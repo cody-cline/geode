@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import clsx from "clsx";
+import { marked } from "marked";
 import {
   Check,
   Download,
@@ -223,11 +224,12 @@ export default function ProjectPanel({
               ) : description === "" ? (
                 <p className={styles.muted}>No description available.</p>
               ) : (
-                // Provider-supplied HTML/Markdown. It comes from a third party,
-                // so scripts and frames are stripped before it reaches the DOM.
+                // Written by third-party mod authors, so it is rendered only
+                // after being normalised to HTML and stripped of anything
+                // executable.
                 <div
                   className="prose"
-                  dangerouslySetInnerHTML={{ __html: sanitize(description) }}
+                  dangerouslySetInnerHTML={{ __html: renderBody(description) }}
                 />
               )}
             </>
@@ -315,6 +317,31 @@ export default function ProjectPanel({
       </aside>
     </div>
   );
+}
+
+/**
+ * Turn a provider's description into safe HTML.
+ *
+ * The two platforms disagree on format: Modrinth stores Markdown, CurseForge
+ * stores HTML. Guessing by content is unreliable (Markdown may contain inline
+ * HTML), but Markdown is a superset in practice — `marked` passes HTML through
+ * untouched — so everything goes through it, then through the sanitiser.
+ */
+function renderBody(raw: string): string {
+  let html: string;
+  try {
+    html = marked.parse(raw, { async: false, gfm: true, breaks: false });
+  } catch {
+    // A malformed description should degrade to plain text, not an empty pane.
+    html = escapeHtml(raw);
+  }
+  return sanitize(html);
+}
+
+function escapeHtml(s: string): string {
+  const div = document.createElement("div");
+  div.textContent = s;
+  return div.innerHTML;
 }
 
 /**

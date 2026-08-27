@@ -323,14 +323,9 @@ pub async fn fetch_all(
     Ok(())
 }
 
-fn spawn_one(
-    client: reqwest::Client,
-    d: Download,
-) -> impl std::future::Future<Output = Result<String>> {
-    async move {
-        fetch_one(&client, &d).await?;
-        Ok(d.label)
-    }
+async fn spawn_one(client: reqwest::Client, d: Download) -> Result<String> {
+    fetch_one(&client, &d).await?;
+    Ok(d.label)
 }
 
 pub async fn get_json<T: serde::de::DeserializeOwned>(

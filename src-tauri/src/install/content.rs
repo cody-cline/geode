@@ -17,6 +17,7 @@ use crate::providers::{self, DependencyKind, Project, Provider, Version};
 /// Replaces any earlier file from the same project so updating never leaves two
 /// copies of a mod in the folder — the single most common way a modded instance
 /// breaks.
+#[allow(clippy::too_many_arguments)] // provenance fields travel together
 pub async fn install(
     client: &reqwest::Client,
     paths: &Paths,

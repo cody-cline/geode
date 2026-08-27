@@ -148,7 +148,8 @@ async fn merges_a_fabric_profile_onto_vanilla() {
     );
 
     // And the classpath must actually contain the game plus the loader.
-    let paths_on_cp = geode_lib::install::classpath(&paths, &merged, &game_version, &features);
+    let client_jar = paths.version_jar(&game_version);
+    let paths_on_cp = geode_lib::install::classpath(&paths, &merged, &client_jar, &features);
     assert!(
         paths_on_cp
             .iter()

@@ -323,11 +323,11 @@ fn merge(modrinth: Vec<Project>, curseforge: Vec<Project>, sort: SortBy) -> Vec<
         // rather than letting whichever API returned more dominate the top.
         SortBy::Relevance => out,
         SortBy::Downloads => {
-            out.sort_by(|a, b| b.downloads.cmp(&a.downloads));
+            out.sort_by_key(|p| std::cmp::Reverse(p.downloads));
             out
         }
         SortBy::Follows => {
-            out.sort_by(|a, b| b.follows.cmp(&a.follows));
+            out.sort_by_key(|p| std::cmp::Reverse(p.follows));
             out
         }
         SortBy::Newest | SortBy::Updated => {

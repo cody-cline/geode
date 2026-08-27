@@ -10,6 +10,12 @@ pub struct Paths {
     pub root: PathBuf,
 }
 
+impl Default for Paths {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Paths {
     pub fn new() -> Self {
         // GEODE_HOME lets you run a throwaway copy against a scratch directory

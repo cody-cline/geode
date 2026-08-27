@@ -151,6 +151,7 @@ struct Processor {
 
 /// Download the installer, run its client processors, and return the loader's
 /// version JSON (still carrying `inheritsFrom`).
+#[allow(clippy::too_many_arguments)] // the installer genuinely needs all of it
 pub async fn install(
     client: &reqwest::Client,
     paths: &Paths,
@@ -178,16 +179,17 @@ pub async fn install(
     let work_dir = paths.cache().join("forge-work").join(loader);
     let work_for_extract = work_dir.clone();
 
-    let (profile_raw, version_raw, extracted) = tokio::task::spawn_blocking(move || {
+    let unpacked = tokio::task::spawn_blocking(move || {
         unpack_installer(&installer_for_read, &libraries_dir, &work_for_extract)
     })
     .await
     .map_err(|e| Error::msg(format!("installer unpack panicked: {e}")))??;
 
-    let profile: InstallProfile = serde_json::from_slice(&profile_raw)
+    let profile: InstallProfile = serde_json::from_slice(&unpacked.install_profile)
         .map_err(|e| Error::json("install_profile.json", e))?;
-    let version: VersionJson =
-        serde_json::from_slice(&version_raw).map_err(|e| Error::json("version.json", e))?;
+    let version: VersionJson = serde_json::from_slice(&unpacked.version_json)
+        .map_err(|e| Error::json("version.json", e))?;
+    let extracted = unpacked.extracted;
 
     // Processor libraries live in the same shared store as game libraries.
     progress
@@ -269,11 +271,20 @@ fn path_str(p: &Path) -> String {
 
 /// Pull `install_profile.json`, `version.json`, the `data/` payloads, and the
 /// embedded `maven/` tree out of the installer jar.
+/// What we pull out of an installer jar.
+struct UnpackedInstaller {
+    install_profile: Vec<u8>,
+    version_json: Vec<u8>,
+    /// `/data/...` payload paths as referenced by the profile, mapped to where
+    /// they landed on disk.
+    extracted: HashMap<String, PathBuf>,
+}
+
 fn unpack_installer(
     installer: &Path,
     libraries_dir: &Path,
     work_dir: &Path,
-) -> Result<(Vec<u8>, Vec<u8>, HashMap<String, PathBuf>)> {
+) -> Result<UnpackedInstaller> {
     let file = std::fs::File::open(installer)?;
     let mut zip = zip::ZipArchive::new(file)?;
 
@@ -342,7 +353,11 @@ fn unpack_installer(
     if version_raw.is_empty() {
         return Err(Error::msg("installer has no version.json"));
     }
-    Ok((profile_raw, version_raw, extracted))
+    Ok(UnpackedInstaller {
+        install_profile: profile_raw,
+        version_json: version_raw,
+        extracted,
+    })
 }
 
 /// A `data` entry is one of: a maven coordinate in brackets, a path into the

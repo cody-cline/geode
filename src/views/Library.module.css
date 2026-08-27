@@ -104,6 +104,9 @@
   padding: 14px;
   text-align: left;
   width: 100%;
+  /* Grow so footers line up across a row even when cards carry
+     different numbers of stat chips. */
+  flex: 1;
 }
 
 .cardText {

@@ -7,6 +7,7 @@ import ProjectPanel from "../components/ProjectPanel";
 import { api } from "../lib/api";
 import { titleCase } from "../lib/format";
 import { useStore } from "../lib/store";
+import { LOADERS } from "../lib/types";
 import type { Project, ProjectKind, Provider, SortBy } from "../lib/types";
 
 import styles from "./Browse.module.css";
@@ -28,6 +29,11 @@ const SORTS: { id: SortBy; label: string }[] = [
 ];
 
 const PAGE_SIZE = 30;
+
+/** Loaders have fixed capitalisation ("NeoForge"), so never title-case them. */
+function loaderLabel(id: string): string {
+  return LOADERS.find((l) => l.id === id)?.label ?? titleCase(id);
+}
 
 export default function Browse() {
   const instances = useStore((s) => s.instances);
@@ -51,11 +57,26 @@ export default function Browse() {
   const [exhausted, setExhausted] = useState(false);
   const [selected, setSelected] = useState<Project | null>(null);
   const [installed, setInstalled] = useState<Set<string>>(new Set());
+  const [page, setPage] = useState(0);
 
   // Guards against an older, slower request overwriting a newer one.
   const requestSeq = useRef(0);
 
   const target = instances.find((i) => i.id === targetId);
+
+  // `sources` records what the user wants; `usableSources` is what we can
+  // actually query. Keeping them apart means CurseForge stays selected — and
+  // comes straight back — once a key is added, without ever showing a ticked
+  // box for a provider that is switched off.
+  // Memoised because it feeds a useCallback dependency list — a fresh array
+  // every render would restart the search on every render.
+  const hasCurseforgeKey = config?.hasCurseforgeKey ?? false;
+  const providers = useMemo(() => {
+    const availableSources: Provider[] = hasCurseforgeKey
+      ? ["modrinth", "curseforge"]
+      : ["modrinth"];
+    return sources.filter((s) => availableSources.includes(s));
+  }, [sources, hasCurseforgeKey]);
 
   // Knowing what the target already has lets cards say "Added" instead of
   // offering an install that would be a no-op.
@@ -115,9 +136,10 @@ export default function Browse() {
     target && target.loader !== "vanilla" ? target.loader : null;
 
   const runSearch = useCallback(
-    async (offset: number) => {
+    async (page: number) => {
+      const offset = page * PAGE_SIZE;
       const seq = ++requestSeq.current;
-      if (offset === 0) setLoading(true);
+      if (page === 0) setLoading(true);
       else setLoadingMore(true);
 
       try {
@@ -130,14 +152,14 @@ export default function Browse() {
           sort,
           offset,
           limit: PAGE_SIZE,
-          providers: sources.length > 0 ? sources : ["modrinth"],
+          providers: providers.length > 0 ? providers : ["modrinth"],
         });
         if (seq !== requestSeq.current) return;
 
         setWarnings(results.warnings);
         setExhausted(results.hits.length < PAGE_SIZE / 2);
         setHits((prev) => {
-          if (offset === 0) return results.hits;
+          if (page === 0) return results.hits;
           // Merging pages can re-surface a project the merge already folded in.
           const seen = new Set(prev.map((p) => `${p.provider}:${p.id}`));
           return [
@@ -154,10 +176,11 @@ export default function Browse() {
         }
       }
     },
-    [debounced, kind, gameVersion, loader, categories, sort, sources, reportError],
+    [debounced, kind, gameVersion, loader, categories, sort, providers, reportError],
   );
 
   useEffect(() => {
+    setPage(0);
     void runSearch(0);
   }, [runSearch]);
 
@@ -254,7 +277,7 @@ export default function Browse() {
             <label className={styles.check}>
               <input
                 type="checkbox"
-                checked={sources.includes("modrinth")}
+                checked={providers.includes("modrinth")}
                 onChange={() => toggleSource("modrinth")}
               />
               <span className="badge badge-modrinth">Modrinth</span>
@@ -262,7 +285,7 @@ export default function Browse() {
             <label className={clsx(styles.check, !config?.hasCurseforgeKey && styles.checkOff)}>
               <input
                 type="checkbox"
-                checked={sources.includes("curseforge")}
+                checked={providers.includes("curseforge")}
                 disabled={!config?.hasCurseforgeKey}
                 onChange={() => toggleSource("curseforge")}
               />
@@ -290,7 +313,7 @@ export default function Browse() {
                 {loader && (
                   <>
                     {" "}
-                    on <strong>{titleCase(loader)}</strong>
+                    on <strong>{loaderLabel(loader)}</strong>
                   </>
                 )}
                 .
@@ -364,7 +387,11 @@ export default function Browse() {
               {!exhausted && (
                 <button
                   className={clsx("btn", styles.loadMore)}
-                  onClick={() => void runSearch(hits.length)}
+                  onClick={() => {
+                    const next = page + 1;
+                    setPage(next);
+                    void runSearch(next);
+                  }}
                   disabled={loadingMore}
                 >
                   {loadingMore ? (
