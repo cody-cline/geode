@@ -1,0 +1,601 @@
+//! Modpack import and export.
+//!
+//! Two formats matter in practice: Modrinth's `.mrpack` (an index of download
+//! URLs plus an overrides tree) and CurseForge's zip (project/file id pairs
+//! that have to be resolved through their API). Both are supported for import;
+//! export produces `.mrpack`, which is the open one.
+
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use crate::error::{Error, Result};
+use crate::meta::Loader;
+use crate::net::{Download, Progress};
+use crate::paths::Paths;
+
+use super::content::{ContentKind, ContentRecord};
+use super::Instance;
+
+// ---------------------------------------------------------------------------
+// modrinth.index.json
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MrIndex {
+    pub format_version: u32,
+    pub game: String,
+    pub version_id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub files: Vec<MrFile>,
+    #[serde(default)]
+    pub dependencies: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MrFile {
+    pub path: String,
+    #[serde(default)]
+    pub hashes: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<MrEnv>,
+    pub downloads: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MrEnv {
+    #[serde(default)]
+    pub client: String,
+    #[serde(default)]
+    pub server: String,
+}
+
+/// Read the loader and game version out of a pack's `dependencies` map.
+fn loader_from_dependencies(deps: &HashMap<String, String>) -> (String, Loader, String) {
+    let mc = deps.get("minecraft").cloned().unwrap_or_default();
+    for (key, loader) in [
+        ("fabric-loader", Loader::Fabric),
+        ("quilt-loader", Loader::Quilt),
+        ("neoforge", Loader::NeoForge),
+        ("forge", Loader::Forge),
+    ] {
+        if let Some(version) = deps.get(key) {
+            return (mc, loader, version.clone());
+        }
+    }
+    (mc, Loader::Vanilla, String::new())
+}
+
+// ---------------------------------------------------------------------------
+// CurseForge manifest.json
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CfManifest {
+    minecraft: CfMinecraft,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    files: Vec<CfManifestFile>,
+    #[serde(default = "default_overrides")]
+    overrides: String,
+}
+
+fn default_overrides() -> String {
+    "overrides".into()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CfMinecraft {
+    version: String,
+    #[serde(default)]
+    mod_loaders: Vec<CfModLoader>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CfModLoader {
+    id: String,
+    #[serde(default)]
+    primary: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CfManifestFile {
+    #[serde(rename = "projectID")]
+    project_id: u32,
+    #[serde(rename = "fileID")]
+    file_id: u32,
+    #[serde(default = "default_required")]
+    required: bool,
+}
+
+fn default_required() -> bool {
+    true
+}
+
+/// `forge-47.2.0` / `fabric-0.15.0` / `neoforge-21.4.10`.
+fn parse_cf_loader(id: &str) -> (Loader, String) {
+    let (name, version) = id.split_once('-').unwrap_or((id, ""));
+    let loader = match name.to_ascii_lowercase().as_str() {
+        "forge" => Loader::Forge,
+        "fabric" => Loader::Fabric,
+        "quilt" => Loader::Quilt,
+        "neoforge" => Loader::NeoForge,
+        _ => Loader::Vanilla,
+    };
+    (loader, version.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Import
+// ---------------------------------------------------------------------------
+
+/// What we learned from a pack file before committing to installing it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackPreview {
+    pub name: String,
+    pub version: String,
+    pub summary: Option<String>,
+    pub mc_version: String,
+    pub loader: Loader,
+    pub loader_version: String,
+    pub file_count: usize,
+    pub format: String,
+    /// True when finishing the import needs a CurseForge API key.
+    pub needs_curseforge_key: bool,
+}
+
+enum PackKind {
+    Modrinth(MrIndex),
+    CurseForge(CfManifest),
+}
+
+fn read_pack(archive: &Path) -> Result<PackKind> {
+    let file = std::fs::File::open(archive)?;
+    let mut zip = zip::ZipArchive::new(file)?;
+
+    if let Ok(mut entry) = zip.by_name("modrinth.index.json") {
+        let mut raw = String::new();
+        entry.read_to_string(&mut raw)?;
+        let index: MrIndex =
+            serde_json::from_str(&raw).map_err(|e| Error::json("modrinth.index.json", e))?;
+        return Ok(PackKind::Modrinth(index));
+    }
+
+    let mut entry = zip.by_name("manifest.json").map_err(|_| {
+        Error::msg("not a modpack — expected modrinth.index.json or manifest.json inside")
+    })?;
+    let mut raw = String::new();
+    entry.read_to_string(&mut raw)?;
+    let manifest: CfManifest =
+        serde_json::from_str(&raw).map_err(|e| Error::json("manifest.json", e))?;
+    Ok(PackKind::CurseForge(manifest))
+}
+
+pub async fn preview(archive: PathBuf) -> Result<PackPreview> {
+    tokio::task::spawn_blocking(move || {
+        let pack = read_pack(&archive)?;
+        Ok(match pack {
+            PackKind::Modrinth(index) => {
+                let (mc, loader, loader_version) = loader_from_dependencies(&index.dependencies);
+                PackPreview {
+                    name: index.name,
+                    version: index.version_id,
+                    summary: index.summary,
+                    mc_version: mc,
+                    loader,
+                    loader_version,
+                    file_count: index.files.len(),
+                    format: "mrpack".into(),
+                    needs_curseforge_key: false,
+                }
+            }
+            PackKind::CurseForge(manifest) => {
+                let primary = manifest
+                    .minecraft
+                    .mod_loaders
+                    .iter()
+                    .find(|l| l.primary)
+                    .or_else(|| manifest.minecraft.mod_loaders.first());
+                let (loader, loader_version) = primary
+                    .map(|l| parse_cf_loader(&l.id))
+                    .unwrap_or((Loader::Vanilla, String::new()));
+                PackPreview {
+                    name: manifest.name,
+                    version: manifest.version,
+                    summary: None,
+                    mc_version: manifest.minecraft.version,
+                    loader,
+                    loader_version,
+                    file_count: manifest.files.len(),
+                    format: "curseforge".into(),
+                    needs_curseforge_key: !manifest.files.is_empty(),
+                }
+            }
+        })
+    })
+    .await
+    .map_err(|e| Error::msg(format!("reading pack panicked: {e}")))?
+}
+
+/// Install a pack into an existing (already created) instance directory.
+pub async fn import_into(
+    client: &reqwest::Client,
+    paths: &Paths,
+    instance: &mut Instance,
+    archive: &Path,
+    curseforge_key: Option<&str>,
+    progress: &Progress,
+) -> Result<()> {
+    let game_dir = paths.game_dir(&instance.id);
+    let archive_owned = archive.to_path_buf();
+
+    let pack = tokio::task::spawn_blocking({
+        let archive = archive_owned.clone();
+        move || read_pack(&archive)
+    })
+    .await
+    .map_err(|e| Error::msg(format!("reading pack panicked: {e}")))??;
+
+    match pack {
+        PackKind::Modrinth(index) => {
+            progress.stage("Extracting overrides", 1).await;
+            extract_overrides(&archive_owned, &game_dir, &["overrides", "client-overrides"])
+                .await?;
+            progress.advance(1, "overrides").await;
+
+            let downloads: Vec<Download> = index
+                .files
+                .iter()
+                .filter(|f| {
+                    // Server-only files have no business in a client instance.
+                    f.env
+                        .as_ref()
+                        .map(|e| e.client != "unsupported")
+                        .unwrap_or(true)
+                })
+                .filter_map(|f| {
+                    let rel = Path::new(&f.path);
+                    if !crate::paths::is_safe_relative(rel) {
+                        return None;
+                    }
+                    let url = f.downloads.first()?;
+                    Some(
+                        Download::new(url.clone(), game_dir.join(rel))
+                            .sha1(f.hashes.get("sha1").cloned())
+                            .size(f.file_size)
+                            .label(f.path.clone()),
+                    )
+                })
+                .collect();
+
+            progress
+                .stage("Downloading pack contents", downloads.len() as u64)
+                .await;
+            crate::net::fetch_all(client, downloads, progress, 10).await?;
+
+            instance.pack = Some(super::PackSource {
+                name: index.name,
+                version: index.version_id,
+                provider: Some("modrinth".into()),
+                project_id: None,
+            });
+        }
+
+        PackKind::CurseForge(manifest) => {
+            let key = curseforge_key.filter(|k| !k.trim().is_empty()).ok_or_else(|| {
+                Error::msg(
+                    "importing a CurseForge pack needs your CurseForge API key — add one in Settings",
+                )
+            })?;
+
+            progress.stage("Extracting overrides", 1).await;
+            extract_overrides(&archive_owned, &game_dir, &[manifest.overrides.as_str()]).await?;
+            progress.advance(1, "overrides").await;
+
+            progress
+                .stage("Resolving pack contents", manifest.files.len() as u64)
+                .await;
+
+            let mut downloads = Vec::new();
+            let mut records = Vec::new();
+            let mut blocked = Vec::new();
+
+            for entry in &manifest.files {
+                progress.check_cancelled()?;
+                let version = match crate::providers::curseforge::file(
+                    client,
+                    entry.project_id,
+                    entry.file_id,
+                    key,
+                )
+                .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        progress.advance(1, &format!("skipped {}: {e}", entry.project_id)).await;
+                        continue;
+                    }
+                };
+                progress.advance(1, &version.name).await;
+
+                let Some(file) = version.primary_file() else {
+                    // Author-blocked downloads cannot be fetched on the user's
+                    // behalf; collect them so we can tell them what to do.
+                    blocked.push(version.name.clone());
+                    continue;
+                };
+
+                downloads.push(
+                    Download::new(file.url.clone(), game_dir.join("mods").join(&file.filename))
+                        .sha1(file.sha1.clone())
+                        .size(file.size)
+                        .label(file.filename.clone()),
+                );
+                records.push(ContentRecord {
+                    file_name: file.filename.clone(),
+                    kind: ContentKind::Mod,
+                    provider: "curseforge".into(),
+                    project_id: version.project_id.clone(),
+                    version_id: version.id.clone(),
+                    name: version.name.clone(),
+                    version_number: version.version_number.clone(),
+                    slug: None,
+                    icon_url: None,
+                    dependency: !entry.required,
+                });
+            }
+
+            progress
+                .stage("Downloading pack contents", downloads.len() as u64)
+                .await;
+            crate::net::fetch_all(client, downloads, progress, 8).await?;
+
+            instance.content.extend(records);
+            instance.pack = Some(super::PackSource {
+                name: manifest.name,
+                version: manifest.version,
+                provider: Some("curseforge".into()),
+                project_id: None,
+            });
+
+            if !blocked.is_empty() {
+                return Err(Error::msg(format!(
+                    "{} file(s) could not be downloaded because their authors disabled \
+                     third-party downloads. Install them by hand from CurseForge: {}",
+                    blocked.len(),
+                    blocked.join(", ")
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Copy the pack's override trees into the game directory. Later roots win, so
+/// `client-overrides` correctly shadows `overrides`.
+async fn extract_overrides(archive: &Path, game_dir: &Path, roots: &[&str]) -> Result<()> {
+    let archive = archive.to_path_buf();
+    let game_dir = game_dir.to_path_buf();
+    let roots: Vec<String> = roots.iter().map(|s| s.to_string()).collect();
+
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let file = std::fs::File::open(&archive)?;
+        let mut zip = zip::ZipArchive::new(file)?;
+
+        for i in 0..zip.len() {
+            let mut entry = zip.by_index(i)?;
+            if entry.is_dir() {
+                continue;
+            }
+            let name = entry.name().to_string();
+            let Some(rel) = roots.iter().find_map(|root| {
+                name.strip_prefix(&format!("{root}/"))
+            }) else {
+                continue;
+            };
+
+            let rel_path = Path::new(rel);
+            if !crate::paths::is_safe_relative(rel_path) {
+                continue;
+            }
+            let dest = game_dir.join(rel_path);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut out = std::fs::File::create(&dest)?;
+            std::io::copy(&mut entry, &mut out)?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| Error::msg(format!("extracting overrides panicked: {e}")))?
+}
+
+// ---------------------------------------------------------------------------
+// Export
+// ---------------------------------------------------------------------------
+
+/// Write the instance out as a `.mrpack`.
+///
+/// Content installed from Modrinth becomes an index entry (a URL, not a copy),
+/// which is what keeps packs small and redistributable. Everything else —
+/// configs, hand-dropped jars, CurseForge files we may not redistribute — goes
+/// into `overrides/`.
+pub async fn export_mrpack(
+    paths: &Paths,
+    instance: &Instance,
+    dest: PathBuf,
+    include_saves: bool,
+    progress: &Progress,
+) -> Result<()> {
+    let game_dir = paths.game_dir(&instance.id);
+
+    let mut index = MrIndex {
+        format_version: 1,
+        game: "minecraft".into(),
+        version_id: instance
+            .pack
+            .as_ref()
+            .map(|p| p.version.clone())
+            .unwrap_or_else(|| "1.0.0".into()),
+        name: instance.name.clone(),
+        summary: (!instance.notes.is_empty()).then(|| instance.notes.clone()),
+        files: Vec::new(),
+        dependencies: HashMap::new(),
+    };
+
+    index
+        .dependencies
+        .insert("minecraft".into(), instance.mc_version.clone());
+    let loader_key = match instance.loader {
+        Loader::Fabric => Some("fabric-loader"),
+        Loader::Quilt => Some("quilt-loader"),
+        Loader::NeoForge => Some("neoforge"),
+        Loader::Forge => Some("forge"),
+        Loader::Vanilla => None,
+    };
+    if let Some(key) = loader_key {
+        index
+            .dependencies
+            .insert(key.into(), instance.loader_version.clone());
+    }
+
+    // Only Modrinth files get indexed — CurseForge's terms do not permit
+    // redistributing their download URLs this way.
+    let mut indexed: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    for record in &instance.content {
+        if record.provider != "modrinth" {
+            continue;
+        }
+        let rel = PathBuf::from(record.kind.folder()).join(&record.file_name);
+        let full = game_dir.join(&rel);
+        let Ok(meta) = tokio::fs::metadata(&full).await else {
+            continue;
+        };
+        let Ok(sha1) = crate::net::sha1_file(&full).await else {
+            continue;
+        };
+
+        index.files.push(MrFile {
+            path: rel.to_string_lossy().replace('\\', "/"),
+            hashes: [("sha1".to_string(), sha1)].into_iter().collect(),
+            env: None,
+            downloads: vec![format!(
+                "https://cdn.modrinth.com/data/{}/versions/{}/{}",
+                record.project_id,
+                record.version_id,
+                urlencoding::encode(&record.file_name)
+            )],
+            file_size: Some(meta.len()),
+        });
+        indexed.insert(rel);
+    }
+
+    progress.stage("Writing pack", 1).await;
+
+    let mut skip_dirs: Vec<&str> = vec!["logs", "crash-reports", "screenshots", ".fabric", "versions"];
+    if !include_saves {
+        skip_dirs.push("saves");
+    }
+
+    let index_json = serde_json::to_vec_pretty(&index)?;
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let file = std::fs::File::create(&dest)?;
+        let mut zip = zip::ZipWriter::new(file);
+        let options: zip::write::FileOptions<'_, ()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+        zip.start_file("modrinth.index.json", options)?;
+        zip.write_all(&index_json)?;
+
+        let mut stack = vec![game_dir.clone()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Ok(rel) = path.strip_prefix(&game_dir) else {
+                    continue;
+                };
+                let top = rel.components().next().and_then(|c| c.as_os_str().to_str());
+                if top.is_some_and(|t| skip_dirs.contains(&t)) {
+                    continue;
+                }
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if indexed.contains(rel) {
+                    continue;
+                }
+                let name = format!("overrides/{}", rel.to_string_lossy().replace('\\', "/"));
+                zip.start_file(name, options)?;
+                let mut source = std::fs::File::open(&path)?;
+                std::io::copy(&mut source, &mut zip)?;
+            }
+        }
+
+        zip.finish()?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| Error::msg(format!("writing pack panicked: {e}")))??;
+
+    progress.finish().await;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_fabric_dependencies() {
+        let deps: HashMap<String, String> = [
+            ("minecraft".to_string(), "1.21.1".to_string()),
+            ("fabric-loader".to_string(), "0.16.9".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let (mc, loader, version) = loader_from_dependencies(&deps);
+        assert_eq!(mc, "1.21.1");
+        assert_eq!(loader, Loader::Fabric);
+        assert_eq!(version, "0.16.9");
+    }
+
+    #[test]
+    fn vanilla_pack_has_no_loader() {
+        let deps: HashMap<String, String> =
+            [("minecraft".to_string(), "1.21.1".to_string())].into_iter().collect();
+        let (_, loader, _) = loader_from_dependencies(&deps);
+        assert_eq!(loader, Loader::Vanilla);
+    }
+
+    #[test]
+    fn parses_curseforge_loader_ids() {
+        assert_eq!(parse_cf_loader("forge-47.2.0"), (Loader::Forge, "47.2.0".into()));
+        assert_eq!(
+            parse_cf_loader("neoforge-21.4.10-beta"),
+            (Loader::NeoForge, "21.4.10-beta".into())
+        );
+        assert_eq!(parse_cf_loader("fabric-0.15.0"), (Loader::Fabric, "0.15.0".into()));
+    }
+}

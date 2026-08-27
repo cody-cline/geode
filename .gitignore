@@ -1,0 +1,11 @@
+node_modules
+dist
+.DS_Store
+*.local
+
+# Rust
+src-tauri/target
+
+# Local secrets / dev scratch
+.env
+.env.local

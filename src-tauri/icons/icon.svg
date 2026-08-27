@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="shell" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2c3440"/>
+      <stop offset="1" stop-color="#161b22"/>
+    </linearGradient>
+    <linearGradient id="crystalA" x1="0" y1="0" x2="0.6" y2="1">
+      <stop offset="0" stop-color="#86efac"/>
+      <stop offset="1" stop-color="#22c55e"/>
+    </linearGradient>
+    <linearGradient id="crystalB" x1="1" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4ade80"/>
+      <stop offset="1" stop-color="#15803d"/>
+    </linearGradient>
+    <linearGradient id="crystalC" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0" stop-color="#bbf7d0"/>
+      <stop offset="1" stop-color="#34d399"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.52" r="0.42">
+      <stop offset="0" stop-color="#4ade80" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#4ade80" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="112" fill="url(#shell)"/>
+
+  <!-- Cracked-open geode shell: an outer hexagon with a lighter inner rim. -->
+  <path d="M256 60 L420 154 L420 358 L256 452 L92 358 L92 154 Z"
+        fill="#0d1117" stroke="#3d4756" stroke-width="14" stroke-linejoin="round"/>
+  <path d="M256 104 L382 176 L382 336 L256 408 L130 336 L130 176 Z"
+        fill="#12181f" stroke="#4b5768" stroke-width="8" stroke-linejoin="round"/>
+
+  <circle cx="256" cy="262" r="150" fill="url(#glow)"/>
+
+  <!-- Crystal cluster inside. -->
+  <path d="M256 132 L322 240 L256 300 L190 240 Z" fill="url(#crystalC)"/>
+  <path d="M190 240 L256 300 L232 386 L162 306 Z" fill="url(#crystalA)"/>
+  <path d="M322 240 L256 300 L280 386 L350 306 Z" fill="url(#crystalB)"/>
+  <path d="M256 132 L190 240 L256 262 Z" fill="#ffffff" opacity="0.22"/>
+  <path d="M256 300 L232 386 L256 340 L280 386 Z" fill="#0d1117" opacity="0.28"/>
+</svg>

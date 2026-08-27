@@ -1,0 +1,100 @@
+use serde::{Deserialize, Serialize};
+
+use crate::error::{Error, Result};
+use crate::paths::Paths;
+
+fn default_memory() -> u32 {
+    4096
+}
+
+/// A conservative, widely-recommended G1 tuning. Users can replace it wholesale
+/// in Settings; we never merge or second-guess what they type.
+fn default_java_args() -> String {
+    "-XX:+UnlockExperimentalVMOptions -XX:+UseG1GC -XX:G1NewSizePercent=20 \
+     -XX:G1ReservePercent=20 -XX:MaxGCPauseMillis=50 -XX:G1HeapRegionSize=32M"
+        .to_string()
+}
+
+fn default_concurrency() -> usize {
+    12
+}
+
+fn default_theme() -> String {
+    "dark".into()
+}
+
+fn default_accent() -> String {
+    "#4ade80".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Config {
+    /// Default heap size for new instances, in MiB.
+    pub memory_mb: u32,
+    pub java_args: String,
+    /// Explicit JVM to use instead of auto-detection.
+    pub java_path: Option<String>,
+    /// Azure application id for Microsoft sign-in.
+    pub client_id: Option<String>,
+    /// The user's own CurseForge API key. CurseForge search and downloads stay
+    /// disabled until this is set — their terms forbid shipping a shared key.
+    pub curseforge_api_key: Option<String>,
+    pub theme: String,
+    pub accent: String,
+    /// Hide the launcher window while the game runs.
+    pub hide_on_launch: bool,
+    pub concurrent_downloads: usize,
+    /// Show snapshots and other non-release versions in the version picker.
+    pub show_snapshots: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            memory_mb: default_memory(),
+            java_args: default_java_args(),
+            java_path: None,
+            client_id: crate::auth::default_client_id(),
+            curseforge_api_key: None,
+            theme: default_theme(),
+            accent: default_accent(),
+            hide_on_launch: false,
+            concurrent_downloads: default_concurrency(),
+            show_snapshots: false,
+        }
+    }
+}
+
+impl Config {
+    pub async fn load(paths: &Paths) -> Result<Self> {
+        match tokio::fs::read(paths.config_file()).await {
+            Ok(bytes) => {
+                serde_json::from_slice(&bytes).map_err(|e| Error::json("config.json", e))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub async fn save(&self, paths: &Paths) -> Result<()> {
+        tokio::fs::create_dir_all(&paths.root).await?;
+        tokio::fs::write(paths.config_file(), serde_json::to_vec_pretty(self)?).await?;
+        Ok(())
+    }
+
+    /// The config as the frontend sees it — the CurseForge key is replaced with
+    /// a boolean so a secret never has to round-trip through the webview.
+    pub fn redacted(&self) -> serde_json::Value {
+        let mut v = serde_json::to_value(self).unwrap_or_default();
+        if let Some(obj) = v.as_object_mut() {
+            let has_key = self
+                .curseforge_api_key
+                .as_ref()
+                .is_some_and(|k| !k.trim().is_empty());
+            obj.remove("curseforgeApiKey");
+            obj.insert("hasCurseforgeKey".into(), serde_json::Value::Bool(has_key));
+        }
+        v
+    }
+}
