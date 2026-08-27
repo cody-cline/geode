@@ -47,9 +47,12 @@ pub struct ProgressEvent {
 
 /// A throttled progress channel tied to one long-running job (an install, an
 /// import, a Java download). The frontend keys off `id`.
+///
+/// The app handle is optional so the install pipeline can run headlessly —
+/// from a test or a CLI — without a window attached.
 #[derive(Clone)]
 pub struct Progress {
-    app: AppHandle,
+    app: Option<AppHandle>,
     id: String,
     stage: Arc<Mutex<String>>,
     current: Arc<AtomicU64>,
@@ -60,6 +63,15 @@ pub struct Progress {
 
 impl Progress {
     pub fn new(app: AppHandle, id: impl Into<String>) -> Self {
+        Self::with_sink(Some(app), id)
+    }
+
+    /// A progress handle that reports nowhere. For headless callers.
+    pub fn silent(id: impl Into<String>) -> Self {
+        Self::with_sink(None, id)
+    }
+
+    fn with_sink(app: Option<AppHandle>, id: impl Into<String>) -> Self {
         Self {
             app,
             id: id.into(),
@@ -122,6 +134,9 @@ impl Progress {
     }
 
     async fn emit(&self, detail: String, done: bool, error: Option<String>) {
+        let Some(app) = &self.app else {
+            return;
+        };
         let ev = ProgressEvent {
             id: self.id.clone(),
             stage: self.stage.lock().await.clone(),
@@ -131,7 +146,7 @@ impl Progress {
             done,
             error,
         };
-        let _ = self.app.emit("geode://progress", ev);
+        let _ = app.emit("geode://progress", ev);
     }
 }
 

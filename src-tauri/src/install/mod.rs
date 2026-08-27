@@ -21,6 +21,9 @@ pub struct Installed {
     pub version: piston::VersionJson,
     pub java: PathBuf,
     pub natives_dir: PathBuf,
+    /// The client jar to put on the classpath. For loaders this is an alias of
+    /// the shared jar named after `version_id` — see [`alias_client_jar`].
+    pub client_jar: PathBuf,
     /// Absolute path to the log4j config the game should use, if the version
     /// ships one.
     pub log_config: Option<PathBuf>,
@@ -110,6 +113,8 @@ pub async fn install_version(
     )
     .await?;
 
+    let client_jar = alias_client_jar(paths, &client_jar, mc_version, &version_id).await?;
+
     let features = launch_features();
     download_libraries(client, paths, &version, &features, progress).await?;
     let natives_dir = extract_natives(paths, &version, &features, progress).await?;
@@ -123,8 +128,52 @@ pub async fn install_version(
         version,
         java: java_path,
         natives_dir,
+        client_jar,
         log_config,
     })
+}
+
+/// Give the shared client jar a second name matching the resolved version id.
+///
+/// NeoForge and Forge pass `-DignoreList=client-extra,${version_name}.jar` so
+/// BootstrapLauncher can keep the unpatched client jar out of the module layer.
+/// That match is on the *filename*, so a jar sitting at `1.21.1.jar` while
+/// `version_name` is `neoforge-21.1.248` is not excluded — and the game dies
+/// with a duplicate-module error before it ever draws a frame.
+///
+/// A hard link keeps one copy of the ~25 MB jar on disk; a plain copy is the
+/// fallback for filesystems or platforms that will not link.
+async fn alias_client_jar(
+    paths: &Paths,
+    shared: &Path,
+    mc_version: &str,
+    version_id: &str,
+) -> Result<PathBuf> {
+    if version_id == mc_version {
+        return Ok(shared.to_path_buf());
+    }
+
+    let alias = paths.version_jar(version_id);
+    if let Ok(existing) = tokio::fs::metadata(&alias).await {
+        // Re-link if the shared jar was replaced (a corrupt download redownloaded).
+        let source_len = tokio::fs::metadata(shared).await.map(|m| m.len()).unwrap_or(0);
+        if existing.len() == source_len && source_len > 0 {
+            return Ok(alias);
+        }
+        let _ = tokio::fs::remove_file(&alias).await;
+    }
+
+    if let Some(parent) = alias.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    match tokio::fs::hard_link(shared, &alias).await {
+        Ok(()) => Ok(alias),
+        Err(_) => {
+            tokio::fs::copy(shared, &alias).await?;
+            Ok(alias)
+        }
+    }
 }
 
 /// Feature flags used when evaluating argument and library rules. We do not
@@ -459,7 +508,7 @@ async fn download_log_config(
 pub fn classpath(
     paths: &Paths,
     version: &piston::VersionJson,
-    mc_version: &str,
+    client_jar: &Path,
     features: &HashMap<String, bool>,
 ) -> Vec<PathBuf> {
     let mut out = Vec::new();
@@ -472,6 +521,6 @@ pub fn classpath(
         }
     }
     // The client jar goes last so loader-patched classes shadow vanilla ones.
-    out.push(paths.version_jar(mc_version));
+    out.push(client_jar.to_path_buf());
     out
 }

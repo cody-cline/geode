@@ -51,6 +51,7 @@ pub fn run() {
             commands::set_config,
             commands::set_curseforge_key,
             commands::app_info,
+            commands::system_memory_mb,
             commands::list_game_versions,
             commands::list_loader_versions,
             commands::list_instances,

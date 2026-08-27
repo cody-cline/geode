@@ -1,0 +1,62 @@
+import { useEffect, useRef } from "react";
+import { X } from "lucide-react";
+
+import styles from "./Modal.module.css";
+
+export default function Modal({
+  title,
+  subtitle,
+  onClose,
+  children,
+  footer,
+  width = 480,
+}: {
+  title: string;
+  subtitle?: string;
+  onClose: () => void;
+  children: React.ReactNode;
+  footer?: React.ReactNode;
+  width?: number;
+}) {
+  const panel = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    // Move focus in so Escape and Tab act on the dialog, not whatever was
+    // behind it.
+    panel.current?.focus();
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div className={styles.backdrop} onMouseDown={onClose}>
+      <div
+        ref={panel}
+        className={styles.panel}
+        style={{ width }}
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        tabIndex={-1}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <header className={styles.head}>
+          <div>
+            <h2 className={styles.title}>{title}</h2>
+            {subtitle && <p className={styles.subtitle}>{subtitle}</p>}
+          </div>
+          <button className="btn btn-ghost btn-icon btn-sm" onClick={onClose} aria-label="Close">
+            <X size={16} />
+          </button>
+        </header>
+
+        <div className={styles.body}>{children}</div>
+
+        {footer && <footer className={styles.foot}>{footer}</footer>}
+      </div>
+    </div>
+  );
+}

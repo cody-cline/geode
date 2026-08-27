@@ -90,7 +90,7 @@ pub fn build_plan(
     let game_dir = paths.game_dir(&instance.id);
     let features = crate::install::launch_features();
 
-    let classpath = crate::install::classpath(paths, version, &instance.mc_version, &features)
+    let classpath = crate::install::classpath(paths, version, &installed.client_jar, &features)
         .into_iter()
         .map(|p| p.to_string_lossy().to_string())
         .collect::<Vec<_>>()

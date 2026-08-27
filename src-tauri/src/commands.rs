@@ -97,6 +97,16 @@ pub struct AppInfo {
     pub has_client_id: bool,
 }
 
+/// Total physical RAM, so the memory slider has a meaningful upper bound
+/// instead of an arbitrary one.
+#[tauri::command]
+pub async fn system_memory_mb() -> Result<u64> {
+    use sysinfo::System;
+    let mut system = System::new();
+    system.refresh_memory();
+    Ok((system.total_memory() / (1024 * 1024)).max(2048))
+}
+
 #[tauri::command]
 pub async fn app_info(state: State<'_, AppState>) -> Result<AppInfo> {
     let config = state.config().await;

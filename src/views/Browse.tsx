@@ -1,0 +1,393 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import clsx from "clsx";
+import { AlertTriangle, Download, Info, Loader2, Search } from "lucide-react";
+
+import ProjectCard from "../components/ProjectCard";
+import ProjectPanel from "../components/ProjectPanel";
+import { api } from "../lib/api";
+import { titleCase } from "../lib/format";
+import { useStore } from "../lib/store";
+import type { Project, ProjectKind, Provider, SortBy } from "../lib/types";
+
+import styles from "./Browse.module.css";
+
+const KINDS: { id: ProjectKind; label: string }[] = [
+  { id: "mod", label: "Mods" },
+  { id: "modpack", label: "Modpacks" },
+  { id: "resourcepack", label: "Resource Packs" },
+  { id: "shader", label: "Shaders" },
+  { id: "datapack", label: "Data Packs" },
+];
+
+const SORTS: { id: SortBy; label: string }[] = [
+  { id: "relevance", label: "Relevance" },
+  { id: "downloads", label: "Downloads" },
+  { id: "follows", label: "Followers" },
+  { id: "updated", label: "Recently updated" },
+  { id: "newest", label: "Newest" },
+];
+
+const PAGE_SIZE = 30;
+
+export default function Browse() {
+  const instances = useStore((s) => s.instances);
+  const config = useStore((s) => s.config);
+  const navigate = useStore((s) => s.navigate);
+  const reportError = useStore((s) => s.reportError);
+
+  const [query, setQuery] = useState("");
+  const [debounced, setDebounced] = useState("");
+  const [kind, setKind] = useState<ProjectKind>("mod");
+  const [sort, setSort] = useState<SortBy>("relevance");
+  const [sources, setSources] = useState<Provider[]>(["modrinth", "curseforge"]);
+  const [categories, setCategories] = useState<string[]>([]);
+  const [available, setAvailable] = useState<string[]>([]);
+  const [targetId, setTargetId] = useState<string>("");
+
+  const [hits, setHits] = useState<Project[]>([]);
+  const [warnings, setWarnings] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [exhausted, setExhausted] = useState(false);
+  const [selected, setSelected] = useState<Project | null>(null);
+  const [installed, setInstalled] = useState<Set<string>>(new Set());
+
+  // Guards against an older, slower request overwriting a newer one.
+  const requestSeq = useRef(0);
+
+  const target = instances.find((i) => i.id === targetId);
+
+  // Knowing what the target already has lets cards say "Added" instead of
+  // offering an install that would be a no-op.
+  const refreshInstalled = useCallback(async () => {
+    if (!target) {
+      setInstalled(new Set());
+      return;
+    }
+    try {
+      const lists = await Promise.all(
+        (["mod", "resourcepack", "shaderpack", "datapack"] as const).map((k) =>
+          api.listContent(target.id, k),
+        ),
+      );
+      setInstalled(
+        new Set(
+          lists
+            .flat()
+            .filter((item) => item.projectId)
+            .map((item) => `${item.provider}:${item.projectId}`),
+        ),
+      );
+    } catch {
+      setInstalled(new Set());
+    }
+  }, [target]);
+
+  useEffect(() => {
+    void refreshInstalled();
+  }, [refreshInstalled]);
+
+  const isInstalled = (project: Project) =>
+    installed.has(`${project.provider}:${project.id}`) ||
+    project.alsoOn.some((ref) => installed.has(`${ref.provider}:${ref.id}`));
+
+  useEffect(() => {
+    if (!targetId && instances.length > 0) setTargetId(instances[0].id);
+  }, [instances, targetId]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(query), 280);
+    return () => clearTimeout(timer);
+  }, [query]);
+
+  useEffect(() => {
+    api
+      .getCategories(kind)
+      .then(setAvailable)
+      .catch(() => setAvailable([]));
+    setCategories([]);
+  }, [kind]);
+
+  // Scoping results to the target instance is what makes the install button
+  // trustworthy: everything listed is known to fit.
+  const gameVersion = target?.mcVersion ?? null;
+  const loader =
+    target && target.loader !== "vanilla" ? target.loader : null;
+
+  const runSearch = useCallback(
+    async (offset: number) => {
+      const seq = ++requestSeq.current;
+      if (offset === 0) setLoading(true);
+      else setLoadingMore(true);
+
+      try {
+        const results = await api.searchProjects({
+          query: debounced,
+          kind,
+          gameVersion,
+          loader,
+          categories,
+          sort,
+          offset,
+          limit: PAGE_SIZE,
+          providers: sources.length > 0 ? sources : ["modrinth"],
+        });
+        if (seq !== requestSeq.current) return;
+
+        setWarnings(results.warnings);
+        setExhausted(results.hits.length < PAGE_SIZE / 2);
+        setHits((prev) => {
+          if (offset === 0) return results.hits;
+          // Merging pages can re-surface a project the merge already folded in.
+          const seen = new Set(prev.map((p) => `${p.provider}:${p.id}`));
+          return [
+            ...prev,
+            ...results.hits.filter((p) => !seen.has(`${p.provider}:${p.id}`)),
+          ];
+        });
+      } catch (e) {
+        if (seq === requestSeq.current) reportError("Search failed", e);
+      } finally {
+        if (seq === requestSeq.current) {
+          setLoading(false);
+          setLoadingMore(false);
+        }
+      }
+    },
+    [debounced, kind, gameVersion, loader, categories, sort, sources, reportError],
+  );
+
+  useEffect(() => {
+    void runSearch(0);
+  }, [runSearch]);
+
+  const toggleSource = (provider: Provider) =>
+    setSources((prev) =>
+      prev.includes(provider)
+        ? prev.filter((p) => p !== provider)
+        : [...prev, provider],
+    );
+
+  const toggleCategory = (category: string) =>
+    setCategories((prev) =>
+      prev.includes(category)
+        ? prev.filter((c) => c !== category)
+        : [...prev, category],
+    );
+
+  const kindLabel = useMemo(
+    () => KINDS.find((k) => k.id === kind)?.label.toLowerCase() ?? "results",
+    [kind],
+  );
+
+  return (
+    <>
+      <header className={styles.header}>
+        <div className={styles.searchWrap}>
+          <Search size={15} className={styles.searchIcon} />
+          <input
+            className={clsx("input", styles.search)}
+            placeholder={`Search ${kindLabel}`}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            autoFocus
+          />
+        </div>
+
+        <div className={styles.target}>
+          <span className={styles.targetLabel}>Install to</span>
+          {instances.length === 0 ? (
+            <button
+              className="btn btn-sm"
+              onClick={() => navigate({ view: "library" })}
+            >
+              Create an instance
+            </button>
+          ) : (
+            <select
+              className="select"
+              style={{ width: 190 }}
+              value={targetId}
+              onChange={(e) => setTargetId(e.target.value)}
+              aria-label="Target instance"
+            >
+              {instances.map((i) => (
+                <option key={i.id} value={i.id}>
+                  {i.name} · {i.mcVersion}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+      </header>
+
+      <div className={styles.tabs}>
+        {KINDS.map((k) => (
+          <button
+            key={k.id}
+            className={clsx(styles.tab, kind === k.id && styles.tabActive)}
+            onClick={() => setKind(k.id)}
+          >
+            {k.label}
+          </button>
+        ))}
+        <div style={{ flex: 1 }} />
+        <select
+          className="select"
+          style={{ width: 175 }}
+          value={sort}
+          onChange={(e) => setSort(e.target.value as SortBy)}
+          aria-label="Sort results"
+        >
+          {SORTS.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.label}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <div className={styles.body}>
+        <aside className={styles.filters}>
+          <section className={styles.filterSection}>
+            <h3 className={styles.filterTitle}>Source</h3>
+            <label className={styles.check}>
+              <input
+                type="checkbox"
+                checked={sources.includes("modrinth")}
+                onChange={() => toggleSource("modrinth")}
+              />
+              <span className="badge badge-modrinth">Modrinth</span>
+            </label>
+            <label className={clsx(styles.check, !config?.hasCurseforgeKey && styles.checkOff)}>
+              <input
+                type="checkbox"
+                checked={sources.includes("curseforge")}
+                disabled={!config?.hasCurseforgeKey}
+                onChange={() => toggleSource("curseforge")}
+              />
+              <span className="badge badge-curseforge">CurseForge</span>
+            </label>
+            {!config?.hasCurseforgeKey && (
+              <p className={styles.filterNote}>
+                Needs your own API key.{" "}
+                <button
+                  className={styles.linkBtn}
+                  onClick={() => navigate({ view: "settings", tab: "sources" })}
+                >
+                  Add it
+                </button>
+              </p>
+            )}
+          </section>
+
+          {target && (
+            <section className={styles.filterSection}>
+              <h3 className={styles.filterTitle}>Compatibility</h3>
+              <p className={styles.compat}>
+                Showing only what works with{" "}
+                <strong>Minecraft {target.mcVersion}</strong>
+                {loader && (
+                  <>
+                    {" "}
+                    on <strong>{titleCase(loader)}</strong>
+                  </>
+                )}
+                .
+              </p>
+            </section>
+          )}
+
+          {available.length > 0 && (
+            <section className={styles.filterSection}>
+              <h3 className={styles.filterTitle}>Categories</h3>
+              <div className={styles.categories}>
+                {available.map((category) => (
+                  <button
+                    key={category}
+                    className={clsx(
+                      styles.categoryChip,
+                      categories.includes(category) && styles.categoryActive,
+                    )}
+                    onClick={() => toggleCategory(category)}
+                  >
+                    {titleCase(category)}
+                  </button>
+                ))}
+              </div>
+            </section>
+          )}
+        </aside>
+
+        <div className={styles.results}>
+          {warnings.map((warning) => (
+            <div key={warning} className={styles.warning}>
+              <AlertTriangle size={14} />
+              {warning}
+            </div>
+          ))}
+
+          {loading ? (
+            <div className={styles.grid}>
+              {Array.from({ length: 8 }, (_, i) => (
+                <div key={i} className="skeleton" style={{ height: 116 }} />
+              ))}
+            </div>
+          ) : hits.length === 0 ? (
+            <div className={styles.empty}>
+              <Info size={30} className={styles.emptyIcon} />
+              <p>
+                Nothing found
+                {debounced && <> for “{debounced}”</>}
+                {target && <> that fits {target.name}</>}.
+              </p>
+              <p className={styles.emptyHint}>
+                Try a different search, widen the sources, or clear the category
+                filters.
+              </p>
+            </div>
+          ) : (
+            <>
+              <div className={styles.grid}>
+                {hits.map((project) => (
+                  <ProjectCard
+                    key={`${project.provider}:${project.id}`}
+                    project={project}
+                    target={target}
+                    installed={isInstalled(project)}
+                    onOpen={() => setSelected(project)}
+                    onInstalled={refreshInstalled}
+                  />
+                ))}
+              </div>
+
+              {!exhausted && (
+                <button
+                  className={clsx("btn", styles.loadMore)}
+                  onClick={() => void runSearch(hits.length)}
+                  disabled={loadingMore}
+                >
+                  {loadingMore ? (
+                    <Loader2 size={14} className="spin" />
+                  ) : (
+                    <Download size={14} />
+                  )}
+                  Load more
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+
+      {selected && (
+        <ProjectPanel
+          project={selected}
+          target={target}
+          onClose={() => setSelected(null)}
+          onInstalled={refreshInstalled}
+        />
+      )}
+    </>
+  );
+}

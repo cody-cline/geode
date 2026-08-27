@@ -1,0 +1,77 @@
+.stack {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 380px;
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 12px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow);
+  pointer-events: auto;
+  animation: fade-up 0.18s var(--ease);
+}
+
+.icon {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.info .icon {
+  color: var(--info);
+}
+
+.success .icon {
+  color: var(--accent);
+}
+
+.error {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border-strong));
+}
+
+.error .icon {
+  color: var(--danger);
+}
+
+.text {
+  min-width: 0;
+  flex: 1;
+}
+
+.title {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.body {
+  margin-top: 2px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.close {
+  flex-shrink: 0;
+  color: var(--text-faint);
+  padding: 2px;
+  border-radius: 4px;
+  transition: color 0.12s var(--ease);
+}
+
+.close:hover {
+  color: var(--text);
+}
