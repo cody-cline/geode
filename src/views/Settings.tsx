@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import clsx from "clsx";
 import {
+  AlertTriangle,
   Check,
   Coffee,
   Download,
@@ -19,7 +20,7 @@ import AccountsModal from "../components/AccountsModal";
 import { api } from "../lib/api";
 import { hashHue, initials } from "../lib/format";
 import { useStore } from "../lib/store";
-import type { AppInfo, JavaInstall } from "../lib/types";
+import type { AppInfo, JavaInstall, KeyCheck } from "../lib/types";
 
 import styles from "./Settings.module.css";
 
@@ -523,6 +524,21 @@ function Sources() {
 
   const [key, setKey] = useState("");
   const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [check, setCheck] = useState<KeyCheck | null>(null);
+
+  async function testKey() {
+    setTesting(true);
+    setCheck(null);
+    try {
+      // Test what is typed if anything, else whatever is currently in effect.
+      setCheck(await api.testCurseforgeKey(key.trim() || undefined));
+    } catch (e) {
+      reportError("Could not test the key", e);
+    } finally {
+      setTesting(false);
+    }
+  }
 
   async function saveKey(value: string | null) {
     setSaving(true);
@@ -623,6 +639,14 @@ function Sources() {
               onChange={(e) => setKey(e.target.value)}
             />
             <button
+              className="btn"
+              onClick={testKey}
+              disabled={testing || (!key.trim() && !config.hasCurseforgeKey)}
+            >
+              {testing ? <Loader2 size={13} className="spin" /> : <Check size={13} />}
+              Test
+            </button>
+            <button
               className="btn btn-primary"
               onClick={() => saveKey(key.trim())}
               disabled={!key.trim() || saving}
@@ -640,6 +664,12 @@ function Sources() {
               </button>
             )}
           </div>
+          {check && (
+            <p className={check.ok ? styles.checkOk : styles.checkBad}>
+              {check.ok ? <Check size={13} /> : <AlertTriangle size={13} />}
+              {check.message}
+            </p>
+          )}
           <p className="hint">
             Stored in your Geode config directory with owner-only permissions and
             never sent anywhere except CurseForge.

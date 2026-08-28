@@ -162,13 +162,23 @@ Two shortcuts, depending on what you are doing:
 
   ```bash
   cp .env.example .env
-  # GEODE_CURSEFORGE_KEY=your-key-here
+  # GEODE_CURSEFORGE_KEY=$2a$10$your-key-here
   npm run tauri build
   ```
 
-  `.env` is gitignored, and editing it triggers a rebuild. A real environment
-  variable still wins for one-offs. Settings will show "Enabled (compiled in)".
-  Distribute that binary and the clause applies again.
+  `.env` is gitignored, and editing it triggers a rebuild. Settings will show
+  "Enabled (compiled in)". Distribute that binary and the clause applies again.
+
+  **Quote it if you use the command line instead.** CurseForge keys are
+  bcrypt-format (`$2a$10$…`), so an unquoted shell assignment expands `$2a` and
+  `$10` to nothing and bakes in a mangled key:
+
+  ```bash
+  GEODE_CURSEFORGE_KEY='$2a$10$...' npm run tauri build   # single quotes
+  ```
+
+  The `.env` file has no such problem — it is read directly, never by a shell.
+  *Settings → Mod sources → Test* reports which case you are in.
 - **Curious what others do?** Prism, PolyMC and most open-source launchers ship
   a shared key in their binaries. It was raised as a ToS violation in
   [PrismLauncher#263](https://github.com/PrismLauncher/PrismLauncher/issues/263)

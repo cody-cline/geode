@@ -88,6 +88,31 @@ pub async fn set_curseforge_key(state: State<'_, AppState>, key: Option<String>)
     Ok(has_key)
 }
 
+/// Try a key against CurseForge and report exactly what came back.
+///
+/// Takes the key to test so Settings can verify before saving; omit it to test
+/// whatever is currently in effect.
+#[tauri::command]
+pub async fn test_curseforge_key(
+    state: State<'_, AppState>,
+    key: Option<String>,
+) -> Result<providers::curseforge::KeyCheck> {
+    let candidate = match key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty()) {
+        Some(k) => Some(k),
+        None => state.config().await.effective_curseforge_key(),
+    };
+
+    let Some(candidate) = candidate else {
+        return Ok(providers::curseforge::KeyCheck {
+            ok: false,
+            status: 0,
+            message: "No CurseForge key is set.".into(),
+        });
+    };
+
+    Ok(providers::curseforge::check_key(&state.http, &candidate).await)
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppInfo {

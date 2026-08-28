@@ -50,6 +50,7 @@ pub fn run() {
             commands::get_config,
             commands::set_config,
             commands::set_curseforge_key,
+            commands::test_curseforge_key,
             commands::app_info,
             commands::system_memory_mb,
             commands::list_game_versions,

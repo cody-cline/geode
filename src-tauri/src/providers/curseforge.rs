@@ -90,9 +90,10 @@ async fn get<T: serde::de::DeserializeOwned>(
 
     let status = resp.status();
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        return Err(Error::msg(
-            "the CurseForge API key was rejected — check it in Settings",
-        ));
+        return Err(Error::msg(format!(
+            "the CurseForge API key was rejected. {}",
+            key_shape_hint(api_key)
+        )));
     }
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
         return Err(Error::msg("CurseForge rate limit reached — try again shortly"));
@@ -105,9 +106,90 @@ async fn get<T: serde::de::DeserializeOwned>(
     serde_json::from_str(&text).map_err(|e| Error::json("CurseForge response", e))
 }
 
+/// Guess *why* a key was refused, from its shape alone.
+///
+/// CurseForge keys are bcrypt-format: `$2a$10$` followed by 53 characters of
+/// `./A-Za-z0-9`. The dollar signs make them a trap in a shell — writing
+/// `GEODE_CURSEFORGE_KEY=$2a$10$… cargo build` unquoted lets the shell expand
+/// `$2a` and `$10` to nothing, baking in a truncated key that fails exactly
+/// like a wrong one. Telling the two apart saves a lot of staring.
+fn key_shape_hint(key: &str) -> &'static str {
+    let looks_bcrypt = key.starts_with("$2") && key.matches('$').count() >= 3;
+
+    if key.len() < 20 {
+        return "That key looks too short — if you set it on a command line, \
+                the shell probably ate the `$` characters. Quote it: \
+                GEODE_CURSEFORGE_KEY='$2a$10$...'";
+    }
+    if !looks_bcrypt {
+        return "That does not look like a CurseForge key (they start with \
+                `$2a$10$`). If you set it on a command line, quote it so the \
+                shell cannot expand the `$` parts.";
+    }
+    "The shape looks right, so the key itself is probably wrong or revoked — \
+     check it at console.curseforge.com."
+}
+
 #[derive(Debug, Deserialize)]
 struct Envelope<T> {
     data: T,
+}
+
+/// What a key check found. Reported verbatim so a surprising status is visible
+/// rather than flattened into "something went wrong".
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyCheck {
+    pub ok: bool,
+    pub status: u16,
+    pub message: String,
+}
+
+/// Make one cheap request to see whether a key works.
+pub async fn check_key(client: &reqwest::Client, api_key: &str) -> KeyCheck {
+    let url = format!("{API}/mods/search?gameId={MINECRAFT_GAME_ID}&classId=6&pageSize=1");
+
+    let resp = match client
+        .get(&url)
+        .header("x-api-key", api_key)
+        .header("Accept", "application/json")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return KeyCheck {
+                ok: false,
+                status: 0,
+                message: format!("Could not reach CurseForge: {e}"),
+            }
+        }
+    };
+
+    let status = resp.status();
+    if status.is_success() {
+        return KeyCheck {
+            ok: true,
+            status: status.as_u16(),
+            message: "Key works — CurseForge is enabled.".into(),
+        };
+    }
+
+    let message = if status == reqwest::StatusCode::UNAUTHORIZED
+        || status == reqwest::StatusCode::FORBIDDEN
+    {
+        format!("Rejected ({status}). {}", key_shape_hint(api_key))
+    } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        "Rate limited — the key may be fine, try again shortly.".into()
+    } else {
+        format!("CurseForge returned HTTP {status}.")
+    };
+
+    KeyCheck {
+        ok: false,
+        status: status.as_u16(),
+        message,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -427,6 +509,26 @@ pub async fn file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flags_a_shell_mangled_key() {
+        // `$2a$10$abc...` with the shell having eaten the variable-looking parts.
+        let hint = key_shape_hint("abc");
+        assert!(hint.contains("shell"), "{hint}");
+    }
+
+    #[test]
+    fn flags_a_key_that_is_not_bcrypt_shaped() {
+        let hint = key_shape_hint("a-perfectly-long-but-wrong-looking-key-value");
+        assert!(hint.contains("CurseForge key"), "{hint}");
+    }
+
+    #[test]
+    fn accepts_a_well_shaped_key() {
+        let key = format!("$2a$10${}", "a".repeat(53));
+        let hint = key_shape_hint(&key);
+        assert!(hint.contains("shape looks right"), "{hint}");
+    }
 
     #[test]
     fn maps_loader_ids_both_ways() {

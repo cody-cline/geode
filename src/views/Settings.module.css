@@ -453,3 +453,27 @@
   overflow-wrap: anywhere;
   user-select: text;
 }
+
+.checkOk,
+.checkBad {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin-top: 9px;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.checkOk {
+  color: var(--accent);
+}
+
+.checkBad {
+  color: var(--warn);
+}
+
+.checkOk svg,
+.checkBad svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}

@@ -189,6 +189,12 @@ export interface Config {
   curseforgeKeyFromBuild: boolean;
 }
 
+export interface KeyCheck {
+  ok: boolean;
+  status: number;
+  message: string;
+}
+
 export interface JavaInstall {
   path: string;
   major: number;

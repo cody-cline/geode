@@ -12,6 +12,7 @@ import type {
   Instance,
   InstanceOverrides,
   JavaInstall,
+  KeyCheck,
   PackPreview,
   Project,
   ProjectKind,
@@ -36,6 +37,8 @@ export const api = {
     invoke<Config>("set_config", { patch }),
   setCurseforgeKey: (key: string | null) =>
     invoke<boolean>("set_curseforge_key", { key }),
+  testCurseforgeKey: (key?: string) =>
+    invoke<KeyCheck>("test_curseforge_key", { key: key ?? null }),
   appInfo: () => invoke<AppInfo>("app_info"),
   systemMemoryMb: () => invoke<number>("system_memory_mb"),
 
