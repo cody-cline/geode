@@ -97,9 +97,26 @@ pub async fn test_curseforge_key(
     state: State<'_, AppState>,
     key: Option<String>,
 ) -> Result<providers::curseforge::KeyCheck> {
-    let candidate = match key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty()) {
-        Some(k) => Some(k),
-        None => state.config().await.effective_curseforge_key(),
+    let typed = key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
+    let config = state.config().await;
+
+    let (candidate, source) = match typed {
+        Some(k) => (Some(k), "the key you typed"),
+        None => {
+            let saved = config
+                .curseforge_api_key
+                .as_ref()
+                .map(|k| k.trim())
+                .filter(|k| !k.is_empty())
+                .map(str::to_string);
+            match saved {
+                Some(k) => (Some(k), "the key saved in Settings"),
+                None => (
+                    crate::config::default_curseforge_key(),
+                    "the key compiled into this build",
+                ),
+            }
+        }
     };
 
     let Some(candidate) = candidate else {
@@ -107,10 +124,12 @@ pub async fn test_curseforge_key(
             ok: false,
             status: 0,
             message: "No CurseForge key is set.".into(),
+            source: "nothing".into(),
+            fingerprint: String::new(),
         });
     };
 
-    Ok(providers::curseforge::check_key(&state.http, &candidate).await)
+    Ok(providers::curseforge::check_key(&state.http, &candidate, source).await)
 }
 
 #[derive(Debug, Serialize)]

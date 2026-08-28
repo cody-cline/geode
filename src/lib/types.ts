@@ -193,6 +193,10 @@ export interface KeyCheck {
   ok: boolean;
   status: number;
   message: string;
+  /** Which key was tested — typed, saved in Settings, or compiled in. */
+  source: string;
+  /** Safe shape summary (prefix + length); never the key itself. */
+  fingerprint: string;
 }
 
 export interface JavaInstall {

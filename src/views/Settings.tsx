@@ -665,10 +665,17 @@ function Sources() {
             )}
           </div>
           {check && (
-            <p className={check.ok ? styles.checkOk : styles.checkBad}>
+            <div className={check.ok ? styles.checkOk : styles.checkBad}>
               {check.ok ? <Check size={13} /> : <AlertTriangle size={13} />}
-              {check.message}
-            </p>
+              <span>
+                {check.message}
+                {check.fingerprint && (
+                  <span className={styles.fingerprint}>
+                    Tested {check.source}: <code>{check.fingerprint}</code>
+                  </span>
+                )}
+              </span>
+            </div>
           )}
           <p className="hint">
             Stored in your Geode config directory with owner-only permissions and

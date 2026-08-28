@@ -113,21 +113,46 @@ async fn get<T: serde::de::DeserializeOwned>(
 /// `GEODE_CURSEFORGE_KEY=$2a$10$… cargo build` unquoted lets the shell expand
 /// `$2a` and `$10` to nothing, baking in a truncated key that fails exactly
 /// like a wrong one. Telling the two apart saves a lot of staring.
-fn key_shape_hint(key: &str) -> &'static str {
+fn key_shape_hint(key: &str) -> String {
     let looks_bcrypt = key.starts_with("$2") && key.matches('$').count() >= 3;
+    let len = key.chars().count();
 
-    if key.len() < 20 {
-        return "That key looks too short — if you set it on a command line, \
+    if len < 20 {
+        return "That key looks far too short — if you set it on a command line, \
                 the shell probably ate the `$` characters. Quote it: \
-                GEODE_CURSEFORGE_KEY='$2a$10$...'";
+                GEODE_CURSEFORGE_KEY='$2a$10$...', or put it in .env where no \
+                shell is involved."
+            .into();
     }
     if !looks_bcrypt {
-        return "That does not look like a CurseForge key (they start with \
-                `$2a$10$`). If you set it on a command line, quote it so the \
-                shell cannot expand the `$` parts.";
+        return "That does not look like a CurseForge key — they start with \
+                `$2a$10$`. If you set it on a command line, quote it so the \
+                shell cannot expand the `$` parts."
+            .into();
     }
-    "The shape looks right, so the key itself is probably wrong or revoked — \
-     check it at console.curseforge.com."
+    if len != CF_KEY_LEN {
+        return format!(
+            "The key is {len} characters; CurseForge keys are exactly \
+             {CF_KEY_LEN}. It looks like {} — copy the whole value from \
+             console.curseforge.com.",
+            if len < CF_KEY_LEN { "part is missing" } else { "something extra got included" }
+        );
+    }
+    "The length and prefix are both correct, so the value itself is being \
+     refused — regenerate it at console.curseforge.com. Also make sure no \
+     older key is saved in Settings shadowing the one you meant to use."
+        .into()
+}
+
+/// `$2a$10$` plus a 53-character bcrypt payload.
+const CF_KEY_LEN: usize = 60;
+
+/// A description of a key safe to show on screen: the fixed bcrypt prefix,
+/// which carries no secret, plus the length. Enough to spot a truncated or
+/// padded key without ever displaying the value.
+pub fn fingerprint(key: &str) -> String {
+    let prefix: String = key.chars().take(7).collect();
+    format!("{prefix}… · {} characters", key.chars().count())
 }
 
 #[derive(Debug, Deserialize)]
@@ -143,11 +168,18 @@ pub struct KeyCheck {
     pub ok: bool,
     pub status: u16,
     pub message: String,
+    /// Where the key came from, so a stale saved key shadowing a compiled-in
+    /// one is visible rather than baffling.
+    pub source: String,
+    /// Safe-to-display shape summary; never the key itself.
+    pub fingerprint: String,
 }
 
 /// Make one cheap request to see whether a key works.
-pub async fn check_key(client: &reqwest::Client, api_key: &str) -> KeyCheck {
+pub async fn check_key(client: &reqwest::Client, api_key: &str, source: &str) -> KeyCheck {
     let url = format!("{API}/mods/search?gameId={MINECRAFT_GAME_ID}&classId=6&pageSize=1");
+    let source = source.to_string();
+    let fingerprint = fingerprint(api_key);
 
     let resp = match client
         .get(&url)
@@ -162,6 +194,8 @@ pub async fn check_key(client: &reqwest::Client, api_key: &str) -> KeyCheck {
                 ok: false,
                 status: 0,
                 message: format!("Could not reach CurseForge: {e}"),
+                source,
+                fingerprint,
             }
         }
     };
@@ -172,6 +206,8 @@ pub async fn check_key(client: &reqwest::Client, api_key: &str) -> KeyCheck {
             ok: true,
             status: status.as_u16(),
             message: "Key works — CurseForge is enabled.".into(),
+            source,
+            fingerprint,
         };
     }
 
@@ -189,6 +225,8 @@ pub async fn check_key(client: &reqwest::Client, api_key: &str) -> KeyCheck {
         ok: false,
         status: status.as_u16(),
         message,
+        source,
+        fingerprint,
     }
 }
 
@@ -526,8 +564,33 @@ mod tests {
     #[test]
     fn accepts_a_well_shaped_key() {
         let key = format!("$2a$10${}", "a".repeat(53));
+        assert_eq!(key.len(), CF_KEY_LEN);
         let hint = key_shape_hint(&key);
-        assert!(hint.contains("shape looks right"), "{hint}");
+        assert!(hint.contains("length and prefix are both correct"), "{hint}");
+    }
+
+    #[test]
+    fn flags_a_truncated_key() {
+        // Right prefix, wrong length — a partial paste.
+        let key = format!("$2a$10${}", "a".repeat(20));
+        let hint = key_shape_hint(&key);
+        assert!(hint.contains("part is missing"), "{hint}");
+    }
+
+    #[test]
+    fn flags_an_overlong_key() {
+        let key = format!("$2a$10${}", "a".repeat(80));
+        let hint = key_shape_hint(&key);
+        assert!(hint.contains("something extra"), "{hint}");
+    }
+
+    #[test]
+    fn fingerprint_hides_the_secret() {
+        let key = format!("$2a$10${}", "s".repeat(53));
+        let fp = fingerprint(&key);
+        assert!(fp.starts_with("$2a$10$"), "{fp}");
+        assert!(fp.contains("60 characters"), "{fp}");
+        assert!(!fp.contains(&"s".repeat(10)), "payload leaked: {fp}");
     }
 
     #[test]
