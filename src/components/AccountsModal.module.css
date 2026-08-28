@@ -118,6 +118,101 @@
   color: var(--text-faint);
 }
 
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.scanning {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  color: var(--text-faint);
+  padding: 4px 0;
+}
+
+.importBlock {
+  padding: 13px;
+  border-radius: var(--radius);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.importLead {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  line-height: 1.55;
+}
+
+.importLead strong {
+  color: var(--text);
+}
+
+.importRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 9px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+
+.importNote {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  line-height: 1.5;
+}
+
+.altAuth {
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+.altAuth summary {
+  cursor: pointer;
+  color: var(--text-faint);
+  padding: 4px 0;
+}
+
+.altAuth summary:hover {
+  color: var(--text);
+}
+
+.altAuth p {
+  margin: 8px 0 10px;
+  line-height: 1.55;
+}
+
+.noticeActions {
+  display: flex;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.noteLine {
+  color: var(--text);
+}
+
+.noteLine + .noticeActions {
+  display: flex;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.noteLine {
+  margin-top: 6px;
+}
+
+.noticeAlt {
+  color: var(--text-faint);
+}
+
 .notice {
   padding: 13px;
   border-radius: var(--radius);

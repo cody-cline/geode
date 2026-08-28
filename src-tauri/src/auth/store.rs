@@ -17,6 +17,9 @@ use crate::paths::Paths;
 pub enum AccountKind {
     Microsoft,
     Offline,
+    /// A live session borrowed from another launcher on this machine. Online
+    /// play works, but the token cannot be renewed here — see [`super::import`].
+    Imported,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +37,12 @@ pub struct Account {
     pub msa_refresh_token: Option<String>,
     #[serde(default)]
     pub added_at: i64,
+    /// For imported accounts: the file to re-read when the session expires.
+    #[serde(default)]
+    pub source_path: Option<String>,
+    /// Human-readable name of the launcher it came from.
+    #[serde(default)]
+    pub source_label: Option<String>,
 }
 
 impl Account {
@@ -46,6 +55,27 @@ impl Account {
             mc_expires_at: 0,
             msa_refresh_token: None,
             added_at: chrono::Utc::now().timestamp(),
+            source_path: None,
+            source_label: None,
+        }
+    }
+
+    /// Wrap a session lifted from another launcher.
+    ///
+    /// Minecraft tokens run about 24 hours and the file gives no expiry we can
+    /// trust, so assume a conservative 12 and let the re-read path handle it
+    /// being wrong in either direction.
+    pub fn imported(candidate: &super::import::ImportCandidate) -> Self {
+        Self {
+            id: candidate.uuid.clone(),
+            username: candidate.username.clone(),
+            kind: AccountKind::Imported,
+            mc_access_token: Some(candidate.access_token.clone()),
+            mc_expires_at: chrono::Utc::now().timestamp() + 12 * 3600,
+            msa_refresh_token: None,
+            added_at: chrono::Utc::now().timestamp(),
+            source_path: Some(candidate.source_path.clone()),
+            source_label: Some(candidate.source_label.clone()),
         }
     }
 
@@ -65,6 +95,8 @@ pub struct AccountView {
     pub kind: AccountKind,
     pub active: bool,
     pub needs_reauth: bool,
+    /// Which launcher an imported session came from.
+    pub source_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -106,6 +138,7 @@ impl AccountsFile {
                 active: self.active.as_deref() == Some(a.id.as_str()),
                 needs_reauth: a.kind == AccountKind::Microsoft
                     && a.msa_refresh_token.is_none(),
+                source_label: a.source_label.clone(),
             })
             .collect()
     }
@@ -196,6 +229,32 @@ pub async fn session_for(
                 user_type: "msa",
             });
         }
+    }
+
+    // An imported session has no refresh token by design. Instead, re-read the
+    // launcher it came from: if that launcher has been opened since, it will
+    // have renewed the token in place and the user needs to do nothing.
+    if account.kind == AccountKind::Imported {
+        let source = account
+            .source_path
+            .clone()
+            .ok_or_else(|| Error::msg("this imported account has no source launcher recorded"))?;
+
+        let token = super::import::refresh_from_source(client, &source, &account.id).await?;
+
+        let mut updated = account.clone();
+        updated.mc_access_token = Some(token.clone());
+        updated.mc_expires_at = chrono::Utc::now().timestamp() + 12 * 3600;
+        let (uuid, username) = (updated.id.clone(), updated.username.clone());
+        file.upsert(updated);
+        file.save(paths).await?;
+
+        return Ok(Session {
+            username,
+            uuid,
+            access_token: token,
+            user_type: "msa",
+        });
     }
 
     let refresh = account

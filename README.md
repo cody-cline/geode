@@ -42,9 +42,10 @@ ones don't — that's the author saying "works well with", not "needs".
 Everything installed is tracked, so *Check updates* works even months later.
 Jars you drop in by hand still show up, with names read out of the jar itself.
 
-**Real launching.** Microsoft sign-in via device code — you finish it in your
-own browser, where your password manager works. Offline accounts for
-single-player and LAN. Java is detected across every layout distros use, and a
+**Real launching.** Online play without registering anything: Geode can adopt a
+session from Prism, MultiMC, ATLauncher or the official launcher if one is
+already signed in here. Failing that, Microsoft device-code sign-in with your
+own Azure ID, or offline accounts for single-player and LAN. Java is detected across every layout distros use, and a
 matching Temurin runtime is downloaded automatically when nothing on the system
 fits. The console parses Minecraft's log4j XML stream back into levelled,
 filterable, searchable entries instead of a wall of markup.
@@ -90,16 +91,34 @@ npm run tauri build
 Everything Geode owns lives in `~/.local/share/geode` (override with
 `GEODE_HOME`). Deleting that directory resets it completely.
 
-## Two things you have to set up yourself
+## Accounts and CurseForge
 
-Both are consequences of other people's terms, not oversights. Geode works
-without either — you just get offline accounts and Modrinth only.
+Neither needs setting up before Geode is useful — offline accounts and Modrinth
+work out of the box. Both limits below come from other people's terms, not from
+missing work.
 
-### Microsoft sign-in needs your own Azure client ID
+### Online play — the easy way, and the thorough way
 
-Microsoft issues OAuth client IDs per application, and Mojang separately
-approves each one for Minecraft API access. A shared ID baked into a public app
-would violate the terms it was granted under, so there isn't one.
+**Easy: import a session from a launcher you already use.** If Prism, MultiMC,
+ATLauncher or the official launcher is signed in on this machine, open
+*Accounts* and Geode offers to use that session. No Azure, no forms, nothing to
+register.
+
+That works because the Minecraft access token belongs to *your account*, not to
+the launcher that fetched it. Geode takes only that token — never the other
+launcher's client ID or refresh token, since renewing with someone else's
+application registration would be impersonating their app.
+
+The trade-off: Geode can't renew what it didn't issue. A session lasts around a
+day. When it lapses, open the other launcher once — it refreshes on start — and
+Geode picks the new token up on its own. If a scan finds nothing, it tells you
+which of the two cases you're in: no account signed in, or a session that has
+expired.
+
+**Thorough: your own Azure client ID.** Only needed if you want Geode standing
+on its own with no other launcher installed. Microsoft issues client IDs per
+application and Mojang separately approves each one for Minecraft API access, so
+there is no shared ID to ship.
 
 1. Register an app in the [Azure portal](https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade) — public client, no secret.
 2. Turn on **Allow public client flows** so the device-code grant works.
@@ -107,6 +126,8 @@ would violate the terms it was granted under, so there isn't one.
 4. Paste the Application (client) ID into *Settings → Accounts*.
 
 Or bake it in at build time with `GEODE_CLIENT_ID=... npm run tauri build`.
+
+**Neither:** offline accounts work immediately for single-player and LAN.
 
 ### CurseForge needs your own API key
 

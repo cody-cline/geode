@@ -1,13 +1,22 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import clsx from "clsx";
-import { Check, Copy, ExternalLink, Loader2, Trash2, UserPlus } from "lucide-react";
+import {
+  Check,
+  Copy,
+  DownloadCloud,
+  ExternalLink,
+  Loader2,
+  RefreshCw,
+  Trash2,
+  UserPlus,
+} from "lucide-react";
 
 import Modal from "./Modal";
 import { api } from "../lib/api";
 import { hashHue, initials } from "../lib/format";
 import { useStore } from "../lib/store";
-import type { DeviceCodeStart } from "../lib/types";
+import type { DeviceCodeStart, ImportCandidate, ImportScan } from "../lib/types";
 
 import styles from "./AccountsModal.module.css";
 
@@ -24,6 +33,47 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
   const [copied, setCopied] = useState(false);
   const [offlineName, setOfflineName] = useState("");
   const [addingOffline, setAddingOffline] = useState(false);
+  const [scan, setScan] = useState<ImportScan | null>(null);
+  const [scanning, setScanning] = useState(true);
+  const [importing, setImporting] = useState<string | null>(null);
+
+  // Scan on open. It is a handful of file reads plus one API call per token,
+  // and finding an existing session is the answer for most people.
+  const rescan = useCallback(async () => {
+    setScanning(true);
+    try {
+      setScan(await api.findImportableAccounts());
+    } catch {
+      setScan({ candidates: [], notes: [] });
+    } finally {
+      setScanning(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void rescan();
+  }, [rescan]);
+
+  const known = new Set(accounts.map((a) => a.id));
+  const importable = (scan?.candidates ?? []).filter((c) => !known.has(c.uuid));
+  const notes = scan?.notes ?? [];
+
+  async function importSession(candidate: ImportCandidate) {
+    setImporting(candidate.uuid);
+    try {
+      const account = await api.importAccount(candidate.uuid);
+      await refreshAccounts();
+      toast({
+        kind: "success",
+        title: `Imported ${account.username}`,
+        body: `Using the session from ${candidate.sourceLabel}.`,
+      });
+    } catch (e) {
+      reportError("Could not import that session", e);
+    } finally {
+      setImporting(null);
+    }
+  }
 
   async function startMicrosoftLogin() {
     setSigningIn(true);
@@ -104,7 +154,11 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
                 <span className={styles.meta}>
                   <span className={styles.name}>{account.username}</span>
                   <span className={styles.kind}>
-                    {account.kind === "microsoft" ? "Microsoft" : "Offline"}
+                    {account.kind === "microsoft"
+                      ? "Microsoft"
+                      : account.kind === "imported"
+                        ? `via ${account.sourceLabel ?? "another launcher"}`
+                        : "Offline"}
                     {account.needsReauth && " · needs sign-in again"}
                   </span>
                 </span>
@@ -155,7 +209,58 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
           </p>
         </div>
       ) : (
-        <div>
+        <div className={styles.section}>
+          {/* Importing needs no Azure application at all, so it leads. */}
+          {scanning ? (
+            <p className={styles.scanning}>
+              <Loader2 size={13} className="spin" />
+              Looking for sessions in other launchers…
+            </p>
+          ) : importable.length > 0 ? (
+            <div className={styles.importBlock}>
+              <p className={styles.importLead}>
+                <strong>Found an existing session.</strong> Use your own
+                Minecraft login from another launcher on this machine — no Azure
+                setup needed.
+              </p>
+              {importable.map((candidate) => (
+                <div key={candidate.uuid} className={styles.importRow}>
+                  <span
+                    className={styles.avatar}
+                    style={{
+                      background: `linear-gradient(135deg, hsl(${hashHue(candidate.uuid)} 55% 42%), hsl(${(hashHue(candidate.uuid) + 40) % 360} 55% 30%))`,
+                    }}
+                  >
+                    {initials(candidate.username)}
+                  </span>
+                  <span className={styles.meta}>
+                    <span className={styles.name}>{candidate.username}</span>
+                    <span className={styles.kind}>
+                      from {candidate.sourceLabel}
+                    </span>
+                  </span>
+                  <button
+                    className="btn btn-sm btn-primary"
+                    onClick={() => importSession(candidate)}
+                    disabled={importing !== null}
+                  >
+                    {importing === candidate.uuid ? (
+                      <Loader2 size={12} className="spin" />
+                    ) : (
+                      <DownloadCloud size={13} />
+                    )}
+                    Use this
+                  </button>
+                </div>
+              ))}
+              <p className={styles.importNote}>
+                Geode borrows only the session token, never the other launcher's
+                app credentials — so it can't renew it. When it lapses, open
+                that launcher once and Geode picks the fresh one up by itself.
+              </p>
+            </div>
+          ) : null}
+
           {config?.clientId ? (
             <button
               className="btn btn-primary"
@@ -166,12 +271,15 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
               {signingIn ? <Loader2 size={14} className="spin" /> : <UserPlus size={15} />}
               Sign in with Microsoft
             </button>
-          ) : (
-            <div className={styles.notice}>
+          ) : importable.length > 0 ? (
+            // An import is available, so the Azure route is a footnote rather
+            // than a wall of setup instructions.
+            <details className={styles.altAuth}>
+              <summary>Or sign in directly with Microsoft</summary>
               <p>
-                Microsoft sign-in needs an Azure application ID. Microsoft issues
-                these per app and Mojang approves each one individually, so Geode
-                cannot ship with one.
+                Needs your own Azure application ID, which Mojang has to approve
+                for Minecraft API access. Only worth it if you want Geode to
+                stand on its own without another launcher installed.
               </p>
               <button
                 className="btn btn-sm"
@@ -182,6 +290,42 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
               >
                 Set it up in Settings
               </button>
+            </details>
+          ) : (
+            <div className={styles.notice}>
+              {notes.length > 0 ? (
+                notes.map((note) => (
+                  <p key={note} className={styles.noteLine}>
+                    {note}
+                  </p>
+                ))
+              ) : (
+                <p>No other launcher with a signed-in account was found here.</p>
+              )}
+              <p className={styles.noticeAlt}>
+                Signing in directly instead needs your own Azure application ID —
+                Microsoft issues them per app and Mojang approves each one, so
+                Geode cannot ship one.
+              </p>
+              <div className={styles.noticeActions}>
+                <button className="btn btn-sm" onClick={rescan} disabled={scanning}>
+                  {scanning ? (
+                    <Loader2 size={13} className="spin" />
+                  ) : (
+                    <RefreshCw size={13} />
+                  )}
+                  Scan again
+                </button>
+                <button
+                  className="btn btn-sm"
+                  onClick={() => {
+                    navigate({ view: "settings", tab: "accounts" });
+                    onClose();
+                  }}
+                >
+                  Set up Microsoft sign-in
+                </button>
+              </div>
             </div>
           )}
         </div>

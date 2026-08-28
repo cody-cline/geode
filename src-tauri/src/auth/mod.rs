@@ -11,6 +11,7 @@
 //! engine to babysit, no redirect URI to register, and the user signs in inside
 //! their own browser where their password manager already works.
 
+pub mod import;
 pub mod store;
 
 use serde::{Deserialize, Serialize};

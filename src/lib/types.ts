@@ -144,9 +144,25 @@ export interface SearchQuery {
 export interface Account {
   id: string;
   username: string;
-  kind: "microsoft" | "offline";
+  kind: "microsoft" | "offline" | "imported";
   active: boolean;
   needsReauth: boolean;
+  /** Which launcher an imported session came from. */
+  sourceLabel: string | null;
+}
+
+/** A live session found in another launcher. Carries no token. */
+export interface ImportCandidate {
+  username: string;
+  uuid: string;
+  sourceLabel: string;
+  sourcePath: string;
+}
+
+export interface ImportScan {
+  candidates: ImportCandidate[];
+  /** Why a launcher we found could not be imported from. */
+  notes: string[];
 }
 
 export interface DeviceCodeStart {
