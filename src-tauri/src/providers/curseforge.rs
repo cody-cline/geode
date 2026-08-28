@@ -130,6 +130,9 @@ fn key_shape_hint(key: &str) -> String {
                 shell cannot expand the `$` parts."
             .into();
     }
+    if let Some(problem) = key_charset_problem(key) {
+        return problem;
+    }
     if len != CF_KEY_LEN {
         return format!(
             "The key is {len} characters; CurseForge keys are exactly \
@@ -146,6 +149,35 @@ fn key_shape_hint(key: &str) -> String {
 
 /// `$2a$10$` plus a 53-character bcrypt payload.
 const CF_KEY_LEN: usize = 60;
+
+/// Find any character that cannot legally appear in a bcrypt-format key.
+///
+/// A key pasted out of a web page can carry look-alike Unicode — a Cyrillic
+/// `а`, a non-breaking space, a zero-width joiner — that is invisible on screen
+/// and leaves the *character* count at 60 while making the value wrong. Nothing
+/// else in this file can tell that apart from a revoked key.
+fn key_charset_problem(key: &str) -> Option<String> {
+    for (index, ch) in key.chars().enumerate() {
+        let legal = ch.is_ascii_alphanumeric() || matches!(ch, '$' | '.' | '/');
+        if !legal {
+            let described = if ch.is_whitespace() {
+                "whitespace".to_string()
+            } else if !ch.is_ascii() {
+                format!("the non-ASCII character {ch:?}")
+            } else {
+                format!("{ch:?}")
+            };
+            return Some(format!(
+                "Character {} of the key is {described} (U+{:04X}). CurseForge \
+                 keys only contain A-Z, a-z, 0-9, `.`, `/` and `$` — this looks \
+                 like it came along from copying. Retype or re-copy the key.",
+                index + 1,
+                ch as u32
+            ));
+        }
+    }
+    None
+}
 
 /// A description of a key safe to show on screen: the fixed bcrypt prefix,
 /// which carries no secret, plus the length. Enough to spot a truncated or
@@ -177,7 +209,18 @@ pub struct KeyCheck {
 
 /// Make one cheap request to see whether a key works.
 pub async fn check_key(client: &reqwest::Client, api_key: &str, source: &str) -> KeyCheck {
-    let url = format!("{API}/mods/search?gameId={MINECRAFT_GAME_ID}&classId=6&pageSize=1");
+    check_key_at(client, API, api_key, source).await
+}
+
+/// The body of [`check_key`], with the base URL injectable so the request it
+/// builds can be inspected on the wire by a test.
+pub async fn check_key_at(
+    client: &reqwest::Client,
+    base: &str,
+    api_key: &str,
+    source: &str,
+) -> KeyCheck {
+    let url = format!("{base}/mods/search?gameId={MINECRAFT_GAME_ID}&classId=6&pageSize=1");
     let source = source.to_string();
     let fingerprint = fingerprint(api_key);
 
@@ -211,14 +254,27 @@ pub async fn check_key(client: &reqwest::Client, api_key: &str, source: &str) ->
         };
     }
 
+    // Quote CurseForge rather than paraphrasing it: their body distinguishes a
+    // missing key from a rejected one, and any wording we invent can only lose
+    // information.
+    let body = resp.text().await.unwrap_or_default();
+    let said: String = body.trim().chars().take(200).collect();
+
     let message = if status == reqwest::StatusCode::UNAUTHORIZED
         || status == reqwest::StatusCode::FORBIDDEN
     {
-        format!("Rejected ({status}). {}", key_shape_hint(api_key))
+        let quoted = if said.is_empty() {
+            String::new()
+        } else {
+            format!(" CurseForge said: \u{201c}{said}\u{201d}.")
+        };
+        format!("Rejected ({status}).{quoted} {}", key_shape_hint(api_key))
     } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
         "Rate limited — the key may be fine, try again shortly.".into()
-    } else {
+    } else if said.is_empty() {
         format!("CurseForge returned HTTP {status}.")
+    } else {
+        format!("CurseForge returned HTTP {status}: \u{201c}{said}\u{201d}.")
     };
 
     KeyCheck {
@@ -582,6 +638,29 @@ mod tests {
         let key = format!("$2a$10${}", "a".repeat(80));
         let hint = key_shape_hint(&key);
         assert!(hint.contains("something extra"), "{hint}");
+    }
+
+    #[test]
+    fn flags_a_lookalike_unicode_character() {
+        // Cyrillic \u{430} in place of ASCII 'a' — same width on screen, same char count.
+        let key = format!("$2a$10$\u{430}{}", "a".repeat(52));
+        assert_eq!(key.chars().count(), CF_KEY_LEN);
+        let hint = key_shape_hint(&key);
+        assert!(hint.contains("non-ASCII"), "{hint}");
+        assert!(hint.contains("Character 8"), "{hint}");
+    }
+
+    #[test]
+    fn flags_embedded_whitespace() {
+        let key = format!("$2a$10$ {}", "a".repeat(52));
+        let hint = key_shape_hint(&key);
+        assert!(hint.contains("whitespace"), "{hint}");
+    }
+
+    #[test]
+    fn clean_key_has_no_charset_problem() {
+        let key = format!("$2a$10${}", "aB3./".repeat(10) + "aaa");
+        assert!(key_charset_problem(&key).is_none());
     }
 
     #[test]
