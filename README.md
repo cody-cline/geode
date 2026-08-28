@@ -91,6 +91,25 @@ npm run tauri build
 Everything Geode owns lives in `~/.local/share/geode` (override with
 `GEODE_HOME`). Deleting that directory resets it completely.
 
+### NVIDIA on Wayland
+
+WebKitGTK's DMABUF renderer aborts on the NVIDIA proprietary driver under
+Wayland, killing the process before the window appears:
+
+```text
+Gdk-Message: Error 71 (Protocol error) dispatching to Wayland display.
+```
+
+Geode detects that combination at startup and sets
+`WEBKIT_DISABLE_DMABUF_RENDERER=1` for itself, so there is nothing to configure.
+It stays on native Wayland — forcing `GDK_BACKEND=x11` would also work but gives
+up correct HiDPI and fractional scaling. Set the variable yourself to override
+the detection in either direction.
+
+The failure is a race: GDK connects successfully and only errors later during
+dispatch, so it can appear intermittent. Forcing `GDK_BACKEND=wayland`
+reproduces it reliably.
+
 ## Accounts and CurseForge
 
 Neither needs setting up before Geode is useful — offline accounts and Modrinth
