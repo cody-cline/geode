@@ -1,72 +1,28 @@
-import { useState } from "react";
 import clsx from "clsx";
-import { Check, Download, Loader2, Plus, ShieldAlert } from "lucide-react";
+import { Check, Download, Loader2, Package, Plus, ShieldAlert } from "lucide-react";
 
-import { api } from "../lib/api";
 import { compactNumber, relativeTime } from "../lib/format";
-import { useStore } from "../lib/store";
-import type { Instance, Project } from "../lib/types";
+import type { Project } from "../lib/types";
 
 import styles from "./ProjectCard.module.css";
 
 export default function ProjectCard({
   project,
-  target,
   installed,
+  busy,
   onOpen,
-  onInstalled,
+  onRequestInstall,
 }: {
   project: Project;
-  target?: Instance;
   installed?: boolean;
+  busy?: boolean;
   onOpen: () => void;
-  onInstalled?: () => void;
+  /** Asks the parent where this should go — the card never decides. */
+  onRequestInstall: (project: Project) => void;
 }) {
-  const toast = useStore((s) => s.toast);
-  const reportError = useStore((s) => s.reportError);
-  const [busy, setBusy] = useState(false);
-  const [done, setDone] = useState(false);
-
   const isModpack = project.kind === "modpack";
   const blocked = !project.distributionAllowed;
-  const showInstalled = installed || done;
-
-  async function install(e: React.MouseEvent) {
-    e.stopPropagation();
-    if (!target) return;
-
-    setBusy(true);
-    try {
-      const report = await api.installContent(
-        target.id,
-        project.provider,
-        project.id,
-      );
-      setDone(true);
-      onInstalled?.();
-
-      const extras = report.installed.length - 1;
-      toast({
-        kind: "success",
-        title: `Added ${project.name}`,
-        body:
-          extras > 0
-            ? `Plus ${extras} required ${extras === 1 ? "dependency" : "dependencies"}.`
-            : undefined,
-      });
-      if (report.skipped.length > 0) {
-        toast({
-          kind: "error",
-          title: "Some dependencies were skipped",
-          body: report.skipped.join("; "),
-        });
-      }
-    } catch (err) {
-      reportError(`Could not install ${project.name}`, err);
-    } finally {
-      setBusy(false);
-    }
-  }
+  const showInstalled = installed;
 
   return (
     <article className={styles.card} onClick={onOpen}>
@@ -117,7 +73,22 @@ export default function ProjectCard({
 
       <div className={styles.action}>
         {isModpack ? (
-          <span className={styles.packHint}>Open</span>
+          <button
+            className="btn btn-sm btn-primary"
+            onClick={(e) => {
+              e.stopPropagation();
+              onRequestInstall(project);
+            }}
+            disabled={busy || blocked}
+            title={
+              blocked
+                ? "The author disabled third-party downloads — open the project page"
+                : "Create a new instance from this pack"
+            }
+          >
+            {busy ? <Loader2 size={12} className="spin" /> : <Package size={13} />}
+            Install pack
+          </button>
         ) : showInstalled ? (
           <span className={styles.installed}>
             <Check size={13} />
@@ -126,18 +97,19 @@ export default function ProjectCard({
         ) : (
           <button
             className="btn btn-sm btn-primary"
-            onClick={install}
-            disabled={!target || busy || blocked}
+            onClick={(e) => {
+              e.stopPropagation();
+              onRequestInstall(project);
+            }}
+            disabled={busy || blocked}
             title={
               blocked
                 ? "The author disabled third-party downloads — open the project page"
-                : !target
-                  ? "Pick an instance to install into"
-                  : `Install into ${target.name}`
+                : "Choose an instance to install into"
             }
           >
             {busy ? <Loader2 size={12} className="spin" /> : <Plus size={13} />}
-            Install
+            Install…
           </button>
         )}
       </div>

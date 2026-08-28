@@ -67,6 +67,7 @@ pub fn run() {
             commands::remove_content,
             commands::add_local_content,
             commands::install_content,
+            commands::install_modpack,
             commands::check_content_updates,
             commands::apply_content_update,
             commands::search_projects,

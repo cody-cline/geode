@@ -106,6 +106,18 @@ export const api = {
       projectId,
       versionId: versionId ?? null,
     }),
+  installModpack: (
+    provider: Provider,
+    projectId: string,
+    versionId?: string,
+    name?: string,
+  ) =>
+    invoke<Instance>("install_modpack", {
+      provider,
+      projectId,
+      versionId: versionId ?? null,
+      name: name ?? null,
+    }),
   checkContentUpdates: (id: string) =>
     invoke<UpdateCandidate[]>("check_content_updates", { id }),
   applyContentUpdate: (

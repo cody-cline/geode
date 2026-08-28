@@ -115,7 +115,13 @@ pub async fn install_with_dependencies(
     curseforge_key: Option<&str>,
     progress: &Progress,
 ) -> Result<InstallReport> {
-    let kind = project.kind.install_kind();
+    let kind = project.kind.install_kind().ok_or_else(|| {
+        Error::msg(format!(
+            "{} is a modpack — it creates its own instance rather than \
+             installing into one",
+            project.name
+        ))
+    })?;
     let mut report = InstallReport {
         installed: Vec::new(),
         skipped: Vec::new(),

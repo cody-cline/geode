@@ -3,10 +3,10 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import clsx from "clsx";
 import { marked } from "marked";
 import {
-  Check,
   Download,
   ExternalLink,
   Loader2,
+  Package,
   Plus,
   ShieldAlert,
   X,
@@ -14,7 +14,6 @@ import {
 
 import { api } from "../lib/api";
 import { compactNumber, fileSize, relativeTime, titleCase } from "../lib/format";
-import { useStore } from "../lib/store";
 import type { Instance, Project, ProjectVersion, Provider } from "../lib/types";
 
 import styles from "./ProjectPanel.module.css";
@@ -23,15 +22,14 @@ export default function ProjectPanel({
   project,
   target,
   onClose,
-  onInstalled,
+  onRequestInstall,
 }: {
   project: Project;
+  /** Only used to scope the version list; never an install destination. */
   target?: Instance;
   onClose: () => void;
-  onInstalled?: () => void;
+  onRequestInstall: (project: Project, versionId?: string) => void;
 }) {
-  const toast = useStore((s) => s.toast);
-  const reportError = useStore((s) => s.reportError);
 
   // A merged card can be installed from either platform.
   const availableSources: { provider: Provider; id: string; pageUrl: string }[] = [
@@ -42,8 +40,6 @@ export default function ProjectPanel({
 
   const [description, setDescription] = useState<string | null>(null);
   const [versions, setVersions] = useState<ProjectVersion[] | null>(null);
-  const [installing, setInstalling] = useState<string | null>(null);
-  const [installedIds, setInstalledIds] = useState<Set<string>>(new Set());
   const [tab, setTab] = useState<"about" | "versions">("about");
 
   useEffect(() => {
@@ -77,40 +73,8 @@ export default function ProjectPanel({
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  async function install(version?: ProjectVersion) {
-    if (!target) return;
-    setInstalling(version?.id ?? "latest");
-    try {
-      const report = await api.installContent(
-        target.id,
-        source.provider,
-        source.id,
-        version?.id,
-      );
-      if (version) setInstalledIds((prev) => new Set(prev).add(version.id));
-      onInstalled?.();
-
-      const extras = report.installed.length - 1;
-      toast({
-        kind: "success",
-        title: `Added ${project.name}`,
-        body: extras > 0 ? `Plus ${extras} required.` : undefined,
-      });
-      if (report.skipped.length > 0) {
-        toast({
-          kind: "error",
-          title: "Some dependencies were skipped",
-          body: report.skipped.join("; "),
-        });
-      }
-    } catch (e) {
-      reportError(`Could not install ${project.name}`, e);
-    } finally {
-      setInstalling(null);
-    }
-  }
-
   const blocked = !project.distributionAllowed;
+  const isModpack = project.kind === "modpack";
 
   return (
     <div className={styles.backdrop} onMouseDown={onClose}>
@@ -173,15 +137,10 @@ export default function ProjectPanel({
           ) : (
             <button
               className="btn btn-primary"
-              onClick={() => void install()}
-              disabled={!target || installing !== null}
+              onClick={() => onRequestInstall(project)}
             >
-              {installing === "latest" ? (
-                <Loader2 size={14} className="spin" />
-              ) : (
-                <Plus size={15} />
-              )}
-              {target ? `Install into ${target.name}` : "Pick an instance first"}
+              {isModpack ? <Package size={15} /> : <Plus size={15} />}
+              {isModpack ? "Install as new instance" : "Install\u2026"}
             </button>
           )}
           <button className="btn" onClick={() => void openUrl(source.pageUrl)}>
@@ -253,7 +212,6 @@ export default function ProjectPanel({
             <ul className={styles.versionList}>
               {versions.map((version) => {
                 const file = version.files.find((f) => f.primary) ?? version.files[0];
-                const isInstalled = installedIds.has(version.id);
                 return (
                   <li key={version.id} className={styles.version}>
                     <div className={styles.versionText}>
@@ -287,27 +245,13 @@ export default function ProjectPanel({
                         <p className={styles.versionBlocked}>{version.blockedReason}</p>
                       )}
                     </div>
-                    {isInstalled ? (
-                      <span className={styles.installedTag}>
-                        <Check size={13} /> Added
-                      </span>
-                    ) : (
-                      <button
-                        className="btn btn-sm"
-                        onClick={() => void install(version)}
-                        disabled={
-                          !target ||
-                          installing !== null ||
-                          Boolean(version.blockedReason)
-                        }
-                      >
-                        {installing === version.id ? (
-                          <Loader2 size={12} className="spin" />
-                        ) : (
-                          "Install"
-                        )}
-                      </button>
-                    )}
+                    <button
+                      className="btn btn-sm"
+                      onClick={() => onRequestInstall(project, version.id)}
+                      disabled={Boolean(version.blockedReason)}
+                    >
+                      {isModpack ? "Use this" : "Install\u2026"}
+                    </button>
                   </li>
                 );
               })}

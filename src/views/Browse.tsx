@@ -2,13 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import { AlertTriangle, Download, Info, Loader2, Search } from "lucide-react";
 
+import InstallTargetModal from "../components/InstallTargetModal";
+import ModpackInstallModal from "../components/ModpackInstallModal";
 import ProjectCard from "../components/ProjectCard";
 import ProjectPanel from "../components/ProjectPanel";
 import { api } from "../lib/api";
 import { titleCase } from "../lib/format";
 import { useStore } from "../lib/store";
 import { LOADERS } from "../lib/types";
-import type { Project, ProjectKind, Provider, SortBy } from "../lib/types";
+import type { Instance, Project, ProjectKind, Provider, SortBy } from "../lib/types";
 
 import styles from "./Browse.module.css";
 
@@ -40,6 +42,7 @@ export default function Browse() {
   const config = useStore((s) => s.config);
   const navigate = useStore((s) => s.navigate);
   const reportError = useStore((s) => s.reportError);
+  const toast = useStore((s) => s.toast);
 
   const [query, setQuery] = useState("");
   const [debounced, setDebounced] = useState("");
@@ -58,6 +61,18 @@ export default function Browse() {
   const [selected, setSelected] = useState<Project | null>(null);
   const [installed, setInstalled] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(0);
+
+  // An install is never implicit: the button opens one of these, and the pack
+  // route creates an instance rather than writing into one.
+  const [askTarget, setAskTarget] = useState<{
+    project: Project;
+    versionId?: string;
+  } | null>(null);
+  const [packInstall, setPackInstall] = useState<{
+    project: Project;
+    versionId?: string;
+  } | null>(null);
+  const [installing, setInstalling] = useState<string | null>(null);
 
   // Guards against an older, slower request overwriting a newer one.
   const requestSeq = useRef(0);
@@ -111,6 +126,48 @@ export default function Browse() {
   const isInstalled = (project: Project) =>
     installed.has(`${project.provider}:${project.id}`) ||
     project.alsoOn.some((ref) => installed.has(`${ref.provider}:${ref.id}`));
+
+  function requestInstall(project: Project, versionId?: string) {
+    if (project.kind === "modpack") setPackInstall({ project, versionId });
+    else setAskTarget({ project, versionId });
+  }
+
+  async function installInto(instance: Instance) {
+    if (!askTarget) return;
+    const { project, versionId } = askTarget;
+    setInstalling(project.id);
+    try {
+      const report = await api.installContent(
+        instance.id,
+        project.provider,
+        project.id,
+        versionId,
+      );
+      setAskTarget(null);
+      await refreshInstalled();
+
+      const extras = report.installed.length - 1;
+      toast({
+        kind: "success",
+        title: `Added ${project.name} to ${instance.name}`,
+        body:
+          extras > 0
+            ? `Plus ${extras} required ${extras === 1 ? "dependency" : "dependencies"}.`
+            : undefined,
+      });
+      if (report.skipped.length > 0) {
+        toast({
+          kind: "error",
+          title: "Some dependencies were skipped",
+          body: report.skipped.join("; "),
+        });
+      }
+    } catch (e) {
+      reportError(`Could not install ${project.name}`, e);
+    } finally {
+      setInstalling(null);
+    }
+  }
 
   useEffect(() => {
     if (!targetId && instances.length > 0) setTargetId(instances[0].id);
@@ -218,7 +275,7 @@ export default function Browse() {
         </div>
 
         <div className={styles.target}>
-          <span className={styles.targetLabel}>Install to</span>
+          <span className={styles.targetLabel}>Compatible with</span>
           {instances.length === 0 ? (
             <button
               className="btn btn-sm"
@@ -232,7 +289,7 @@ export default function Browse() {
               style={{ width: 190 }}
               value={targetId}
               onChange={(e) => setTargetId(e.target.value)}
-              aria-label="Target instance"
+              aria-label="Filter by instance compatibility"
             >
               {instances.map((i) => (
                 <option key={i.id} value={i.id}>
@@ -308,7 +365,7 @@ export default function Browse() {
             <section className={styles.filterSection}>
               <h3 className={styles.filterTitle}>Compatibility</h3>
               <p className={styles.compat}>
-                Showing only what works with{" "}
+                Filtering to what works with{" "}
                 <strong>Minecraft {target.mcVersion}</strong>
                 {loader && (
                   <>
@@ -376,10 +433,10 @@ export default function Browse() {
                   <ProjectCard
                     key={`${project.provider}:${project.id}`}
                     project={project}
-                    target={target}
                     installed={isInstalled(project)}
+                    busy={installing === project.id}
                     onOpen={() => setSelected(project)}
-                    onInstalled={refreshInstalled}
+                    onRequestInstall={requestInstall}
                   />
                 ))}
               </div>
@@ -412,7 +469,30 @@ export default function Browse() {
           project={selected}
           target={target}
           onClose={() => setSelected(null)}
-          onInstalled={refreshInstalled}
+          onRequestInstall={requestInstall}
+        />
+      )}
+
+      {askTarget && (
+        <InstallTargetModal
+          project={askTarget.project}
+          preselect={targetId}
+          installedIn={
+            target && isInstalled(askTarget.project)
+              ? new Set([target.id])
+              : undefined
+          }
+          busy={installing !== null}
+          onPick={installInto}
+          onClose={() => setAskTarget(null)}
+        />
+      )}
+
+      {packInstall && (
+        <ModpackInstallModal
+          project={packInstall.project}
+          versionId={packInstall.versionId}
+          onClose={() => setPackInstall(null)}
         />
       )}
     </>

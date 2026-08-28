@@ -429,8 +429,8 @@ pub async fn install_content(
     let mut inst = instance::load(&state.paths, &id).await?;
     let project = providers::project(&state.http, provider, &project_id, cf_key).await?;
 
-    let loader = (project.kind.install_kind() == ContentKind::Mod)
-        .then(|| inst.loader.as_str());
+    let loader =
+        (project.kind.install_kind() == Some(ContentKind::Mod)).then(|| inst.loader.as_str());
     let versions = providers::versions(
         &state.http,
         provider,
@@ -480,6 +480,130 @@ pub async fn install_content(
         Err(e) => {
             // Persist whatever did land so the folder and the manifest agree.
             let _ = inst.save(&state.paths).await;
+            progress.fail(&e.to_string()).await;
+            Err(e)
+        }
+    }
+}
+
+/// Install a modpack as a brand-new instance.
+///
+/// A pack is not content you add to an instance — it defines one, including its
+/// Minecraft version and loader. So this downloads the pack, creates the
+/// instance its manifest describes, and imports into that.
+#[tauri::command]
+pub async fn install_modpack(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    provider: String,
+    project_id: String,
+    version_id: Option<String>,
+    name: Option<String>,
+) -> Result<InstanceView> {
+    let provider = Provider::parse(&provider).ok_or_else(|| Error::msg("unknown provider"))?;
+    let config = state.config().await;
+    let cf_key = config.effective_curseforge_key();
+    let cf_key = cf_key.as_deref();
+
+    let project = providers::project(&state.http, provider, &project_id, cf_key).await?;
+    if project.kind != providers::ProjectKind::Modpack {
+        return Err(Error::msg(format!("{} is not a modpack", project.name)));
+    }
+
+    // Packs are not filtered by loader or game version: the pack chooses those.
+    let versions =
+        providers::versions(&state.http, provider, &project_id, None, None, cf_key).await?;
+    let version = match &version_id {
+        Some(want) => versions
+            .iter()
+            .find(|v| &v.id == want)
+            .ok_or_else(|| Error::msg("that pack version is no longer available"))?,
+        None => crate::install::content::pick_best(&versions)
+            .ok_or_else(|| Error::msg(format!("{} has no downloadable release", project.name)))?,
+    };
+
+    if let Some(reason) = &version.blocked_reason {
+        return Err(Error::msg(reason.clone()));
+    }
+    let file = version
+        .primary_file()
+        .ok_or_else(|| Error::msg(format!("{} has no downloadable file", project.name)))?;
+
+    let progress = Progress::new(app, format!("pack:{}", project.id));
+    state.register_cancel(progress.id(), progress.cancel_flag());
+
+    let archive = state.paths.cache().join("packs").join(&file.filename);
+    progress.stage("Downloading pack", 1).await;
+    let downloaded = crate::net::fetch_one(
+        &state.http,
+        &crate::net::Download::new(file.url.clone(), archive.clone())
+            .sha1(file.sha1.clone())
+            .size(file.size)
+            .label(project.name.clone()),
+    )
+    .await;
+
+    if let Err(e) = downloaded {
+        state.clear_cancel(progress.id());
+        progress.fail(&e.to_string()).await;
+        return Err(e);
+    }
+    progress.advance(1, &file.filename).await;
+
+    let preview = instance::modpack::preview(archive.clone()).await?;
+    if preview.needs_curseforge_key && cf_key.is_none() {
+        state.clear_cancel(progress.id());
+        let e = Error::msg(
+            "this CurseForge pack needs your CurseForge API key to resolve its \
+             contents — add one in Settings",
+        );
+        progress.fail(&e.to_string()).await;
+        return Err(e);
+    }
+
+    let display_name = name
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| project.name.clone());
+
+    let mut inst = instance::create(
+        &state.paths,
+        display_name,
+        preview.mc_version,
+        preview.loader,
+        preview.loader_version,
+    )
+    .await?;
+
+    let result = instance::modpack::import_into(
+        &state.http,
+        &state.paths,
+        &mut inst,
+        &archive,
+        cf_key,
+        &progress,
+    )
+    .await;
+
+    // Record where it came from so updates and re-imports have provenance.
+    inst.pack = Some(instance::PackSource {
+        name: project.name.clone(),
+        version: version.version_number.clone(),
+        provider: Some(provider.as_str().to_string()),
+        project_id: Some(project.id.clone()),
+    });
+
+    state.clear_cancel(progress.id());
+    // Save regardless: a partly imported pack is more useful than a directory
+    // the launcher refuses to acknowledge.
+    inst.save(&state.paths).await?;
+
+    match result {
+        Ok(()) => {
+            progress.finish().await;
+            Ok(view(inst, &state))
+        }
+        Err(e) => {
             progress.fail(&e.to_string()).await;
             Err(e)
         }

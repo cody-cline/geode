@@ -59,13 +59,19 @@ impl ProjectKind {
         }
     }
 
-    pub fn install_kind(self) -> crate::instance::content::ContentKind {
+    /// Which folder inside an instance this kind installs into.
+    ///
+    /// `None` for modpacks: a pack is not a file you drop into an instance, it
+    /// *becomes* an instance. Returning `ContentKind::Mod` here — as this used
+    /// to — quietly wrote the pack archive into `mods/`.
+    pub fn install_kind(self) -> Option<crate::instance::content::ContentKind> {
         use crate::instance::content::ContentKind;
         match self {
-            ProjectKind::ResourcePack => ContentKind::ResourcePack,
-            ProjectKind::Shader => ContentKind::ShaderPack,
-            ProjectKind::DataPack => ContentKind::DataPack,
-            _ => ContentKind::Mod,
+            ProjectKind::Mod => Some(ContentKind::Mod),
+            ProjectKind::ResourcePack => Some(ContentKind::ResourcePack),
+            ProjectKind::Shader => Some(ContentKind::ShaderPack),
+            ProjectKind::DataPack => Some(ContentKind::DataPack),
+            ProjectKind::Modpack => None,
         }
     }
 }
