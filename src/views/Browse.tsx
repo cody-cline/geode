@@ -11,7 +11,14 @@ import { api } from "../lib/api";
 import { titleCase } from "../lib/format";
 import { useStore } from "../lib/store";
 import { LOADERS } from "../lib/types";
-import type { Instance, Project, ProjectKind, Provider, SortBy } from "../lib/types";
+import type {
+  Instance,
+  Loader,
+  Project,
+  ProjectKind,
+  Provider,
+  SortBy,
+} from "../lib/types";
 
 import styles from "./Browse.module.css";
 
@@ -64,7 +71,11 @@ export default function Browse({
   const [sources, setSources] = useState<Provider[]>(["modrinth", "curseforge"]);
   const [categories, setCategories] = useState<string[]>([]);
   const [available, setAvailable] = useState<string[]>([]);
-  const [targetId, setTargetId] = useState<string>("");
+  /** Last instance installed into, used to preselect the picker. */
+  const [lastTargetId, setLastTargetId] = useState<string>("");
+  const [filterVersion, setFilterVersion] = useState("");
+  const [filterLoader, setFilterLoader] = useState("");
+  const [gameVersions, setGameVersions] = useState<string[]>([]);
 
   const [hits, setHits] = useState<Project[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
@@ -90,7 +101,7 @@ export default function Browse({
   // Guards against an older, slower request overwriting a newer one.
   const requestSeq = useRef(0);
 
-  const target = lockedInstance ?? instances.find((i) => i.id === targetId);
+  const target = lockedInstance;
 
   // `sources` records what the user wants; `usableSources` is what we can
   // actually query. Keeping them apart means CurseForge stays selected — and
@@ -106,31 +117,34 @@ export default function Browse({
     return sources.filter((s) => availableSources.includes(s));
   }, [sources, hasCurseforgeKey]);
 
-  // Knowing what the target already has lets cards say "Added" instead of
-  // offering an install that would be a no-op.
+  const contentKeys = useCallback(async (instanceId: string) => {
+    const lists = await Promise.all(
+      (["mod", "resourcepack", "shaderpack", "datapack"] as const).map((k) =>
+        api.listContent(instanceId, k),
+      ),
+    );
+    return new Set(
+      lists
+        .flat()
+        .filter((item) => item.projectId)
+        .map((item) => `${item.provider}:${item.projectId}`),
+    );
+  }, []);
+
+  // Cards only claim "Added" when there is one unambiguous instance to be
+  // added to — in global browse a mod may be in one instance and not another,
+  // and a single badge cannot honestly say which.
   const refreshInstalled = useCallback(async () => {
-    if (!target) {
+    if (!lockedInstance) {
       setInstalled(new Set());
       return;
     }
     try {
-      const lists = await Promise.all(
-        (["mod", "resourcepack", "shaderpack", "datapack"] as const).map((k) =>
-          api.listContent(target.id, k),
-        ),
-      );
-      setInstalled(
-        new Set(
-          lists
-            .flat()
-            .filter((item) => item.projectId)
-            .map((item) => `${item.provider}:${item.projectId}`),
-        ),
-      );
+      setInstalled(await contentKeys(lockedInstance.id));
     } catch {
       setInstalled(new Set());
     }
-  }, [target]);
+  }, [lockedInstance, contentKeys]);
 
   useEffect(() => {
     void refreshInstalled();
@@ -139,6 +153,32 @@ export default function Browse({
   const isInstalled = (project: Project) =>
     installed.has(`${project.provider}:${project.id}`) ||
     project.alsoOn.some((ref) => installed.has(`${ref.provider}:${ref.id}`));
+
+  // Which instances already have the project the picker is open for.
+  const [installedIn, setInstalledIn] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    if (!askTarget) return;
+    let cancelled = false;
+    const key = `${askTarget.project.provider}:${askTarget.project.id}`;
+    const alt = askTarget.project.alsoOn.map((r) => `${r.provider}:${r.id}`);
+
+    Promise.all(
+      instances.map(async (i) => {
+        try {
+          const keys = await contentKeys(i.id);
+          return keys.has(key) || alt.some((a) => keys.has(a)) ? i.id : null;
+        } catch {
+          return null;
+        }
+      }),
+    ).then((ids) => {
+      if (!cancelled) setInstalledIn(new Set(ids.filter(Boolean) as string[]));
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [askTarget, instances, contentKeys]);
 
   function requestInstall(project: Project, versionId?: string) {
     // A pack always creates its own instance, even from inside one.
@@ -166,6 +206,7 @@ export default function Browse({
         project.id,
         versionId,
       );
+      setLastTargetId(instance.id);
       await Promise.all([refreshInstalled(), refreshInstances()]);
 
       const extras = report.installed.length - 1;
@@ -198,16 +239,64 @@ export default function Browse({
     await installDirect(instance, project, versionId);
   }
 
-  useEffect(() => {
-    if (!lockedInstance && !targetId && instances.length > 0) {
-      setTargetId(instances[0].id);
+  /**
+   * Build an instance for the mod, then install into it.
+   *
+   * The two steps are separate backend calls, so a failure partway leaves the
+   * new instance behind. That is deliberate — an empty instance of the right
+   * version is a usable starting point, and deleting it would throw away work
+   * the user asked for.
+   */
+  async function createAndInstall(
+    name: string,
+    gameVersion: string,
+    loader: Loader,
+  ) {
+    if (!askTarget) return;
+    const { project, versionId } = askTarget;
+    setInstalling(project.id);
+
+    try {
+      let loaderVersion = "";
+      if (loader !== "vanilla") {
+        const builds = await api.listLoaderVersions(loader, gameVersion);
+        if (builds.length === 0) {
+          throw new Error(
+            `No ${loader} build exists for Minecraft ${gameVersion}.`,
+          );
+        }
+        loaderVersion = builds[0];
+      }
+
+      const instance = await api.createInstance(
+        name,
+        gameVersion,
+        loader,
+        loaderVersion,
+      );
+      await refreshInstances();
+      setAskTarget(null);
+      await installDirect(instance, project, versionId);
+      navigate({ view: "instance", id: instance.id });
+    } catch (e) {
+      reportError(`Could not create an instance for ${project.name}`, e);
+    } finally {
+      setInstalling(null);
     }
-  }, [instances, targetId, lockedInstance]);
+  }
 
   useEffect(() => {
     const timer = setTimeout(() => setDebounced(query), 280);
     return () => clearTimeout(timer);
   }, [query]);
+
+  useEffect(() => {
+    if (lockedInstance) return;
+    api
+      .listGameVersions(config?.showSnapshots ?? false)
+      .then((list) => setGameVersions(list.map((v) => v.id)))
+      .catch(() => setGameVersions([]));
+  }, [lockedInstance, config?.showSnapshots]);
 
   useEffect(() => {
     api
@@ -217,11 +306,18 @@ export default function Browse({
     setCategories([]);
   }, [kind]);
 
-  // Scoping results to the target instance is what makes the install button
-  // trustworthy: everything listed is known to fit.
-  const gameVersion = target?.mcVersion ?? null;
-  const loader =
-    target && target.loader !== "vanilla" ? target.loader : null;
+  // Only the in-instance view scopes automatically — there the destination is
+  // fixed, so narrowing is helpful. Global browse shows everything unless the
+  // user asks otherwise, because hiding a mod that would have worked is worse
+  // than showing one that will not.
+  const gameVersion = lockedInstance
+    ? lockedInstance.mcVersion
+    : filterVersion || null;
+  const loader = lockedInstance
+    ? lockedInstance.loader !== "vanilla"
+      ? lockedInstance.loader
+      : null
+    : filterLoader || null;
 
   const runSearch = useCallback(
     async (page: number) => {
@@ -317,32 +413,39 @@ export default function Browse({
                 Done
               </button>
             </>
-          ) : instances.length === 0 ? (
-            <>
-              <span className={styles.targetLabel}>Compatible with</span>
-              <button
-                className="btn btn-sm"
-                onClick={() => navigate({ view: "library" })}
-              >
-                Create an instance
-              </button>
-            </>
           ) : (
             <>
-            <span className={styles.targetLabel}>Compatible with</span>
-            <select
-              className="select"
-              style={{ width: 190 }}
-              value={targetId}
-              onChange={(e) => setTargetId(e.target.value)}
-              aria-label="Filter by instance compatibility"
-            >
-              {instances.map((i) => (
-                <option key={i.id} value={i.id}>
-                  {i.name} · {i.mcVersion}
-                </option>
-              ))}
-            </select>
+              <span className={styles.targetLabel}>Filter</span>
+              <select
+                className="select"
+                style={{ width: 150 }}
+                value={filterVersion}
+                onChange={(e) => setFilterVersion(e.target.value)}
+                aria-label="Filter by Minecraft version"
+              >
+                <option value="">Any version</option>
+                {gameVersions.map((v) => (
+                  <option key={v} value={v}>
+                    {v}
+                  </option>
+                ))}
+              </select>
+              {(kind === "mod" || kind === "modpack") && (
+                <select
+                  className="select"
+                  style={{ width: 130 }}
+                  value={filterLoader}
+                  onChange={(e) => setFilterLoader(e.target.value)}
+                  aria-label="Filter by mod loader"
+                >
+                  <option value="">Any loader</option>
+                  {LOADERS.filter((l) => l.id !== "vanilla").map((l) => (
+                    <option key={l.id} value={l.id}>
+                      {l.label}
+                    </option>
+                  ))}
+                </select>
+              )}
             </>
           )}
         </div>
@@ -408,12 +511,12 @@ export default function Browse({
             )}
           </section>
 
-          {target && (
+          {lockedInstance && (
             <section className={styles.filterSection}>
               <h3 className={styles.filterTitle}>Compatibility</h3>
               <p className={styles.compat}>
                 Filtering to what works with{" "}
-                <strong>Minecraft {target.mcVersion}</strong>
+                <strong>Minecraft {lockedInstance.mcVersion}</strong>
                 {loader && (
                   <>
                     {" "}
@@ -466,7 +569,7 @@ export default function Browse({
               <p>
                 Nothing found
                 {debounced && <> for “{debounced}”</>}
-                {target && <> that fits {target.name}</>}.
+                {lockedInstance && <> that fits {lockedInstance.name}</>}.
               </p>
               <p className={styles.emptyHint}>
                 Try a different search, widen the sources, or clear the category
@@ -525,14 +628,11 @@ export default function Browse({
       {askTarget && (
         <InstallTargetModal
           project={askTarget.project}
-          preselect={targetId}
-          installedIn={
-            target && isInstalled(askTarget.project)
-              ? new Set([target.id])
-              : undefined
-          }
+          preselect={lastTargetId}
+          installedIn={installedIn}
           busy={installing !== null}
           onPick={installInto}
+          onCreateAndInstall={createAndInstall}
           onClose={() => setAskTarget(null)}
         />
       )}

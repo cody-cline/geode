@@ -78,6 +78,75 @@
   flex-shrink: 0;
 }
 
+.modes {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+
+.mode {
+  flex: 1;
+  height: 28px;
+  border-radius: 5px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-dim);
+  transition:
+    background 0.12s var(--ease),
+    color 0.12s var(--ease);
+}
+
+.mode:hover {
+  color: var(--text);
+}
+
+.modeActive,
+.modeActive:hover {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--accent);
+}
+
+/* Greyed, but still clickable — metadata is often behind reality. */
+.incompatible {
+  opacity: 0.5;
+}
+
+.incompatible:hover {
+  opacity: 0.75;
+}
+
+.incompatible.selected {
+  opacity: 1;
+  border-color: color-mix(in srgb, var(--warn) 55%, transparent);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+}
+
+.newGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-faint);
+  line-height: 1.55;
+}
+
+.noteWarn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--warn);
+}
+
 .emptyNote {
   font-size: 13px;
   color: var(--text-dim);
