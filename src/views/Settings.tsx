@@ -564,7 +564,8 @@ function Sources() {
           <span className={styles.sourceState}>
             {config.hasCurseforgeKey ? (
               <>
-                <Check size={14} /> Enabled
+                <Check size={14} />
+                {config.curseforgeKeyFromBuild ? "Enabled (compiled in)" : "Enabled"}
               </>
             ) : (
               "Not configured"
@@ -574,10 +575,17 @@ function Sources() {
 
         <div className={styles.callout}>
           <p>
-            CurseForge issues API keys per developer and their terms state a key
-            is non-transferable and must not be shared. A key baked into a public
-            app would be exactly that, so Geode asks for yours instead. It is
-            free to request.
+            CurseForge issues API keys per developer, and their terms say a key
+            is non-transferable and must not be disclosed to a third party. A
+            key shipped in a public build is exactly that — Prism and most
+            open-source launchers do it anyway, but Geode does not by default.
+            Keys are free to request.
+          </p>
+          <p className={styles.calloutNote}>
+            For a build you keep to yourself there is no third party, so you can
+            compile your own key in instead of pasting it here:{" "}
+            <code>GEODE_CURSEFORGE_KEY=… npm run tauri build</code>. Share that
+            binary and the clause applies again.
           </p>
           <p className={styles.calloutNote}>
             Some authors also disable third-party downloads for their projects.
@@ -606,7 +614,11 @@ function Sources() {
               type="password"
               value={key}
               placeholder={
-                config.hasCurseforgeKey ? "•••••••••••••••• (stored)" : "Paste your key"
+                config.curseforgeKeyFromBuild
+                  ? "using the compiled-in key — paste one to override"
+                  : config.hasCurseforgeKey
+                    ? "•••••••••••••••• (stored)"
+                    : "Paste your key"
               }
               onChange={(e) => setKey(e.target.value)}
             />
@@ -618,7 +630,7 @@ function Sources() {
               {saving && <Loader2 size={13} className="spin" />}
               Save
             </button>
-            {config.hasCurseforgeKey && (
+            {config.hasCurseforgeKey && !config.curseforgeKeyFromBuild && (
               <button
                 className="btn btn-danger"
                 onClick={() => saveKey(null)}

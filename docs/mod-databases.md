@@ -34,10 +34,26 @@ Two constraints shape how it is wired in:
 
 1. **Keys are per-developer and non-transferable.** The 3rd-party API terms
    state a key may not be disclosed to any third party. A key compiled into a
-   public app is exactly that. So Geode ships without one and asks for yours in
-   *Settings → Mod sources*. CurseForge search, installs and pack imports stay
-   inert until it is set, and the UI says so rather than silently returning
-   half a result set.
+   *distributed* app is exactly that.
+
+   Worth being straight about what everyone else does: **Prism Launcher ships a
+   key in its source and binaries**, as do PolyMC and most forks. It was filed
+   as a ToS violation in
+   [PrismLauncher#263](https://github.com/PrismLauncher/PrismLauncher/issues/263)
+   and closed as not planned. The alternative the issue proposes — and what
+   [cfproxy](https://github.com/bmpm-mc/cfproxy) and GDLauncher do — is a proxy
+   server holding the key, so the client never sees it. That is ToS-clean, but
+   it means running infrastructure and having one key absorb every user's rate
+   limit.
+
+   Geode does neither by default: it asks for your key in *Settings → Mod
+   sources*, and CurseForge stays inert until one is set, with the UI saying so
+   rather than silently returning half a result set.
+
+   For a build you do not distribute there is no third party, so
+   `GEODE_CURSEFORGE_KEY=… npm run tauri build` compiles your own key in and you
+   never paste it again. Hand that binary to someone else and the clause
+   applies again.
 
 2. **Authors can disable third-party downloads.** When `allowModDistribution`
    is false the API returns a null `downloadUrl`. The CDN path is guessable

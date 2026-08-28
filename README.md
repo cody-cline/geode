@@ -45,9 +45,9 @@ Jars you drop in by hand still show up, with names read out of the jar itself.
 **Real launching.** Online play without registering anything: Geode can adopt a
 session from Prism, MultiMC, ATLauncher or the official launcher if one is
 already signed in here. Failing that, Microsoft device-code sign-in with your
-own Azure ID, or offline accounts for single-player and LAN. Java is detected across every layout distros use, and a
-matching Temurin runtime is downloaded automatically when nothing on the system
-fits. The console parses Minecraft's log4j XML stream back into levelled,
+own Azure ID, or offline accounts for single-player and LAN. Java is detected
+across every layout distros use, and a matching Temurin runtime is downloaded
+automatically when nothing on the system fits. The console parses Minecraft's log4j XML stream back into levelled,
 filterable, searchable entries instead of a wall of markup.
 
 **Modpacks.** Import `.mrpack` and CurseForge zips. Export `.mrpack` — Modrinth
@@ -151,10 +151,20 @@ Or bake it in at build time with `GEODE_CLIENT_ID=... npm run tauri build`.
 ### CurseForge needs your own API key
 
 CurseForge issues keys per developer and their terms state a key is
-non-transferable and must not be disclosed to third parties. Shipping one
-publicly is precisely that. Get a free key from the
-[CurseForge console](https://console.curseforge.com/) and paste it into
+non-transferable and must not be disclosed to third parties. Get a free key from
+the [CurseForge console](https://console.curseforge.com/) and paste it into
 *Settings → Mod sources*.
+
+Two shortcuts, depending on what you are doing:
+
+- **Private build?** There is no third party, so compile your key in and stop
+  pasting it: `GEODE_CURSEFORGE_KEY=… npm run tauri build`. Settings will show
+  "Enabled (compiled in)". Distribute that binary and the clause applies again.
+- **Curious what others do?** Prism, PolyMC and most open-source launchers ship
+  a shared key in their binaries. It was raised as a ToS violation in
+  [PrismLauncher#263](https://github.com/PrismLauncher/PrismLauncher/issues/263)
+  and closed as not planned. Geode doesn't copy that by default — see
+  [docs/mod-databases.md](docs/mod-databases.md).
 
 Note that some authors disable third-party downloads for their projects. Geode
 shows those with a **Manual** badge and links to the project page rather than

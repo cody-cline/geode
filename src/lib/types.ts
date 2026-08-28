@@ -185,6 +185,8 @@ export interface Config {
   concurrentDownloads: number;
   showSnapshots: boolean;
   hasCurseforgeKey: boolean;
+  /** True when the key came from GEODE_CURSEFORGE_KEY at build time. */
+  curseforgeKeyFromBuild: boolean;
 }
 
 export interface JavaInstall {

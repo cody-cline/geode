@@ -83,7 +83,7 @@ pub async fn set_curseforge_key(state: State<'_, AppState>, key: Option<String>)
     let mut config = state.config().await;
     config.curseforge_api_key = key.filter(|k| !k.trim().is_empty()).map(|k| k.trim().to_string());
     config.save(&state.paths).await?;
-    let has_key = config.curseforge_api_key.is_some();
+    let has_key = config.effective_curseforge_key().is_some();
     state.set_config(config).await;
     Ok(has_key)
 }
@@ -379,7 +379,8 @@ pub async fn install_content(
 ) -> Result<crate::install::content::InstallReport> {
     let provider = Provider::parse(&provider).ok_or_else(|| Error::msg("unknown provider"))?;
     let config = state.config().await;
-    let cf_key = config.curseforge_api_key.as_deref();
+    let cf_key = config.effective_curseforge_key();
+    let cf_key = cf_key.as_deref();
 
     let mut inst = instance::load(&state.paths, &id).await?;
     let project = providers::project(&state.http, provider, &project_id, cf_key).await?;
@@ -455,7 +456,7 @@ pub async fn check_content_updates(
     let result = crate::install::content::check_updates(
         &state.http,
         &inst,
-        config.curseforge_api_key.as_deref(),
+        config.effective_curseforge_key().as_deref(),
         &progress,
     )
     .await;
@@ -497,7 +498,12 @@ pub async fn search_projects(
     query: SearchQuery,
 ) -> Result<SearchResults> {
     let config = state.config().await;
-    providers::search(&state.http, &query, config.curseforge_api_key.as_deref()).await
+    providers::search(
+        &state.http,
+        &query,
+        config.effective_curseforge_key().as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -512,7 +518,7 @@ pub async fn get_project(
         &state.http,
         provider,
         &id,
-        config.curseforge_api_key.as_deref(),
+        config.effective_curseforge_key().as_deref(),
     )
     .await
 }
@@ -529,7 +535,7 @@ pub async fn get_project_description(
         &state.http,
         provider,
         &id,
-        config.curseforge_api_key.as_deref(),
+        config.effective_curseforge_key().as_deref(),
     )
     .await
 }
@@ -550,7 +556,7 @@ pub async fn get_project_versions(
         &id,
         game_version.as_deref(),
         loader.as_deref(),
-        config.curseforge_api_key.as_deref(),
+        config.effective_curseforge_key().as_deref(),
     )
     .await
 }
@@ -926,7 +932,7 @@ pub async fn import_modpack(
         &state.paths,
         &mut inst,
         &archive,
-        config.curseforge_api_key.as_deref(),
+        config.effective_curseforge_key().as_deref(),
         &progress,
     )
     .await;
