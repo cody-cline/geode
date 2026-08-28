@@ -51,15 +51,16 @@ async fn api_key_header_survives_dollar_signs() {
         .unwrap_or_else(|| panic!("no x-api-key header sent; got {headers:#?}"));
 
     let sent = api_key_header
-        .splitn(2, ':')
-        .nth(1)
-        .expect("header value")
-        .trim();
+        .split_once(':')
+        .map(|(_, value)| value.trim())
+        .expect("header value");
 
     assert_eq!(sent, FAKE_KEY, "the key was altered before reaching the socket");
 
     assert!(
-        headers.iter().any(|h| h.to_ascii_lowercase() == "accept: application/json"),
+        headers
+            .iter()
+            .any(|h| h.eq_ignore_ascii_case("accept: application/json")),
         "missing Accept header; got {headers:#?}"
     );
 
