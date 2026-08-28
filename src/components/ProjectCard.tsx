@@ -10,12 +10,15 @@ export default function ProjectCard({
   project,
   installed,
   busy,
+  directInstall,
   onOpen,
   onRequestInstall,
 }: {
   project: Project;
   installed?: boolean;
   busy?: boolean;
+  /** True when the destination is already fixed, so no dialog follows. */
+  directInstall?: boolean;
   onOpen: () => void;
   /** Asks the parent where this should go — the card never decides. */
   onRequestInstall: (project: Project) => void;
@@ -105,11 +108,14 @@ export default function ProjectCard({
             title={
               blocked
                 ? "The author disabled third-party downloads — open the project page"
-                : "Choose an instance to install into"
+                : directInstall
+                  ? undefined
+                  : "Choose an instance to install into"
             }
           >
             {busy ? <Loader2 size={12} className="spin" /> : <Plus size={13} />}
-            Install…
+            {/* The ellipsis promises a dialog; only show it when one follows. */}
+            {directInstall ? "Install" : "Install\u2026"}
           </button>
         )}
       </div>

@@ -25,8 +25,13 @@ const KINDS: { id: ContentKind; label: string; extensions: string[] }[] = [
   { id: "datapack", label: "Data Packs", extensions: ["zip"] },
 ];
 
-export default function ContentTab({ instance }: { instance: Instance }) {
-  const navigate = useStore((s) => s.navigate);
+export default function ContentTab({
+  instance,
+  onBrowse,
+}: {
+  instance: Instance;
+  onBrowse: () => void;
+}) {
   const toast = useStore((s) => s.toast);
   const reportError = useStore((s) => s.reportError);
   const refreshInstances = useStore((s) => s.refreshInstances);
@@ -209,10 +214,7 @@ export default function ContentTab({ instance }: { instance: Instance }) {
             )}
             Check updates
           </button>
-          <button
-            className="btn btn-primary"
-            onClick={() => navigate({ view: "browse" })}
-          >
+          <button className="btn btn-primary" onClick={onBrowse}>
             Browse
           </button>
         </div>
@@ -253,10 +255,7 @@ export default function ContentTab({ instance }: { instance: Instance }) {
                   : `No ${KINDS.find((k) => k.id === kind)?.label.toLowerCase()} yet.`}
             </p>
             {!filter && (
-              <button
-                className="btn btn-primary btn-sm"
-                onClick={() => navigate({ view: "browse" })}
-              >
+              <button className="btn btn-primary btn-sm" onClick={onBrowse}>
                 Find some
               </button>
             )}

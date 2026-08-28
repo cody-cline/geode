@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 
 import InstanceIcon from "../components/InstanceIcon";
+import Browse from "./Browse";
 import ContentTab from "./instance/ContentTab";
 import LogsTab from "./instance/LogsTab";
 import SettingsTab from "./instance/SettingsTab";
@@ -41,6 +42,9 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
   const [active, setActive] = useState<TabId>(
     TABS.some((t) => t.id === tab) ? (tab as TabId) : "content",
   );
+  // Browsing happens inside the instance rather than navigating to the global
+  // Browse view, so the sidebar stays put and the destination stays obvious.
+  const [browsing, setBrowsing] = useState(false);
 
   const instance = instances.find((i) => i.id === id);
 
@@ -67,6 +71,10 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
     } catch (e) {
       reportError("Could not open the folder", e);
     }
+  }
+
+  if (browsing) {
+    return <Browse lockedInstance={instance} onDone={() => setBrowsing(false)} />;
   }
 
   return (
@@ -155,7 +163,9 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
       </nav>
 
       <div className={styles.body}>
-        {active === "content" && <ContentTab instance={instance} />}
+        {active === "content" && (
+          <ContentTab instance={instance} onBrowse={() => setBrowsing(true)} />
+        )}
         {active === "logs" && <LogsTab instanceId={id} />}
         {active === "settings" && <SettingsTab instance={instance} />}
       </div>

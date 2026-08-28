@@ -23,12 +23,15 @@ export default function ProjectPanel({
   target,
   onClose,
   onRequestInstall,
+  directInstall,
 }: {
   project: Project;
   /** Only used to scope the version list; never an install destination. */
   target?: Instance;
   onClose: () => void;
   onRequestInstall: (project: Project, versionId?: string) => void;
+  /** True when the destination is already fixed, so no dialog follows. */
+  directInstall?: boolean;
 }) {
 
   // A merged card can be installed from either platform.
@@ -140,7 +143,11 @@ export default function ProjectPanel({
               onClick={() => onRequestInstall(project)}
             >
               {isModpack ? <Package size={15} /> : <Plus size={15} />}
-              {isModpack ? "Install as new instance" : "Install\u2026"}
+              {isModpack
+                ? "Install as new instance"
+                : directInstall
+                  ? "Install"
+                  : "Install\u2026"}
             </button>
           )}
           <button className="btn" onClick={() => void openUrl(source.pageUrl)}>
@@ -250,7 +257,7 @@ export default function ProjectPanel({
                       onClick={() => onRequestInstall(project, version.id)}
                       disabled={Boolean(version.blockedReason)}
                     >
-                      {isModpack ? "Use this" : "Install\u2026"}
+                      {isModpack ? "Use this" : directInstall ? "Install" : "Install\u2026"}
                     </button>
                   </li>
                 );

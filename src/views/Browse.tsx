@@ -4,6 +4,7 @@ import { AlertTriangle, Download, Info, Loader2, Search } from "lucide-react";
 
 import InstallTargetModal from "../components/InstallTargetModal";
 import ModpackInstallModal from "../components/ModpackInstallModal";
+import InstanceIcon from "../components/InstanceIcon";
 import ProjectCard from "../components/ProjectCard";
 import ProjectPanel from "../components/ProjectPanel";
 import { api } from "../lib/api";
@@ -37,12 +38,24 @@ function loaderLabel(id: string): string {
   return LOADERS.find((l) => l.id === id)?.label ?? titleCase(id);
 }
 
-export default function Browse() {
+export default function Browse({
+  lockedInstance,
+  onDone,
+}: {
+  /**
+   * Set when browsing from inside an instance. The destination is then implied
+   * by context, so results are scoped to it and installs skip the picker —
+   * asking again would only re-confirm a choice already made by being here.
+   */
+  lockedInstance?: Instance;
+  onDone?: () => void;
+} = {}) {
   const instances = useStore((s) => s.instances);
   const config = useStore((s) => s.config);
   const navigate = useStore((s) => s.navigate);
   const reportError = useStore((s) => s.reportError);
   const toast = useStore((s) => s.toast);
+  const refreshInstances = useStore((s) => s.refreshInstances);
 
   const [query, setQuery] = useState("");
   const [debounced, setDebounced] = useState("");
@@ -77,7 +90,7 @@ export default function Browse() {
   // Guards against an older, slower request overwriting a newer one.
   const requestSeq = useRef(0);
 
-  const target = instances.find((i) => i.id === targetId);
+  const target = lockedInstance ?? instances.find((i) => i.id === targetId);
 
   // `sources` records what the user wants; `usableSources` is what we can
   // actually query. Keeping them apart means CurseForge stays selected — and
@@ -128,13 +141,23 @@ export default function Browse() {
     project.alsoOn.some((ref) => installed.has(`${ref.provider}:${ref.id}`));
 
   function requestInstall(project: Project, versionId?: string) {
-    if (project.kind === "modpack") setPackInstall({ project, versionId });
-    else setAskTarget({ project, versionId });
+    // A pack always creates its own instance, even from inside one.
+    if (project.kind === "modpack") {
+      setPackInstall({ project, versionId });
+      return;
+    }
+    if (lockedInstance) {
+      void installDirect(lockedInstance, project, versionId);
+      return;
+    }
+    setAskTarget({ project, versionId });
   }
 
-  async function installInto(instance: Instance) {
-    if (!askTarget) return;
-    const { project, versionId } = askTarget;
+  async function installDirect(
+    instance: Instance,
+    project: Project,
+    versionId?: string,
+  ) {
     setInstalling(project.id);
     try {
       const report = await api.installContent(
@@ -143,8 +166,7 @@ export default function Browse() {
         project.id,
         versionId,
       );
-      setAskTarget(null);
-      await refreshInstalled();
+      await Promise.all([refreshInstalled(), refreshInstances()]);
 
       const extras = report.installed.length - 1;
       toast({
@@ -169,9 +191,18 @@ export default function Browse() {
     }
   }
 
+  async function installInto(instance: Instance) {
+    if (!askTarget) return;
+    const { project, versionId } = askTarget;
+    setAskTarget(null);
+    await installDirect(instance, project, versionId);
+  }
+
   useEffect(() => {
-    if (!targetId && instances.length > 0) setTargetId(instances[0].id);
-  }, [instances, targetId]);
+    if (!lockedInstance && !targetId && instances.length > 0) {
+      setTargetId(instances[0].id);
+    }
+  }, [instances, targetId, lockedInstance]);
 
   useEffect(() => {
     const timer = setTimeout(() => setDebounced(query), 280);
@@ -275,15 +306,30 @@ export default function Browse() {
         </div>
 
         <div className={styles.target}>
-          <span className={styles.targetLabel}>Compatible with</span>
-          {instances.length === 0 ? (
-            <button
-              className="btn btn-sm"
-              onClick={() => navigate({ view: "library" })}
-            >
-              Create an instance
-            </button>
+          {lockedInstance ? (
+            <>
+              <span className={styles.targetLabel}>Adding to</span>
+              <span className={styles.lockedTarget}>
+                <InstanceIcon instance={lockedInstance} size={20} />
+                {lockedInstance.name}
+              </span>
+              <button className="btn btn-sm" onClick={onDone}>
+                Done
+              </button>
+            </>
+          ) : instances.length === 0 ? (
+            <>
+              <span className={styles.targetLabel}>Compatible with</span>
+              <button
+                className="btn btn-sm"
+                onClick={() => navigate({ view: "library" })}
+              >
+                Create an instance
+              </button>
+            </>
           ) : (
+            <>
+            <span className={styles.targetLabel}>Compatible with</span>
             <select
               className="select"
               style={{ width: 190 }}
@@ -297,6 +343,7 @@ export default function Browse() {
                 </option>
               ))}
             </select>
+            </>
           )}
         </div>
       </header>
@@ -435,6 +482,7 @@ export default function Browse() {
                     project={project}
                     installed={isInstalled(project)}
                     busy={installing === project.id}
+                    directInstall={Boolean(lockedInstance)}
                     onOpen={() => setSelected(project)}
                     onRequestInstall={requestInstall}
                   />
@@ -470,6 +518,7 @@ export default function Browse() {
           target={target}
           onClose={() => setSelected(null)}
           onRequestInstall={requestInstall}
+          directInstall={Boolean(lockedInstance)}
         />
       )}
 
