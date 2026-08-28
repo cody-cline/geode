@@ -158,8 +158,17 @@ the [CurseForge console](https://console.curseforge.com/) and paste it into
 Two shortcuts, depending on what you are doing:
 
 - **Private build?** There is no third party, so compile your key in and stop
-  pasting it: `GEODE_CURSEFORGE_KEY=… npm run tauri build`. Settings will show
-  "Enabled (compiled in)". Distribute that binary and the clause applies again.
+  pasting it. Copy `.env.example` to `.env` and fill it in:
+
+  ```bash
+  cp .env.example .env
+  # GEODE_CURSEFORGE_KEY=your-key-here
+  npm run tauri build
+  ```
+
+  `.env` is gitignored, and editing it triggers a rebuild. A real environment
+  variable still wins for one-offs. Settings will show "Enabled (compiled in)".
+  Distribute that binary and the clause applies again.
 - **Curious what others do?** Prism, PolyMC and most open-source launchers ship
   a shared key in their binaries. It was raised as a ToS violation in
   [PrismLauncher#263](https://github.com/PrismLauncher/PrismLauncher/issues/263)
