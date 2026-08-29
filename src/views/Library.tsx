@@ -15,7 +15,7 @@ import InstanceIcon from "../components/InstanceIcon";
 import NewInstanceModal from "../components/NewInstanceModal";
 import { launchInstance, stopInstance } from "../lib/actions";
 import { formatDuration, useStore } from "../lib/store";
-import { relativeTime } from "../lib/format";
+import { hashHue, relativeTime } from "../lib/format";
 import { LOADERS } from "../lib/types";
 import type { Instance } from "../lib/types";
 
@@ -160,15 +160,38 @@ function InstanceCard({
   const loaderLabel = LOADERS.find((l) => l.id === instance.loader)?.label;
   const preparing = Boolean(progress) && !instance.running;
 
+  const [artFailed, setArtFailed] = useState(false);
+  const banner = instance.pack?.bannerUrl ?? instance.pack?.iconUrl ?? null;
+  const hue = hashHue(instance.id);
+
   return (
     <article className={clsx(styles.card, instance.running && styles.cardRunning)}>
-      {instance.pack?.bannerUrl && (
-        <button className={styles.banner} onClick={onOpen} tabIndex={-1} aria-hidden="true">
-          <img src={instance.pack.bannerUrl} alt="" loading="lazy" />
-        </button>
-      )}
+      {/* The art leads. Instances without pack artwork get a generated wash
+          from their own hue, so the grid keeps one silhouette instead of
+          alternating between tall and short cards. */}
+      <button className={styles.art} onClick={onOpen} tabIndex={-1} aria-hidden="true">
+        {banner && !artFailed ? (
+          <img
+            src={banner}
+            alt=""
+            loading="lazy"
+            onError={() => setArtFailed(true)}
+          />
+        ) : (
+          <span
+            className={styles.artFallback}
+            style={{
+              background: `linear-gradient(135deg, hsl(${hue} 46% 34%), hsl(${(hue + 55) % 360} 44% 20%))`,
+            }}
+          />
+        )}
+        <span className={styles.artScrim} />
+      </button>
+
       <button className={styles.cardBody} onClick={onOpen}>
-        <InstanceIcon instance={instance} size={44} />
+        <span className={styles.iconRing}>
+          <InstanceIcon instance={instance} size={46} />
+        </span>
         <div className={styles.cardText}>
           <h3 className={styles.cardName}>{instance.name}</h3>
           <p className={styles.cardMeta}>

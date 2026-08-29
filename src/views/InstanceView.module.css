@@ -5,45 +5,54 @@
   color: var(--text-faint);
 }
 
-/* Pack artwork behind the header, faded so text stays readable over it. */
+/* The header sits *on* the artwork rather than beside it, so a pack's banner
+   is the first thing the page presents. Instances without art get a wash from
+   their own hue so the layout does not change shape. */
 .hero {
   position: relative;
-  height: 132px;
-  overflow: hidden;
-  background: var(--surface-2);
+  isolation: isolate;
+  background: var(--surface);
 }
 
-.hero img {
+.heroImg {
+  position: absolute;
+  inset: 0;
+  display: block;
   width: 100%;
   height: 100%;
   object-fit: cover;
+  object-position: center 38%;
+  z-index: -2;
 }
 
-.hero::after {
-  content: "";
+/* Dark enough under the text to keep contrast on a bright screenshot, clear
+   at the top so the image is still the image. */
+.heroScrim {
   position: absolute;
   inset: 0;
-  background: linear-gradient(
-    to bottom,
-    color-mix(in srgb, var(--bg) 35%, transparent),
-    var(--surface) 96%
-  );
+  z-index: -1;
+  background:
+    linear-gradient(
+      to bottom,
+      color-mix(in srgb, var(--bg) 22%, transparent) 0%,
+      color-mix(in srgb, var(--bg) 34%, transparent) 40%,
+      color-mix(in srgb, var(--bg) 72%, transparent) 68%,
+      color-mix(in srgb, var(--surface) 92%, transparent) 88%,
+      var(--surface) 100%
+    );
 }
 
-.headerOverBanner {
-  margin-top: -46px;
-  position: relative;
-  background: transparent;
-  border-bottom: 1px solid var(--border);
-  backdrop-filter: blur(2px);
+/* Only art gets the tall treatment; a plain wash needs less room. */
+.heroArt .header {
+  padding-top: 150px;
 }
 
 .packSummary {
-  margin-top: 6px;
-  font-size: 12.5px;
+  margin-top: 7px;
+  font-size: 13px;
   color: var(--text-dim);
   line-height: 1.5;
-  max-width: 70ch;
+  max-width: 74ch;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   line-clamp: 2;
@@ -53,7 +62,9 @@
 
 .packLink {
   cursor: pointer;
-  transition: border-color 0.12s var(--ease);
+  transition:
+    border-color 0.12s var(--ease),
+    color 0.12s var(--ease);
 }
 
 .packLink:hover {
@@ -63,29 +74,36 @@
 
 .header {
   display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 18px 22px 16px;
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
+  align-items: flex-end;
+  gap: 16px;
+  padding: 22px 22px 18px;
+  background: transparent;
 }
 
+/* Sits on the artwork so the header row starts at the icon, rather than
+   leaving a column of empty space beside it. */
 .back {
+  position: absolute;
+  top: 14px;
+  left: 16px;
+  z-index: 2;
   display: grid;
   place-items: center;
-  width: 30px;
-  height: 30px;
-  border-radius: var(--radius-sm);
-  color: var(--text-dim);
-  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  color: var(--text);
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+  backdrop-filter: blur(6px);
+  border: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
   transition:
     background 0.12s var(--ease),
-    color 0.12s var(--ease);
+    transform 0.12s var(--ease);
 }
 
 .back:hover {
-  background: var(--surface-2);
-  color: var(--text);
+  background: color-mix(in srgb, var(--bg) 75%, transparent);
+  transform: translateX(-1px);
 }
 
 .headText {
@@ -94,7 +112,7 @@
 }
 
 .name {
-  font-size: 19px;
+  font-size: 23px;
   letter-spacing: -0.015em;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -138,6 +156,7 @@
   padding: 0 22px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
+  border-top: 1px solid var(--border);
 }
 
 .tab {

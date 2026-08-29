@@ -19,7 +19,7 @@ import LogsTab from "./instance/LogsTab";
 import SettingsTab from "./instance/SettingsTab";
 import { api } from "../lib/api";
 import { launchInstance, stopInstance } from "../lib/actions";
-import { relativeTime } from "../lib/format";
+import { hashHue, relativeTime } from "../lib/format";
 import { formatDuration, useStore } from "../lib/store";
 import { LOADERS } from "../lib/types";
 
@@ -80,23 +80,34 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
 
   const pack = instance.pack;
 
+  const hero = pack?.bannerUrl ?? pack?.iconUrl ?? null;
+  const hue = hashHue(instance.id);
+
   return (
     <>
-      {pack?.bannerUrl && (
-        <div className={styles.hero} aria-hidden="true">
-          <img src={pack.bannerUrl} alt="" />
-        </div>
-      )}
-      <header className={clsx(styles.header, pack?.bannerUrl && styles.headerOverBanner)}>
+      <div className={clsx(styles.hero, hero && styles.heroArt)}>
+        {hero ? (
+          <img className={styles.heroImg} src={hero} alt="" />
+        ) : (
+          <span
+            className={styles.heroImg}
+            style={{
+              background: `linear-gradient(135deg, hsl(${hue} 44% 30%), hsl(${(hue + 55) % 360} 42% 18%))`,
+            }}
+          />
+        )}
+        <span className={styles.heroScrim} />
+
         <button
           className={styles.back}
           onClick={() => navigate({ view: "library" })}
           aria-label="Back to library"
         >
-          <ArrowLeft size={16} />
+          <ArrowLeft size={17} />
         </button>
 
-        <InstanceIcon instance={instance} size={52} />
+        <header className={styles.header}>
+        <InstanceIcon instance={instance} size={64} radius={16} />
 
         <div className={styles.headText}>
           <h1 className={styles.name}>{instance.name}</h1>
@@ -165,7 +176,8 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
             </button>
           )}
         </div>
-      </header>
+        </header>
+      </div>
 
       <nav className={styles.tabs}>
         {TABS.map((t) => (

@@ -70,7 +70,7 @@
 
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(255px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
   gap: 12px;
 }
 
@@ -97,26 +97,46 @@
   border-color: color-mix(in srgb, var(--accent) 50%, transparent);
 }
 
-/* Pack artwork, so an installed pack looks like itself in the grid. */
-.banner {
+/* The artwork is the card's subject, not a garnish: full-bleed, tall enough
+   to read, and faded into the surface so the title sits on it cleanly. */
+.art {
+  position: relative;
   display: block;
   width: 100%;
-  height: 78px;
+  height: 172px;
   overflow: hidden;
   background: var(--surface-2);
-  border-bottom: 1px solid var(--border);
   cursor: pointer;
 }
 
-.banner img {
+.art img,
+.artFallback {
+  display: block;
   width: 100%;
   height: 100%;
   object-fit: cover;
-  transition: transform 0.4s var(--ease);
+  transition: transform 0.55s var(--ease);
 }
 
-.card:hover .banner img {
-  transform: scale(1.04);
+.card:hover .art img,
+.card:hover .artFallback {
+  transform: scale(1.05);
+}
+
+/* Two stops: a light top wash keeps busy screenshots from fighting the
+   card border, and a hard landing into the surface hides the seam. */
+.artScrim {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(
+      to bottom,
+      color-mix(in srgb, var(--bg) 18%, transparent) 0%,
+      transparent 38%,
+      color-mix(in srgb, var(--bg) 45%, transparent) 66%,
+      color-mix(in srgb, var(--surface) 80%, transparent) 86%,
+      var(--surface) 100%
+    );
 }
 
 .cardPack {
@@ -132,11 +152,24 @@
   max-width: 100%;
 }
 
+/* Straddles the artwork edge, ringed so it reads against any image. */
+.iconRing {
+  display: block;
+  margin-top: -30px;
+  border-radius: 13px;
+  box-shadow:
+    0 0 0 3px var(--surface),
+    var(--shadow-sm);
+  flex-shrink: 0;
+}
+
 .cardBody {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: flex-start;
   gap: 12px;
-  padding: 14px;
+  padding: 0 14px 14px;
   text-align: left;
   width: 100%;
   /* Grow so footers line up across a row even when cards carry
@@ -147,10 +180,13 @@
 .cardText {
   min-width: 0;
   flex: 1;
+  /* Aligns the title with the icon's lower half rather than its top. */
+  padding-top: 6px;
 }
 
 .cardName {
-  font-size: 14px;
+  font-size: 15px;
+  letter-spacing: -0.01em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
