@@ -7,36 +7,63 @@ import Modal from "./Modal";
 import { api } from "../lib/api";
 import { useStore } from "../lib/store";
 import { LOADERS } from "../lib/types";
-import type { Instance, Loader, Project } from "../lib/types";
+import type { Instance, Loader, Project, ProjectVersion } from "../lib/types";
 
 import styles from "./InstallTargetModal.module.css";
 
 /**
  * Why an instance may not suit this project, or `null` if it does.
  *
+ * Judged against the project's actual files where they are known, because
+ * `project.loaders` and `project.gameVersions` are independent unions: a mod
+ * listing both Fabric and 1.21.1 does not necessarily have a Fabric file *for*
+ * 1.21.1. Falls back to those unions only while the files are still loading.
+ *
  * Incompatible instances are shown greyed rather than hidden, and stay
- * selectable: a mod frequently runs on a version its metadata has not listed
- * yet, and refusing outright would block installs that would have worked. The
- * warning is the point, not the block.
+ * selectable: metadata frequently lags reality, and refusing outright would
+ * block installs that would have worked. The warning is the point, not the
+ * block.
  */
-function compatibility(project: Project, instance: Instance): string | null {
+function compatibility(
+  project: Project,
+  instance: Instance,
+  files: ProjectVersion[] | null,
+): string | null {
   const needsLoader = project.kind === "mod";
+  const loaderLabel = LOADERS.find((l) => l.id === instance.loader)?.label;
 
   if (needsLoader && instance.loader === "vanilla") {
     return "no mod loader";
   }
-  if (
-    needsLoader &&
-    project.loaders.length > 0 &&
-    !project.loaders.includes(instance.loader)
-  ) {
-    return `no ${LOADERS.find((l) => l.id === instance.loader)?.label} build`;
+
+  if (files === null) {
+    if (
+      needsLoader &&
+      project.loaders.length > 0 &&
+      !project.loaders.includes(instance.loader)
+    ) {
+      return `no ${loaderLabel} build`;
+    }
+    if (
+      project.gameVersions.length > 0 &&
+      !project.gameVersions.includes(instance.mcVersion)
+    ) {
+      return `nothing for ${instance.mcVersion}`;
+    }
+    return null;
   }
-  if (
-    project.gameVersions.length > 0 &&
-    !project.gameVersions.includes(instance.mcVersion)
-  ) {
-    return `nothing for ${instance.mcVersion}`;
+
+  const forLoader = needsLoader
+    ? files.filter((f) => f.loaders.includes(instance.loader))
+    : files;
+
+  if (needsLoader && forLoader.length === 0) {
+    return `no ${loaderLabel} build`;
+  }
+  if (!forLoader.some((f) => f.gameVersions.includes(instance.mcVersion))) {
+    return needsLoader
+      ? `no ${loaderLabel} build for ${instance.mcVersion}`
+      : `nothing for ${instance.mcVersion}`;
   }
   return null;
 }
@@ -83,69 +110,107 @@ export default function InstallTargetModal({
 }) {
   const instances = useStore((s) => s.instances);
 
+  // --- new instance ---
+  //
+  // Options come from the project's actual files, not from `project.loaders`
+  // and `project.gameVersions`. Those are flattened unions: a mod on both
+  // Fabric and NeoForge that only ever shipped NeoForge for older versions
+  // would otherwise offer NeoForge + a Fabric-only version, a pair that has no
+  // file behind it. Each file carries its loaders and game versions together,
+  // so pairing them here means every combination on offer is real.
+  const [files, setFiles] = useState<ProjectVersion[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    // Unfiltered on purpose — this is what defines the choices.
+    api
+      .getProjectVersions(project.provider, project.id)
+      .then((list) => !cancelled && setFiles(list))
+      .catch(() => !cancelled && setFiles([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [project.provider, project.id]);
+
+  const installable = useMemo(
+    () => (files ?? []).filter((f) => !f.blockedReason && f.files.length > 0),
+    [files],
+  );
+
+  const loaderOptions = useMemo(() => {
+    if (project.kind !== "mod") return [];
+    const present = new Set(installable.flatMap((f) => f.loaders));
+    return LOADERS.filter((l) => l.id !== "vanilla" && present.has(l.id));
+  }, [project.kind, installable]);
+
+  const [newLoader, setNewLoader] = useState<Loader>("vanilla");
+  const [newVersion, setNewVersion] = useState("");
+  const [newName, setNewName] = useState("");
+
   const compatible = useMemo(
-    () => instances.filter((i) => !compatibility(project, i)),
-    [instances, project],
+    () => instances.filter((i) => !compatibility(project, i, files)),
+    [instances, project, files],
   );
 
   const [mode, setMode] = useState<"existing" | "new">(
-    // With nothing that fits, creating one is the only useful action.
-    instances.length === 0 || compatible.length === 0 ? "new" : "existing",
+    instances.length === 0 ? "new" : "existing",
   );
 
-  const [selected, setSelected] = useState<string>(
-    preselect && compatible.some((i) => i.id === preselect)
-      ? preselect
-      : (compatible[0]?.id ?? instances[0]?.id ?? ""),
-  );
+  // Once the files land, a set of instances that all fail is a dead end —
+  // switch to the only useful action, unless the user has already chosen.
+  const [modeTouched, setModeTouched] = useState(false);
+  useEffect(() => {
+    if (!modeTouched && files !== null && compatible.length === 0) {
+      setMode("new");
+    }
+  }, [files, compatible.length, modeTouched]);
+
+  const [selected, setSelected] = useState<string>(instances[0]?.id ?? "");
+  useEffect(() => {
+    const preferred =
+      preselect && compatible.some((i) => i.id === preselect)
+        ? preselect
+        : compatible[0]?.id;
+    if (preferred) setSelected(preferred);
+    // Only re-home the selection when the compatible set itself changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [compatible.length, preselect]);
 
   // Suitable instances first, so the obvious choice sits at the top.
   const ordered = useMemo(
     () =>
       [...instances].sort(
         (a, b) =>
-          (compatibility(project, a) ? 1 : 0) -
-          (compatibility(project, b) ? 1 : 0),
+          (compatibility(project, a, files) ? 1 : 0) -
+          (compatibility(project, b, files) ? 1 : 0),
       ),
-    [instances, project],
+    [instances, project, files],
   );
 
-  // --- new instance ---
+  // Versions that have a file for the chosen loader — nothing else.
+  const versionOptions = useMemo(() => {
+    const relevant =
+      newLoader === "vanilla"
+        ? installable
+        : installable.filter((f) => f.loaders.includes(newLoader));
+    return sortVersionsDescending([
+      ...new Set(relevant.flatMap((f) => f.gameVersions)),
+    ]);
+  }, [installable, newLoader]);
 
-  const versionOptions = useMemo(
-    () => sortVersionsDescending(project.gameVersions),
-    [project.gameVersions],
-  );
-  const loaderOptions = useMemo(() => {
-    if (project.kind !== "mod") return [];
-    return LOADERS.filter(
-      (l) => l.id !== "vanilla" && project.loaders.includes(l.id),
-    );
-  }, [project.kind, project.loaders]);
-
-  const [newVersion, setNewVersion] = useState(versionOptions[0] ?? "");
-  const [newLoader, setNewLoader] = useState<Loader>(
-    loaderOptions[0]?.id ?? "vanilla",
-  );
-  const [newName, setNewName] = useState("");
-
-  // Only some loaders are published for any given game version.
-  const [loaderAvailable, setLoaderAvailable] = useState<boolean | null>(null);
+  // Settle on a loader once the files arrive, then keep the version valid for
+  // whichever loader is chosen.
   useEffect(() => {
-    if (newLoader === "vanilla" || !newVersion) {
-      setLoaderAvailable(true);
-      return;
+    if (loaderOptions.length > 0 && !loaderOptions.some((l) => l.id === newLoader)) {
+      setNewLoader(loaderOptions[0].id);
     }
-    let cancelled = false;
-    setLoaderAvailable(null);
-    api
-      .listLoaderVersions(newLoader, newVersion)
-      .then((list) => !cancelled && setLoaderAvailable(list.length > 0))
-      .catch(() => !cancelled && setLoaderAvailable(false));
-    return () => {
-      cancelled = true;
-    };
-  }, [newLoader, newVersion]);
+  }, [loaderOptions, newLoader]);
+
+  useEffect(() => {
+    if (versionOptions.length > 0 && !versionOptions.includes(newVersion)) {
+      setNewVersion(versionOptions[0]);
+    }
+  }, [versionOptions, newVersion]);
 
   const suggestedName =
     newName.trim() ||
@@ -153,10 +218,9 @@ export default function InstallTargetModal({
     project.name;
 
   const target = instances.find((i) => i.id === selected);
-  const targetProblem = target ? compatibility(project, target) : null;
+  const targetProblem = target ? compatibility(project, target, files) : null;
 
-  const canCreate =
-    Boolean(newVersion) && loaderAvailable === true && !busy;
+  const canCreate = Boolean(newVersion) && !busy;
 
   return (
     <Modal
@@ -206,13 +270,19 @@ export default function InstallTargetModal({
         <div className={styles.modes}>
           <button
             className={clsx(styles.mode, mode === "existing" && styles.modeActive)}
-            onClick={() => setMode("existing")}
+            onClick={() => {
+              setModeTouched(true);
+              setMode("existing");
+            }}
           >
             Existing instance
           </button>
           <button
             className={clsx(styles.mode, mode === "new" && styles.modeActive)}
-            onClick={() => setMode("new")}
+            onClick={() => {
+              setModeTouched(true);
+              setMode("new");
+            }}
           >
             New instance
           </button>
@@ -222,7 +292,7 @@ export default function InstallTargetModal({
       {mode === "existing" ? (
         <div className={styles.list}>
           {ordered.map((instance) => {
-            const problem = compatibility(project, instance);
+            const problem = compatibility(project, instance, files);
             const already = installedIn?.has(instance.id);
             return (
               <button
@@ -266,9 +336,14 @@ export default function InstallTargetModal({
         </div>
       ) : (
         <>
-          {versionOptions.length === 0 ? (
+          {files === null ? (
             <p className={styles.note}>
-              {project.name} does not list any Minecraft versions, so an instance
+              <Loader2 size={12} className="spin" />
+              Reading the versions {project.name} publishes…
+            </p>
+          ) : versionOptions.length === 0 ? (
+            <p className={styles.note}>
+              {project.name} has no downloadable files listed, so an instance
               cannot be built from it automatically.
             </p>
           ) : (
@@ -327,27 +402,11 @@ export default function InstallTargetModal({
               </div>
 
               <p className={styles.note}>
-                {loaderAvailable === null ? (
-                  <>
-                    <Loader2 size={12} className="spin" /> Checking{" "}
-                    {LOADERS.find((l) => l.id === newLoader)?.label} builds for{" "}
-                    {newVersion}…
-                  </>
-                ) : loaderAvailable ? (
-                  <>
-                    Creates a {newVersion}
-                    {newLoader !== "vanilla" &&
-                      ` ${LOADERS.find((l) => l.id === newLoader)?.label}`}{" "}
-                    instance using the newest loader build, then installs{" "}
-                    {project.name} into it.
-                  </>
-                ) : (
-                  <span className={styles.noteWarn}>
-                    <AlertTriangle size={12} />
-                    No {LOADERS.find((l) => l.id === newLoader)?.label} build
-                    exists for {newVersion}. Pick another combination.
-                  </span>
-                )}
+                Creates a {newVersion}
+                {newLoader !== "vanilla" &&
+                  ` ${LOADERS.find((l) => l.id === newLoader)?.label}`}{" "}
+                instance using the newest loader build, then installs{" "}
+                {project.name} into it.
               </p>
             </>
           )}

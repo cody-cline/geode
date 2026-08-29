@@ -140,13 +140,6 @@
   line-height: 1.55;
 }
 
-.noteWarn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--warn);
-}
-
 .emptyNote {
   font-size: 13px;
   color: var(--text-dim);
