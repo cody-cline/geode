@@ -312,6 +312,8 @@ struct CfMod {
     date_modified: Option<String>,
     #[serde(default)]
     latest_files_indexes: Vec<CfFileIndex>,
+    #[serde(default)]
+    screenshots: Vec<CfScreenshot>,
     /// False when the author opted out of third-party downloads.
     #[serde(default = "default_true")]
     allow_mod_distribution: bool,
@@ -346,6 +348,13 @@ struct CfAuthor {
 struct CfCategory {
     #[serde(default)]
     slug: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CfScreenshot {
+    #[serde(default)]
+    url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -400,6 +409,9 @@ fn to_project(m: CfMod) -> Project {
         loaders,
         game_versions,
         updated: m.date_modified,
+        // CurseForge has no dedicated banner, but the first screenshot is
+        // conventionally the promo image.
+        banner_url: m.screenshots.into_iter().find_map(|s| s.url),
         distribution_allowed: m.allow_mod_distribution,
         also_on: Vec::new(),
     }

@@ -106,6 +106,10 @@ pub struct Project {
     pub game_versions: Vec<String>,
     pub updated: Option<String>,
     pub page_url: String,
+    /// Wide promo image, where the platform has one. Modpacks almost always do,
+    /// and it is what makes an installed pack look like itself.
+    #[serde(default)]
+    pub banner_url: Option<String>,
     /// False when the author has opted out of third-party downloads, so nothing
     /// here can be installed automatically. Always true on Modrinth.
     #[serde(default = "yes")]
@@ -439,6 +443,7 @@ mod tests {
             game_versions: vec![],
             updated: None,
             page_url: String::new(),
+            banner_url: None,
             distribution_allowed: true,
             also_on: vec![],
         }

@@ -13,6 +13,7 @@ import type {
   InstanceOverrides,
   JavaInstall,
   KeyCheck,
+  LinkReport,
   PackPreview,
   Project,
   ProjectKind,
@@ -118,6 +119,8 @@ export const api = {
       versionId: versionId ?? null,
       name: name ?? null,
     }),
+  linkUntrackedContent: (id: string) =>
+    invoke<LinkReport>("link_untracked_content", { id }),
   checkContentUpdates: (id: string) =>
     invoke<UpdateCandidate[]>("check_content_updates", { id }),
   applyContentUpdate: (

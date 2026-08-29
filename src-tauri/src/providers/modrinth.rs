@@ -64,6 +64,10 @@ struct SearchHit {
     versions: Vec<String>,
     #[serde(default)]
     date_modified: Option<String>,
+    #[serde(default)]
+    featured_gallery: Option<String>,
+    #[serde(default)]
+    gallery: Vec<String>,
 }
 
 /// Modrinth lumps loaders in with categories. Splitting them keeps the UI's
@@ -118,6 +122,7 @@ fn to_project(hit: SearchHit) -> Project {
         loaders,
         game_versions: hit.versions,
         updated: hit.date_modified,
+        banner_url: hit.featured_gallery.or_else(|| hit.gallery.into_iter().next()),
         distribution_allowed: true,
         also_on: Vec::new(),
     }
@@ -182,6 +187,15 @@ struct ProjectResponse {
     loaders: Vec<String>,
     #[serde(default)]
     updated: Option<String>,
+    #[serde(default)]
+    gallery: Vec<GalleryEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GalleryEntry {
+    url: String,
+    #[serde(default)]
+    featured: bool,
 }
 
 pub async fn project(client: &reqwest::Client, id: &str) -> Result<Project> {
@@ -207,6 +221,12 @@ pub async fn project(client: &reqwest::Client, id: &str) -> Result<Project> {
         loaders: p.loaders,
         game_versions: p.game_versions,
         updated: p.updated,
+        banner_url: p
+            .gallery
+            .iter()
+            .find(|g| g.featured)
+            .or_else(|| p.gallery.first())
+            .map(|g| g.url.clone()),
         distribution_allowed: true,
         also_on: Vec::new(),
     })
@@ -351,6 +371,85 @@ pub async fn version_by_hash(client: &reqwest::Client, sha1: &str) -> Result<Opt
     }
     let v: VersionResponse = resp.json().await?;
     Ok(Some(to_version(v)))
+}
+
+/// Resolve many projects at once. Used to put names and icons on files that a
+/// modpack index identified only by id.
+pub async fn projects_by_ids(
+    client: &reqwest::Client,
+    ids: &[String],
+) -> Result<Vec<Project>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    // The endpoint takes ids in the query string, so keep each request short
+    // enough that no proxy truncates the URL.
+    for chunk in ids.chunks(100) {
+        let encoded = serde_json::to_string(chunk)?;
+        let url = format!("{API}/projects?ids={}", urlencoding::encode(&encoded));
+        let batch: Vec<ProjectResponse> = get_json(client, &url).await?;
+        out.extend(batch.into_iter().map(|p| {
+            let kind = kind_from_str(&p.project_type);
+            let (_, categories) = split_loaders(p.categories);
+            Project {
+                provider: Provider::Modrinth,
+                page_url: format!("https://modrinth.com/{}/{}", p.project_type, p.slug),
+                id: p.id,
+                slug: p.slug,
+                name: p.title,
+                summary: p.description,
+                icon_url: p.icon_url,
+                downloads: p.downloads,
+                follows: p.followers,
+                author: String::new(),
+                kind,
+                categories,
+                loaders: p.loaders,
+                game_versions: p.game_versions,
+                updated: p.updated,
+                banner_url: p
+                    .gallery
+                    .iter()
+                    .find(|g| g.featured)
+                    .or_else(|| p.gallery.first())
+                    .map(|g| g.url.clone()),
+                distribution_allowed: true,
+                also_on: Vec::new(),
+            }
+        }));
+    }
+    Ok(out)
+}
+
+/// Identify files by SHA-1. This is how a jar with no provenance — dropped in
+/// by hand, or written by a pack index that records only URLs — gets linked
+/// back to the project it came from.
+pub async fn versions_by_hashes(
+    client: &reqwest::Client,
+    sha1s: &[String],
+) -> Result<std::collections::HashMap<String, Version>> {
+    let mut found = std::collections::HashMap::new();
+    if sha1s.is_empty() {
+        return Ok(found);
+    }
+
+    for chunk in sha1s.chunks(500) {
+        let body = serde_json::json!({ "hashes": chunk, "algorithm": "sha1" });
+        let resp = client
+            .post(format!("{API}/version_files"))
+            .json(&body)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            continue;
+        }
+        let batch: std::collections::HashMap<String, VersionResponse> = resp.json().await?;
+        for (hash, version) in batch {
+            found.insert(hash.to_lowercase(), to_version(version));
+        }
+    }
+    Ok(found)
 }
 
 #[derive(Debug, Deserialize)]

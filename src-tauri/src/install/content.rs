@@ -373,6 +373,22 @@ mod tests {
     }
 
     #[test]
+    fn parses_ids_from_a_modrinth_cdn_url() {
+        let url = "https://cdn.modrinth.com/data/AANobbMI/versions/S3DUMfBo/sodium.jar";
+        assert_eq!(
+            ids_from_modrinth_url(url),
+            Some(("AANobbMI".into(), "S3DUMfBo".into()))
+        );
+    }
+
+    #[test]
+    fn ignores_urls_from_elsewhere() {
+        assert!(ids_from_modrinth_url("https://edge.forgecdn.net/files/1/2/x.jar").is_none());
+        assert!(ids_from_modrinth_url("https://cdn.modrinth.com/data/OnlyProject").is_none());
+        assert!(ids_from_modrinth_url("not a url").is_none());
+    }
+
+    #[test]
     fn prefers_stable_release() {
         let versions = vec![
             version("beta-2", "beta", true),
@@ -398,4 +414,142 @@ mod tests {
         let versions = vec![version("blocked", "release", false)];
         assert!(pick_best(&versions).is_none());
     }
+}
+
+// ---------------------------------------------------------------------------
+// Linking files back to their source
+// ---------------------------------------------------------------------------
+
+/// A Modrinth CDN download URL encodes the ids we want:
+/// `https://cdn.modrinth.com/data/<PROJECT>/versions/<VERSION>/<file>`
+///
+/// A `.mrpack` index lists only URLs and hashes, so without this every mod a
+/// pack installs would arrive with no provenance — unnamed, untracked and
+/// invisible to update checks.
+pub fn ids_from_modrinth_url(url: &str) -> Option<(String, String)> {
+    let rest = url
+        .split_once("cdn.modrinth.com/data/")
+        .map(|(_, r)| r)?;
+    let mut parts = rest.split('/');
+    let project = parts.next()?;
+    if parts.next()? != "versions" {
+        return None;
+    }
+    let version = parts.next()?;
+    if project.is_empty() || version.is_empty() {
+        return None;
+    }
+    Some((project.to_string(), version.to_string()))
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkReport {
+    pub identified: usize,
+    pub unknown: usize,
+}
+
+/// Give provenance to files that have none.
+///
+/// Works from the file bytes: SHA-1 each untracked file and ask Modrinth which
+/// version it is. That covers hand-dropped jars and anything a pack installed
+/// by URL alone, and it is exact — a hash match is the same file, not a guess
+/// from the filename.
+///
+/// Modrinth only. CurseForge's equivalent takes a bespoke murmur2 fingerprint
+/// rather than a standard hash, so files that exist only there stay untracked.
+pub async fn link_untracked(
+    client: &reqwest::Client,
+    paths: &Paths,
+    instance: &mut Instance,
+    progress: &Progress,
+) -> Result<LinkReport> {
+    use crate::instance::content::{self as content, ContentKind};
+
+    let kinds = [
+        ContentKind::Mod,
+        ContentKind::ResourcePack,
+        ContentKind::ShaderPack,
+        ContentKind::DataPack,
+    ];
+
+    // Collect the untracked files first so the hash lookup is one request.
+    let mut pending: Vec<(ContentKind, String, String)> = Vec::new();
+    for kind in kinds {
+        let items = content::list(paths, instance, kind).await?;
+        let dir = content::content_dir(paths, &instance.id, kind);
+        for item in items.into_iter().filter(|i| i.from_disk) {
+            let path = dir.join(&item.file_name);
+            if let Ok(sha1) = crate::net::sha1_file(&path).await {
+                pending.push((kind, item.file_name, sha1.to_lowercase()));
+            }
+        }
+    }
+
+    if pending.is_empty() {
+        progress.finish().await;
+        return Ok(LinkReport {
+            identified: 0,
+            unknown: 0,
+        });
+    }
+
+    progress
+        .stage("Identifying files", pending.len() as u64)
+        .await;
+
+    let hashes: Vec<String> = pending.iter().map(|(_, _, h)| h.clone()).collect();
+    let found = crate::providers::modrinth::versions_by_hashes(client, &hashes).await?;
+
+    // One more call turns ids into names and icons.
+    let project_ids: Vec<String> = {
+        let mut ids: Vec<String> = found.values().map(|v| v.project_id.clone()).collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    };
+    let projects = crate::providers::modrinth::projects_by_ids(client, &project_ids)
+        .await
+        .unwrap_or_default();
+
+    let mut identified = 0;
+    for (kind, file_name, sha1) in pending {
+        progress.advance(1, &file_name).await;
+        let Some(version) = found.get(&sha1) else {
+            continue;
+        };
+        let project = projects.iter().find(|p| p.id == version.project_id);
+
+        // Disabled files carry a `.disabled` suffix; records key off the plain
+        // name so toggling does not orphan them.
+        let base = file_name
+            .strip_suffix(".disabled")
+            .unwrap_or(&file_name)
+            .to_string();
+
+        instance
+            .content
+            .retain(|r| !(r.file_name == base && r.kind == kind));
+        instance.content.push(ContentRecord {
+            file_name: base,
+            kind,
+            provider: Provider::Modrinth.as_str().to_string(),
+            project_id: version.project_id.clone(),
+            version_id: version.id.clone(),
+            name: project.map(|p| p.name.clone()).unwrap_or_else(|| {
+                version.name.clone()
+            }),
+            version_number: version.version_number.clone(),
+            slug: project.map(|p| p.slug.clone()),
+            icon_url: project.and_then(|p| p.icon_url.clone()),
+            dependency: false,
+        });
+        identified += 1;
+    }
+
+    progress.finish().await;
+    Ok(LinkReport {
+        identified,
+        unknown: hashes.len() - identified,
+    })
 }

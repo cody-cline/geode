@@ -289,12 +289,13 @@ pub async fn import_into(
                 .await;
             crate::net::fetch_all(client, downloads, progress, 10).await?;
 
-            instance.pack = Some(super::PackSource {
-                name: index.name,
-                version: index.version_id,
-                provider: Some("modrinth".into()),
-                project_id: None,
-            });
+            record_mrpack_provenance(client, instance, &index.files, progress).await;
+
+            instance.pack = Some(super::PackSource::local(
+                index.name,
+                index.version_id,
+                Some("modrinth".into()),
+            ));
         }
 
         PackKind::CurseForge(manifest) => {
@@ -367,12 +368,11 @@ pub async fn import_into(
             crate::net::fetch_all(client, downloads, progress, 8).await?;
 
             instance.content.extend(records);
-            instance.pack = Some(super::PackSource {
-                name: manifest.name,
-                version: manifest.version,
-                provider: Some("curseforge".into()),
-                project_id: None,
-            });
+            instance.pack = Some(super::PackSource::local(
+                manifest.name,
+                manifest.version,
+                Some("curseforge".into()),
+            ));
 
             if !blocked.is_empty() {
                 return Err(Error::msg(format!(
@@ -426,6 +426,85 @@ async fn extract_overrides(archive: &Path, game_dir: &Path, roots: &[&str]) -> R
     })
     .await
     .map_err(|e| Error::msg(format!("extracting overrides panicked: {e}")))?
+}
+
+/// Give every file a `.mrpack` installed a link back to its project.
+///
+/// The index records only a URL and a hash, so without this a freshly
+/// installed pack shows dozens of "untracked" rows with filenames for names and
+/// no update path. The URL already contains the project and version ids, so no
+/// extra lookup is needed to establish provenance — only one batched call to
+/// turn those ids into names and icons.
+///
+/// Best-effort: a pack is perfectly usable with imperfect labels, so a failure
+/// here is swallowed rather than failing the install.
+async fn record_mrpack_provenance(
+    client: &reqwest::Client,
+    instance: &mut Instance,
+    files: &[MrFile],
+    progress: &Progress,
+) {
+    let mut pending: Vec<(ContentKind, String, String, String)> = Vec::new();
+
+    for file in files {
+        let path = Path::new(&file.path);
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let kind = match path.parent().and_then(|p| p.file_name()).and_then(|d| d.to_str()) {
+            Some("mods") => ContentKind::Mod,
+            Some("resourcepacks") => ContentKind::ResourcePack,
+            Some("shaderpacks") => ContentKind::ShaderPack,
+            Some("datapacks") => ContentKind::DataPack,
+            _ => continue,
+        };
+        let Some((project_id, version_id)) = file
+            .downloads
+            .iter()
+            .find_map(|u| crate::install::content::ids_from_modrinth_url(u))
+        else {
+            continue;
+        };
+        pending.push((kind, name.to_string(), project_id, version_id));
+    }
+
+    if pending.is_empty() {
+        return;
+    }
+
+    progress.stage("Linking pack contents", pending.len() as u64).await;
+
+    let ids: Vec<String> = {
+        let mut v: Vec<String> = pending.iter().map(|(_, _, p, _)| p.clone()).collect();
+        v.sort();
+        v.dedup();
+        v
+    };
+    let projects = crate::providers::modrinth::projects_by_ids(client, &ids)
+        .await
+        .unwrap_or_default();
+
+    for (kind, file_name, project_id, version_id) in pending {
+        progress.advance(1, &file_name).await;
+        let project = projects.iter().find(|p| p.id == project_id);
+        instance
+            .content
+            .retain(|r| !(r.file_name == file_name && r.kind == kind));
+        instance.content.push(ContentRecord {
+            file_name: file_name.clone(),
+            kind,
+            provider: "modrinth".into(),
+            project_id,
+            version_id,
+            name: project
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| file_name.clone()),
+            version_number: String::new(),
+            slug: project.map(|p| p.slug.clone()),
+            icon_url: project.and_then(|p| p.icon_url.clone()),
+            dependency: false,
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------

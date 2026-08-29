@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import clsx from "clsx";
 import {
   ArrowLeft,
@@ -8,6 +8,7 @@ import {
   Play,
   Square,
   Clock,
+  ExternalLink,
   Package,
 } from "lucide-react";
 
@@ -77,9 +78,16 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
     return <Browse lockedInstance={instance} onDone={() => setBrowsing(false)} />;
   }
 
+  const pack = instance.pack;
+
   return (
     <>
-      <header className={styles.header}>
+      {pack?.bannerUrl && (
+        <div className={styles.hero} aria-hidden="true">
+          <img src={pack.bannerUrl} alt="" />
+        </div>
+      )}
+      <header className={clsx(styles.header, pack?.bannerUrl && styles.headerOverBanner)}>
         <button
           className={styles.back}
           onClick={() => navigate({ view: "library" })}
@@ -99,13 +107,25 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
                 {loaderLabel} {instance.loaderVersion}
               </span>
             )}
-            {instance.pack && (
-              <span className="badge">
-                <Package size={10} />
-                {instance.pack.name} {instance.pack.version}
-              </span>
-            )}
+            {pack &&
+              (pack.pageUrl ? (
+                <button
+                  className={clsx("badge", styles.packLink)}
+                  onClick={() => void openUrl(pack.pageUrl!)}
+                  title={`Open ${pack.name} on ${pack.provider ?? "its page"}`}
+                >
+                  <Package size={10} />
+                  {pack.name} {pack.version}
+                  <ExternalLink size={9} />
+                </button>
+              ) : (
+                <span className="badge">
+                  <Package size={10} />
+                  {pack.name} {pack.version}
+                </span>
+              ))}
           </div>
+          {pack?.summary && <p className={styles.packSummary}>{pack.summary}</p>}
           <div className={styles.stats}>
             <span>
               <Clock size={11} />

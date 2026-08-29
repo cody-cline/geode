@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 import { hashHue, initials } from "../lib/format";
 import type { Instance } from "../lib/types";
 
@@ -9,10 +11,15 @@ export default function InstanceIcon({
   size = 40,
   radius,
 }: {
-  instance: Pick<Instance, "id" | "name" | "icon">;
+  instance: Pick<Instance, "id" | "name" | "icon"> & {
+    pack?: Instance["pack"];
+  };
   size?: number;
   radius?: number;
 }) {
+  // Remote art can fail — offline, or the project pulled the image.
+  const [artFailed, setArtFailed] = useState(false);
+
   const hue = hashHue(instance.id);
   const style: React.CSSProperties = {
     width: size,
@@ -32,11 +39,24 @@ export default function InstanceIcon({
 
   const icon = instance.icon?.trim();
 
+  // An explicit icon wins — pack artwork is a default, not a lock.
   if (icon && EMOJI_RE.test(icon)) {
     return (
       <span style={{ ...style, background: "var(--surface-3)", fontSize: size * 0.52 }}>
         {icon}
       </span>
+    );
+  }
+
+  if (!icon && instance.pack?.iconUrl && !artFailed) {
+    return (
+      <img
+        src={instance.pack.iconUrl}
+        alt=""
+        loading="lazy"
+        style={{ ...style, background: "var(--surface-3)", objectFit: "cover" }}
+        onError={() => setArtFailed(true)}
+      />
     );
   }
 

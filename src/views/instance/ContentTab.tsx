@@ -4,6 +4,7 @@ import clsx from "clsx";
 import {
   ArrowUpCircle,
   FilePlus2,
+  Link2,
   Loader2,
   Package,
   RefreshCw,
@@ -42,6 +43,7 @@ export default function ContentTab({
   const [updates, setUpdates] = useState<UpdateCandidate[]>([]);
   const [checking, setChecking] = useState(false);
   const [updating, setUpdating] = useState<string | null>(null);
+  const [linking, setLinking] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -118,6 +120,29 @@ export default function ContentTab({
     }
   }
 
+  async function linkUntracked() {
+    setLinking(true);
+    try {
+      const report = await api.linkUntrackedContent(instance.id);
+      await Promise.all([load(), refreshInstances()]);
+      toast({
+        kind: report.identified > 0 ? "success" : "info",
+        title:
+          report.identified > 0
+            ? `Linked ${report.identified} file${report.identified === 1 ? "" : "s"}`
+            : "Nothing new could be identified",
+        body:
+          report.unknown > 0
+            ? `${report.unknown} file${report.unknown === 1 ? " is" : "s are"} not on Modrinth, so ${report.unknown === 1 ? "it stays" : "they stay"} untracked.`
+            : undefined,
+      });
+    } catch (e) {
+      reportError("Could not identify files", e);
+    } finally {
+      setLinking(false);
+    }
+  }
+
   async function checkUpdates() {
     setChecking(true);
     try {
@@ -167,6 +192,7 @@ export default function ContentTab({
   }
 
   const trackedCount = items?.filter((i) => i.projectId).length ?? 0;
+  const untrackedCount = items?.filter((i) => i.fromDisk).length ?? 0;
 
   return (
     <div className={styles.wrap}>
@@ -197,6 +223,21 @@ export default function ContentTab({
             <FilePlus2 size={14} />
             Add file
           </button>
+          {untrackedCount > 0 && (
+            <button
+              className="btn"
+              onClick={linkUntracked}
+              disabled={linking}
+              title="Match untracked files against Modrinth by file hash"
+            >
+              {linking ? (
+                <Loader2 size={14} className="spin" />
+              ) : (
+                <Link2 size={14} />
+              )}
+              Identify {untrackedCount}
+            </button>
+          )}
           <button
             className="btn"
             onClick={checkUpdates}

@@ -61,6 +61,10 @@ pub struct Instance {
     pub pack: Option<PackSource>,
 }
 
+/// Where an instance came from, and enough of the source's identity to keep
+/// showing it. An instance built from a pack should look like that pack, not
+/// like a generic folder that once had files copied into it — so the artwork
+/// and blurb are stored rather than re-fetched, and survive being offline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PackSource {
@@ -70,6 +74,58 @@ pub struct PackSource {
     pub provider: Option<String>,
     #[serde(default)]
     pub project_id: Option<String>,
+    #[serde(default)]
+    pub slug: Option<String>,
+    #[serde(default)]
+    pub icon_url: Option<String>,
+    #[serde(default)]
+    pub banner_url: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub page_url: Option<String>,
+    /// The pack version id, so an update check knows what it is comparing to.
+    #[serde(default)]
+    pub version_id: Option<String>,
+}
+
+impl PackSource {
+    /// A pack installed from a provider, keeping its artwork and blurb.
+    pub fn from_project(
+        project: &crate::providers::Project,
+        version_number: String,
+        version_id: String,
+    ) -> Self {
+        Self {
+            name: project.name.clone(),
+            version: version_number,
+            provider: Some(project.provider.as_str().to_string()),
+            project_id: Some(project.id.clone()),
+            slug: Some(project.slug.clone()),
+            icon_url: project.icon_url.clone(),
+            banner_url: project.banner_url.clone(),
+            summary: (!project.summary.is_empty()).then(|| project.summary.clone()),
+            page_url: (!project.page_url.is_empty()).then(|| project.page_url.clone()),
+            version_id: Some(version_id),
+        }
+    }
+
+    /// A pack imported from a file on disk: a name and version, nothing to
+    /// link back to.
+    pub fn local(name: String, version: String, provider: Option<String>) -> Self {
+        Self {
+            name,
+            version,
+            provider,
+            project_id: None,
+            slug: None,
+            icon_url: None,
+            banner_url: None,
+            summary: None,
+            page_url: None,
+            version_id: None,
+        }
+    }
 }
 
 impl Instance {

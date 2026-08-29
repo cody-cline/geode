@@ -586,12 +586,11 @@ pub async fn install_modpack(
     .await;
 
     // Record where it came from so updates and re-imports have provenance.
-    inst.pack = Some(instance::PackSource {
-        name: project.name.clone(),
-        version: version.version_number.clone(),
-        provider: Some(provider.as_str().to_string()),
-        project_id: Some(project.id.clone()),
-    });
+    inst.pack = Some(instance::PackSource::from_project(
+        &project,
+        version.version_number.clone(),
+        version.id.clone(),
+    ));
 
     state.clear_cancel(progress.id());
     // Save regardless: a partly imported pack is more useful than a directory
@@ -602,6 +601,35 @@ pub async fn install_modpack(
         Ok(()) => {
             progress.finish().await;
             Ok(view(inst, &state))
+        }
+        Err(e) => {
+            progress.fail(&e.to_string()).await;
+            Err(e)
+        }
+    }
+}
+
+/// Identify files that arrived without provenance and link them to their
+/// project, so they get a real name and join update checks.
+#[tauri::command]
+pub async fn link_untracked_content(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<crate::install::content::LinkReport> {
+    let mut inst = instance::load(&state.paths, &id).await?;
+    let progress = Progress::new(app, format!("link:{id}"));
+    state.register_cancel(progress.id(), progress.cancel_flag());
+
+    let result =
+        crate::install::content::link_untracked(&state.http, &state.paths, &mut inst, &progress)
+            .await;
+
+    state.clear_cancel(progress.id());
+    match result {
+        Ok(report) => {
+            inst.save(&state.paths).await?;
+            Ok(report)
         }
         Err(e) => {
             progress.fail(&e.to_string()).await;

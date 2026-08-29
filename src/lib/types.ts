@@ -35,6 +35,17 @@ export interface PackSource {
   version: string;
   provider?: string | null;
   projectId?: string | null;
+  slug?: string | null;
+  iconUrl?: string | null;
+  bannerUrl?: string | null;
+  summary?: string | null;
+  pageUrl?: string | null;
+  versionId?: string | null;
+}
+
+export interface LinkReport {
+  identified: number;
+  unknown: number;
 }
 
 export interface Instance {
@@ -94,6 +105,7 @@ export interface Project {
   gameVersions: string[];
   updated?: string | null;
   pageUrl: string;
+  bannerUrl?: string | null;
   distributionAllowed: boolean;
   alsoOn: ProviderRef[];
 }

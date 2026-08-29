@@ -8,6 +8,7 @@ import {
   Search,
   Square,
   Clock,
+  Package,
 } from "lucide-react";
 
 import InstanceIcon from "../components/InstanceIcon";
@@ -161,6 +162,11 @@ function InstanceCard({
 
   return (
     <article className={clsx(styles.card, instance.running && styles.cardRunning)}>
+      {instance.pack?.bannerUrl && (
+        <button className={styles.banner} onClick={onOpen} tabIndex={-1} aria-hidden="true">
+          <img src={instance.pack.bannerUrl} alt="" loading="lazy" />
+        </button>
+      )}
       <button className={styles.cardBody} onClick={onOpen}>
         <InstanceIcon instance={instance} size={44} />
         <div className={styles.cardText}>
@@ -169,6 +175,12 @@ function InstanceCard({
             {instance.mcVersion}
             {instance.loader !== "vanilla" && ` · ${loaderLabel}`}
           </p>
+          {instance.pack && (
+            <p className={styles.cardPack}>
+              <Package size={10} />
+              {instance.pack.name} {instance.pack.version}
+            </p>
+          )}
           <div className={styles.cardStats}>
             {instance.modCount > 0 && (
               <span className={styles.stat}>
