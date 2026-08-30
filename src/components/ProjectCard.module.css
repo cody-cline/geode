@@ -1,8 +1,10 @@
-.card {
+/* A full-width row rather than a grid tile: the summary is the thing people
+   actually read when browsing, and it gets several times the width here. */
+.row {
   display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 12px;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 18px;
   border-radius: var(--radius);
   border: 1px solid var(--border);
   background: var(--surface);
@@ -12,15 +14,15 @@
     background 0.14s var(--ease);
 }
 
-.card:hover {
+.row:hover {
   border-color: var(--border-strong);
   background: var(--surface-2);
 }
 
 .icon {
-  width: 46px;
-  height: 46px;
-  border-radius: 9px;
+  width: 64px;
+  height: 64px;
+  border-radius: 12px;
   overflow: hidden;
   flex-shrink: 0;
   background: var(--surface-3);
@@ -35,7 +37,7 @@
 }
 
 .iconFallback {
-  font-size: 15px;
+  font-size: 20px;
   font-weight: 700;
   color: var(--text-faint);
   text-transform: uppercase;
@@ -44,36 +46,38 @@
 .text {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .titleRow {
   display: flex;
-  align-items: baseline;
-  gap: 7px;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
   min-width: 0;
 }
 
 .name {
-  font-size: 13.5px;
+  font-size: 15px;
+  letter-spacing: -0.01em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  max-width: 100%;
 }
 
 .author {
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--text-faint);
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  flex-shrink: 1;
 }
 
 .summary {
-  margin-top: 3px;
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--text-dim);
-  line-height: 1.45;
+  line-height: 1.5;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   line-clamp: 2;
@@ -85,37 +89,57 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 8px;
+  gap: 12px;
+  margin-top: 2px;
 }
 
 .stat {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  font-size: 11.5px;
+  gap: 5px;
+  font-size: 12px;
   color: var(--text-faint);
   white-space: nowrap;
+}
+
+.category {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  opacity: 0.75;
+  white-space: nowrap;
+}
+
+.category::before {
+  content: "·";
+  margin-right: 12px;
+  opacity: 0.6;
+}
+
+.category:first-of-type::before {
+  content: none;
+  margin-right: 0;
 }
 
 .action {
   flex-shrink: 0;
   display: flex;
-  align-items: center;
-  align-self: center;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 5px;
+  min-width: 96px;
 }
 
 .installed {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 12px;
+  font-size: 12.5px;
   font-weight: 600;
   color: var(--accent);
   padding: 0 6px;
 }
 
-.packHint {
-  font-size: 12px;
+.installedNote {
+  font-size: 11px;
   color: var(--text-faint);
 }

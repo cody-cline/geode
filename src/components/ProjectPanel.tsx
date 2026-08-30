@@ -7,12 +7,15 @@ import {
   ExternalLink,
   Loader2,
   Package,
+  Play,
   Plus,
   ShieldAlert,
   X,
 } from "lucide-react";
 
 import { api } from "../lib/api";
+import { launchInstance } from "../lib/actions";
+import { useStore } from "../lib/store";
 import { compactNumber, fileSize, relativeTime, titleCase } from "../lib/format";
 import type { Instance, Project, ProjectVersion, Provider } from "../lib/types";
 
@@ -24,6 +27,7 @@ export default function ProjectPanel({
   onClose,
   onRequestInstall,
   directInstall,
+  installedInstance,
 }: {
   project: Project;
   /** Only used to scope the version list; never an install destination. */
@@ -32,6 +36,8 @@ export default function ProjectPanel({
   onRequestInstall: (project: Project, versionId?: string) => void;
   /** True when the destination is already fixed, so no dialog follows. */
   directInstall?: boolean;
+  /** For modpacks: the instance this pack already built, if any. */
+  installedInstance?: Instance;
 }) {
 
   // A merged card can be installed from either platform.
@@ -44,6 +50,7 @@ export default function ProjectPanel({
   const [description, setDescription] = useState<string | null>(null);
   const [versions, setVersions] = useState<ProjectVersion[] | null>(null);
   const [tab, setTab] = useState<"about" | "versions">("about");
+  const navigate = useStore((st) => st.navigate);
 
   useEffect(() => {
     let cancelled = false;
@@ -137,6 +144,26 @@ export default function ProjectPanel({
                 project page and drop it into the instance's mods folder.
               </div>
             </div>
+          ) : installedInstance ? (
+            <>
+              <button
+                className="btn btn-primary"
+                onClick={() => void launchInstance(installedInstance)}
+                disabled={installedInstance.running}
+              >
+                <Play size={15} fill="currentColor" />
+                {installedInstance.running ? "Running" : "Play"}
+              </button>
+              <button
+                className="btn"
+                onClick={() => {
+                  navigate({ view: "instance", id: installedInstance.id });
+                  onClose();
+                }}
+              >
+                Open instance
+              </button>
+            </>
           ) : (
             <button
               className="btn btn-primary"
@@ -252,13 +279,21 @@ export default function ProjectPanel({
                         <p className={styles.versionBlocked}>{version.blockedReason}</p>
                       )}
                     </div>
-                    <button
-                      className="btn btn-sm"
-                      onClick={() => onRequestInstall(project, version.id)}
-                      disabled={Boolean(version.blockedReason)}
-                    >
-                      {isModpack ? "Use this" : directInstall ? "Install" : "Install\u2026"}
-                    </button>
+                    {isModpack && installedInstance ? (
+                      <span className={styles.installedTag}>Installed</span>
+                    ) : (
+                      <button
+                        className="btn btn-sm"
+                        onClick={() => onRequestInstall(project, version.id)}
+                        disabled={Boolean(version.blockedReason)}
+                      >
+                        {isModpack
+                          ? "Use this"
+                          : directInstall
+                            ? "Install"
+                            : "Install\u2026"}
+                      </button>
+                    )}
                   </li>
                 );
               })}

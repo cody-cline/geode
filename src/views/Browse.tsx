@@ -145,6 +145,24 @@ export default function Browse({
     void refreshInstalled();
   }, [refreshInstalled]);
 
+  /**
+   * A modpack defines an instance, so a second install would only produce a
+   * duplicate. If one already exists for this project, the row plays it.
+   */
+  const packInstance = (project: Project): Instance | undefined => {
+    if (project.kind !== "modpack") return undefined;
+    const keys = new Set([
+      `${project.provider}:${project.id}`,
+      ...project.alsoOn.map((r) => `${r.provider}:${r.id}`),
+    ]);
+    return instances.find(
+      (i) =>
+        i.pack?.provider &&
+        i.pack?.projectId &&
+        keys.has(`${i.pack.provider}:${i.pack.projectId}`),
+    );
+  };
+
   const isInstalled = (project: Project) =>
     installed.has(`${project.provider}:${project.id}`) ||
     project.alsoOn.some((ref) => installed.has(`${ref.provider}:${ref.id}`));
@@ -180,6 +198,11 @@ export default function Browse({
     // nothing to ask — it creates its own instance straight away, even when
     // invoked from inside another one.
     if (project.kind === "modpack") {
+      const existing = packInstance(project);
+      if (existing) {
+        navigate({ view: "instance", id: existing.id });
+        return;
+      }
       void installPack(project, versionId);
       return;
     }
@@ -581,9 +604,9 @@ export default function Browse({
           ))}
 
           {loading ? (
-            <div className={styles.grid}>
-              {Array.from({ length: 8 }, (_, i) => (
-                <div key={i} className="skeleton" style={{ height: 116 }} />
+            <div className={styles.list}>
+              {Array.from({ length: 7 }, (_, i) => (
+                <div key={i} className="skeleton" style={{ height: 94 }} />
               ))}
             </div>
           ) : hits.length === 0 ? (
@@ -601,12 +624,13 @@ export default function Browse({
             </div>
           ) : (
             <>
-              <div className={styles.grid}>
+              <div className={styles.list}>
                 {hits.map((project) => (
                   <ProjectCard
                     key={`${project.provider}:${project.id}`}
                     project={project}
                     installed={isInstalled(project)}
+                    installedInstance={packInstance(project)}
                     busy={installing === project.id}
                     directInstall={Boolean(lockedInstance)}
                     onOpen={() => setSelected(project)}
@@ -642,6 +666,7 @@ export default function Browse({
         <ProjectPanel
           project={selected}
           target={target}
+          installedInstance={packInstance(selected)}
           onClose={() => setSelected(null)}
           onRequestInstall={requestInstall}
           directInstall={Boolean(lockedInstance)}

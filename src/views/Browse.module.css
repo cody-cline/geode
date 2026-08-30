@@ -197,6 +197,11 @@
   min-width: 0;
 }
 
+.warning,
+.loadMore {
+  max-width: 1080px;
+}
+
 .warning {
   display: flex;
   align-items: center;
@@ -210,10 +215,13 @@
   font-size: 12.5px;
 }
 
-.grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 11px;
+/* One column. Rows can be scanned top-to-bottom and give the summary room,
+   which a 320px tile never did. */
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 1080px;
 }
 
 .loadMore {

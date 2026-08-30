@@ -1,14 +1,24 @@
 import clsx from "clsx";
-import { Check, Download, Loader2, Package, Plus, ShieldAlert } from "lucide-react";
+import {
+  Check,
+  Download,
+  Loader2,
+  Package,
+  Play,
+  Plus,
+  ShieldAlert,
+} from "lucide-react";
 
-import { compactNumber, relativeTime } from "../lib/format";
-import type { Project } from "../lib/types";
+import { launchInstance } from "../lib/actions";
+import { compactNumber, relativeTime, titleCase } from "../lib/format";
+import type { Instance, Project } from "../lib/types";
 
 import styles from "./ProjectCard.module.css";
 
 export default function ProjectCard({
   project,
   installed,
+  installedInstance,
   busy,
   directInstall,
   onOpen,
@@ -16,6 +26,12 @@ export default function ProjectCard({
 }: {
   project: Project;
   installed?: boolean;
+  /**
+   * For modpacks: the instance this pack already built. A pack defines an
+   * instance, so installing it twice would just make a duplicate — the row
+   * offers to play the one that exists instead.
+   */
+  installedInstance?: Instance;
   busy?: boolean;
   /** True when the destination is already fixed, so no dialog follows. */
   directInstall?: boolean;
@@ -25,10 +41,9 @@ export default function ProjectCard({
 }) {
   const isModpack = project.kind === "modpack";
   const blocked = !project.distributionAllowed;
-  const showInstalled = installed;
 
   return (
-    <article className={styles.card} onClick={onOpen}>
+    <article className={styles.row} onClick={onOpen}>
       <div className={styles.icon}>
         {project.iconUrl ? (
           <img src={project.iconUrl} alt="" loading="lazy" />
@@ -40,18 +55,8 @@ export default function ProjectCard({
       <div className={styles.text}>
         <div className={styles.titleRow}>
           <h3 className={styles.name}>{project.name}</h3>
-          {project.author && <span className={styles.author}>by {project.author}</span>}
-        </div>
-
-        <p className={styles.summary}>{project.summary}</p>
-
-        <div className={styles.metaRow}>
-          <span className={styles.stat}>
-            <Download size={11} />
-            {compactNumber(project.downloads)}
-          </span>
-          {project.updated && (
-            <span className={styles.stat}>Updated {relativeTime(project.updated)}</span>
+          {project.author && (
+            <span className={styles.author}>by {project.author}</span>
           )}
           <span className={clsx("badge", `badge-${project.provider}`)}>
             {project.provider === "modrinth" ? "Modrinth" : "CurseForge"}
@@ -66,16 +71,54 @@ export default function ProjectCard({
             </span>
           ))}
           {blocked && (
-            <span className="badge badge-warn" title="The author disabled third-party downloads">
+            <span
+              className="badge badge-warn"
+              title="The author disabled third-party downloads"
+            >
               <ShieldAlert size={10} />
               Manual
             </span>
           )}
         </div>
+
+        <p className={styles.summary}>{project.summary}</p>
+
+        <div className={styles.metaRow}>
+          <span className={styles.stat}>
+            <Download size={12} />
+            {compactNumber(project.downloads)}
+          </span>
+          {project.updated && (
+            <span className={styles.stat}>
+              Updated {relativeTime(project.updated)}
+            </span>
+          )}
+          {project.categories.slice(0, 3).map((category) => (
+            <span key={category} className={styles.category}>
+              {titleCase(category)}
+            </span>
+          ))}
+        </div>
       </div>
 
       <div className={styles.action}>
-        {isModpack ? (
+        {installedInstance ? (
+          <>
+            <button
+              className="btn btn-sm btn-primary"
+              onClick={(e) => {
+                e.stopPropagation();
+                void launchInstance(installedInstance);
+              }}
+              disabled={installedInstance.running}
+              title={`Play ${installedInstance.name}`}
+            >
+              <Play size={12} fill="currentColor" />
+              {installedInstance.running ? "Running" : "Play"}
+            </button>
+            <span className={styles.installedNote}>Installed</span>
+          </>
+        ) : isModpack ? (
           <button
             className="btn btn-sm btn-primary"
             onClick={(e) => {
@@ -90,9 +133,9 @@ export default function ProjectCard({
             }
           >
             {busy ? <Loader2 size={12} className="spin" /> : <Package size={13} />}
-            Install pack
+            Install
           </button>
-        ) : showInstalled ? (
+        ) : installed ? (
           <span className={styles.installed}>
             <Check size={13} />
             Added
@@ -114,8 +157,7 @@ export default function ProjectCard({
             }
           >
             {busy ? <Loader2 size={12} className="spin" /> : <Plus size={13} />}
-            {/* The ellipsis promises a dialog; only show it when one follows. */}
-            {directInstall ? "Install" : "Install\u2026"}
+            {directInstall ? "Install" : "Install…"}
           </button>
         )}
       </div>
