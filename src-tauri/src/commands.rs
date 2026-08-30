@@ -456,7 +456,7 @@ pub async fn install_content(
         })?,
     };
 
-    let progress = Progress::new(app, format!("install:{id}"));
+    let progress = Progress::new(app, format!("install:{id}:{project_id}"));
     state.register_cancel(progress.id(), progress.cancel_flag());
 
     let result = crate::install::content::install_with_dependencies(

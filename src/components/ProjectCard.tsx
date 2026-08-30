@@ -11,7 +11,7 @@ import {
 
 import { launchInstance } from "../lib/actions";
 import { compactNumber, relativeTime, titleCase } from "../lib/format";
-import type { Instance, Project } from "../lib/types";
+import type { Instance, ProgressEvent, Project } from "../lib/types";
 
 import styles from "./ProjectCard.module.css";
 
@@ -20,6 +20,7 @@ export default function ProjectCard({
   installed,
   installedInstance,
   busy,
+  progress,
   directInstall,
   onOpen,
   onRequestInstall,
@@ -33,6 +34,8 @@ export default function ProjectCard({
    */
   installedInstance?: Instance;
   busy?: boolean;
+  /** Live install progress for this project, when one is running. */
+  progress?: ProgressEvent;
   /** True when the destination is already fixed, so no dialog follows. */
   directInstall?: boolean;
   onOpen: () => void;
@@ -41,6 +44,14 @@ export default function ProjectCard({
 }) {
   const isModpack = project.kind === "modpack";
   const blocked = !project.distributionAllowed;
+
+  // While installing, the row's job is to report the install. The blurb and
+  // stats are not going anywhere, so they yield to the bar.
+  const installing = Boolean(progress) && !progress?.done;
+  const pct =
+    progress && progress.total > 0
+      ? Math.min(100, Math.round((progress.current / progress.total) * 100))
+      : null;
 
   return (
     <article className={styles.row} onClick={onOpen}>
@@ -81,24 +92,49 @@ export default function ProjectCard({
           )}
         </div>
 
-        <p className={styles.summary}>{project.summary}</p>
+        {installing ? (
+          <div className={styles.progress}>
+            <div className={styles.progressHead}>
+              <span className={styles.progressStage}>
+                {progress?.error ? "Failed" : (progress?.stage ?? "Working")}
+              </span>
+              <span className={styles.progressPct}>
+                {pct !== null ? `${pct}%` : ""}
+              </span>
+            </div>
+            <div className={styles.track}>
+              <div
+                className={pct === null ? styles.barIndeterminate : styles.bar}
+                style={pct === null ? undefined : { width: `${pct}%` }}
+                data-error={progress?.error ? "true" : undefined}
+              />
+            </div>
+            <p className={styles.progressDetail}>
+              {progress?.error ?? progress?.detail}
+            </p>
+          </div>
+        ) : (
+          <>
+            <p className={styles.summary}>{project.summary}</p>
 
-        <div className={styles.metaRow}>
-          <span className={styles.stat}>
-            <Download size={12} />
-            {compactNumber(project.downloads)}
-          </span>
-          {project.updated && (
-            <span className={styles.stat}>
-              Updated {relativeTime(project.updated)}
-            </span>
-          )}
-          {project.categories.slice(0, 3).map((category) => (
-            <span key={category} className={styles.category}>
-              {titleCase(category)}
-            </span>
-          ))}
-        </div>
+            <div className={styles.metaRow}>
+              <span className={styles.stat}>
+                <Download size={12} />
+                {compactNumber(project.downloads)}
+              </span>
+              {project.updated && (
+                <span className={styles.stat}>
+                  Updated {relativeTime(project.updated)}
+                </span>
+              )}
+              {project.categories.slice(0, 3).map((category) => (
+                <span key={category} className={styles.category}>
+                  {titleCase(category)}
+                </span>
+              ))}
+            </div>
+          </>
+        )}
       </div>
 
       <div className={styles.action}>

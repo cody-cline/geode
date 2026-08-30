@@ -93,6 +93,22 @@ export default function Browse({
   } | null>(null);
   const [installing, setInstalling] = useState<string | null>(null);
 
+  const progressMap = useStore((s) => s.progress);
+
+  /**
+   * The live job for a row, if any. Content installs are keyed
+   * `install:<instance>:<project>` and packs `pack:<project>`, so a row can
+   * find its own without knowing which instance was chosen.
+   */
+  const progressFor = (project: Project) => {
+    if (project.kind === "modpack") return progressMap[`pack:${project.id}`];
+    const suffix = `:${project.id}`;
+    for (const [key, value] of Object.entries(progressMap)) {
+      if (key.startsWith("install:") && key.endsWith(suffix)) return value;
+    }
+    return undefined;
+  };
+
   // Guards against an older, slower request overwriting a newer one.
   const requestSeq = useRef(0);
 
@@ -229,7 +245,9 @@ export default function Browse({
           instance.loader !== "vanilla" ? ` · ${instance.loader}` : ""
         }`,
       });
-      navigate({ view: "instance", id: instance.id });
+      // Deliberately stays put: installing a pack is often one of several
+      // things you are doing while browsing, and jumping away loses your
+      // place in the results.
     } catch (e) {
       // A partial import still leaves a usable instance, so refresh either way.
       await refreshInstances();
@@ -323,7 +341,6 @@ export default function Browse({
       await refreshInstances();
       setAskTarget(null);
       await installDirect(instance, project, versionId);
-      navigate({ view: "instance", id: instance.id });
     } catch (e) {
       reportError(`Could not create an instance for ${project.name}`, e);
     } finally {
@@ -643,6 +660,7 @@ export default function Browse({
                     installed={isInstalled(project)}
                     installedInstance={packInstance(project)}
                     busy={installing === project.id}
+                    progress={progressFor(project)}
                     directInstall={Boolean(lockedInstance)}
                     onOpen={() => setSelected(project)}
                     onRequestInstall={requestInstall}

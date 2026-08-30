@@ -16,6 +16,7 @@ import InstanceIcon from "../components/InstanceIcon";
 import Browse from "./Browse";
 import ContentTab from "./instance/ContentTab";
 import LogsTab from "./instance/LogsTab";
+import PackTab from "./instance/PackTab";
 import SettingsTab from "./instance/SettingsTab";
 import { api } from "../lib/api";
 import { launchInstance, stopInstance } from "../lib/actions";
@@ -27,6 +28,7 @@ import styles from "./InstanceView.module.css";
 
 const TABS = [
   { id: "content", label: "Content" },
+  { id: "pack", label: "Pack" },
   { id: "logs", label: "Logs" },
   { id: "settings", label: "Settings" },
 ] as const;
@@ -180,7 +182,7 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
       </div>
 
       <nav className={styles.tabs}>
-        {TABS.map((t) => (
+        {TABS.filter((t) => t.id !== "pack" || Boolean(pack?.projectId)).map((t) => (
           <button
             key={t.id}
             className={clsx(styles.tab, active === t.id && styles.tabActive)}
@@ -198,6 +200,7 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
         {active === "content" && (
           <ContentTab instance={instance} onBrowse={() => setBrowsing(true)} />
         )}
+        {active === "pack" && <PackTab instance={instance} />}
         {active === "logs" && <LogsTab instanceId={id} />}
         {active === "settings" && <SettingsTab instance={instance} />}
       </div>
