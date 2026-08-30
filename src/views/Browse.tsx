@@ -428,6 +428,17 @@ export default function Browse({
         : [...prev, category],
     );
 
+  // A modpack builds its own instance rather than going into one, so it is not
+  // a thing you can add to the profile you are already in.
+  const kinds = useMemo(
+    () => (lockedInstance ? KINDS.filter((k) => k.id !== "modpack") : KINDS),
+    [lockedInstance],
+  );
+
+  useEffect(() => {
+    if (lockedInstance && kind === "modpack") setKind("mod");
+  }, [lockedInstance, kind]);
+
   const kindLabel = useMemo(
     () => KINDS.find((k) => k.id === kind)?.label.toLowerCase() ?? "results",
     [kind],
@@ -498,7 +509,7 @@ export default function Browse({
       </header>
 
       <div className={styles.tabs}>
-        {KINDS.map((k) => (
+        {kinds.map((k) => (
           <button
             key={k.id}
             className={clsx(styles.tab, kind === k.id && styles.tabActive)}
