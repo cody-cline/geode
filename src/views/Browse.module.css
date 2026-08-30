@@ -197,11 +197,6 @@
   min-width: 0;
 }
 
-.warning,
-.loadMore {
-  max-width: 1080px;
-}
-
 .warning {
   display: flex;
   align-items: center;
@@ -215,13 +210,12 @@
   font-size: 12.5px;
 }
 
-/* One column. Rows can be scanned top-to-bottom and give the summary room,
-   which a 320px tile never did. */
+/* One column, filling the pane. Rows can be scanned top-to-bottom and give the
+   summary the whole width, which a 320px tile never did. */
 .list {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-width: 1080px;
 }
 
 .loadMore {
