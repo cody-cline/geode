@@ -3,7 +3,6 @@ import clsx from "clsx";
 import { AlertTriangle, Download, Info, Loader2, Search } from "lucide-react";
 
 import InstallTargetModal from "../components/InstallTargetModal";
-import ModpackInstallModal from "../components/ModpackInstallModal";
 import InstanceIcon from "../components/InstanceIcon";
 import ProjectCard from "../components/ProjectCard";
 import ProjectPanel from "../components/ProjectPanel";
@@ -86,13 +85,9 @@ export default function Browse({
   const [installed, setInstalled] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(0);
 
-  // An install is never implicit: the button opens one of these, and the pack
-  // route creates an instance rather than writing into one.
+  // Mods ask where they should go; packs do not, because they answer that
+  // themselves by building the instance.
   const [askTarget, setAskTarget] = useState<{
-    project: Project;
-    versionId?: string;
-  } | null>(null);
-  const [packInstall, setPackInstall] = useState<{
     project: Project;
     versionId?: string;
   } | null>(null);
@@ -181,9 +176,11 @@ export default function Browse({
   }, [askTarget, instances, contentKeys]);
 
   function requestInstall(project: Project, versionId?: string) {
-    // A pack always creates its own instance, even from inside one.
+    // A pack already carries its own name, version and loader, so there is
+    // nothing to ask — it creates its own instance straight away, even when
+    // invoked from inside another one.
     if (project.kind === "modpack") {
-      setPackInstall({ project, versionId });
+      void installPack(project, versionId);
       return;
     }
     if (lockedInstance) {
@@ -191,6 +188,32 @@ export default function Browse({
       return;
     }
     setAskTarget({ project, versionId });
+  }
+
+  async function installPack(project: Project, versionId?: string) {
+    setInstalling(project.id);
+    try {
+      const instance = await api.installModpack(
+        project.provider,
+        project.id,
+        versionId,
+      );
+      await refreshInstances();
+      toast({
+        kind: "success",
+        title: `Installed ${instance.name}`,
+        body: `Minecraft ${instance.mcVersion}${
+          instance.loader !== "vanilla" ? ` · ${instance.loader}` : ""
+        }`,
+      });
+      navigate({ view: "instance", id: instance.id });
+    } catch (e) {
+      // A partial import still leaves a usable instance, so refresh either way.
+      await refreshInstances();
+      reportError(`Could not install ${project.name}`, e);
+    } finally {
+      setInstalling(null);
+    }
   }
 
   async function installDirect(
@@ -637,13 +660,6 @@ export default function Browse({
         />
       )}
 
-      {packInstall && (
-        <ModpackInstallModal
-          project={packInstall.project}
-          versionId={packInstall.versionId}
-          onClose={() => setPackInstall(null)}
-        />
-      )}
     </>
   );
 }
