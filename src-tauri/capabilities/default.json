@@ -1,0 +1,21 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Everything the Geode window is allowed to call. Tauri v2 denies plugin commands unless a capability grants them; the app's own #[tauri::command] handlers do not need listing here.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+
+    "core:event:default",
+
+    "core:window:allow-hide",
+    "core:window:allow-show",
+    "core:window:allow-set-focus",
+
+    "dialog:allow-open",
+    "dialog:allow-save",
+
+    "opener:allow-open-url",
+    "opener:allow-reveal-item-in-dir"
+  ]
+}
