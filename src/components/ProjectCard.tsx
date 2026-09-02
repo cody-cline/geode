@@ -24,6 +24,9 @@ export default function ProjectCard({
   progress,
   directInstall,
   viaConnector,
+  fabricAlso,
+  nativeLoaderLabel,
+  onChooseFabric,
   onOpen,
   onRequestInstall,
 }: {
@@ -42,6 +45,11 @@ export default function ProjectCard({
   directInstall?: boolean;
   /** This is a Fabric mod being offered on a (Neo)Forge target. */
   viaConnector?: boolean;
+  /** It builds for both loaders, so the row offers the choice. */
+  fabricAlso?: boolean;
+  /** Display name of the instance's own loader, e.g. "NeoForge". */
+  nativeLoaderLabel?: string;
+  onChooseFabric?: (fabric: boolean) => void;
   onOpen: () => void;
   /** Asks the parent where this should go — the card never decides. */
   onRequestInstall: (project: Project) => void;
@@ -85,14 +93,49 @@ export default function ProjectCard({
               {ref.provider === "modrinth" ? "Modrinth" : "CurseForge"}
             </span>
           ))}
-          {viaConnector && (
+          {fabricAlso ? (
             <span
-              className={clsx("badge", styles.connectorBadge)}
-              title="A Fabric mod. Installing it adds Sinytra Connector, Forgified Fabric API and Connector Extras so it can run on this loader."
+              className={styles.loaderPick}
+              role="group"
+              aria-label="Build to install"
+              onClick={(e) => e.stopPropagation()}
             >
-              <Blocks size={10} />
-              via Connector
+              <button
+                type="button"
+                className={clsx(
+                  styles.loaderOpt,
+                  !viaConnector && styles.loaderOptNative,
+                )}
+                aria-pressed={!viaConnector}
+                onClick={() => onChooseFabric?.(false)}
+                title={`Install the ${nativeLoaderLabel} build`}
+              >
+                {nativeLoaderLabel}
+              </button>
+              <button
+                type="button"
+                className={clsx(
+                  styles.loaderOpt,
+                  viaConnector && styles.loaderOptFabric,
+                )}
+                aria-pressed={Boolean(viaConnector)}
+                onClick={() => onChooseFabric?.(true)}
+                title="Install the Fabric build instead and run it through Sinytra Connector — useful when another mod expects the Fabric one"
+              >
+                <Blocks size={10} />
+                Fabric
+              </button>
             </span>
+          ) : (
+            viaConnector && (
+              <span
+                className={clsx("badge", styles.connectorBadge)}
+                title="A Fabric mod. Installing it adds Sinytra Connector, Forgified Fabric API and Connector Extras so it can run on this loader."
+              >
+                <Blocks size={10} />
+                via Connector
+              </span>
+            )
           )}
           {blocked && (
             <span
@@ -200,9 +243,11 @@ export default function ProjectCard({
             title={
               blocked
                 ? "The author disabled third-party downloads — open the project page"
-                : directInstall
-                  ? undefined
-                  : "Choose an instance to install into"
+                : viaConnector
+                  ? "Installs the Fabric build, plus Sinytra Connector, Forgified Fabric API and Connector Extras"
+                  : directInstall
+                    ? undefined
+                    : "Choose an instance to install into"
             }
           >
             {busy ? <Loader2 size={12} className="spin" /> : <Plus size={13} />}

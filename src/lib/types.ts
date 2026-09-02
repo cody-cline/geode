@@ -108,11 +108,16 @@ export interface Project {
   bannerUrl?: string | null;
   distributionAllowed: boolean;
   /**
-   * Set client-side, not by the API: this hit came from the Fabric search and
-   * has no build for the target's own loader, so installing it means going
-   * through Sinytra Connector.
+   * Set client-side, not by the API: install the Fabric build and run it
+   * through Sinytra Connector. Always true for a hit only the Fabric search
+   * found; on a [`fabricAlso`] project it is the choice the row is showing.
    */
   viaConnector?: boolean;
+  /**
+   * Both searches turned this up, so it has a build for the target's own
+   * loader *and* a Fabric one. The row lets you pick between them.
+   */
+  fabricAlso?: boolean;
   alsoOn: ProviderRef[];
 }
 

@@ -45,6 +45,14 @@ function loaderLabel(id: string): string {
   return LOADERS.find((l) => l.id === id)?.label ?? titleCase(id);
 }
 
+/** Every identity a hit answers to, so cross-provider listings match. */
+function projectKeys(p: Project): string[] {
+  return [
+    `${p.provider}:${p.id}`,
+    ...p.alsoOn.map((r) => `${r.provider}:${r.id}`),
+  ];
+}
+
 export default function Browse({
   lockedInstance,
   onDone,
@@ -448,20 +456,27 @@ export default function Browse({
         ]);
         if (seq !== requestSeq.current) return;
 
-        const nativeKeys = new Set(
-          native.hits.flatMap((p) => [
-            `${p.provider}:${p.id}`,
-            ...p.alsoOn.map((r) => `${r.provider}:${r.id}`),
-          ]),
+        // A project can be listed on both providers, so match on every
+        // identity a hit carries rather than just its own.
+        const nativeKeys = new Set(native.hits.flatMap(projectKeys));
+        const fabricKeys = new Set((fabric?.hits ?? []).flatMap(projectKeys));
+
+        // Found by both queries: it has a build for either loader, and the row
+        // offers the choice. Found only by the Fabric one: Connector is the
+        // only way to run it here.
+        const nativeHits = native.hits.map((p) =>
+          fabric && projectKeys(p).some((k) => fabricKeys.has(k))
+            ? { ...p, fabricAlso: true }
+            : p,
         );
         const viaConnector = (fabric?.hits ?? [])
-          .filter((p) => !nativeKeys.has(`${p.provider}:${p.id}`))
+          .filter((p) => !projectKeys(p).some((k) => nativeKeys.has(k)))
           .map((p) => ({ ...p, viaConnector: true }));
         const results = {
           // Interleave by each hit's rank in its own result set so Connector
           // mods land among equally-relevant native ones instead of below them.
-          hits: [...native.hits, ...viaConnector]
-            .map((p, i) => ({ p, rank: i < native.hits.length ? i : i - native.hits.length }))
+          hits: [...nativeHits, ...viaConnector]
+            .map((p, i) => ({ p, rank: i < nativeHits.length ? i : i - nativeHits.length }))
             .sort((a, b) => a.rank - b.rank)
             .map((e) => e.p),
           warnings: [
@@ -522,6 +537,17 @@ export default function Browse({
       prev.includes(category)
         ? prev.filter((c) => c !== category)
         : [...prev, category],
+    );
+
+  // The choice lives on the hit, so everything downstream — the install call,
+  // the panel, the picker dialog — carries it without being told separately.
+  const chooseFabric = (project: Project, fabric: boolean) =>
+    setHits((prev) =>
+      prev.map((p) =>
+        p.provider === project.provider && p.id === project.id
+          ? { ...p, viaConnector: fabric }
+          : p,
+      ),
     );
 
   // A modpack builds its own instance rather than going into one, so it is not
@@ -763,6 +789,9 @@ export default function Browse({
                     onOpen={() => setSelected(project)}
                     onRequestInstall={requestInstall}
                     viaConnector={project.viaConnector}
+                    fabricAlso={project.fabricAlso}
+                    nativeLoaderLabel={loaderLabel(loader ?? "")}
+                    onChooseFabric={(fabric) => chooseFabric(project, fabric)}
                   />
                 ))}
               </div>

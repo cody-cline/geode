@@ -229,3 +229,46 @@
   border-color: color-mix(in srgb, #a78bfa 38%, transparent);
   color: #c4b5fd;
 }
+
+/* Badge-shaped, so a mod that builds for both loaders reads as one more fact
+   about it — but split in two, because it is also the choice. */
+.loaderPick {
+  display: inline-flex;
+  height: 20px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-3);
+  overflow: hidden;
+}
+
+.loaderOpt {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition:
+    background 0.14s var(--ease),
+    color 0.14s var(--ease);
+}
+
+.loaderOpt:hover {
+  color: var(--text-dim);
+}
+
+.loaderOptNative {
+  background: var(--border-strong);
+  color: var(--text);
+}
+
+.loaderOptFabric,
+.loaderOptFabric:hover {
+  background: color-mix(in srgb, #a78bfa 22%, transparent);
+  color: #c4b5fd;
+}
