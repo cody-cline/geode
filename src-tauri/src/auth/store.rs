@@ -136,8 +136,7 @@ impl AccountsFile {
                 username: a.username.clone(),
                 kind: a.kind,
                 active: self.active.as_deref() == Some(a.id.as_str()),
-                needs_reauth: a.kind == AccountKind::Microsoft
-                    && a.msa_refresh_token.is_none(),
+                needs_reauth: a.kind == AccountKind::Microsoft && a.msa_refresh_token.is_none(),
                 source_label: a.source_label.clone(),
             })
             .collect()
@@ -261,9 +260,8 @@ pub async fn session_for(
         .msa_refresh_token
         .clone()
         .ok_or(Error::AuthExpired)?;
-    let client_id = client_id.ok_or_else(|| {
-        Error::msg("no Microsoft client ID is configured — set one in Settings")
-    })?;
+    let client_id = client_id
+        .ok_or_else(|| Error::msg("no Microsoft client ID is configured — set one in Settings"))?;
 
     let msa = super::refresh_msa(client, client_id, &refresh).await?;
     let (token, expires_at, profile) = super::minecraft_session(client, &msa.access_token).await?;

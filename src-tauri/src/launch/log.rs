@@ -106,7 +106,10 @@ impl Log4jParser {
         }
         let raw = std::mem::take(&mut self.buffer);
         self.in_event = false;
-        raw.lines().filter(|l| !l.trim().is_empty()).map(plain).collect()
+        raw.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(plain)
+            .collect()
     }
 }
 
@@ -220,7 +223,9 @@ mod tests {
         }
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].level, "ERROR");
-        assert!(out[0].message.starts_with("Boom\njava.lang.RuntimeException"));
+        assert!(out[0]
+            .message
+            .starts_with("Boom\njava.lang.RuntimeException"));
         assert!(out[0].message.contains("at x.y.Z.main"));
     }
 

@@ -109,7 +109,10 @@ pub fn build_plan(
     vars.insert("auth_player_name".into(), session.username.clone());
     vars.insert("auth_uuid".into(), session.uuid.clone());
     vars.insert("auth_access_token".into(), session.access_token.clone());
-    vars.insert("auth_session".into(), format!("token:{}", session.access_token));
+    vars.insert(
+        "auth_session".into(),
+        format!("token:{}", session.access_token),
+    );
     vars.insert("user_type".into(), session.user_type.into());
     // Mojang's own launcher sends its XUID and client id here; the game only
     // forwards them to telemetry, and an empty value is accepted.

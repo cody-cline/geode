@@ -55,7 +55,10 @@ async fn resolves_a_vanilla_version() {
         .count();
     assert!(allowed > 10, "suspiciously few libraries: {allowed}");
 
-    println!("resolved {latest}: {allowed} libraries, main {}", version.main_class);
+    println!(
+        "resolved {latest}: {allowed} libraries, main {}",
+        version.main_class
+    );
     let _ = tokio::fs::remove_dir_all(&paths.root).await;
 }
 
@@ -102,7 +105,10 @@ async fn merges_a_fabric_profile_onto_vanilla() {
 
     let merged = piston::merge_inherited(profile, vanilla);
 
-    assert_ne!(merged.main_class, vanilla_main, "main class should be Fabric's");
+    assert_ne!(
+        merged.main_class, vanilla_main,
+        "main class should be Fabric's"
+    );
     assert!(
         merged.libraries.len() > vanilla_libs,
         "merge lost libraries: {} <= {vanilla_libs}",
@@ -185,7 +191,12 @@ async fn lists_loader_versions_for_every_family() {
         .map(|v| v.id.clone())
         .unwrap_or_else(|| manifest.latest.release.clone());
 
-    for loader in [Loader::Fabric, Loader::Quilt, Loader::NeoForge, Loader::Forge] {
+    for loader in [
+        Loader::Fabric,
+        Loader::Quilt,
+        Loader::NeoForge,
+        Loader::Forge,
+    ] {
         match meta::loader_versions(&client, loader, &game_version).await {
             Ok(versions) => println!(
                 "{}: {} builds for {game_version}{}",
@@ -243,7 +254,11 @@ async fn modrinth_search_returns_installable_versions() {
     assert!(!versions.is_empty(), "sodium has no fabric versions");
     let newest = &versions[0];
     let file = newest.primary_file().expect("no primary file");
-    assert!(file.url.starts_with("https://"), "bad file url: {}", file.url);
+    assert!(
+        file.url.starts_with("https://"),
+        "bad file url: {}",
+        file.url
+    );
     assert!(file.sha1.is_some(), "no sha1 to verify against");
     assert!(file.filename.ends_with(".jar"));
 

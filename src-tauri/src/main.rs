@@ -65,8 +65,14 @@ mod tests {
 
     #[test]
     fn leaves_working_setups_alone() {
-        assert!(!needs_dmabuf_workaround(false, true, false), "mesa on wayland");
-        assert!(!needs_dmabuf_workaround(false, false, true), "nvidia on x11");
+        assert!(
+            !needs_dmabuf_workaround(false, true, false),
+            "mesa on wayland"
+        );
+        assert!(
+            !needs_dmabuf_workaround(false, false, true),
+            "nvidia on x11"
+        );
         assert!(!needs_dmabuf_workaround(false, false, false), "mesa on x11");
     }
 }

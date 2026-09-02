@@ -62,7 +62,10 @@ fn search_roots() -> Vec<PathBuf> {
             roots.push(home.join("Library/Java/JavaVirtualMachines"));
         }
     } else {
-        for base in ["C:\\Program Files\\Java", "C:\\Program Files\\Eclipse Adoptium"] {
+        for base in [
+            "C:\\Program Files\\Java",
+            "C:\\Program Files\\Eclipse Adoptium",
+        ] {
             roots.push(PathBuf::from(base));
         }
     }
@@ -254,10 +257,11 @@ pub async fn provision(
         adoptium_os()
     );
     let assets: Vec<AdoptiumAsset> = crate::net::get_json(client, &url).await?;
-    let asset = assets
-        .into_iter()
-        .next()
-        .ok_or_else(|| Error::msg(format!("Adoptium has no Java {major} build for this system")))?;
+    let asset = assets.into_iter().next().ok_or_else(|| {
+        Error::msg(format!(
+            "Adoptium has no Java {major} build for this system"
+        ))
+    })?;
 
     let dest_dir = paths.java().join(format!("temurin-{major}"));
     // A previous half-finished attempt would otherwise shadow the new one.

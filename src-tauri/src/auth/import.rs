@@ -299,12 +299,7 @@ mod tests {
     use super::*;
 
     fn fake_jwt() -> String {
-        format!(
-            "{}.{}.{}",
-            "a".repeat(40),
-            "b".repeat(40),
-            "c".repeat(40)
-        )
+        format!("{}.{}.{}", "a".repeat(40), "b".repeat(40), "c".repeat(40))
     }
 
     #[test]
@@ -316,7 +311,11 @@ mod tests {
     fn rejects_short_and_malformed_strings() {
         assert!(!looks_like_jwt("hello"));
         assert!(!looks_like_jwt(&"a".repeat(300))); // no dots
-        assert!(!looks_like_jwt(&format!("{}.{}", "a".repeat(80), "b".repeat(80)))); // two segments
+        assert!(!looks_like_jwt(&format!(
+            "{}.{}",
+            "a".repeat(80),
+            "b".repeat(80)
+        ))); // two segments
         assert!(!looks_like_jwt(&format!(
             "{}.{}.{}",
             "a".repeat(40),

@@ -255,8 +255,12 @@ pub async fn import_into(
     match pack {
         PackKind::Modrinth(index) => {
             progress.stage("Extracting overrides", 1).await;
-            extract_overrides(&archive_owned, &game_dir, &["overrides", "client-overrides"])
-                .await?;
+            extract_overrides(
+                &archive_owned,
+                &game_dir,
+                &["overrides", "client-overrides"],
+            )
+            .await?;
             progress.advance(1, "overrides").await;
 
             let downloads: Vec<Download> = index
@@ -329,7 +333,9 @@ pub async fn import_into(
                 {
                     Ok(v) => v,
                     Err(e) => {
-                        progress.advance(1, &format!("skipped {}: {e}", entry.project_id)).await;
+                        progress
+                            .advance(1, &format!("skipped {}: {e}", entry.project_id))
+                            .await;
                         continue;
                     }
                 };
@@ -359,6 +365,8 @@ pub async fn import_into(
                     slug: None,
                     icon_url: None,
                     dependency: !entry.required,
+                    // Pack manifests carry no dependency graph; the jars do.
+                    requires: None,
                 });
             }
 
@@ -405,9 +413,10 @@ async fn extract_overrides(archive: &Path, game_dir: &Path, roots: &[&str]) -> R
                 continue;
             }
             let name = entry.name().to_string();
-            let Some(rel) = roots.iter().find_map(|root| {
-                name.strip_prefix(&format!("{root}/"))
-            }) else {
+            let Some(rel) = roots
+                .iter()
+                .find_map(|root| name.strip_prefix(&format!("{root}/")))
+            else {
                 continue;
             };
 
@@ -451,7 +460,11 @@ async fn record_mrpack_provenance(
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        let kind = match path.parent().and_then(|p| p.file_name()).and_then(|d| d.to_str()) {
+        let kind = match path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|d| d.to_str())
+        {
             Some("mods") => ContentKind::Mod,
             Some("resourcepacks") => ContentKind::ResourcePack,
             Some("shaderpacks") => ContentKind::ShaderPack,
@@ -472,7 +485,9 @@ async fn record_mrpack_provenance(
         return;
     }
 
-    progress.stage("Linking pack contents", pending.len() as u64).await;
+    progress
+        .stage("Linking pack contents", pending.len() as u64)
+        .await;
 
     let ids: Vec<String> = {
         let mut v: Vec<String> = pending.iter().map(|(_, _, p, _)| p.clone()).collect();
@@ -503,6 +518,7 @@ async fn record_mrpack_provenance(
             slug: project.map(|p| p.slug.clone()),
             icon_url: project.and_then(|p| p.icon_url.clone()),
             dependency: false,
+            requires: None,
         });
     }
 }
@@ -589,7 +605,13 @@ pub async fn export_mrpack(
 
     progress.stage("Writing pack", 1).await;
 
-    let mut skip_dirs: Vec<&str> = vec!["logs", "crash-reports", "screenshots", ".fabric", "versions"];
+    let mut skip_dirs: Vec<&str> = vec![
+        "logs",
+        "crash-reports",
+        "screenshots",
+        ".fabric",
+        "versions",
+    ];
     if !include_saves {
         skip_dirs.push("saves");
     }
@@ -662,19 +684,26 @@ mod tests {
 
     #[test]
     fn vanilla_pack_has_no_loader() {
-        let deps: HashMap<String, String> =
-            [("minecraft".to_string(), "1.21.1".to_string())].into_iter().collect();
+        let deps: HashMap<String, String> = [("minecraft".to_string(), "1.21.1".to_string())]
+            .into_iter()
+            .collect();
         let (_, loader, _) = loader_from_dependencies(&deps);
         assert_eq!(loader, Loader::Vanilla);
     }
 
     #[test]
     fn parses_curseforge_loader_ids() {
-        assert_eq!(parse_cf_loader("forge-47.2.0"), (Loader::Forge, "47.2.0".into()));
+        assert_eq!(
+            parse_cf_loader("forge-47.2.0"),
+            (Loader::Forge, "47.2.0".into())
+        );
         assert_eq!(
             parse_cf_loader("neoforge-21.4.10-beta"),
             (Loader::NeoForge, "21.4.10-beta".into())
         );
-        assert_eq!(parse_cf_loader("fabric-0.15.0"), (Loader::Fabric, "0.15.0".into()));
+        assert_eq!(
+            parse_cf_loader("fabric-0.15.0"),
+            (Loader::Fabric, "0.15.0".into())
+        );
     }
 }

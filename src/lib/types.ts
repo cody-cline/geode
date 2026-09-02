@@ -81,6 +81,14 @@ export interface ContentItem {
   slug?: string;
   dependency: boolean;
   fromDisk: boolean;
+  /** File names of installed mods this one needs. */
+  requires: string[];
+  /** File names of installed mods that need this one. */
+  requiredBy: string[];
+  /** Arrived as a dependency, and nothing installed still needs it. */
+  unused: boolean;
+  /** The jar stated its own dependencies, rather than us inferring them. */
+  declaresDeps: boolean;
 }
 
 export interface ProviderRef {

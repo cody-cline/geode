@@ -79,8 +79,7 @@ pub async fn install_version(
             } else {
                 meta::fabric::Flavor::Quilt
             };
-            let profile =
-                meta::fabric::profile(client, flavor, mc_version, loader_version).await?;
+            let profile = meta::fabric::profile(client, flavor, mc_version, loader_version).await?;
             progress.advance(1, loader.display_name()).await;
             piston::merge_inherited(profile, vanilla)
         }
@@ -156,7 +155,10 @@ async fn alias_client_jar(
     let alias = paths.version_jar(version_id);
     if let Ok(existing) = tokio::fs::metadata(&alias).await {
         // Re-link if the shared jar was replaced (a corrupt download redownloaded).
-        let source_len = tokio::fs::metadata(shared).await.map(|m| m.len()).unwrap_or(0);
+        let source_len = tokio::fs::metadata(shared)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
         if existing.len() == source_len && source_len > 0 {
             return Ok(alias);
         }
@@ -218,10 +220,7 @@ fn library_download(lib: &piston::Library, paths: &Paths) -> Option<Download> {
 
 /// The native payload for a library on this OS, for manifests that still use
 /// the legacy `natives` + `classifiers` layout.
-fn native_download(
-    lib: &piston::Library,
-    paths: &Paths,
-) -> Option<(Download, Vec<String>)> {
+fn native_download(lib: &piston::Library, paths: &Paths) -> Option<(Download, Vec<String>)> {
     let classifier = lib.native_classifier()?;
     let downloads = lib.downloads.as_ref()?;
     let art = downloads.classifiers.get(&classifier)?;
@@ -302,7 +301,9 @@ async fn extract_natives(
         return Ok(dir);
     }
 
-    progress.stage("Extracting natives", jobs.len() as u64).await;
+    progress
+        .stage("Extracting natives", jobs.len() as u64)
+        .await;
     for (jar, exclude) in jobs {
         let dir = dir.clone();
         tokio::task::spawn_blocking(move || extract_native_jar(&jar, &dir, &exclude))

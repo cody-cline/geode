@@ -184,7 +184,10 @@ async fn installs_and_launches_minecraft() {
     assert!(
         !plan.args.iter().any(|a| a.contains("${")),
         "unsubstituted placeholder in args: {:?}",
-        plan.args.iter().filter(|a| a.contains("${")).collect::<Vec<_>>()
+        plan.args
+            .iter()
+            .filter(|a| a.contains("${"))
+            .collect::<Vec<_>>()
     );
 
     tokio::fs::create_dir_all(&plan.game_dir).await.unwrap();

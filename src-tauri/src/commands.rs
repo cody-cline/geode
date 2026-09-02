@@ -81,7 +81,9 @@ pub async fn set_config(
 #[tauri::command]
 pub async fn set_curseforge_key(state: State<'_, AppState>, key: Option<String>) -> Result<bool> {
     let mut config = state.config().await;
-    config.curseforge_api_key = key.filter(|k| !k.trim().is_empty()).map(|k| k.trim().to_string());
+    config.curseforge_api_key = key
+        .filter(|k| !k.trim().is_empty())
+        .map(|k| k.trim().to_string());
     config.save(&state.paths).await?;
     let has_key = config.effective_curseforge_key().is_some();
     state.set_config(config).await;
@@ -359,7 +361,7 @@ pub async fn list_content(
 ) -> Result<Vec<ContentItem>> {
     let kind = parse_kind(&kind)?;
     let inst = instance::load(&state.paths, &id).await?;
-    instance::content::list(&state.paths, &inst, kind).await
+    instance::content::list(&state.paths, &inst, kind, &state.jars).await
 }
 
 #[tauri::command]
@@ -372,6 +374,33 @@ pub async fn set_content_enabled(
 ) -> Result<String> {
     let kind = parse_kind(&kind)?;
     instance::content::set_enabled(&state.paths, &id, kind, &file, enabled).await
+}
+
+/// Promote a mod that arrived as a dependency to one you keep on purpose, or
+/// put it back.
+///
+/// Dependency data is never going to be perfect — a jar can require an id
+/// nothing here declares, and the mod holding it up is then reported as unused.
+/// This is the escape hatch: say you want it, and it stops being offered for
+/// cleanup, permanently.
+#[tauri::command]
+pub async fn set_content_kept(
+    state: State<'_, AppState>,
+    id: String,
+    kind: String,
+    file: String,
+    kept: bool,
+) -> Result<()> {
+    let kind = parse_kind(&kind)?;
+    let mut inst = instance::load(&state.paths, &id).await?;
+    let base = file.strip_suffix(".disabled").unwrap_or(&file);
+    let record = inst
+        .content
+        .iter_mut()
+        .find(|r| r.file_name == base && r.kind == kind)
+        .ok_or_else(|| Error::msg("that file has no install record to change"))?;
+    record.dependency = !kept;
+    inst.save(&state.paths).await
 }
 
 #[tauri::command]
@@ -683,9 +712,14 @@ pub async fn link_untracked_content(
     let progress = Progress::new(app, format!("link:{id}"));
     state.register_cancel(progress.id(), progress.cancel_flag());
 
-    let result =
-        crate::install::content::link_untracked(&state.http, &state.paths, &mut inst, &progress)
-            .await;
+    let result = crate::install::content::link_untracked(
+        &state.http,
+        &state.paths,
+        &mut inst,
+        &state.jars,
+        &progress,
+    )
+    .await;
 
     state.clear_cancel(progress.id());
     match result {
@@ -813,8 +847,8 @@ pub async fn get_project_versions(
 
 #[tauri::command]
 pub async fn get_categories(state: State<'_, AppState>, kind: String) -> Result<Vec<String>> {
-    let kind = providers::ProjectKind::parse(&kind)
-        .ok_or_else(|| Error::msg("unknown project type"))?;
+    let kind =
+        providers::ProjectKind::parse(&kind).ok_or_else(|| Error::msg("unknown project type"))?;
     providers::modrinth::categories(&state.http, kind).await
 }
 
@@ -890,19 +924,14 @@ pub async fn find_importable_accounts(
 }
 
 #[tauri::command]
-pub async fn import_account(
-    state: State<'_, AppState>,
-    uuid: String,
-) -> Result<AccountView> {
+pub async fn import_account(state: State<'_, AppState>, uuid: String) -> Result<AccountView> {
     // Re-discover rather than trusting a token round-tripped through the
     // frontend — the candidate list deliberately does not serialise one.
     let candidate = crate::auth::import::discover_candidates(&state.http)
         .await
         .into_iter()
         .find(|c| c.uuid == uuid)
-        .ok_or_else(|| {
-            Error::msg("that session is no longer available — try scanning again")
-        })?;
+        .ok_or_else(|| Error::msg("that session is no longer available — try scanning again"))?;
 
     let mut file = AccountsFile::load(&state.paths).await?;
     let account = Account::imported(&candidate);
@@ -927,7 +956,10 @@ pub async fn add_offline_account(
     if username.len() < 3 || username.len() > 16 {
         return Err(Error::msg("usernames are 3 to 16 characters"));
     }
-    if !username.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+    if !username
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
         return Err(Error::msg("usernames may only use letters, digits and _"));
     }
 
@@ -1060,14 +1092,7 @@ pub async fn launch_instance(
     };
 
     let plan = crate::launch::build_plan(&state.paths, &config, &inst, &installed, &session)?;
-    let pid = crate::launch::spawn(
-        &app,
-        &state.paths,
-        &inst,
-        plan,
-        state.games.clone(),
-    )
-    .await?;
+    let pid = crate::launch::spawn(&app, &state.paths, &inst, plan, state.games.clone()).await?;
 
     inst.last_played = Some(chrono::Utc::now().timestamp());
     inst.save(&state.paths).await?;
@@ -1216,13 +1241,7 @@ pub async fn export_modpack(
     let progress = Progress::new(app, format!("export:{id}"));
     let dest = PathBuf::from(dest);
 
-    instance::modpack::export_mrpack(
-        &state.paths,
-        &inst,
-        dest.clone(),
-        include_saves,
-        &progress,
-    )
-    .await?;
+    instance::modpack::export_mrpack(&state.paths, &inst, dest.clone(), include_saves, &progress)
+        .await?;
     Ok(dest.to_string_lossy().to_string())
 }

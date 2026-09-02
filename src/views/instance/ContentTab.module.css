@@ -202,3 +202,94 @@
   margin-right: auto;
   line-height: 1.6;
 }
+
+/* Grouped list ---------------------------------------------------------- */
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.group + .group {
+  margin-top: 18px;
+}
+
+.groupHead {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  padding: 0 2px 6px;
+}
+
+.groupTitle {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.groupCount {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-faint);
+}
+
+.groupNote {
+  flex: 1;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.entry {
+  display: flex;
+  flex-direction: column;
+}
+
+.caveat {
+  padding: 8px 22px;
+  font-size: 12px;
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--warn) 24%, transparent);
+}
+
+/* The one line that replaces a tree: who is holding this mod in place. */
+.holders {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.needs {
+  list-style: none;
+  margin: 2px 0 0 46px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.need {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+  border-left: 1px solid var(--border);
+}
+
+.needArrow {
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+
+.needShared {
+  font-size: 11px;
+  color: var(--text-faint);
+}

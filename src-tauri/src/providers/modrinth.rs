@@ -122,7 +122,9 @@ fn to_project(hit: SearchHit) -> Project {
         loaders,
         game_versions: hit.versions,
         updated: hit.date_modified,
-        banner_url: hit.featured_gallery.or_else(|| hit.gallery.into_iter().next()),
+        banner_url: hit
+            .featured_gallery
+            .or_else(|| hit.gallery.into_iter().next()),
         distribution_allowed: true,
         also_on: Vec::new(),
     }
@@ -130,10 +132,8 @@ fn to_project(hit: SearchHit) -> Project {
 
 pub async fn search(client: &reqwest::Client, query: &SearchQuery) -> Result<Vec<Project>> {
     // Facets are AND across the outer array, OR within each inner array.
-    let mut facets: Vec<Vec<String>> = vec![vec![format!(
-        "project_type:{}",
-        kind_facet(query.kind)
-    )]];
+    let mut facets: Vec<Vec<String>> =
+        vec![vec![format!("project_type:{}", kind_facet(query.kind))]];
 
     if let Some(v) = &query.game_version {
         facets.push(vec![format!("versions:{v}")]);
@@ -375,10 +375,7 @@ pub async fn version_by_hash(client: &reqwest::Client, sha1: &str) -> Result<Opt
 
 /// Resolve many projects at once. Used to put names and icons on files that a
 /// modpack index identified only by id.
-pub async fn projects_by_ids(
-    client: &reqwest::Client,
-    ids: &[String],
-) -> Result<Vec<Project>> {
+pub async fn projects_by_ids(client: &reqwest::Client, ids: &[String]) -> Result<Vec<Project>> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }

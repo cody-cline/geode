@@ -19,8 +19,7 @@ use serde_json::json;
 
 use crate::error::{Error, Result};
 
-const DEVICE_CODE_URL: &str =
-    "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode";
+const DEVICE_CODE_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode";
 const TOKEN_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
 const XBL_URL: &str = "https://user.auth.xboxlive.com/user/authenticate";
 const XSTS_URL: &str = "https://xsts.auth.xboxlive.com/xsts/authorize";
@@ -445,8 +444,12 @@ fn md5_digest(input: &[u8]) -> [u8; 16] {
     }
     msg.extend_from_slice(&bit_len.to_le_bytes());
 
-    let (mut a0, mut b0, mut c0, mut d0) =
-        (0x6745_2301u32, 0xefcd_ab89u32, 0x98ba_dcfeu32, 0x1032_5476u32);
+    let (mut a0, mut b0, mut c0, mut d0) = (
+        0x6745_2301u32,
+        0xefcd_ab89u32,
+        0x98ba_dcfeu32,
+        0x1032_5476u32,
+    );
 
     for chunk in msg.chunks(64) {
         let m: Vec<u32> = chunk
@@ -465,10 +468,7 @@ fn md5_digest(input: &[u8]) -> [u8; 16] {
             let tmp = d;
             d = c;
             c = b;
-            let sum = a
-                .wrapping_add(f)
-                .wrapping_add(k[i])
-                .wrapping_add(m[g]);
+            let sum = a.wrapping_add(f).wrapping_add(k[i]).wrapping_add(m[g]);
             b = b.wrapping_add(sum.rotate_left(S[i]));
             a = tmp;
         }
@@ -492,7 +492,10 @@ mod tests {
 
     #[test]
     fn md5_matches_known_vectors() {
-        assert_eq!(hex::encode(md5_digest(b"")), "d41d8cd98f00b204e9800998ecf8427e");
+        assert_eq!(
+            hex::encode(md5_digest(b"")),
+            "d41d8cd98f00b204e9800998ecf8427e"
+        );
         assert_eq!(
             hex::encode(md5_digest(b"abc")),
             "900150983cd24fb0d6963f7d28e17f72"

@@ -130,7 +130,8 @@ impl Progress {
     }
 
     pub async fn fail(&self, err: &str) {
-        self.emit("Failed".into(), true, Some(err.to_string())).await;
+        self.emit("Failed".into(), true, Some(err.to_string()))
+            .await;
     }
 
     async fn emit(&self, detail: String, done: bool, error: Option<String>) {

@@ -92,6 +92,8 @@ export const api = {
     file: string,
     enabled: boolean,
   ) => invoke<string>("set_content_enabled", { id, kind, file, enabled }),
+  setContentKept: (id: string, kind: ContentKind, file: string, kept: boolean) =>
+    invoke<void>("set_content_kept", { id, kind, file, kept }),
   removeContent: (id: string, kind: ContentKind, file: string) =>
     invoke<void>("remove_content", { id, kind, file }),
   addLocalContent: (id: string, kind: ContentKind, files: string[]) =>

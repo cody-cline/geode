@@ -148,7 +148,10 @@ pub fn maven_relative_path(coord: &str) -> PathBuf {
 pub fn is_safe_relative(p: &Path) -> bool {
     use std::path::Component;
     !p.components().any(|c| {
-        matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_))
+        matches!(
+            c,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
     })
 }
 

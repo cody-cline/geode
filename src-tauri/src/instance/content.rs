@@ -5,7 +5,7 @@
 //! hand still shows up, and deleting a file outside the launcher does not leave
 //! a phantom entry.
 
-use std::io::Read;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -13,9 +13,10 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::paths::Paths;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ContentKind {
+    #[default]
     Mod,
     ResourcePack,
     ShaderPack,
@@ -63,10 +64,19 @@ pub struct ContentRecord {
     /// offered for cleanup when the parent goes away.
     #[serde(default)]
     pub dependency: bool,
+    /// Project ids this version requires, from the same provider.
+    ///
+    /// `None` means nobody has looked yet — records written before this was
+    /// tracked, and anything that arrived through a modpack. The distinction
+    /// matters: an empty list is a promise that this needs nothing, and
+    /// treating "unknown" as that promise is how you end up telling someone to
+    /// delete a library half their mods depend on.
+    #[serde(default)]
+    pub requires: Option<Vec<String>>,
 }
 
 /// One row in the instance's content list.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContentItem {
     pub file_name: String,
@@ -88,6 +98,20 @@ pub struct ContentItem {
     pub dependency: bool,
     /// Read from the jar itself when we have no provenance record.
     pub from_disk: bool,
+    /// File names of installed mods this one needs.
+    #[serde(default)]
+    pub requires: Vec<String>,
+    /// File names of installed mods that need this one.
+    #[serde(default)]
+    pub required_by: Vec<String>,
+    /// Pulled in as a dependency, and nothing installed still needs it.
+    #[serde(default)]
+    pub unused: bool,
+    /// The jar told us what it needs. When false, its edges are guesswork from
+    /// the provider's list, or absent — so it cannot be used to argue that
+    /// something else is unused.
+    #[serde(default)]
+    pub declares_deps: bool,
 }
 
 const DISABLED_SUFFIX: &str = ".disabled";
@@ -117,9 +141,12 @@ pub async fn list(
     paths: &Paths,
     instance: &super::Instance,
     kind: ContentKind,
+    jars: &super::jar::MetaCache,
 ) -> Result<Vec<ContentItem>> {
     let dir = paths.game_dir(&instance.id).join(kind.folder());
     let mut items = Vec::new();
+    // Kept alongside `items` by index; only mods have any.
+    let mut metas: Vec<Option<super::jar::JarMeta>> = Vec::new();
 
     let mut entries = match tokio::fs::read_dir(&dir).await {
         Ok(e) => e,
@@ -145,6 +172,13 @@ pub async fn list(
             .iter()
             .find(|r| r.file_name == base_name && r.kind == kind);
 
+        // Every mod is read, not just the untracked ones: the jar is where the
+        // dependency graph comes from.
+        let meta = match kind {
+            ContentKind::Mod => jars.get(&entry.path()).await,
+            _ => None,
+        };
+
         let item = match record {
             Some(r) => ContentItem {
                 file_name: file_name.clone(),
@@ -160,117 +194,108 @@ pub async fn list(
                 slug: r.slug.clone(),
                 dependency: r.dependency,
                 from_disk: false,
+                ..Default::default()
             },
-            None => {
-                let meta = if kind == ContentKind::Mod {
-                    read_jar_metadata(&entry.path()).await
-                } else {
-                    None
-                };
-                let (name, version) = meta.unwrap_or_else(|| (base_name.to_string(), String::new()));
-                ContentItem {
-                    file_name: file_name.clone(),
-                    kind,
-                    name,
-                    version,
-                    enabled,
-                    size,
-                    provider: None,
-                    project_id: None,
-                    version_id: None,
-                    icon_url: None,
-                    slug: None,
-                    dependency: false,
-                    from_disk: true,
-                }
-            }
+            None => ContentItem {
+                file_name: file_name.clone(),
+                kind,
+                name: meta
+                    .as_ref()
+                    .and_then(|m| m.name.clone())
+                    .unwrap_or_else(|| base_name.to_string()),
+                version: meta
+                    .as_ref()
+                    .and_then(|m| m.version.clone())
+                    .unwrap_or_default(),
+                enabled,
+                size,
+                dependency: false,
+                from_disk: true,
+                ..Default::default()
+            },
         };
         items.push(item);
+        metas.push(meta);
     }
 
+    if kind == ContentKind::Mod {
+        link(&mut items, &metas, &instance.content);
+    }
+
+    // Sorting last keeps `items` and `metas` aligned while the graph is built.
     items.sort_by_key(|i| i.name.to_lowercase());
     Ok(items)
 }
 
-/// Best-effort display name and version for a mod jar we did not install.
-/// Covers Fabric, Quilt, and Forge/NeoForge metadata; anything else falls back
-/// to the filename.
-async fn read_jar_metadata(jar: &Path) -> Option<(String, String)> {
-    let jar = jar.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        let file = std::fs::File::open(&jar).ok()?;
-        let mut zip = zip::ZipArchive::new(file).ok()?;
+/// Mod ids vary in punctuation across loaders — `cloth-config` on Fabric,
+/// `cloth_config` on NeoForge — and the same mod keeps its meaning across both.
+fn id_key(id: &str) -> String {
+    id.to_ascii_lowercase().replace('-', "_")
+}
 
-        if let Some(found) = read_entry(&mut zip, "fabric.mod.json")
-            .or_else(|| read_entry(&mut zip, "quilt.mod.json"))
-        {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&found) {
-                // Quilt nests its metadata under `quilt_loader`.
-                let root = v.get("quilt_loader").unwrap_or(&v);
-                let meta = root.get("metadata").unwrap_or(root);
-                let name = meta
-                    .get("name")
-                    .and_then(|n| n.as_str())
-                    .or_else(|| root.get("id").and_then(|n| n.as_str()))?
-                    .to_string();
-                let version = root
-                    .get("version")
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                return Some((name, version));
+/// Fill in each item's dependency edges, and mark libraries nothing needs.
+///
+/// Edges come from two places and are unioned rather than chosen between: what
+/// the jars declare, and the required project ids recorded at install time.
+/// Both are incomplete in different ways, and for deciding that something is
+/// unused, a missed edge is the expensive mistake — it invites you to delete a
+/// library that is holding the instance up.
+fn link(
+    items: &mut [ContentItem],
+    metas: &[Option<super::jar::JarMeta>],
+    records: &[ContentRecord],
+) {
+    // Which file answers to a given mod id, and to a given project.
+    let mut by_mod_id: HashMap<String, usize> = HashMap::new();
+    let mut by_project: HashMap<(String, String), usize> = HashMap::new();
+    for (i, item) in items.iter().enumerate() {
+        if let Some(meta) = &metas[i] {
+            for id in &meta.provides {
+                by_mod_id.entry(id_key(id)).or_insert(i);
+            }
+        }
+        if let (Some(provider), Some(project)) = (&item.provider, &item.project_id) {
+            by_project.insert((provider.clone(), project.clone()), i);
+        }
+    }
+
+    let mut edges: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); items.len()];
+    for (i, item) in items.iter().enumerate() {
+        if let Some(meta) = &metas[i] {
+            for id in &meta.requires {
+                if let Some(&target) = by_mod_id.get(&id_key(id)) {
+                    edges[i].insert(target);
+                }
             }
         }
 
-        let toml = read_entry(&mut zip, "META-INF/neoforge.mods.toml")
-            .or_else(|| read_entry(&mut zip, "META-INF/mods.toml"))?;
-        parse_mods_toml(&toml)
-    })
-    .await
-    .ok()
-    .flatten()
-}
-
-fn read_entry(zip: &mut zip::ZipArchive<std::fs::File>, name: &str) -> Option<String> {
-    let mut entry = zip.by_name(name).ok()?;
-    let mut s = String::new();
-    entry.read_to_string(&mut s).ok()?;
-    Some(s)
-}
-
-/// Pull `displayName` and `version` out of a `mods.toml`. A real TOML parser
-/// would be overkill for two quoted scalars in a known layout.
-fn parse_mods_toml(toml: &str) -> Option<(String, String)> {
-    let mut name = None;
-    let mut version = None;
-    for line in toml.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("displayName") {
-            name = quoted_value(rest);
-        } else if let Some(rest) = line.strip_prefix("version") {
-            version = quoted_value(rest);
+        let base = strip_disabled(&item.file_name).0;
+        let recorded = records
+            .iter()
+            .find(|r| r.file_name == base && r.kind == item.kind)
+            .and_then(|r| r.requires.as_ref().map(|ids| (r.provider.clone(), ids)));
+        if let Some((provider, ids)) = recorded {
+            for id in ids {
+                if let Some(&target) = by_project.get(&(provider.clone(), id.clone())) {
+                    edges[i].insert(target);
+                }
+            }
         }
-        if name.is_some() && version.is_some() {
-            break;
+
+        edges[i].remove(&i);
+    }
+
+    let names: Vec<String> = items.iter().map(|i| i.file_name.clone()).collect();
+    for (i, targets) in edges.iter().enumerate() {
+        items[i].requires = targets.iter().map(|&t| names[t].clone()).collect();
+        items[i].declares_deps = metas[i].is_some();
+        for &t in targets {
+            items[t].required_by.push(names[i].clone());
         }
     }
-    let name = name?;
-    // `${file.jarVersion}` is substituted by the loader from the jar manifest,
-    // so it is meaningless to show.
-    let version = version
-        .filter(|v| !v.starts_with("${"))
-        .unwrap_or_default();
-    Some((name, version))
-}
-
-fn quoted_value(rest: &str) -> Option<String> {
-    let after_eq = rest.split_once('=')?.1.trim();
-    let quote = after_eq.chars().next()?;
-    if quote != '"' && quote != '\'' {
-        return None;
+    for item in items.iter_mut() {
+        item.unused = item.dependency && item.required_by.is_empty();
     }
-    let body = &after_eq[1..];
-    Some(body[..body.find(quote)?].to_string())
 }
 
 pub fn content_dir(paths: &Paths, instance_id: &str, kind: ContentKind) -> PathBuf {
@@ -279,7 +304,12 @@ pub fn content_dir(paths: &Paths, instance_id: &str, kind: ContentKind) -> PathB
 
 /// Resolve a user-supplied filename to a path inside the content folder,
 /// rejecting anything that tries to escape it.
-fn resolve_file(paths: &Paths, instance_id: &str, kind: ContentKind, file: &str) -> Result<PathBuf> {
+fn resolve_file(
+    paths: &Paths,
+    instance_id: &str,
+    kind: ContentKind,
+    file: &str,
+) -> Result<PathBuf> {
     let rel = Path::new(file);
     if !crate::paths::is_safe_relative(rel) || rel.components().count() != 1 {
         return Err(Error::msg("invalid filename"));
@@ -324,4 +354,138 @@ pub async fn remove(
         .content
         .retain(|r| !(r.file_name == base && r.kind == kind));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::instance::jar::JarMeta;
+
+    fn item(file: &str, dependency: bool) -> ContentItem {
+        ContentItem {
+            file_name: file.into(),
+            kind: ContentKind::Mod,
+            name: file.into(),
+            dependency,
+            ..Default::default()
+        }
+    }
+
+    fn meta(provides: &[&str], requires: &[&str]) -> Option<JarMeta> {
+        Some(JarMeta {
+            provides: provides.iter().map(|s| s.to_string()).collect(),
+            requires: requires.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn a_library_two_mods_share_is_not_unused_until_both_go() {
+        let mut items = vec![
+            item("a.jar", false),
+            item("b.jar", false),
+            item("lib.jar", true),
+        ];
+        let metas = vec![
+            meta(&["a"], &["lib"]),
+            meta(&["b"], &["lib"]),
+            meta(&["lib"], &[]),
+        ];
+        link(&mut items, &metas, &[]);
+
+        assert_eq!(items[2].required_by, vec!["a.jar", "b.jar"]);
+        assert_eq!(items[0].requires, vec!["lib.jar"]);
+        assert!(!items[2].unused);
+
+        // Drop one dependent: the other still holds it up.
+        let mut items = vec![item("b.jar", false), item("lib.jar", true)];
+        link(
+            &mut items,
+            &[meta(&["b"], &["lib"]), meta(&["lib"], &[])],
+            &[],
+        );
+        assert!(!items[1].unused);
+
+        // Drop the last one and it is finally loose.
+        let mut items = vec![item("lib.jar", true)];
+        link(&mut items, &[meta(&["lib"], &[])], &[]);
+        assert!(items[0].unused);
+    }
+
+    #[test]
+    fn a_mod_you_chose_is_never_reported_unused() {
+        let mut items = vec![item("chosen.jar", false)];
+        link(&mut items, &[meta(&["chosen"], &[])], &[]);
+        assert!(!items[0].unused);
+    }
+
+    #[test]
+    fn ids_match_across_the_loaders_punctuation() {
+        // Fabric writes cloth-config, NeoForge writes cloth_config, and the
+        // same jar can be asked for either way.
+        let mut items = vec![item("mod.jar", false), item("cloth.jar", true)];
+        let metas = vec![
+            meta(&["mod"], &["cloth-config"]),
+            meta(&["cloth_config"], &[]),
+        ];
+        link(&mut items, &metas, &[]);
+        assert_eq!(items[1].required_by, vec!["mod.jar"]);
+        assert!(!items[1].unused);
+    }
+
+    #[test]
+    fn falls_back_to_the_recorded_project_ids() {
+        // Neither jar declares anything readable, so the only edge available is
+        // the one the provider gave us at install time.
+        let mut items = vec![item("mod.jar", false), item("lib.jar", true)];
+        items[0].provider = Some("modrinth".into());
+        items[0].project_id = Some("AAA".into());
+        items[1].provider = Some("modrinth".into());
+        items[1].project_id = Some("BBB".into());
+
+        let records = vec![ContentRecord {
+            file_name: "mod.jar".into(),
+            kind: ContentKind::Mod,
+            provider: "modrinth".into(),
+            project_id: "AAA".into(),
+            version_id: "1".into(),
+            name: "Mod".into(),
+            version_number: "1".into(),
+            slug: None,
+            icon_url: None,
+            dependency: false,
+            requires: Some(vec!["BBB".into()]),
+        }];
+        link(&mut items, &[None, None], &records);
+
+        assert_eq!(items[1].required_by, vec!["mod.jar"]);
+        assert!(!items[1].unused);
+        assert!(!items[0].declares_deps);
+    }
+
+    #[test]
+    fn a_disabled_file_still_matches_its_record() {
+        let mut items = vec![item("mod.jar.disabled", false), item("lib.jar", true)];
+        items[0].provider = Some("modrinth".into());
+        items[0].project_id = Some("AAA".into());
+        items[1].provider = Some("modrinth".into());
+        items[1].project_id = Some("BBB".into());
+
+        let records = vec![ContentRecord {
+            // Records key off the enabled name.
+            file_name: "mod.jar".into(),
+            kind: ContentKind::Mod,
+            provider: "modrinth".into(),
+            project_id: "AAA".into(),
+            version_id: "1".into(),
+            name: "Mod".into(),
+            version_number: "1".into(),
+            slug: None,
+            icon_url: None,
+            dependency: false,
+            requires: Some(vec!["BBB".into()]),
+        }];
+        link(&mut items, &[None, None], &records);
+        assert_eq!(items[1].required_by, vec!["mod.jar.disabled"]);
+    }
 }

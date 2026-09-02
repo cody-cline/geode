@@ -91,9 +91,7 @@ impl Default for Config {
 impl Config {
     pub async fn load(paths: &Paths) -> Result<Self> {
         match tokio::fs::read(paths.config_file()).await {
-            Ok(bytes) => {
-                serde_json::from_slice(&bytes).map_err(|e| Error::json("config.json", e))
-            }
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| Error::json("config.json", e)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e.into()),
         }
@@ -155,7 +153,10 @@ mod tests {
     #[test]
     fn user_key_wins_over_build_key() {
         let config = with_key("user-key");
-        assert_eq!(config.effective_curseforge_key().as_deref(), Some("user-key"));
+        assert_eq!(
+            config.effective_curseforge_key().as_deref(),
+            Some("user-key")
+        );
     }
 
     #[test]
@@ -181,5 +182,3 @@ mod tests {
         assert_eq!(v["curseforgeKeyFromBuild"], serde_json::json!(false));
     }
 }
-
-

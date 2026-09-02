@@ -12,7 +12,11 @@ const FAKE_KEY: &str = "$2a$10$Abc./123Abc./123Abc./123Abc./123Abc./123Abc./123A
 
 #[tokio::test]
 async fn api_key_header_survives_dollar_signs() {
-    assert_eq!(FAKE_KEY.len(), 60, "test fixture should match a real key's shape");
+    assert_eq!(
+        FAKE_KEY.len(),
+        60,
+        "test fixture should match a real key's shape"
+    );
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("addr");
@@ -55,7 +59,10 @@ async fn api_key_header_survives_dollar_signs() {
         .map(|(_, value)| value.trim())
         .expect("header value");
 
-    assert_eq!(sent, FAKE_KEY, "the key was altered before reaching the socket");
+    assert_eq!(
+        sent, FAKE_KEY,
+        "the key was altered before reaching the socket"
+    );
 
     assert!(
         headers
@@ -70,5 +77,9 @@ async fn api_key_header_survives_dollar_signs() {
     assert_eq!(result.status, 200);
 
     // The fingerprint must never carry the payload.
-    assert!(!result.fingerprint.contains("Abc./123"), "{}", result.fingerprint);
+    assert!(
+        !result.fingerprint.contains("Abc./123"),
+        "{}",
+        result.fingerprint
+    );
 }

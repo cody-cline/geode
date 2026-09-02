@@ -76,15 +76,8 @@ impl SupportMatrix {
 
 /// Build the matrix from Connector's published files.
 async fn fetch_matrix(client: &reqwest::Client) -> Result<SupportMatrix> {
-    let versions = providers::versions(
-        client,
-        Provider::Modrinth,
-        CONNECTOR_SLUG,
-        None,
-        None,
-        None,
-    )
-    .await?;
+    let versions =
+        providers::versions(client, Provider::Modrinth, CONNECTOR_SLUG, None, None, None).await?;
 
     let mut pairs = Vec::new();
     for version in versions {
@@ -190,7 +183,9 @@ pub async fn ensure_stack(
     use crate::instance::content::ContentKind;
 
     let mut added = Vec::new();
-    progress.stage("Preparing Connector", STACK.len() as u64).await;
+    progress
+        .stage("Preparing Connector", STACK.len() as u64)
+        .await;
 
     for slug in STACK {
         progress.check_cancelled()?;

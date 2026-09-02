@@ -86,9 +86,21 @@ pub async fn install(
         slug,
         icon_url,
         dependency: as_dependency,
+        requires: Some(required_ids(version)),
     });
 
     Ok(file.filename.clone())
+}
+
+/// The provider's view of what a version requires, kept as a fallback for jars
+/// whose own metadata we cannot read.
+fn required_ids(version: &Version) -> Vec<String> {
+    version
+        .dependencies
+        .iter()
+        .filter(|d| d.kind == DependencyKind::Required)
+        .filter_map(|d| d.project_id.clone())
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -200,9 +212,9 @@ pub async fn install_with_dependencies(
                         .filter_map(|d| d.project_id.clone()),
                 );
             }
-            Ok(None) => report.skipped.push(format!(
-                "no compatible version of dependency {project_id}"
-            )),
+            Ok(None) => report
+                .skipped
+                .push(format!("no compatible version of dependency {project_id}")),
             Err(e) => report.skipped.push(format!("dependency {project_id}: {e}")),
         }
     }
@@ -285,7 +297,9 @@ pub async fn check_updates(
     progress: &Progress,
 ) -> Result<Vec<UpdateCandidate>> {
     let tracked: Vec<ContentRecord> = instance.content.clone();
-    progress.stage("Checking for updates", tracked.len() as u64).await;
+    progress
+        .stage("Checking for updates", tracked.len() as u64)
+        .await;
 
     let mut out = Vec::new();
     for record in tracked {
@@ -405,7 +419,10 @@ mod tests {
 
     #[test]
     fn skips_versions_without_files() {
-        let versions = vec![version("blocked", "release", false), version("ok", "beta", true)];
+        let versions = vec![
+            version("blocked", "release", false),
+            version("ok", "beta", true),
+        ];
         assert_eq!(pick_best(&versions).unwrap().id, "ok");
     }
 
@@ -427,9 +444,7 @@ mod tests {
 /// pack installs would arrive with no provenance — unnamed, untracked and
 /// invisible to update checks.
 pub fn ids_from_modrinth_url(url: &str) -> Option<(String, String)> {
-    let rest = url
-        .split_once("cdn.modrinth.com/data/")
-        .map(|(_, r)| r)?;
+    let rest = url.split_once("cdn.modrinth.com/data/").map(|(_, r)| r)?;
     let mut parts = rest.split('/');
     let project = parts.next()?;
     if parts.next()? != "versions" {
@@ -462,6 +477,7 @@ pub async fn link_untracked(
     client: &reqwest::Client,
     paths: &Paths,
     instance: &mut Instance,
+    jars: &crate::instance::jar::MetaCache,
     progress: &Progress,
 ) -> Result<LinkReport> {
     use crate::instance::content::{self as content, ContentKind};
@@ -476,7 +492,7 @@ pub async fn link_untracked(
     // Collect the untracked files first so the hash lookup is one request.
     let mut pending: Vec<(ContentKind, String, String)> = Vec::new();
     for kind in kinds {
-        let items = content::list(paths, instance, kind).await?;
+        let items = content::list(paths, instance, kind, jars).await?;
         let dir = content::content_dir(paths, &instance.id, kind);
         for item in items.into_iter().filter(|i| i.from_disk) {
             let path = dir.join(&item.file_name);
@@ -536,13 +552,15 @@ pub async fn link_untracked(
             provider: Provider::Modrinth.as_str().to_string(),
             project_id: version.project_id.clone(),
             version_id: version.id.clone(),
-            name: project.map(|p| p.name.clone()).unwrap_or_else(|| {
-                version.name.clone()
-            }),
+            name: project
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| version.name.clone()),
             version_number: version.version_number.clone(),
             slug: project.map(|p| p.slug.clone()),
             icon_url: project.and_then(|p| p.icon_url.clone()),
             dependency: false,
+            // A hash lookup gives provenance, not a dependency list.
+            requires: None,
         });
         identified += 1;
     }

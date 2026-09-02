@@ -81,9 +81,9 @@ fn neo_prefix(mc_version: &str) -> String {
 
 fn installer_url(flavor: Flavor, mc_version: &str, loader: &str) -> String {
     match flavor {
-        Flavor::NeoForge => format!(
-            "{NEO_MAVEN}/net/neoforged/neoforge/{loader}/neoforge-{loader}-installer.jar"
-        ),
+        Flavor::NeoForge => {
+            format!("{NEO_MAVEN}/net/neoforged/neoforge/{loader}/neoforge-{loader}-installer.jar")
+        }
         // Forge loader ids already include the game version (`1.20.1-47.2.0`),
         // but older releases append the game version a second time.
         Flavor::Forge => {
@@ -193,7 +193,10 @@ pub async fn install(
 
     // Processor libraries live in the same shared store as game libraries.
     progress
-        .stage("Downloading loader libraries", profile.libraries.len() as u64)
+        .stage(
+            "Downloading loader libraries",
+            profile.libraries.len() as u64,
+        )
         .await;
     let mut downloads = Vec::new();
     for lib in &profile.libraries {
@@ -210,7 +213,10 @@ pub async fn install(
     // Build the substitution table the processor args are templated against.
     let mut tokens: HashMap<String, String> = HashMap::new();
     for (key, value) in &profile.data {
-        tokens.insert(key.clone(), resolve_data_value(&value.client, paths, &extracted));
+        tokens.insert(
+            key.clone(),
+            resolve_data_value(&value.client, paths, &extracted),
+        );
     }
     tokens.insert("SIDE".into(), "client".into());
     tokens.insert("MINECRAFT_JAR".into(), path_str(vanilla_jar));
@@ -362,11 +368,7 @@ fn unpack_installer(
 
 /// A `data` entry is one of: a maven coordinate in brackets, a path into the
 /// installer jar, or a literal string.
-fn resolve_data_value(
-    raw: &str,
-    paths: &Paths,
-    extracted: &HashMap<String, PathBuf>,
-) -> String {
+fn resolve_data_value(raw: &str, paths: &Paths, extracted: &HashMap<String, PathBuf>) -> String {
     if let Some(coord) = raw.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
         return path_str(&paths.maven(coord));
     }
@@ -545,7 +547,10 @@ mod tests {
             version_id(Flavor::Forge, "1.20.1", "1.20.1-47.2.0"),
             "1.20.1-47.2.0-forge"
         );
-        assert_eq!(version_id(Flavor::Forge, "1.20.1", "47.2.0"), "1.20.1-forge-47.2.0");
+        assert_eq!(
+            version_id(Flavor::Forge, "1.20.1", "47.2.0"),
+            "1.20.1-forge-47.2.0"
+        );
     }
 
     #[test]
@@ -555,7 +560,10 @@ mod tests {
         };
         let mut tokens = HashMap::new();
         tokens.insert("SIDE".to_string(), "client".to_string());
-        assert_eq!(expand_arg("--side={SIDE}", &tokens, &paths), "--side=client");
+        assert_eq!(
+            expand_arg("--side={SIDE}", &tokens, &paths),
+            "--side=client"
+        );
     }
 
     #[test]

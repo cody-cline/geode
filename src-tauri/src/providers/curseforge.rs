@@ -60,11 +60,11 @@ fn loader_name(id: Option<u32>) -> Option<&'static str> {
 
 fn sort_field(sort: SortBy) -> u32 {
     match sort {
-        SortBy::Relevance => 1,  // Featured
-        SortBy::Downloads => 6,  // TotalDownloads
-        SortBy::Follows => 2,    // Popularity
-        SortBy::Newest => 11,    // ReleasedDate
-        SortBy::Updated => 3,    // LastUpdated
+        SortBy::Relevance => 1, // Featured
+        SortBy::Downloads => 6, // TotalDownloads
+        SortBy::Follows => 2,   // Popularity
+        SortBy::Newest => 11,   // ReleasedDate
+        SortBy::Updated => 3,   // LastUpdated
     }
 }
 
@@ -96,7 +96,9 @@ async fn get<T: serde::de::DeserializeOwned>(
         )));
     }
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        return Err(Error::msg("CurseForge rate limit reached — try again shortly"));
+        return Err(Error::msg(
+            "CurseForge rate limit reached — try again shortly",
+        ));
     }
     if !status.is_success() {
         return Err(Error::msg(format!("CurseForge returned HTTP {status}")));
@@ -138,7 +140,11 @@ fn key_shape_hint(key: &str) -> String {
             "The key is {len} characters; CurseForge keys are exactly \
              {CF_KEY_LEN}. It looks like {} — copy the whole value from \
              console.curseforge.com.",
-            if len < CF_KEY_LEN { "part is missing" } else { "something extra got included" }
+            if len < CF_KEY_LEN {
+                "part is missing"
+            } else {
+                "something extra got included"
+            }
         );
     }
     "The length and prefix are both correct, so the value itself is being \
@@ -634,7 +640,10 @@ mod tests {
         let key = format!("$2a$10${}", "a".repeat(53));
         assert_eq!(key.len(), CF_KEY_LEN);
         let hint = key_shape_hint(&key);
-        assert!(hint.contains("length and prefix are both correct"), "{hint}");
+        assert!(
+            hint.contains("length and prefix are both correct"),
+            "{hint}"
+        );
     }
 
     #[test]

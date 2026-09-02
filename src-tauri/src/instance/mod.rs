@@ -1,4 +1,5 @@
 pub mod content;
+pub mod jar;
 pub mod modpack;
 
 use serde::{Deserialize, Serialize};
@@ -182,7 +183,10 @@ pub fn slugify(name: &str) -> String {
 pub async fn unique_id(paths: &Paths, base: &str) -> String {
     let mut candidate = base.to_string();
     let mut n = 2;
-    while tokio::fs::metadata(paths.instance(&candidate)).await.is_ok() {
+    while tokio::fs::metadata(paths.instance(&candidate))
+        .await
+        .is_ok()
+    {
         candidate = format!("{base}-{n}");
         n += 1;
     }
