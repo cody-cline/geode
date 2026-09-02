@@ -1,5 +1,6 @@
 import clsx from "clsx";
 import {
+  Blocks,
   Check,
   Download,
   Loader2,
@@ -22,6 +23,7 @@ export default function ProjectCard({
   busy,
   progress,
   directInstall,
+  viaConnector,
   onOpen,
   onRequestInstall,
 }: {
@@ -38,6 +40,8 @@ export default function ProjectCard({
   progress?: ProgressEvent;
   /** True when the destination is already fixed, so no dialog follows. */
   directInstall?: boolean;
+  /** This is a Fabric mod being offered on a (Neo)Forge target. */
+  viaConnector?: boolean;
   onOpen: () => void;
   /** Asks the parent where this should go — the card never decides. */
   onRequestInstall: (project: Project) => void;
@@ -81,6 +85,15 @@ export default function ProjectCard({
               {ref.provider === "modrinth" ? "Modrinth" : "CurseForge"}
             </span>
           ))}
+          {viaConnector && (
+            <span
+              className={clsx("badge", styles.connectorBadge)}
+              title="A Fabric mod. Installing it adds Sinytra Connector, Forgified Fabric API and Connector Extras so it can run on this loader."
+            >
+              <Blocks size={10} />
+              via Connector
+            </span>
+          )}
           {blocked && (
             <span
               className="badge badge-warn"

@@ -221,3 +221,11 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* Distinct from the provider badges: this is a statement about how the mod
+   will run, not about where it came from. */
+.connectorBadge {
+  background: color-mix(in srgb, #a78bfa 16%, transparent);
+  border-color: color-mix(in srgb, #a78bfa 38%, transparent);
+  color: #c4b5fd;
+}

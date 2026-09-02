@@ -412,6 +412,19 @@ pub async fn add_local_content(
     Ok(added)
 }
 
+/// Whether Fabric mods can be offered for this instance via Sinytra Connector.
+///
+/// Answered from the files Connector publishes, so it stays correct as it gains
+/// or drops versions without anything here changing.
+#[tauri::command]
+pub async fn connector_support(
+    state: State<'_, AppState>,
+    game_version: String,
+    loader: String,
+) -> Result<crate::connector::ConnectorSupport> {
+    crate::connector::support_for(&state.http, &state.connector, &game_version, &loader).await
+}
+
 #[tauri::command]
 pub async fn install_content(
     app: AppHandle,
@@ -420,6 +433,8 @@ pub async fn install_content(
     provider: String,
     project_id: String,
     version_id: Option<String>,
+    // Install the mod's Fabric build and bring in the Connector runtime.
+    via_connector: Option<bool>,
 ) -> Result<crate::install::content::InstallReport> {
     let provider = Provider::parse(&provider).ok_or_else(|| Error::msg("unknown provider"))?;
     let config = state.config().await;
@@ -429,8 +444,34 @@ pub async fn install_content(
     let mut inst = instance::load(&state.paths, &id).await?;
     let project = providers::project(&state.http, provider, &project_id, cf_key).await?;
 
-    let loader =
-        (project.kind.install_kind() == Some(ContentKind::Mod)).then(|| inst.loader.as_str());
+    let via_connector = via_connector.unwrap_or(false);
+    if via_connector {
+        // Re-check rather than trusting the caller: the UI decides whether to
+        // offer this, but the rule belongs with the thing that enforces it.
+        let support = crate::connector::support_for(
+            &state.http,
+            &state.connector,
+            &inst.mc_version,
+            inst.loader.as_str(),
+        )
+        .await?;
+        if !support.supported {
+            return Err(Error::msg(format!(
+                "Sinytra Connector has no build for Minecraft {} on {}, so Fabric mods \
+                 cannot run there",
+                inst.mc_version,
+                inst.loader.display_name()
+            )));
+        }
+    }
+
+    // A Connector install wants the mod's Fabric build, not one for the
+    // instance's own loader — that is the whole point of the route.
+    let loader = if via_connector {
+        Some("fabric")
+    } else {
+        (project.kind.install_kind() == Some(ContentKind::Mod)).then(|| inst.loader.as_str())
+    };
     let versions = providers::versions(
         &state.http,
         provider,
@@ -459,6 +500,22 @@ pub async fn install_content(
     let progress = Progress::new(app, format!("install:{id}:{project_id}"));
     state.register_cancel(progress.id(), progress.cancel_flag());
 
+    // The runtime goes in first: a Fabric jar in a (Neo)Forge mods folder does
+    // nothing on its own, and a failure here should stop before that happens.
+    let mut connector_added = Vec::new();
+    if via_connector {
+        match crate::connector::ensure_stack(&state.http, &state.paths, &mut inst, &progress).await
+        {
+            Ok(added) => connector_added = added,
+            Err(e) => {
+                state.clear_cancel(progress.id());
+                let _ = inst.save(&state.paths).await;
+                progress.fail(&e.to_string()).await;
+                return Err(e);
+            }
+        }
+    }
+
     let result = crate::install::content::install_with_dependencies(
         &state.http,
         &state.paths,
@@ -472,7 +529,12 @@ pub async fn install_content(
 
     state.clear_cancel(progress.id());
     match result {
-        Ok(report) => {
+        Ok(mut report) => {
+            // Report the runtime alongside the mod so the toast can say what
+            // else arrived and why.
+            for name in connector_added {
+                report.installed.push(name);
+            }
             inst.save(&state.paths).await?;
             progress.finish().await;
             Ok(report)
@@ -673,15 +735,7 @@ pub async fn apply_content_update(
     project_id: String,
     version_id: String,
 ) -> Result<crate::install::content::InstallReport> {
-    install_content(
-        app,
-        state,
-        id,
-        provider,
-        project_id,
-        Some(version_id),
-    )
-    .await
+    install_content(app, state, id, provider, project_id, Some(version_id), None).await
 }
 
 // ---------------------------------------------------------------------------

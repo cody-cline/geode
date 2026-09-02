@@ -3,6 +3,7 @@ import type {
   Account,
   AppInfo,
   Config,
+  ConnectorSupport,
   ContentItem,
   ContentKind,
   DeviceCodeStart,
@@ -100,13 +101,17 @@ export const api = {
     provider: Provider,
     projectId: string,
     versionId?: string,
+    viaConnector?: boolean,
   ) =>
     invoke<InstallReport>("install_content", {
       id,
       provider,
       projectId,
       versionId: versionId ?? null,
+      viaConnector: viaConnector ?? null,
     }),
+  connectorSupport: (gameVersion: string, loader: string) =>
+    invoke<ConnectorSupport>("connector_support", { gameVersion, loader }),
   installModpack: (
     provider: Provider,
     projectId: string,

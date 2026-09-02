@@ -107,6 +107,12 @@ export interface Project {
   pageUrl: string;
   bannerUrl?: string | null;
   distributionAllowed: boolean;
+  /**
+   * Set client-side, not by the API: this hit came from the Fabric search and
+   * has no build for the target's own loader, so installing it means going
+   * through Sinytra Connector.
+   */
+  viaConnector?: boolean;
   alsoOn: ProviderRef[];
 }
 
@@ -199,6 +205,14 @@ export interface Config {
   hasCurseforgeKey: boolean;
   /** True when the key came from GEODE_CURSEFORGE_KEY at build time. */
   curseforgeKeyFromBuild: boolean;
+}
+
+export interface ConnectorSupport {
+  supported: boolean;
+  /** Game versions Connector covers for this loader, for explaining a no. */
+  versionsForLoader: string[];
+  /** Slugs installed alongside a Fabric mod. */
+  stack: string[];
 }
 
 export interface KeyCheck {

@@ -11,6 +11,7 @@ import { titleCase } from "../lib/format";
 import { useStore } from "../lib/store";
 import { LOADERS } from "../lib/types";
 import type {
+  ConnectorSupport,
   Instance,
   Loader,
   Project,
@@ -75,6 +76,8 @@ export default function Browse({
   const [filterVersion, setFilterVersion] = useState("");
   const [filterLoader, setFilterLoader] = useState("");
   const [gameVersions, setGameVersions] = useState<string[]>([]);
+  const [includeFabric, setIncludeFabric] = useState(false);
+  const [connector, setConnector] = useState<ConnectorSupport | null>(null);
 
   const [hits, setHits] = useState<Project[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
@@ -269,6 +272,7 @@ export default function Browse({
         project.provider,
         project.id,
         versionId,
+        project.viaConnector,
       );
       setLastTargetId(instance.id);
       await Promise.all([refreshInstalled(), refreshInstances()]);
@@ -277,8 +281,9 @@ export default function Browse({
       toast({
         kind: "success",
         title: `Added ${project.name} to ${instance.name}`,
-        body:
-          extras > 0
+        body: project.viaConnector
+          ? `Running on Sinytra Connector${extras > 0 ? `, plus ${extras} more` : ""}.`
+          : extras > 0
             ? `Plus ${extras} required ${extras === 1 ? "dependency" : "dependencies"}.`
             : undefined,
       });
@@ -382,6 +387,35 @@ export default function Browse({
       : null
     : filterLoader || null;
 
+  // Whether Fabric mods can be offered for the current target. The answer
+  // comes from the files Connector publishes, so it needs no local version
+  // table and stays right as Connector gains or drops support.
+  useEffect(() => {
+    const version = lockedInstance?.mcVersion ?? filterVersion;
+    const activeLoader = lockedInstance?.loader ?? filterLoader;
+    if (!version || !activeLoader) {
+      setConnector(null);
+      return;
+    }
+    let cancelled = false;
+    api
+      .connectorSupport(version, activeLoader)
+      .then((s) => !cancelled && setConnector(s))
+      .catch(() => !cancelled && setConnector(null));
+    return () => {
+      cancelled = true;
+    };
+  }, [lockedInstance, filterVersion, filterLoader]);
+
+  const connectorOffered = kind === "mod" && Boolean(connector?.supported);
+
+  // Turning the target off should not leave the option silently applied.
+  useEffect(() => {
+    if (!connectorOffered && includeFabric) setIncludeFabric(false);
+  }, [connectorOffered, includeFabric]);
+
+  const useFabric = connectorOffered && includeFabric;
+
   const runSearch = useCallback(
     async (page: number) => {
       const offset = page * PAGE_SIZE;
@@ -390,18 +424,53 @@ export default function Browse({
       else setLoadingMore(true);
 
       try {
-        const results = await api.searchProjects({
+        const base = {
           query: debounced,
           kind,
           gameVersion,
-          loader,
           categories,
           sort,
           offset,
           limit: PAGE_SIZE,
-          providers: providers.length > 0 ? providers : ["modrinth"],
-        });
+          providers: (providers.length > 0
+            ? providers
+            : (["modrinth"] as Provider[])) as Provider[],
+        };
+
+        // Two queries when Connector is in play: the target's own loader, then
+        // Fabric. Native builds win, so anything only the second query found is
+        // what Connector actually adds.
+        const [native, fabric] = await Promise.all([
+          api.searchProjects({ ...base, loader }),
+          useFabric
+            ? api.searchProjects({ ...base, loader: "fabric" })
+            : Promise.resolve(null),
+        ]);
         if (seq !== requestSeq.current) return;
+
+        const nativeKeys = new Set(
+          native.hits.flatMap((p) => [
+            `${p.provider}:${p.id}`,
+            ...p.alsoOn.map((r) => `${r.provider}:${r.id}`),
+          ]),
+        );
+        const viaConnector = (fabric?.hits ?? [])
+          .filter((p) => !nativeKeys.has(`${p.provider}:${p.id}`))
+          .map((p) => ({ ...p, viaConnector: true }));
+        const results = {
+          // Interleave by each hit's rank in its own result set so Connector
+          // mods land among equally-relevant native ones instead of below them.
+          hits: [...native.hits, ...viaConnector]
+            .map((p, i) => ({ p, rank: i < native.hits.length ? i : i - native.hits.length }))
+            .sort((a, b) => a.rank - b.rank)
+            .map((e) => e.p),
+          warnings: [
+            ...native.warnings,
+            ...(fabric?.warnings ?? []).filter(
+              (w) => !native.warnings.includes(w),
+            ),
+          ],
+        };
 
         setWarnings(results.warnings);
         setExhausted(results.hits.length < PAGE_SIZE / 2);
@@ -423,7 +492,17 @@ export default function Browse({
         }
       }
     },
-    [debounced, kind, gameVersion, loader, categories, sort, providers, reportError],
+    [
+      debounced,
+      kind,
+      gameVersion,
+      loader,
+      categories,
+      sort,
+      providers,
+      useFabric,
+      reportError,
+    ],
   );
 
   useEffect(() => {
@@ -602,6 +681,25 @@ export default function Browse({
             </section>
           )}
 
+          {connectorOffered && (
+            <section className={styles.filterSection}>
+              <h3 className={styles.filterTitle}>Compatibility layer</h3>
+              <label className={styles.check}>
+                <input
+                  type="checkbox"
+                  checked={includeFabric}
+                  onChange={(e) => setIncludeFabric(e.target.checked)}
+                />
+                <span className={styles.connectorLabel}>Include Fabric mods</span>
+              </label>
+              <p className={styles.filterNote}>
+                Mixes Fabric-only mods into the list, run through Sinytra
+                Connector. Installing one also adds Connector, Forgified Fabric
+                API and Connector Extras.
+              </p>
+            </section>
+          )}
+
           {available.length > 0 && (
             <section className={styles.filterSection}>
               <h3 className={styles.filterTitle}>Categories</h3>
@@ -664,6 +762,7 @@ export default function Browse({
                     directInstall={Boolean(lockedInstance)}
                     onOpen={() => setSelected(project)}
                     onRequestInstall={requestInstall}
+                    viaConnector={project.viaConnector}
                   />
                 ))}
               </div>

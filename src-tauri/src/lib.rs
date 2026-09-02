@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod commands;
 pub mod config;
+pub mod connector;
 pub mod error;
 pub mod install;
 pub mod instance;
@@ -67,6 +68,7 @@ pub fn run() {
             commands::remove_content,
             commands::add_local_content,
             commands::install_content,
+            commands::connector_support,
             commands::install_modpack,
             commands::link_untracked_content,
             commands::check_content_updates,

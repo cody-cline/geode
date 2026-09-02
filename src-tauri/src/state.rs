@@ -63,6 +63,7 @@ pub struct AppState {
     pub paths: Paths,
     pub http: reqwest::Client,
     pub manifests: ManifestCache,
+    pub connector: crate::connector::SupportCache,
     pub games: GameRegistry,
     /// Cached so every command does not re-read config.json from disk.
     config: tokio::sync::RwLock<Config>,
@@ -76,6 +77,7 @@ impl AppState {
             paths,
             http: crate::net::client(),
             manifests: ManifestCache::new(),
+            connector: crate::connector::SupportCache::new(),
             games: GameRegistry::default(),
             config: tokio::sync::RwLock::new(config),
             cancels: Mutex::new(HashMap::new()),

@@ -16,6 +16,7 @@ use crate::error::{Error, Result};
 use crate::install::Installed;
 use crate::instance::Instance;
 use crate::meta::piston::{Argument, VersionJson};
+use crate::meta::Loader;
 use crate::paths::Paths;
 
 pub const LAUNCHER_NAME: &str = "geode";
@@ -159,13 +160,17 @@ pub fn build_plan(
             .map(str::to_string),
     );
 
+    // Switches the game to structured XML logging, which the console pane
+    // parses back into levelled entries. Forge and NeoForge ship their own
+    // log4j config; Mojang's replaces it and silences mod-loading output, so
+    // they keep theirs and the console falls back to plain lines.
     if let Some(log_config) = &installed.log_config {
-        // Switches the game to structured XML logging, which the console pane
-        // parses back into levelled entries.
-        args.push(format!(
-            "-Dlog4j.configurationFile={}",
-            log_config.to_string_lossy()
-        ));
+        if !matches!(instance.loader, Loader::Forge | Loader::NeoForge) {
+            args.push(format!(
+                "-Dlog4j.configurationFile={}",
+                log_config.to_string_lossy()
+            ));
+        }
     }
 
     match &version.arguments {
