@@ -143,16 +143,6 @@
   fill: var(--border-strong);
 }
 
-/* One separate little graph. Deliberately quiet — it is there to group, not
-   to compete with the nodes sitting on top of it. */
-.cluster {
-  position: absolute;
-  border-radius: var(--radius);
-  border: 1px solid var(--border);
-  background: color-mix(in srgb, var(--surface) 55%, transparent);
-  pointer-events: none;
-}
-
 .centre {
   position: absolute;
   inset: 0;
