@@ -10,7 +10,7 @@
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 16px;
   padding: 12px 22px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
@@ -19,6 +19,7 @@
 .searchWrap {
   position: relative;
   width: 210px;
+  flex-shrink: 0;
 }
 
 .searchIcon {
@@ -36,117 +37,23 @@
   width: 100%;
 }
 
-.legend {
-  display: flex;
-  gap: 14px;
-  flex: 1;
-  font-size: 11px;
+/* The one fact that matters most about a mods folder, said in words. Most
+   mods are connected to nothing, and a picture of the minority that are
+   should not be the only thing on the page that speaks. */
+.summary {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.omitted {
+  margin-left: 12px;
+  padding-left: 12px;
+  border-left: 1px solid var(--border);
   color: var(--text-faint);
-}
-
-.legendItem {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 3px;
-  display: inline-block;
-}
-
-.dotRoot {
-  background: var(--accent);
-}
-
-.dotDep {
-  background: var(--info);
-}
-
-.dotLoose {
-  background: var(--warn);
-}
-
-.zoom {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.scale {
-  font-size: 11px;
-  color: var(--text-faint);
-  min-width: 38px;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
-}
-
-/* Canvas ----------------------------------------------------------------- */
-
-.frame {
-  position: relative;
-  flex: 1;
-  min-height: 0;
-  overflow: hidden;
-  cursor: grab;
-  touch-action: none;
-  /* A faint grid gives the pan something to move against; without it a drag
-     on empty space feels like nothing happened. */
-  background-color: var(--bg);
-  background-image: radial-gradient(
-    circle at 1px 1px,
-    var(--border) 1px,
-    transparent 0
-  );
-  background-size: 22px 22px;
-}
-
-.frame:active {
-  cursor: grabbing;
-}
-
-.canvas {
-  position: absolute;
-  top: 0;
-  left: 0;
-  transform-origin: 0 0;
-}
-
-.wires {
-  position: absolute;
-  top: 0;
-  left: 0;
-  pointer-events: none;
-}
-
-.wire {
-  fill: none;
-  stroke: color-mix(in srgb, var(--text-faint) 65%, transparent);
-  stroke-width: 1.6;
-  stroke-linecap: round;
-  transition:
-    stroke 0.15s var(--ease),
-    opacity 0.15s var(--ease);
-}
-
-/* The traced chain, once something is hovered or pinned. */
-.wireLit {
-  stroke: var(--accent);
-}
-
-.wireDim {
-  opacity: 0.12;
-}
-
-.arrow {
-  fill: color-mix(in srgb, var(--text-faint) 65%, transparent);
 }
 
 .centre {
-  position: absolute;
-  inset: 0;
+  flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -160,6 +67,81 @@
   opacity: 0.4;
 }
 
+/* The deck --------------------------------------------------------------- */
+
+.deck {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 276px);
+  gap: 16px;
+  justify-content: center;
+  align-items: start;
+  padding: 20px 22px 40px;
+}
+
+/* A border around each little graph rather than whitespace between them.
+   Enclosure is a stronger grouping cue than proximity, and it is what lets
+   "these are five unrelated things" land before anything has been read. */
+.card {
+  width: 276px;
+  padding: 16px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.full {
+  grid-column: 1 / -1;
+  width: auto;
+}
+
+.cardHead {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.cardTitle {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.cardNote {
+  font-size: 11px;
+  font-style: normal;
+  color: var(--text-faint);
+}
+
+.plot {
+  position: relative;
+}
+
+.wires {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+}
+
+/* Filled wedges, not strokes: wide at the mod, narrow at the library it
+   needs, so direction is carried along the whole line instead of by a head
+   that several edges would stack on top of each other. */
+.wire {
+  fill: color-mix(in srgb, var(--text-faint) 78%, transparent);
+}
+
+.skip {
+  fill: none;
+  stroke: color-mix(in srgb, var(--text-faint) 78%, transparent);
+  stroke-linecap: round;
+}
+
 /* Nodes ------------------------------------------------------------------ */
 
 .node {
@@ -168,7 +150,7 @@
   align-items: center;
   gap: 9px;
   padding: 0 11px 0 0;
-  border-radius: 10px;
+  border-radius: 9px;
   border: 1px solid var(--border-strong);
   background: linear-gradient(
     180deg,
@@ -183,14 +165,42 @@
   cursor: pointer;
   overflow: hidden;
   transition:
-    border-color 0.15s var(--ease),
-    box-shadow 0.15s var(--ease),
-    opacity 0.15s var(--ease);
+    border-color 0.14s var(--ease),
+    box-shadow 0.14s var(--ease);
 }
 
 .node:hover {
   border-color: var(--text-faint);
   box-shadow: var(--shadow);
+}
+
+/* The left edge carries the colour, so a mod you chose reads differently
+   from one that came along, without painting whole boxes. */
+.nodeRoot {
+  border-left: 3px solid var(--accent);
+}
+
+.nodeDep {
+  border-left: 3px solid var(--info);
+}
+
+.nodeUnused {
+  border-left-color: var(--warn);
+}
+
+.nodeOff {
+  opacity: 0.45;
+  font-style: italic;
+}
+
+.nodeFocus {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface-2));
+}
+
+.nodeMatch {
+  border-color: var(--warn);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--warn) 35%, transparent);
 }
 
 .nodeIcon {
@@ -212,39 +222,6 @@
   object-fit: cover;
 }
 
-/* The left edge carries the colour, so the legend reads at a glance without
-   painting whole boxes and losing the text contrast. */
-.nodeRoot {
-  border-left: 3px solid var(--accent);
-}
-
-.nodeDep {
-  border-left: 3px solid var(--info);
-}
-
-.nodeUnused {
-  border-left-color: var(--warn);
-}
-
-.nodeOff {
-  opacity: 0.45;
-  font-style: italic;
-}
-
-.nodeDim {
-  opacity: 0.22;
-}
-
-.nodeFocus {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 14%, var(--surface-2));
-}
-
-.nodeMatch {
-  border-color: var(--warn);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--warn) 35%, transparent);
-}
-
 .nodeName {
   flex: 1;
   overflow: hidden;
@@ -252,135 +229,97 @@
   white-space: nowrap;
 }
 
-/* How many mods hang off this one — the number that makes a library a hub. */
-.fanIn {
-  flex-shrink: 0;
-  min-width: 18px;
-  padding: 1px 5px;
-  border-radius: 999px;
-  background: var(--surface-3);
-  color: var(--text-dim);
-  font-size: 10px;
-  font-weight: 600;
-  text-align: center;
-}
-
-/* Detail panel ----------------------------------------------------------- */
-
-.detail {
-  position: absolute;
-  right: 16px;
-  bottom: 16px;
-  width: 268px;
-  padding: 14px 16px;
-  border-radius: var(--radius);
-  border: 1px solid var(--border-strong);
-  background: var(--surface);
-  box-shadow: var(--shadow);
-}
-
-.detail h3 {
-  font-size: 13px;
-  font-weight: 600;
-  margin-bottom: 2px;
-}
-
-.detailMeta {
+/* Chips ------------------------------------------------------------------
+ *
+ * The compact form, used in exactly two places, both of which genuinely are
+ * sets rather than structures: the mods that stand alone, and the dependents
+ * of a library too popular to draw as spokes.
+ */
+.rule {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 0 12px;
   font-size: 11px;
   color: var(--text-faint);
-  margin-bottom: 10px;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.detail dl {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-bottom: 12px;
+.rule::before,
+.rule::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
 }
 
-.detail dt {
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-faint);
-}
-
-.detail dd {
-  font-size: 12px;
-  color: var(--text-dim);
-  line-height: 1.45;
-}
-
-/* Loose mods ------------------------------------------------------------- */
-
-.shelf {
-  flex-shrink: 0;
-  max-height: 132px;
-  overflow-y: auto;
-  padding: 10px 22px 14px;
-  border-top: 1px solid var(--border);
-  background: var(--surface);
-}
-
-.shelfTitle {
-  display: block;
-  margin-bottom: 8px;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-faint);
-}
-
-.shelfItems {
+.chips {
   display: flex;
   flex-wrap: wrap;
-  gap: 5px;
+  gap: 8px;
 }
 
 .chip {
-  padding: 3px 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px 0 5px;
   border-radius: 999px;
   border: 1px solid var(--border);
   background: var(--surface-2);
   color: var(--text-dim);
-  font-size: 11px;
-  max-width: 190px;
+  font-size: 11.5px;
+  cursor: pointer;
+  max-width: 240px;
+  transition:
+    border-color 0.14s var(--ease),
+    color 0.14s var(--ease);
+}
+
+/* The label needs its own box to clip against — a flex item cannot ellipsis
+   a bare text node. */
+.chipName {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.chip:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.chipIcon {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  overflow: hidden;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  background: var(--surface-3);
+  color: var(--text-faint);
+}
+
+.chipIcon img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* An unreadable jar is not the same as an unconnected one, and parking it
+   here silently would claim more than we know. */
+.chipUnknown {
+  border-style: dashed;
+}
+
+.chipFocus {
+  border-color: var(--accent);
+  color: var(--text);
 }
 
 .chipMatch {
   border-color: var(--warn);
   color: var(--text);
-}
-
-.shelfNote {
-  margin-left: 10px;
-  font-weight: 500;
-  text-transform: none;
-  letter-spacing: 0;
-  font-style: normal;
-  opacity: 0.75;
-}
-
-.chipUnknown {
-  border-style: dashed;
-}
-
-.omitted {
-  padding-left: 14px;
-  border-left: 1px solid var(--border);
-  color: var(--text-faint);
-  opacity: 0.85;
-}
-
-.hint {
-  font-size: 11px;
-  color: var(--text-faint);
 }
