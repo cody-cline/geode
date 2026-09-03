@@ -32,10 +32,20 @@ const PLATFORM_IDS: &[&str] = &[
 pub struct JarMeta {
     pub name: Option<String>,
     pub version: Option<String>,
-    /// Every id this file satisfies: its own, its declared aliases, and the
-    /// ids of the jars it bundles.
-    pub provides: Vec<String>,
-    /// Ids it requires, with platform ids and anything it bundles removed.
+    /// Ids the jar itself answers to: its own, plus any declared aliases.
+    pub primary: Vec<String>,
+    /// Ids satisfied by jars packed inside it.
+    ///
+    /// Held apart from [`JarMeta::primary`] because a mod carrying a copy of a
+    /// library is a worse answer to "what provides this" than the library
+    /// itself, when both are installed.
+    pub bundled: Vec<String>,
+    /// Ids it requires, platform ids aside.
+    ///
+    /// Deliberately still lists what the jar bundles. Fabric Loader prefers an
+    /// installed copy over a packed one, so Mod Menu carrying its own
+    /// fabric-resource-loader-v0 does not stop Fabric API being what actually
+    /// answers for it — and that relationship is the point of the graph.
     pub requires: Vec<String>,
 }
 
@@ -113,7 +123,7 @@ pub fn read(path: &Path) -> Option<JarMeta> {
             continue;
         };
         if let Some(nested) = declaration(&mut inner) {
-            meta.provides.extend(nested.provides);
+            meta.bundled.extend(nested.primary);
         }
     }
 
@@ -122,7 +132,7 @@ pub fn read(path: &Path) -> Option<JarMeta> {
 }
 
 fn normalise(meta: &mut JarMeta) {
-    for list in [&mut meta.provides, &mut meta.requires] {
+    for list in [&mut meta.primary, &mut meta.bundled, &mut meta.requires] {
         for id in list.iter_mut() {
             *id = id.trim().to_ascii_lowercase();
         }
@@ -130,8 +140,9 @@ fn normalise(meta: &mut JarMeta) {
         list.sort();
         list.dedup();
     }
+    meta.bundled.retain(|id| !meta.primary.contains(id));
     meta.requires
-        .retain(|id| !PLATFORM_IDS.contains(&id.as_str()) && !meta.provides.contains(id));
+        .retain(|id| !PLATFORM_IDS.contains(&id.as_str()));
 }
 
 fn declaration<R: Read + Seek>(zip: &mut zip::ZipArchive<R>) -> Option<JarMeta> {
@@ -180,12 +191,12 @@ fn from_fabric(value: &serde_json::Value) -> JarMeta {
     let root = value.get("quilt_loader").unwrap_or(value);
     let named = root.get("metadata").unwrap_or(root);
 
-    let mut provides = Vec::new();
+    let mut primary = Vec::new();
     if let Some(id) = root.get("id").and_then(|v| v.as_str()) {
-        provides.push(id.to_string());
+        primary.push(id.to_string());
     }
     if let Some(list) = root.get("provides").and_then(|v| v.as_array()) {
-        provides.extend(list.iter().filter_map(entry_id));
+        primary.extend(list.iter().filter_map(entry_id));
     }
 
     let mut requires = Vec::new();
@@ -212,7 +223,8 @@ fn from_fabric(value: &serde_json::Value) -> JarMeta {
             .get("version")
             .and_then(|v| v.as_str())
             .map(str::to_string),
-        provides,
+        primary,
+        bundled: Vec::new(),
         requires,
     }
 }
@@ -234,7 +246,7 @@ fn from_mods_toml(text: &str) -> Option<JarMeta> {
     let root: toml::Table = text.parse().ok()?;
     let mods = root.get("mods")?.as_array()?;
 
-    let provides: Vec<String> = mods
+    let primary: Vec<String> = mods
         .iter()
         .filter_map(|m| m.get("modId").and_then(|v| v.as_str()))
         .map(str::to_string)
@@ -274,7 +286,8 @@ fn from_mods_toml(text: &str) -> Option<JarMeta> {
             // manifest, so it says nothing here.
             .filter(|v| !v.starts_with("${"))
             .map(str::to_string),
-        provides,
+        primary,
+        bundled: Vec::new(),
         requires,
     })
 }
@@ -296,7 +309,7 @@ mod tests {
                 "depends":{"minecraft":">=1.21","fabricloader":"*","fabric-api":"*"}}"#,
         );
         assert_eq!(meta.name.as_deref(), Some("Sodium"));
-        assert_eq!(meta.provides, vec!["sodium"]);
+        assert_eq!(meta.primary, vec!["sodium"]);
         // minecraft and the loader are the platform, not installed files.
         assert_eq!(meta.requires, vec!["fabric-api"]);
     }
@@ -310,7 +323,7 @@ mod tests {
                 "depends":[{"id":"cloth-config"},{"id":"emi","optional":true},"quilt_loader"]}}"#,
         );
         assert_eq!(meta.name.as_deref(), Some("Example"));
-        assert_eq!(meta.provides, vec!["example", "legacy_name"]);
+        assert_eq!(meta.primary, vec!["example", "legacy_name"]);
         // Optional dependencies are the author saying "works well with", and
         // pulling them into the graph would make half a folder look required.
         assert_eq!(meta.requires, vec!["cloth-config"]);
@@ -343,7 +356,7 @@ mod tests {
         .unwrap();
         assert_eq!(meta.name.as_deref(), Some("Just Enough Items"));
         assert_eq!(meta.version.as_deref(), Some("19.0.0"));
-        assert_eq!(meta.provides, vec!["jei"]);
+        assert_eq!(meta.primary, vec!["jei"]);
         assert_eq!(meta.requires, vec!["cloth_config"]);
     }
 
@@ -373,17 +386,23 @@ mod tests {
     }
 
     #[test]
-    fn a_bundled_dependency_is_not_a_missing_one() {
+    fn a_bundled_id_stays_out_of_the_jars_own_identity() {
         let mut meta = JarMeta {
-            provides: vec!["ffapi".into(), "fabric-api-base".into()],
+            primary: vec!["modmenu".into()],
+            // A jar can bundle a copy of something it also names itself.
+            bundled: vec!["modmenu".into(), "fabric-resource-loader-v0".into()],
             requires: vec![
-                "fabric-api-base".into(),
+                "fabric-resource-loader-v0".into(),
                 "minecraft".into(),
                 "sodium".into(),
             ],
             ..Default::default()
         };
         normalise(&mut meta);
-        assert_eq!(meta.requires, vec!["sodium"]);
+        assert_eq!(meta.primary, vec!["modmenu"]);
+        assert_eq!(meta.bundled, vec!["fabric-resource-loader-v0"]);
+        // The requirement survives being bundled: an installed Fabric API is
+        // still what the loader would use, and what the graph should show.
+        assert_eq!(meta.requires, vec!["fabric-resource-loader-v0", "sodium"]);
     }
 }

@@ -245,13 +245,18 @@ fn link(
     metas: &[Option<super::jar::JarMeta>],
     records: &[ContentRecord],
 ) {
-    // Which file answers to a given mod id, and to a given project.
-    let mut by_mod_id: HashMap<String, usize> = HashMap::new();
+    // Which files answer to a given mod id, and which to a given project. Kept
+    // as lists because several mods can carry a copy of the same library.
+    let mut is_id: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut carries_id: HashMap<String, Vec<usize>> = HashMap::new();
     let mut by_project: HashMap<(String, String), usize> = HashMap::new();
     for (i, item) in items.iter().enumerate() {
         if let Some(meta) = &metas[i] {
-            for id in &meta.provides {
-                by_mod_id.entry(id_key(id)).or_insert(i);
+            for id in &meta.primary {
+                is_id.entry(id_key(id)).or_default().push(i);
+            }
+            for id in &meta.bundled {
+                carries_id.entry(id_key(id)).or_default().push(i);
             }
         }
         if let (Some(provider), Some(project)) = (&item.provider, &item.project_id) {
@@ -259,11 +264,40 @@ fn link(
         }
     }
 
+    // Who answers for an id, best candidate first.
+    //
+    // Being the library beats shipping a copy of it, and not needing the id
+    // beats needing it — a mod that asks for fabric-resource-loader-v0 while
+    // also carrying one is plainly not where that module comes from, even
+    // though Fabric API only carries it too. Nothing ever answers for itself,
+    // or a mod bundling its own dependency would satisfy its own requirement
+    // and the edge would disappear.
+    let wants = |i: usize, key: &str| {
+        metas[i]
+            .as_ref()
+            .is_some_and(|m| m.requires.iter().any(|r| id_key(r) == key))
+    };
+    let resolve = |from: usize, id: &str| -> Option<usize> {
+        let key = id_key(id);
+        let rank = |m: &HashMap<String, Vec<usize>>, needy: bool| {
+            m.get(&key).and_then(|found| {
+                found
+                    .iter()
+                    .find(|&&i| i != from && wants(i, &key) == needy)
+                    .copied()
+            })
+        };
+        rank(&is_id, false)
+            .or_else(|| rank(&is_id, true))
+            .or_else(|| rank(&carries_id, false))
+            .or_else(|| rank(&carries_id, true))
+    };
+
     let mut edges: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); items.len()];
     for (i, item) in items.iter().enumerate() {
         if let Some(meta) = &metas[i] {
             for id in &meta.requires {
-                if let Some(&target) = by_mod_id.get(&id_key(id)) {
+                if let Some(target) = resolve(i, id) {
                     edges[i].insert(target);
                 }
             }
@@ -371,12 +405,18 @@ mod tests {
         }
     }
 
-    fn meta(provides: &[&str], requires: &[&str]) -> Option<JarMeta> {
+    fn meta(primary: &[&str], requires: &[&str]) -> Option<JarMeta> {
         Some(JarMeta {
-            provides: provides.iter().map(|s| s.to_string()).collect(),
+            primary: primary.iter().map(|s| s.to_string()).collect(),
             requires: requires.iter().map(|s| s.to_string()).collect(),
             ..Default::default()
         })
+    }
+
+    fn bundling(primary: &[&str], bundled: &[&str], requires: &[&str]) -> Option<JarMeta> {
+        let mut m = meta(primary, requires).unwrap();
+        m.bundled = bundled.iter().map(|s| s.to_string()).collect();
+        Some(m)
     }
 
     #[test]
@@ -410,6 +450,64 @@ mod tests {
         let mut items = vec![item("lib.jar", true)];
         link(&mut items, &[meta(&["lib"], &[])], &[]);
         assert!(items[0].unused);
+    }
+
+    #[test]
+    fn a_mod_that_carries_a_copy_still_points_at_the_real_library() {
+        // Mod Menu ships its own fabric-resource-loader-v0, but an installed
+        // Fabric API is what the loader will actually use for it.
+        let mut items = vec![item("modmenu.jar", false), item("fabric-api.jar", false)];
+        let metas = vec![
+            bundling(
+                &["modmenu"],
+                &["fabric-resource-loader-v0"],
+                &["fabric-resource-loader-v0"],
+            ),
+            bundling(&["fabric-api"], &["fabric-resource-loader-v0"], &[]),
+        ];
+        link(&mut items, &metas, &[]);
+        assert_eq!(items[0].requires, vec!["fabric-api.jar"]);
+        assert_eq!(items[1].required_by, vec!["modmenu.jar"]);
+    }
+
+    #[test]
+    fn the_library_itself_beats_a_mod_carrying_a_copy_of_it() {
+        let mut items = vec![
+            item("needs-cloth.jar", false),
+            item("also-bundles-cloth.jar", false),
+            item("cloth-config.jar", true),
+        ];
+        let metas = vec![
+            meta(&["needy"], &["cloth-config"]),
+            bundling(&["other"], &["cloth-config"], &[]),
+            meta(&["cloth-config"], &[]),
+        ];
+        link(&mut items, &metas, &[]);
+        assert_eq!(items[0].requires, vec!["cloth-config.jar"]);
+    }
+
+    #[test]
+    fn a_mod_that_needs_an_id_is_not_treated_as_its_source() {
+        // Both carry a copy of the module; only Fabric API is not asking for
+        // one, so it is the one that answers.
+        let mut items = vec![
+            item("modmenu.jar", false),
+            item("fabric-api.jar", false),
+            item("sodium.jar", false),
+        ];
+        let metas = vec![
+            bundling(
+                &["modmenu"],
+                &["fabric-resource-loader-v0"],
+                &["fabric-resource-loader-v0"],
+            ),
+            bundling(&["fabric-api"], &["fabric-resource-loader-v0"], &[]),
+            meta(&["sodium"], &["fabric-resource-loader-v0"]),
+        ];
+        link(&mut items, &metas, &[]);
+        assert_eq!(items[0].requires, vec!["fabric-api.jar"]);
+        assert_eq!(items[2].requires, vec!["fabric-api.jar"]);
+        assert!(items[1].requires.is_empty());
     }
 
     #[test]

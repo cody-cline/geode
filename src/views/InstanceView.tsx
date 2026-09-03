@@ -15,6 +15,7 @@ import {
 import InstanceIcon from "../components/InstanceIcon";
 import Browse from "./Browse";
 import ContentTab from "./instance/ContentTab";
+import GraphTab from "./instance/GraphTab";
 import LogsTab from "./instance/LogsTab";
 import PackTab from "./instance/PackTab";
 import SettingsTab from "./instance/SettingsTab";
@@ -28,6 +29,7 @@ import styles from "./InstanceView.module.css";
 
 const TABS = [
   { id: "content", label: "Content" },
+  { id: "graph", label: "Dependencies" },
   { id: "pack", label: "Pack" },
   { id: "logs", label: "Logs" },
   { id: "settings", label: "Settings" },
@@ -200,6 +202,7 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
         {active === "content" && (
           <ContentTab instance={instance} onBrowse={() => setBrowsing(true)} />
         )}
+        {active === "graph" && <GraphTab instance={instance} />}
         {active === "pack" && <PackTab instance={instance} />}
         {active === "logs" && <LogsTab instanceId={id} />}
         {active === "settings" && <SettingsTab instance={instance} />}

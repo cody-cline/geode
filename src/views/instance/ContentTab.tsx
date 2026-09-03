@@ -3,9 +3,6 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import clsx from "clsx";
 import {
   ArrowUpCircle,
-  ChevronDown,
-  ChevronRight,
-  CornerDownRight,
   FilePlus2,
   Link2,
   Loader2,
@@ -47,8 +44,6 @@ export default function ContentTab({
   const [checking, setChecking] = useState(false);
   const [updating, setUpdating] = useState<string | null>(null);
   const [linking, setLinking] = useState(false);
-  const [sweeping, setSweeping] = useState(false);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   const load = useCallback(async () => {
     try {
@@ -76,202 +71,6 @@ export default function ContentTab({
       : items;
   }, [items, filter]);
 
-  const byFile = useMemo(
-    () => new Map((items ?? []).map((i) => [i.fileName, i])),
-    [items],
-  );
-  const nameOf = useCallback(
-    (file: string) => byFile.get(file)?.name ?? file,
-    [byFile],
-  );
-
-  /**
-   * Three groups rather than a tree. The dependency graph is a graph — one
-   * library can be held up by six mods — so nesting it either duplicates that
-   * library under every parent or picks one parent and lies about the rest.
-   * Grouping plus "required by" says the same thing without either.
-   */
-  const groups = useMemo(() => {
-    if (!shown || kind !== "mod") return null;
-    return [
-      {
-        id: "unused",
-        title: "Not needed any more",
-        note: "Installed for something that has since gone. Nothing left requires them.",
-        items: shown.filter((i) => i.unused),
-      },
-      {
-        id: "chosen",
-        title: "Added by you",
-        note: null,
-        items: shown.filter((i) => !i.unused && !i.dependency),
-      },
-      {
-        id: "libraries",
-        title: "Dependencies",
-        note: null,
-        items: shown.filter((i) => !i.unused && i.dependency),
-      },
-    ].filter((g) => g.items.length > 0);
-  }, [shown, kind]);
-
-  // A jar we could not read might be the one thing keeping a library alive, so
-  // say so rather than letting the unused list look more certain than it is.
-  const unreadable = useMemo(
-    () => (items ?? []).filter((i) => kind === "mod" && !i.declaresDeps).length,
-    [items, kind],
-  );
-
-  function renderRow(item: ContentItem) {
-    const update = updateFor(item);
-    const isOpen = expanded.has(item.fileName);
-    const needs = item.requires.map(nameOf);
-    const holders = item.requiredBy.map(nameOf);
-
-    return (
-      <div key={item.fileName} className={styles.entry}>
-        <div className={clsx(styles.row, !item.enabled && styles.disabled)}>
-          <label className={styles.toggle}>
-            <input
-              type="checkbox"
-              checked={item.enabled}
-              onChange={() => toggle(item)}
-              aria-label={`${item.enabled ? "Disable" : "Enable"} ${item.name}`}
-            />
-          </label>
-
-          <div className={styles.itemIcon}>
-            {item.iconUrl ? (
-              <img src={item.iconUrl} alt="" loading="lazy" />
-            ) : (
-              <Package size={16} />
-            )}
-          </div>
-
-          <div className={styles.itemText}>
-            <div className={styles.itemTitle}>
-              <span className={styles.itemName}>{item.name}</span>
-              {item.unused && (
-                <span
-                  className="badge badge-warn"
-                  title="Nothing installed requires this any more"
-                >
-                  not needed
-                </span>
-              )}
-              {item.fromDisk && (
-                <span
-                  className="badge"
-                  title="Added manually — not tracked for updates"
-                >
-                  untracked
-                </span>
-              )}
-              {item.provider && (
-                <span className={clsx("badge", `badge-${item.provider}`)}>
-                  {item.provider === "modrinth" ? "MR" : "CF"}
-                </span>
-              )}
-            </div>
-
-            <div className={styles.itemMeta}>
-              {item.version && <span>{item.version}</span>}
-              <span className={styles.fileName}>{item.fileName}</span>
-              <span>{fileSize(item.size)}</span>
-            </div>
-
-            {/* The fan-in is the whole reason this is not a tree: one library
-                can be held up by any number of mods, and that list is what
-                tells you whether it is safe to delete. */}
-            {holders.length > 0 && (
-              <p className={styles.holders} title={holders.join(", ")}>
-                Needed by {holders.slice(0, 3).join(", ")}
-                {holders.length > 3 && ` and ${holders.length - 3} more`}
-              </p>
-            )}
-          </div>
-
-          {needs.length > 0 && (
-            <button
-              className="btn btn-ghost btn-sm"
-              onClick={() =>
-                setExpanded((prev) => {
-                  const next = new Set(prev);
-                  if (!next.delete(item.fileName)) next.add(item.fileName);
-                  return next;
-                })
-              }
-              aria-expanded={isOpen}
-              title={`What ${item.name} needs`}
-            >
-              {isOpen ? (
-                <ChevronDown size={13} />
-              ) : (
-                <ChevronRight size={13} />
-              )}
-              {needs.length}
-            </button>
-          )}
-
-          {item.unused && (
-            <button
-              className="btn btn-sm"
-              onClick={() => keep(item)}
-              title="Stop offering this for cleanup — treat it as one you chose"
-            >
-              Keep
-            </button>
-          )}
-
-          {update && (
-            <button
-              className="btn btn-sm btn-primary"
-              onClick={() => applyUpdate(update)}
-              disabled={updating !== null}
-              title={`Update to ${update.newVersionNumber}`}
-            >
-              {updating === update.projectId ? (
-                <Loader2 size={12} className="spin" />
-              ) : (
-                <ArrowUpCircle size={13} />
-              )}
-              Update
-            </button>
-          )}
-
-          <button
-            className="btn btn-ghost btn-icon btn-sm"
-            onClick={() => remove(item)}
-            title="Delete"
-            aria-label={`Delete ${item.name}`}
-          >
-            <Trash2 size={14} />
-          </button>
-        </div>
-
-        {isOpen && (
-          <ul className={styles.needs}>
-            {item.requires.map((file) => {
-              const dep = byFile.get(file);
-              return (
-                <li key={file} className={styles.need}>
-                  <CornerDownRight size={12} className={styles.needArrow} />
-                  <span>{nameOf(file)}</span>
-                  {dep && dep.requiredBy.length > 1 && (
-                    <span className={styles.needShared}>
-                      shared with {dep.requiredBy.length - 1} other
-                      {dep.requiredBy.length > 2 ? "s" : ""}
-                    </span>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </div>
-    );
-  }
-
   const updateFor = (item: ContentItem) =>
     updates.find(
       (u) => u.projectId === item.projectId && u.provider === item.provider,
@@ -297,41 +96,6 @@ export default function ContentTab({
       await Promise.all([load(), refreshInstances()]);
     } catch (e) {
       reportError(`Could not delete ${item.name}`, e);
-    }
-  }
-
-  /**
-   * Removing one library can strand the next: a chain pulled in for a mod that
-   * is gone comes loose a link at a time. Re-reading between passes lets the
-   * whole tail go, and the pass count stops a cycle from spinning.
-   */
-  async function removeUnused(unused: ContentItem[]) {
-    setSweeping(true);
-    try {
-      let batch = unused;
-      for (let pass = 0; pass < 8 && batch.length > 0; pass++) {
-        for (const item of batch) {
-          await api.removeContent(instance.id, kind, item.fileName);
-        }
-        const left = await api.listContent(instance.id, kind);
-        setItems(left);
-        batch = left.filter((i) => i.unused);
-      }
-      await refreshInstances();
-    } catch (e) {
-      reportError("Could not remove those", e);
-      await load();
-    } finally {
-      setSweeping(false);
-    }
-  }
-
-  async function keep(item: ContentItem) {
-    try {
-      await api.setContentKept(instance.id, kind, item.fileName, true);
-      await load();
-    } catch (e) {
-      reportError(`Could not keep ${item.name}`, e);
     }
   }
 
@@ -514,14 +278,6 @@ export default function ContentTab({
         </div>
       )}
 
-      {unreadable > 0 && groups?.some((g) => g.id === "unused") && (
-        <p className={styles.caveat}>
-          {unreadable} mod{unreadable === 1 ? "" : "s"} did not state what
-          {unreadable === 1 ? " it needs" : " they need"}, so something below
-          may still be in use.
-        </p>
-      )}
-
       <div className={styles.list}>
         {shown === null ? (
           <div className={styles.skeletons}>
@@ -546,38 +302,83 @@ export default function ContentTab({
             )}
           </div>
         ) : (
-          <>
-            {groups
-              ? groups.map((group) => (
-                  <section key={group.id} className={styles.group}>
-                    <div className={styles.groupHead}>
-                      <h3 className={styles.groupTitle}>{group.title}</h3>
-                      <span className={styles.groupCount}>
-                        {group.items.length}
+          shown.map((item) => {
+            const update = updateFor(item);
+            return (
+              <div
+                key={item.fileName}
+                className={clsx(styles.row, !item.enabled && styles.disabled)}
+              >
+                <label className={styles.toggle}>
+                  <input
+                    type="checkbox"
+                    checked={item.enabled}
+                    onChange={() => toggle(item)}
+                    aria-label={`${item.enabled ? "Disable" : "Enable"} ${item.name}`}
+                  />
+                </label>
+
+                <div className={styles.itemIcon}>
+                  {item.iconUrl ? (
+                    <img src={item.iconUrl} alt="" loading="lazy" />
+                  ) : (
+                    <Package size={16} />
+                  )}
+                </div>
+
+                <div className={styles.itemText}>
+                  <div className={styles.itemTitle}>
+                    <span className={styles.itemName}>{item.name}</span>
+                    {item.dependency && (
+                      <span className="badge" title="Installed as a dependency">
+                        dependency
                       </span>
-                      {group.note && (
-                        <span className={styles.groupNote}>{group.note}</span>
-                      )}
-                      {group.id === "unused" && (
-                        <button
-                          className="btn btn-sm"
-                          onClick={() => removeUnused(group.items)}
-                          disabled={sweeping}
-                        >
-                          {sweeping ? (
-                            <Loader2 size={12} className="spin" />
-                          ) : (
-                            <Trash2 size={13} />
-                          )}
-                          Remove {group.items.length}
-                        </button>
-                      )}
-                    </div>
-                    {group.items.map(renderRow)}
-                  </section>
-                ))
-              : shown.map(renderRow)}
-          </>
+                    )}
+                    {item.fromDisk && (
+                      <span className="badge" title="Added manually — not tracked for updates">
+                        untracked
+                      </span>
+                    )}
+                    {item.provider && (
+                      <span className={clsx("badge", `badge-${item.provider}`)}>
+                        {item.provider === "modrinth" ? "MR" : "CF"}
+                      </span>
+                    )}
+                  </div>
+                  <div className={styles.itemMeta}>
+                    {item.version && <span>{item.version}</span>}
+                    <span className={styles.fileName}>{item.fileName}</span>
+                    <span>{fileSize(item.size)}</span>
+                  </div>
+                </div>
+
+                {update && (
+                  <button
+                    className="btn btn-sm btn-primary"
+                    onClick={() => applyUpdate(update)}
+                    disabled={updating !== null}
+                    title={`Update to ${update.newVersionNumber}`}
+                  >
+                    {updating === update.projectId ? (
+                      <Loader2 size={12} className="spin" />
+                    ) : (
+                      <ArrowUpCircle size={13} />
+                    )}
+                    Update
+                  </button>
+                )}
+
+                <button
+                  className="btn btn-ghost btn-icon btn-sm"
+                  onClick={() => remove(item)}
+                  title="Delete"
+                  aria-label={`Delete ${item.name}`}
+                >
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            );
+          })
         )}
       </div>
     </div>

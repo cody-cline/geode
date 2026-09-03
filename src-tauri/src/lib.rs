@@ -65,7 +65,6 @@ pub fn run() {
             commands::instance_folder,
             commands::list_content,
             commands::set_content_enabled,
-            commands::set_content_kept,
             commands::remove_content,
             commands::add_local_content,
             commands::install_content,

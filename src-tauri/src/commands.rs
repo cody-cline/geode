@@ -376,33 +376,6 @@ pub async fn set_content_enabled(
     instance::content::set_enabled(&state.paths, &id, kind, &file, enabled).await
 }
 
-/// Promote a mod that arrived as a dependency to one you keep on purpose, or
-/// put it back.
-///
-/// Dependency data is never going to be perfect — a jar can require an id
-/// nothing here declares, and the mod holding it up is then reported as unused.
-/// This is the escape hatch: say you want it, and it stops being offered for
-/// cleanup, permanently.
-#[tauri::command]
-pub async fn set_content_kept(
-    state: State<'_, AppState>,
-    id: String,
-    kind: String,
-    file: String,
-    kept: bool,
-) -> Result<()> {
-    let kind = parse_kind(&kind)?;
-    let mut inst = instance::load(&state.paths, &id).await?;
-    let base = file.strip_suffix(".disabled").unwrap_or(&file);
-    let record = inst
-        .content
-        .iter_mut()
-        .find(|r| r.file_name == base && r.kind == kind)
-        .ok_or_else(|| Error::msg("that file has no install record to change"))?;
-    record.dependency = !kept;
-    inst.save(&state.paths).await
-}
-
 #[tauri::command]
 pub async fn remove_content(
     state: State<'_, AppState>,
