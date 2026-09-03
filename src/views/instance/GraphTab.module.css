@@ -125,11 +125,32 @@
   fill: none;
   stroke: var(--border-strong);
   stroke-width: 1.5;
-  transition: stroke 0.15s var(--ease), opacity 0.15s var(--ease);
+  transition:
+    stroke 0.15s var(--ease),
+    opacity 0.15s var(--ease);
+}
+
+/* The traced chain, once something is hovered or pinned. */
+.wireLit {
+  stroke: var(--accent);
 }
 
 .wireDim {
-  opacity: 0.15;
+  opacity: 0.12;
+}
+
+.arrow {
+  fill: var(--border-strong);
+}
+
+/* One separate little graph. Deliberately quiet — it is there to group, not
+   to compete with the nodes sitting on top of it. */
+.cluster {
+  position: absolute;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 55%, transparent);
+  pointer-events: none;
 }
 
 .centre {
@@ -340,4 +361,9 @@
   border-left: 1px solid var(--border);
   color: var(--text-faint);
   opacity: 0.85;
+}
+
+.hint {
+  font-size: 11px;
+  color: var(--text-faint);
 }

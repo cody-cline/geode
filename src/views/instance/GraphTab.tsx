@@ -14,6 +14,12 @@ const GAP_X = 22;
 const GAP_Y = 74;
 const PAD = 48;
 const ROW_MAX = 9;
+/** Space between one cluster and the next. */
+const CLUSTER_GAP = 64;
+/** Width to wrap the row of clusters at. */
+const PACK_W = 1240;
+/** Breathing room between a cluster's panel and the nodes inside it. */
+const CLUSTER_PAD = 20;
 
 /**
  * Mod ids left out of the diagram.
@@ -73,9 +79,13 @@ type Layout = {
   loose: ContentItem[];
   /** Left out for being in nearly everything's dependency list. */
   omitted: ContentItem[];
+  /** Bounding box of each separate little graph, for drawing it as a group. */
+  clusters: Cluster[];
   width: number;
   height: number;
 };
+
+type Cluster = { x: number; y: number; width: number; height: number };
 
 /**
  * Rank each mod by how far it sits below something that wants it.
@@ -148,6 +158,96 @@ function untangle(rows: string[][], byFile: Map<string, ContentItem>): void {
   }
 }
 
+/**
+ * Split the linked mods into the separate little graphs they actually form.
+ *
+ * Once Fabric API is out of the picture most instances are not one graph at
+ * all — they are a handful of unrelated pairs and triples. Laying those out on
+ * shared rows scatters each one across the full width and drags long crossing
+ * edges between them. Grouping first is what turns the diagram back into
+ * something you can read at a glance.
+ */
+function clusterFiles(
+  linked: ContentItem[],
+  byFile: Map<string, ContentItem>,
+): string[][] {
+  const seen = new Set<string>();
+  const groups: string[][] = [];
+
+  for (const start of linked) {
+    if (seen.has(start.fileName)) continue;
+    const group: string[] = [];
+    const queue = [start.fileName];
+    seen.add(start.fileName);
+
+    while (queue.length > 0) {
+      const file = queue.pop()!;
+      group.push(file);
+      const item = byFile.get(file);
+      if (!item) continue;
+      // Undirected on purpose: a cluster is everything that reaches everything
+      // else, whichever way the arrows point.
+      for (const next of [...item.requires, ...item.requiredBy]) {
+        if (byFile.has(next) && !seen.has(next)) {
+          seen.add(next);
+          queue.push(next);
+        }
+      }
+    }
+    groups.push(group);
+  }
+  return groups;
+}
+
+type Placed = {
+  nodes: { file: string; x: number; y: number; depth: number }[];
+  width: number;
+  height: number;
+};
+
+/** Lay one cluster out on its own, top-down, from its own origin. */
+function layoutCluster(files: string[], byFile: Map<string, ContentItem>): Placed {
+  const members = files
+    .map((f) => byFile.get(f))
+    .filter((i): i is ContentItem => Boolean(i));
+
+  const depth = depths(members, byFile);
+  const rows: string[][] = [];
+  for (const item of members) {
+    const d = depth.get(item.fileName) ?? 0;
+    (rows[d] ??= []).push(item.fileName);
+  }
+  for (const row of rows) row.sort();
+  untangle(rows, byFile);
+
+  // A cluster wide enough to need wrapping is rare, but a modpack's core
+  // library can have twenty dependents and one line of those is unreadable.
+  const lines: { files: string[]; depth: number }[] = [];
+  rows.forEach((row, d) => {
+    for (let i = 0; i < row.length; i += ROW_MAX) {
+      lines.push({ files: row.slice(i, i + ROW_MAX), depth: d });
+    }
+  });
+
+  const widest = Math.max(1, ...lines.map((l) => l.files.length));
+  const width = widest * (NODE_W + GAP_X) - GAP_X;
+
+  const nodes: Placed["nodes"] = [];
+  let y = 0;
+  lines.forEach((line, i) => {
+    // A full gap between layers, a tighter one between wrapped halves of the
+    // same layer, so the banding stays legible.
+    if (i > 0) y += NODE_H + (line.depth === lines[i - 1].depth ? 12 : GAP_Y);
+    const lineWidth = line.files.length * (NODE_W + GAP_X) - GAP_X;
+    const left = (width - lineWidth) / 2;
+    line.files.forEach((file, col) => {
+      nodes.push({ file, x: left + col * (NODE_W + GAP_X), y, depth: line.depth });
+    });
+  });
+
+  return { nodes, width, height: y + NODE_H };
+}
+
 function layout(all: ContentItem[]): Layout {
   const { items, omitted } = omitUbiquitous(all);
   const byFile = new Map(items.map((i) => [i.fileName, i]));
@@ -162,51 +262,43 @@ function layout(all: ContentItem[]): Layout {
     (i) => i.requires.length === 0 && i.requiredBy.length === 0,
   );
 
-  const depth = depths(linked, byFile);
-  const rows: string[][] = [];
-  for (const item of linked) {
-    const d = depth.get(item.fileName) ?? 0;
-    (rows[d] ??= []).push(item.fileName);
-  }
-  for (const row of rows) row.sort();
-  untangle(rows, byFile);
+  const placed = clusterFiles(linked, byFile)
+    .map((files) => layoutCluster(files, byFile))
+    // Biggest first, so the part with something to say is top-left where you
+    // start reading, and the pairs fill in around it.
+    .sort((a, b) => b.nodes.length - a.nodes.length || b.width - a.width);
 
-  // Most packs have one enormous top layer — everything you installed, none of
-  // which anything else needs — and laying that out as a single line makes the
-  // diagram thousands of pixels wide and unreadable at any zoom that fits it.
-  // Wrapping keeps the shape roughly square while each layer stays its own
-  // band, so edges still only ever point downward.
-  const lines: { files: string[]; depth: number }[] = [];
-  rows.forEach((row, d) => {
-    for (let i = 0; i < row.length; i += ROW_MAX) {
-      lines.push({ files: row.slice(i, i + ROW_MAX), depth: d });
+  // Pack the clusters across, wrapping at a width that keeps the whole thing
+  // roughly screen-shaped rather than a single long line of them.
+  const clusters: Cluster[] = [];
+  let cursor = 0;
+  let rowTop = 0;
+  let rowHeight = 0;
+  for (const group of placed) {
+    if (cursor > 0 && cursor + group.width > PACK_W) {
+      rowTop += rowHeight + CLUSTER_GAP;
+      cursor = 0;
+      rowHeight = 0;
     }
-  });
-
-  const widest = Math.max(1, ...lines.map((l) => l.files.length));
-  const width = widest * (NODE_W + GAP_X) - GAP_X;
+    clusters.push({ x: cursor, y: rowTop, width: group.width, height: group.height });
+    for (const n of group.nodes) {
+      n.x += cursor;
+      n.y += rowTop;
+    }
+    cursor += group.width + CLUSTER_GAP;
+    rowHeight = Math.max(rowHeight, group.height);
+  }
 
   const nodes: Node[] = [];
   const index = new Map<string, number>();
-  let y = 0;
-  lines.forEach((line, i) => {
-    // A gap between layers, a tighter one between wrapped halves of the same
-    // layer, so the banding stays legible.
-    if (i > 0) y += NODE_H + (line.depth === lines[i - 1].depth ? 12 : GAP_Y);
-    const lineWidth = line.files.length * (NODE_W + GAP_X) - GAP_X;
-    const left = (width - lineWidth) / 2;
-    line.files.forEach((file, col) => {
-      const item = byFile.get(file);
-      if (!item) return;
-      index.set(file, nodes.length);
-      nodes.push({
-        item,
-        x: left + col * (NODE_W + GAP_X),
-        y,
-        depth: line.depth,
-      });
-    });
-  });
+  for (const group of placed) {
+    for (const n of group.nodes) {
+      const item = byFile.get(n.file);
+      if (!item) continue;
+      index.set(n.file, nodes.length);
+      nodes.push({ item, x: n.x, y: n.y, depth: n.depth });
+    }
+  }
 
   const edges: { from: number; to: number }[] = [];
   for (const node of nodes) {
@@ -224,8 +316,9 @@ function layout(all: ContentItem[]): Layout {
     index,
     loose,
     omitted,
-    width,
-    height: y + NODE_H,
+    clusters,
+    width: Math.max(1, ...clusters.map((c) => c.x + c.width)),
+    height: rowTop + rowHeight,
   };
 }
 
@@ -265,6 +358,7 @@ export default function GraphTab({ instance }: { instance: Instance }) {
 
   const [items, setItems] = useState<ContentItem[] | null>(null);
   const [focus, setFocus] = useState<string | null>(null);
+  const [hover, setHover] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [view, setView] = useState({ x: 0, y: 0, scale: 1 });
 
@@ -291,9 +385,12 @@ export default function GraphTab({ instance }: { instance: Instance }) {
 
   const graph = useMemo(() => layout(items ?? []), [items]);
 
+  // Hovering traces a chain the same way clicking does, so you can follow one
+  // without committing to it; a click pins it and opens the detail panel.
+  const traced = focus ?? hover;
   const lit = useMemo(
-    () => (focus ? related(graph, focus) : null),
-    [graph, focus],
+    () => (traced ? related(graph, traced) : null),
+    [graph, traced],
   );
 
   const matches = useMemo(() => {
@@ -373,9 +470,8 @@ export default function GraphTab({ instance }: { instance: Instance }) {
   const step = (factor: number) =>
     setView((v) => ({ ...v, scale: Math.min(2.5, Math.max(0.2, v.scale * factor)) }));
 
-  const focused = focus ? graph.index.get(focus) : undefined;
-  const focusedItem =
-    focused !== undefined ? graph.nodes[focused].item : undefined;
+  const shownAt = traced ? graph.index.get(traced) : undefined;
+  const shownItem = shownAt !== undefined ? graph.nodes[shownAt].item : undefined;
 
   return (
     <div className={styles.wrap}>
@@ -456,6 +552,22 @@ export default function GraphTab({ instance }: { instance: Instance }) {
               transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})`,
             }}
           >
+            {/* One panel per separate little graph. Most instances are a set
+                of unrelated pairs, and boxing them says so before you have
+                traced a single line. */}
+            {graph.clusters.map((c, i) => (
+              <div
+                key={i}
+                className={styles.cluster}
+                style={{
+                  left: c.x - CLUSTER_PAD,
+                  top: c.y - CLUSTER_PAD,
+                  width: c.width + CLUSTER_PAD * 2,
+                  height: c.height + CLUSTER_PAD * 2,
+                }}
+              />
+            ))}
+
             <svg
               className={styles.wires}
               width={graph.width}
@@ -464,6 +576,19 @@ export default function GraphTab({ instance }: { instance: Instance }) {
               // drawing surface room rather than clipping them.
               style={{ overflow: "visible" }}
             >
+              <defs>
+                <marker
+                  id="graph-arrow"
+                  viewBox="0 0 8 8"
+                  refX="7"
+                  refY="4"
+                  markerWidth="6"
+                  markerHeight="6"
+                  orient="auto-start-reverse"
+                >
+                  <path d="M0,1 L7,4 L0,7 z" className={styles.arrow} />
+                </marker>
+              </defs>
               {graph.edges.map(({ from, to }) => {
                 const a = graph.nodes[from];
                 const b = graph.nodes[to];
@@ -478,7 +603,12 @@ export default function GraphTab({ instance }: { instance: Instance }) {
                 return (
                   <path
                     key={`${a.item.fileName}->${b.item.fileName}`}
-                    className={clsx(styles.wire, !on && styles.wireDim)}
+                    className={clsx(
+                      styles.wire,
+                      on && lit && styles.wireLit,
+                      !on && styles.wireDim,
+                    )}
+                    markerEnd="url(#graph-arrow)"
                     d={`M${x1},${y1} C${x1},${y1 + bend} ${x2},${y2 - bend} ${x2},${y2}`}
                   />
                 );
@@ -505,7 +635,10 @@ export default function GraphTab({ instance }: { instance: Instance }) {
                   onClick={() =>
                     setFocus((f) => (f === item.fileName ? null : item.fileName))
                   }
-                  title={`${item.name}${item.version ? ` ${item.version}` : ""}`}
+                  onPointerEnter={() => setHover(item.fileName)}
+                  onPointerLeave={() =>
+                    setHover((h) => (h === item.fileName ? null : h))
+                  }
                 >
                   <span className={styles.nodeName}>{item.name}</span>
                   {item.requiredBy.length > 1 && (
@@ -517,33 +650,37 @@ export default function GraphTab({ instance }: { instance: Instance }) {
           </div>
         )}
 
-        {focusedItem && (
+        {shownItem && (
           <aside className={styles.detail}>
-            <h3>{focusedItem.name}</h3>
+            <h3>{shownItem.name}</h3>
             <p className={styles.detailMeta}>
-              {focusedItem.version || focusedItem.fileName}
+              {shownItem.version || shownItem.fileName}
             </p>
             <dl>
               <dt>Needs</dt>
               <dd>
-                {focusedItem.requires.length === 0
+                {shownItem.requires.length === 0
                   ? "nothing"
-                  : focusedItem.requires
+                  : shownItem.requires
                       .map((f) => graph.nodes[graph.index.get(f) ?? -1]?.item.name ?? f)
                       .join(", ")}
               </dd>
               <dt>Needed by</dt>
               <dd>
-                {focusedItem.requiredBy.length === 0
+                {shownItem.requiredBy.length === 0
                   ? "nothing"
-                  : focusedItem.requiredBy
+                  : shownItem.requiredBy
                       .map((f) => graph.nodes[graph.index.get(f) ?? -1]?.item.name ?? f)
                       .join(", ")}
               </dd>
             </dl>
-            <button className="btn btn-sm" onClick={() => setFocus(null)}>
-              Clear
-            </button>
+            {focus ? (
+              <button className="btn btn-sm" onClick={() => setFocus(null)}>
+                Clear
+              </button>
+            ) : (
+              <p className={styles.hint}>Click to keep this one up</p>
+            )}
           </aside>
         )}
       </div>
