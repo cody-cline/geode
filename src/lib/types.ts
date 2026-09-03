@@ -89,6 +89,8 @@ export interface ContentItem {
   unused: boolean;
   /** The jar stated its own dependencies, rather than us inferring them. */
   declaresDeps: boolean;
+  /** Mod ids this file answers to. Stable where display names are not. */
+  modIds: string[];
 }
 
 export interface ProviderRef {

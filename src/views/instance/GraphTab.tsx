@@ -15,6 +15,48 @@ const GAP_Y = 74;
 const PAD = 48;
 const ROW_MAX = 9;
 
+/**
+ * Mod ids left out of the diagram.
+ *
+ * Fabric API is required by very nearly every Fabric mod, so drawing it makes
+ * one node every arrow points at and tells you nothing you did not already
+ * know. Removing it lets the structure that varies between instances actually
+ * show. `fabric` is its legacy alias and `fabric_api` is what the Forgified
+ * build calls itself on NeoForge — the same library, three names.
+ */
+const UBIQUITOUS = new Set(["fabric_api", "fabric"]);
+
+/** Loaders differ on punctuation for the same id; the id itself does not. */
+const idKey = (id: string) => id.toLowerCase().replace(/-/g, "_");
+
+/**
+ * Drop the ubiquitous libraries and every edge touching them.
+ *
+ * Done here rather than in the backend graph on purpose: the edges are real,
+ * and the rest of the app — the fan-in counts, working out that nothing needs a
+ * library any more — still depends on them. This is a view choosing what to
+ * draw, not a claim that the dependency is not there.
+ */
+function omitUbiquitous(items: ContentItem[]): {
+  items: ContentItem[];
+  omitted: ContentItem[];
+} {
+  const omitted = items.filter((i) => i.modIds.some((id) => UBIQUITOUS.has(idKey(id))));
+  if (omitted.length === 0) return { items, omitted };
+
+  const gone = new Set(omitted.map((i) => i.fileName));
+  return {
+    items: items
+      .filter((i) => !gone.has(i.fileName))
+      .map((i) => ({
+        ...i,
+        requires: i.requires.filter((f) => !gone.has(f)),
+        requiredBy: i.requiredBy.filter((f) => !gone.has(f)),
+      })),
+    omitted,
+  };
+}
+
 type Node = {
   item: ContentItem;
   x: number;
@@ -29,6 +71,8 @@ type Layout = {
   /** Index into `nodes`, by file name. */
   index: Map<string, number>;
   loose: ContentItem[];
+  /** Left out for being in nearly everything's dependency list. */
+  omitted: ContentItem[];
   width: number;
   height: number;
 };
@@ -104,7 +148,8 @@ function untangle(rows: string[][], byFile: Map<string, ContentItem>): void {
   }
 }
 
-function layout(items: ContentItem[]): Layout {
+function layout(all: ContentItem[]): Layout {
+  const { items, omitted } = omitUbiquitous(all);
   const byFile = new Map(items.map((i) => [i.fileName, i]));
 
   // A mod with no links either way says nothing about structure, and in a big
@@ -178,6 +223,7 @@ function layout(items: ContentItem[]): Layout {
     edges,
     index,
     loose,
+    omitted,
     width,
     height: y + NODE_H,
   };
@@ -353,6 +399,16 @@ export default function GraphTab({ instance }: { instance: Instance }) {
           <span className={styles.legendItem}>
             <i className={clsx(styles.dot, styles.dotLoose)} /> nothing needs it
           </span>
+          {graph.omitted.length > 0 && (
+            <span
+              className={styles.omitted}
+              title={`Hidden so the rest of the shape can show: ${graph.omitted
+                .map((i) => i.name)
+                .join(", ")}`}
+            >
+              {graph.omitted.map((i) => i.name).join(", ")} hidden
+            </span>
+          )}
         </div>
         <div className={styles.zoom}>
           <button className="btn btn-icon btn-sm" onClick={() => step(0.8)} title="Zoom out">
@@ -388,7 +444,9 @@ export default function GraphTab({ instance }: { instance: Instance }) {
             <p>
               {items.length === 0
                 ? "No mods installed yet."
-                : "None of these mods depend on each other."}
+                : graph.omitted.length > 0
+                  ? "Nothing here depends on anything but Fabric API."
+                  : "None of these mods depend on each other."}
             </p>
           </div>
         ) : (

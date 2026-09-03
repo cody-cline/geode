@@ -112,6 +112,11 @@ pub struct ContentItem {
     /// something else is unused.
     #[serde(default)]
     pub declares_deps: bool,
+    /// The mod ids this file answers to. Display names vary — Fabric API is
+    /// "Forgified Fabric API" on NeoForge — but the ids do not, so this is what
+    /// to match on when a specific mod needs recognising.
+    #[serde(default)]
+    pub mod_ids: Vec<String>,
 }
 
 const DISABLED_SUFFIX: &str = ".disabled";
@@ -179,7 +184,7 @@ pub async fn list(
             _ => None,
         };
 
-        let item = match record {
+        let mut item = match record {
             Some(r) => ContentItem {
                 file_name: file_name.clone(),
                 kind,
@@ -214,6 +219,7 @@ pub async fn list(
                 ..Default::default()
             },
         };
+        item.mod_ids = meta.as_ref().map(|m| m.primary.clone()).unwrap_or_default();
         items.push(item);
         metas.push(meta);
     }

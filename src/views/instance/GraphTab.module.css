@@ -334,3 +334,10 @@
 .chipUnknown {
   border-style: dashed;
 }
+
+.omitted {
+  padding-left: 14px;
+  border-left: 1px solid var(--border);
+  color: var(--text-faint);
+  opacity: 0.85;
+}
