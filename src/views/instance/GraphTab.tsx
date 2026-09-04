@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import clsx from "clsx";
-import { Loader2, RotateCcw, Search, Share2 } from "lucide-react";
+import { Crosshair, Loader2, Minus, Plus, RotateCcw, Search, Share2 } from "lucide-react";
 import {
   forceCollide,
   forceLink,
@@ -291,8 +291,14 @@ export default function GraphTab({ instance }: { instance: Instance }) {
   const [, repaint] = useReducer((n: number) => n + 1, 0);
 
   const svg = useRef<SVGSVGElement>(null);
+  const world = useRef<SVGGElement>(null);
   const frame = useRef<number>(0);
   const dragging = useRef<Node | null>(null);
+  const panning = useRef<{ x: number; y: number } | null>(null);
+
+  // Pan and zoom ride on a transform over the solved field rather than on the
+  // viewBox, so the layout itself never moves and a reset is just identity.
+  const [view, setView] = useState({ x: 0, y: 0, k: 1 });
 
   useEffect(() => {
     let cancelled = false;
@@ -329,12 +335,42 @@ export default function GraphTab({ instance }: { instance: Instance }) {
     }
   }, [field]);
 
-  const toModel = (e: React.PointerEvent) => {
+  /** Cursor in the field's own coordinates, panning and zoom accounted for. */
+  const toModel = (e: React.PointerEvent | React.WheelEvent) => {
+    const ctm = world.current?.getScreenCTM();
+    if (!ctm) return null;
+    const at = new DOMPoint(e.clientX, e.clientY).matrixTransform(ctm.inverse());
+    return { x: at.x, y: at.y };
+  };
+
+  /** Cursor in the SVG's own units, which is where panning is measured. */
+  const toCanvas = (e: React.PointerEvent) => {
     const ctm = svg.current?.getScreenCTM();
     if (!ctm) return null;
     const at = new DOMPoint(e.clientX, e.clientY).matrixTransform(ctm.inverse());
     return { x: at.x, y: at.y };
   };
+
+  function onBackgroundDown(e: React.PointerEvent) {
+    const at = toCanvas(e);
+    if (!at) return;
+    panning.current = at;
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }
+
+  // Zoom about the cursor, so whatever you are pointing at stays put.
+  function onWheel(e: React.WheelEvent) {
+    const at = toCanvas(e as unknown as React.PointerEvent);
+    if (!at) return;
+    setView((v) => {
+      const k = Math.min(4, Math.max(0.25, v.k * (e.deltaY < 0 ? 1.12 : 0.893)));
+      return clamp({
+        k,
+        x: at.x - ((at.x - v.x) / v.k) * k,
+        y: at.y - ((at.y - v.y) / v.k) * k,
+      });
+    });
+  }
 
   function onNodeDown(e: React.PointerEvent, node: Node) {
     e.stopPropagation();
@@ -348,14 +384,27 @@ export default function GraphTab({ instance }: { instance: Instance }) {
   }
 
   function onNodeMove(e: React.PointerEvent) {
-    if (!dragging.current) return;
-    const at = toModel(e);
-    if (!at) return;
-    dragging.current.fx = at.x;
-    dragging.current.fy = at.y;
+    if (dragging.current) {
+      const at = toModel(e);
+      if (!at) return;
+      dragging.current.fx = at.x;
+      dragging.current.fy = at.y;
+      return;
+    }
+    if (panning.current) {
+      const at = toCanvas(e);
+      if (!at) return;
+      // Move by the step since the LAST event, not since the press: the anchor
+      // has to advance with the cursor or every frame re-applies the whole
+      // distance travelled so far and the field takes off.
+      const from = panning.current;
+      panning.current = at;
+      setView((v) => clamp({ ...v, x: v.x + at.x - from.x, y: v.y + at.y - from.y }));
+    }
   }
 
   function onNodeUp() {
+    panning.current = null;
     if (!dragging.current) return;
     // fx/fy are deliberately left set: a mod you moved stays where you put it.
     // Double-click hands it back to the field.
@@ -370,6 +419,47 @@ export default function GraphTab({ instance }: { instance: Instance }) {
     cancelAnimationFrame(frame.current);
     frame.current = requestAnimationFrame(animate);
   }
+
+  /**
+   * Keep the field within reach of the viewport.
+   *
+   * Without this you can pan the whole thing off the edge and be left staring
+   * at an empty canvas with no way back except the Fit button.
+   */
+  const clamp = useCallback(
+    (v: { x: number; y: number; k: number }) => {
+      const vb = svg.current?.viewBox.baseVal;
+      if (!vb || vb.width === 0) return v;
+      const edge = 120; // how much of the field must stay on screen
+      return {
+        k: v.k,
+        x: Math.min(
+          vb.x + vb.width - edge - vb.x * v.k,
+          Math.max(vb.x + edge - (vb.x + vb.width) * v.k, v.x),
+        ),
+        y: Math.min(
+          vb.y + vb.height - edge - vb.y * v.k,
+          Math.max(vb.y + edge - (vb.y + vb.height) * v.k, v.y),
+        ),
+      };
+    },
+    [],
+  );
+
+  /** Zoom by a step, holding the centre of the view still. */
+  const step = (by: number) => {
+    const rect = svg.current?.viewBox.baseVal;
+    const cx = rect ? rect.x + rect.width / 2 : 0;
+    const cy = rect ? rect.y + rect.height / 2 : 0;
+    setView((v) => {
+      const k = Math.min(4, Math.max(0.25, v.k * by));
+      return clamp({
+        k,
+        x: cx - ((cx - v.x) / v.k) * k,
+        y: cy - ((cy - v.y) / v.k) * k,
+      });
+    });
+  };
 
   const matches = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -438,7 +528,32 @@ export default function GraphTab({ instance }: { instance: Instance }) {
             )}
           </p>
         )}
-        <span className={styles.hint}>drag to rearrange · double-click to let go</span>
+        <span className={styles.hint}>drag a mod to move it</span>
+        <div className={styles.zoom}>
+          <button
+            className="btn btn-icon btn-sm"
+            onClick={() => step(1 / 1.3)}
+            title="Zoom out"
+          >
+            <Minus size={14} />
+          </button>
+          <span className={styles.scale}>{Math.round(view.k * 100)}%</span>
+          <button
+            className="btn btn-icon btn-sm"
+            onClick={() => step(1.3)}
+            title="Zoom in"
+          >
+            <Plus size={14} />
+          </button>
+          <button
+            className="btn btn-sm"
+            onClick={() => setView({ x: 0, y: 0, k: 1 })}
+            title="Back to the whole field"
+          >
+            <Crosshair size={13} />
+            Fit
+          </button>
+        </div>
       </div>
 
       {items === null ? (
@@ -456,9 +571,11 @@ export default function GraphTab({ instance }: { instance: Instance }) {
           className={styles.field}
           viewBox={field.box}
           preserveAspectRatio="xMidYMid meet"
+          onPointerDown={onBackgroundDown}
           onPointerMove={onNodeMove}
           onPointerUp={onNodeUp}
           onPointerCancel={onNodeUp}
+          onWheel={onWheel}
         >
           <defs>
             {field.nodes.map((n) =>
@@ -470,6 +587,10 @@ export default function GraphTab({ instance }: { instance: Instance }) {
             )}
           </defs>
 
+          <g
+            ref={world}
+            transform={`translate(${view.x},${view.y}) scale(${view.k})`}
+          >
           <g className={styles.wires}>
             {field.links.map((link) => {
               const a = link.source as Node;
@@ -560,6 +681,7 @@ export default function GraphTab({ instance }: { instance: Instance }) {
               </g>
             );
           })}
+          </g>
         </svg>
       )}
 
