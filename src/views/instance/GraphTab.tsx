@@ -88,6 +88,62 @@ function seed(id: string): { x: number; y: number } {
   return { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius };
 }
 
+/**
+ * Drop edges that only repeat what a longer path already says.
+ *
+ * Inventory Profiles Next needs libIPN, libIPN needs Fabric Language Kotlin,
+ * and Inventory Profiles Next also declares Kotlin directly. All three are
+ * true, but drawing the third adds a line carrying nothing: you can already
+ * get there. This is the transitive reduction, and it is the difference
+ * between a triangle and a chain in every picture of a dependency chain.
+ *
+ * Edges are removed one at a time against the edges still standing, so a cycle
+ * — rare in mod metadata but real — cannot lose every one of its edges to the
+ * other two. Sorted first, so which edge survives a tie never depends on the
+ * order the folder was read in.
+ */
+function withoutImpliedEdges(links: Link[]): Link[] {
+  const adj = new Map<string, Set<string>>();
+  for (const link of links) {
+    const from = link.source as string;
+    const set = adj.get(from) ?? new Set<string>();
+    set.add(link.target as string);
+    adj.set(from, set);
+  }
+
+  const reaches = (from: string, to: string) => {
+    const seen = new Set([from]);
+    const queue = [from];
+    while (queue.length > 0) {
+      for (const next of adj.get(queue.shift()!) ?? []) {
+        if (next === to) return true;
+        if (!seen.has(next)) {
+          seen.add(next);
+          queue.push(next);
+        }
+      }
+    }
+    return false;
+  };
+
+  const implied = new Set<Link>();
+  const ordered = [...links].sort(
+    (a, b) =>
+      (a.source as string).localeCompare(b.source as string) ||
+      (a.target as string).localeCompare(b.target as string),
+  );
+  for (const link of ordered) {
+    const from = link.source as string;
+    const to = link.target as string;
+    adj.get(from)!.delete(to);
+    // Still reachable without it? Then the direct edge said nothing new.
+    if (reaches(from, to)) implied.add(link);
+    else adj.get(from)!.add(to);
+  }
+
+  return links.filter((link) => !implied.has(link));
+}
+
 /** Hold each island together, so two of them never read as one tangle. */
 function forceIslands(strength: number) {
   let nodes: Node[] = [];
@@ -174,12 +230,13 @@ function buildField(all: ContentItem[]) {
   });
   const byId = new Map(nodes.map((n) => [n.id, n]));
 
-  const links: Link[] = [];
+  const declared: Link[] = [];
   for (const node of nodes) {
     for (const need of node.item.requires) {
-      if (byId.has(need)) links.push({ source: node.id, target: need });
+      if (byId.has(need)) declared.push({ source: node.id, target: need });
     }
   }
+  const links = withoutImpliedEdges(declared);
 
   // Islands, for the cohesion force. Singletons stay at -1: they have nothing
   // to cohere with, and the outward drift that gives them is the point.
