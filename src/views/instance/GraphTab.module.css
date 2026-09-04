@@ -1,4 +1,5 @@
 .wrap {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -37,10 +38,10 @@
   width: 100%;
 }
 
-/* The one fact that matters most about a mods folder, said in words. Most
-   mods are connected to nothing, and a picture of the minority that are
-   should not be the only thing on the page that speaks. */
+/* Most mods are connected to nothing, and that is the single most useful fact
+   about a folder. The field shows it, but it is worth saying in words too. */
 .summary {
+  flex: 1;
   font-size: 12px;
   color: var(--text-dim);
 }
@@ -50,6 +51,12 @@
   padding-left: 12px;
   border-left: 1px solid var(--border);
   color: var(--text-faint);
+}
+
+.hint {
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
 }
 
 .centre {
@@ -67,259 +74,136 @@
   opacity: 0.4;
 }
 
-/* The deck --------------------------------------------------------------- */
+/* The field --------------------------------------------------------------- */
 
-.deck {
+.field {
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, 276px);
-  gap: 16px;
-  justify-content: center;
-  align-items: start;
-  padding: 20px 22px 40px;
-}
-
-/* A border around each little graph rather than whitespace between them.
-   Enclosure is a stronger grouping cue than proximity, and it is what lets
-   "these are five unrelated things" land before anything has been read. */
-.card {
-  width: 276px;
-  padding: 16px;
-  border-radius: var(--radius);
-  border: 1px solid var(--border);
-  background: var(--surface);
-}
-
-.full {
-  grid-column: 1 / -1;
-  width: auto;
-}
-
-.cardHead {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  margin-bottom: 12px;
-}
-
-.cardTitle {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--text-dim);
-}
-
-.cardNote {
-  font-size: 11px;
-  font-style: normal;
-  color: var(--text-faint);
-}
-
-.plot {
-  position: relative;
+  width: 100%;
+  display: block;
+  touch-action: none;
 }
 
 .wires {
-  position: absolute;
-  top: 0;
-  left: 0;
   pointer-events: none;
 }
 
-/* Filled wedges, not strokes: wide at the mod, narrow at the library it
-   needs, so direction is carried along the whole line instead of by a head
-   that several edges would stack on top of each other. */
+/* Thin and quiet by default. A dependency is a fact about two mods, not the
+   subject of the picture — until you hover one, and then it is. */
 .wire {
-  fill: color-mix(in srgb, var(--text-faint) 78%, transparent);
+  stroke: var(--text-faint);
+  stroke-opacity: 0.38;
+  stroke-width: 1.25;
+  transition:
+    stroke 0.12s var(--ease),
+    stroke-opacity 0.12s var(--ease),
+    stroke-width 0.12s var(--ease);
 }
 
-.skip {
-  fill: none;
-  stroke: color-mix(in srgb, var(--text-faint) 78%, transparent);
-  stroke-linecap: round;
+.wireLit {
+  stroke: var(--accent);
+  stroke-opacity: 1;
+  stroke-width: 3.5;
 }
 
-/* Nodes ------------------------------------------------------------------ */
+.tip {
+  fill: var(--text-faint);
+  fill-opacity: 0.38;
+}
+
+.tipLit {
+  fill: var(--accent);
+}
+
+/* Nodes ------------------------------------------------------------------- */
 
 .node {
-  position: absolute;
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 0 11px 0 0;
-  border-radius: 9px;
-  border: 1px solid var(--border-strong);
-  background: linear-gradient(
-    180deg,
-    var(--surface-2),
-    color-mix(in srgb, var(--surface) 70%, var(--surface-2))
-  );
-  box-shadow: var(--shadow-sm);
-  color: var(--text);
-  font-size: 12.5px;
-  font-weight: 500;
-  text-align: left;
-  cursor: pointer;
-  overflow: hidden;
+  cursor: grab;
+}
+
+.node:active {
+  cursor: grabbing;
+}
+
+.disc {
+  fill: var(--surface-3);
+}
+
+/* A ring rather than a card. Discs cannot tile, which is the point: every
+   arrangement of rectangles reads as a grid however it was arrived at, and
+   every edge between them has to leave a flat face. */
+.rim {
+  fill: none;
+  stroke: var(--border-strong);
+  stroke-width: 1.5;
   transition:
-    border-color 0.14s var(--ease),
-    box-shadow 0.14s var(--ease);
+    stroke 0.12s var(--ease),
+    stroke-width 0.12s var(--ease);
 }
 
-.node:hover {
-  border-color: var(--text-faint);
-  box-shadow: var(--shadow);
+.node:hover .rim {
+  stroke: var(--accent);
+  stroke-width: 2.5;
 }
 
-/* The left edge carries the colour, so a mod you chose reads differently
-   from one that came along, without painting whole boxes. */
-.nodeRoot {
-  border-left: 3px solid var(--accent);
-}
-
-.nodeDep {
-  border-left: 3px solid var(--info);
-}
-
-.nodeUnused {
-  border-left-color: var(--warn);
-}
-
-.nodeOff {
+/* Connected to nothing: present, findable, and visibly quieter. Hiding them
+   would misreport the folder; drawing them at full strength would bury the
+   handful of mods that actually relate to each other. */
+.alone .disc,
+.alone image {
   opacity: 0.45;
-  font-style: italic;
 }
 
-.nodeFocus {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 14%, var(--surface-2));
+.alone .rim {
+  stroke: var(--border);
 }
 
-.nodeMatch {
-  border-color: var(--warn);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--warn) 35%, transparent);
+.picked .rim {
+  stroke: var(--accent);
+  stroke-width: 2.5;
 }
 
-.nodeIcon {
-  width: 24px;
-  height: 24px;
-  margin-left: 11px;
-  border-radius: 6px;
-  overflow: hidden;
-  flex-shrink: 0;
-  display: grid;
-  place-items: center;
-  background: var(--surface-3);
-  color: var(--text-faint);
+.found .rim {
+  stroke: var(--warn);
+  stroke-width: 2.5;
 }
 
-.nodeIcon img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
+.off .disc,
+.off image {
+  opacity: 0.3;
 }
 
-.nodeName {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.faded {
+  opacity: 0.18;
+  pointer-events: none;
 }
 
-/* Chips ------------------------------------------------------------------
- *
- * The compact form, used in exactly two places, both of which genuinely are
- * sets rather than structures: the mods that stand alone, and the dependents
- * of a library too popular to draw as spokes.
- */
-.rule {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 14px 0 12px;
+.label {
   font-size: 11px;
-  color: var(--text-faint);
-  white-space: nowrap;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  fill: var(--text-dim);
+  /* Painting the stroke first puts a halo behind the glyphs, so a label
+     crossing a link stays readable without hiding the link. */
+  paint-order: stroke;
+  stroke: var(--bg);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+  pointer-events: none;
+  user-select: none;
 }
 
-.rule::before,
-.rule::after {
-  content: "";
-  flex: 1;
-  height: 1px;
-  background: var(--border);
+.node:hover .label,
+.picked .label {
+  fill: var(--text);
 }
 
-.chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+.alone .label {
+  fill: var(--text-faint);
 }
 
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 26px;
-  padding: 0 10px 0 5px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--surface-2);
-  color: var(--text-dim);
-  font-size: 11.5px;
-  cursor: pointer;
-  max-width: 240px;
-  transition:
-    border-color 0.14s var(--ease),
-    color 0.14s var(--ease);
-}
-
-/* The label needs its own box to clip against — a flex item cannot ellipsis
-   a bare text node. */
-.chipName {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.chip:hover {
-  border-color: var(--border-strong);
-  color: var(--text);
-}
-
-.chipIcon {
-  width: 16px;
-  height: 16px;
-  border-radius: 4px;
-  overflow: hidden;
-  flex-shrink: 0;
-  display: grid;
-  place-items: center;
-  background: var(--surface-3);
-  color: var(--text-faint);
-}
-
-.chipIcon img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-/* An unreadable jar is not the same as an unconnected one, and parking it
-   here silently would claim more than we know. */
-.chipUnknown {
-  border-style: dashed;
-}
-
-.chipFocus {
-  border-color: var(--accent);
-  color: var(--text);
-}
-
-.chipMatch {
-  border-color: var(--warn);
-  color: var(--text);
+.clear {
+  position: absolute;
+  right: 22px;
+  bottom: 22px;
 }
