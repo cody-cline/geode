@@ -31,6 +31,7 @@ import type {
   BackupInfo,
   ContentItem,
   ContentKind,
+  Schedule,
   Server,
   ServerKindInfo,
   ServerLine,
@@ -43,7 +44,9 @@ import styles from "./ServerView.module.css";
 const TABS = [
   { id: "console", label: "Console" },
   { id: "content", label: "Content" },
-  { id: "backups", label: "Backups" },
+  // Backups on a timer and commands on a timer are the same idea — things the
+  // server does without being asked — so they share a tab.
+  { id: "backups", label: "Automation" },
   { id: "settings", label: "Settings" },
 ] as const;
 
@@ -767,6 +770,8 @@ function BackupsPane({ server }: { server: Server }) {
         </div>
       )}
 
+      <SchedulesSection server={server} />
+
       {confirming && (
         <Modal
           title="Restore this backup?"
@@ -796,6 +801,179 @@ function BackupsPane({ server }: { server: Server }) {
         </Modal>
       )}
     </div>
+  );
+}
+
+/** "every 360 minutes" is a number; "every 6 hours" is an interval. */
+function everyLabel(minutes: number): string {
+  if (minutes <= 0) return "never";
+  if (minutes < 60) return `every ${minutes} minutes`;
+  if (minutes % 1440 === 0) {
+    const days = minutes / 1440;
+    return days === 1 ? "every day" : `every ${days} days`;
+  }
+  if (minutes % 60 === 0) {
+    const hours = minutes / 60;
+    return hours === 1 ? "every hour" : `every ${hours} hours`;
+  }
+  return `every ${minutes} minutes`;
+}
+
+/**
+ * Backups and commands the server runs on its own.
+ *
+ * Edited as a list and saved as a list: there are only ever a handful, and a
+ * save per keystroke while typing a command would be absurd.
+ */
+function SchedulesSection({ server }: { server: Server }) {
+  const reportError = useStore((s) => s.reportError);
+  const refreshServers = useStore((s) => s.refreshServers);
+
+  const [draft, setDraft] = useState<Schedule[]>(server.schedules ?? []);
+  const [saving, setSaving] = useState(false);
+  const dirty = JSON.stringify(draft) !== JSON.stringify(server.schedules ?? []);
+
+  function add() {
+    setDraft((was) => [
+      ...was,
+      {
+        id: crypto.randomUUID(),
+        action: { kind: "backup" },
+        everyMinutes: 360,
+        enabled: true,
+        lastRun: null,
+      },
+    ]);
+  }
+
+  function update(id: string, patch: Partial<Schedule>) {
+    setDraft((was) =>
+      was.map((s) => (s.id === id ? { ...s, ...patch } : s)),
+    );
+  }
+
+  async function save() {
+    setSaving(true);
+    try {
+      await api.updateServer(server.id, { schedules: draft });
+      await refreshServers();
+    } catch (e) {
+      reportError("Could not save schedules", e);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className={styles.section}>
+      <div className={styles.contentHead}>
+        <h2 className={styles.sectionTitle}>On a timer</h2>
+        <div style={{ flex: 1 }} />
+        {dirty && (
+          <button
+            className="btn btn-sm btn-primary"
+            onClick={save}
+            disabled={saving}
+          >
+            {saving && <Loader2 size={12} className="spin" />}
+            Save
+          </button>
+        )}
+        <button className="btn btn-sm" onClick={add}>
+          <Plus size={13} />
+          Add
+        </button>
+      </div>
+
+      {draft.length === 0 ? (
+        <p className={styles.pending}>
+          Nothing scheduled. A server can back itself up on a timer, or run a
+          command — a restart warning, a broadcast, whatever you would type at
+          the console.
+        </p>
+      ) : (
+        <div className={styles.rows}>
+          {draft.map((schedule) => (
+            <div key={schedule.id} className={styles.row}>
+              <label className={styles.rowToggle}>
+                <input
+                  type="checkbox"
+                  checked={schedule.enabled}
+                  onChange={(e) =>
+                    update(schedule.id, { enabled: e.target.checked })
+                  }
+                  aria-label="Enabled"
+                />
+              </label>
+
+              <select
+                className={clsx("select", styles.scheduleKind)}
+                value={schedule.action.kind}
+                onChange={(e) =>
+                  update(schedule.id, {
+                    action:
+                      e.target.value === "backup"
+                        ? { kind: "backup" }
+                        : { kind: "command", value: "" },
+                  })
+                }
+              >
+                <option value="backup">Back up</option>
+                <option value="command">Run command</option>
+              </select>
+
+              {schedule.action.kind === "command" && (
+                <input
+                  className={clsx("input", styles.scheduleCommand)}
+                  value={schedule.action.value}
+                  placeholder="say Restarting in 5 minutes"
+                  spellCheck={false}
+                  onChange={(e) =>
+                    update(schedule.id, {
+                      action: { kind: "command", value: e.target.value },
+                    })
+                  }
+                />
+              )}
+
+              <span className={styles.scheduleEvery}>
+                <input
+                  className={clsx("input", styles.keepInput)}
+                  type="number"
+                  min={1}
+                  value={schedule.everyMinutes}
+                  onChange={(e) =>
+                    update(schedule.id, {
+                      everyMinutes: Number(e.target.value) || 0,
+                    })
+                  }
+                />
+                <span className={styles.rowMeta}>
+                  {everyLabel(schedule.everyMinutes)}
+                </span>
+              </span>
+
+              <button
+                className={styles.rowRemove}
+                onClick={() =>
+                  setDraft((was) => was.filter((s) => s.id !== schedule.id))
+                }
+                title="Remove this schedule"
+                aria-label="Remove this schedule"
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <p className={styles.pending}>
+        A scheduled backup flushes the world first when the server is running. A
+        scheduled command is skipped while it is stopped — there is no console
+        to type at.
+      </p>
+    </section>
   );
 }
 

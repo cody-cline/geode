@@ -142,6 +142,23 @@ export interface ServerSettings {
   keepBackups: number | null;
 }
 
+/**
+ * What a schedule does when it fires. Adjacently tagged, matching the backend:
+ * `{ kind: "backup" }` or `{ kind: "command", value: "say hello" }`.
+ */
+export type ScheduleAction =
+  | { kind: "backup" }
+  | { kind: "command"; value: string };
+
+export interface Schedule {
+  id: string;
+  action: ScheduleAction;
+  /** Zero means never, so a half-filled form stays harmless. */
+  everyMinutes: number;
+  enabled: boolean;
+  lastRun: number | null;
+}
+
 /** One backup of a server's files. Its name is also its timestamp. */
 export interface BackupInfo {
   name: string;
@@ -163,6 +180,8 @@ export interface Server {
   eulaAccepted: boolean;
   settings: ServerSettings;
   content: ContentRecord[];
+  /** Backups and commands this server runs on a timer. */
+  schedules: Schedule[];
   notes: string;
   /** Added by the backend view layer. */
   running: boolean;

@@ -15,6 +15,7 @@ pub mod install;
 pub mod meta;
 pub mod properties;
 pub mod run;
+pub mod schedule;
 
 use serde::{Deserialize, Serialize};
 
@@ -260,6 +261,9 @@ pub struct Server {
     /// it — disk stays the source of truth.
     #[serde(default)]
     pub content: Vec<crate::instance::content::ContentRecord>,
+    /// Backups and commands this server runs on a timer.
+    #[serde(default)]
+    pub schedules: Vec<schedule::Schedule>,
     #[serde(default)]
     pub notes: String,
 }
@@ -279,6 +283,7 @@ impl Server {
             eula_accepted: false,
             settings: ServerSettings::default(),
             content: Vec::new(),
+            schedules: Vec::new(),
             notes: String::new(),
         }
     }

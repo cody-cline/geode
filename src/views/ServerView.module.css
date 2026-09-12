@@ -326,6 +326,29 @@
   color: var(--danger);
 }
 
+.scheduleKind {
+  width: 130px;
+  height: 28px;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.scheduleCommand {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  font-size: 12px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+.scheduleEvery {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
 .retention {
   display: inline-flex;
   align-items: center;

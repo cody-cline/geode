@@ -38,7 +38,13 @@ pub fn run() {
                 Config::load(&paths).await.unwrap_or_default()
             });
 
-            app.manage(AppState::new(paths, config));
+            let state = AppState::new(paths.clone(), config);
+            // Cloned out before the state is handed over, so the ticker owns
+            // what it needs rather than reaching back through app state on
+            // every pass.
+            let servers = state.servers.clone();
+            app.manage(state);
+            crate::server::schedule::spawn(app.handle().clone(), paths, servers);
             Ok(())
         })
         .on_window_event(|window, event| {

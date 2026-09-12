@@ -1140,6 +1140,8 @@ pub struct ServerPatch {
     pub name: Option<String>,
     pub notes: Option<String>,
     pub settings: Option<crate::server::ServerSettings>,
+    /// The whole list, edited as a unit — there are only ever a handful.
+    pub schedules: Option<Vec<crate::server::schedule::Schedule>>,
 }
 
 #[tauri::command]
@@ -1161,6 +1163,17 @@ pub async fn update_server(
     }
     if let Some(settings) = patch.settings {
         server.settings = settings;
+    }
+    if let Some(mut schedules) = patch.schedules {
+        // A new schedule is stamped as if it had just run, so adding one does
+        // not immediately fire it.
+        let now = chrono::Utc::now().timestamp();
+        for schedule in &mut schedules {
+            if schedule.last_run.is_none() {
+                schedule.last_run = Some(now);
+            }
+        }
+        server.schedules = schedules;
     }
     server.save(&state.paths).await?;
     Ok(server_view(server, &state))

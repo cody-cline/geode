@@ -27,6 +27,7 @@ import type {
   Provider,
   SearchQuery,
   SearchResults,
+  Schedule,
   Server,
   ServerKindInfo,
   ServerProperty,
@@ -213,7 +214,12 @@ export const api = {
   deleteServer: (id: string) => invoke<void>("delete_server", { id }),
   updateServer: (
     id: string,
-    patch: { name?: string; notes?: string; settings?: ServerSettings },
+    patch: {
+      name?: string;
+      notes?: string;
+      settings?: ServerSettings;
+      schedules?: Schedule[];
+    },
   ) => invoke<Server>("update_server", { id, patch }),
   acceptServerEula: (id: string) =>
     invoke<Server>("accept_server_eula", { id }),
