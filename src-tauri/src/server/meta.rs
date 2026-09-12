@@ -660,28 +660,33 @@ async fn spigot_versions(client: &reqwest::Client) -> Result<Vec<String>> {
     Ok(out)
 }
 
+/// What revisions too old to declare a range were built under.
+const LEGACY_SPIGOT_JDK: u32 = 8;
+
+/// The JDK to build a revision with, from the class-file range it declares.
+///
+/// The lower bound is taken because it is the one most likely to still be
+/// installable. Kept apart from the fetch so the fallback can be tested without
+/// the network: it is silent, and getting it wrong surfaces only as BuildTools
+/// refusing to start, several seconds into someone's build.
+fn jdk_for_revision(java_versions: Option<&[u32]>) -> u32 {
+    java_versions
+        .and_then(|versions| versions.first())
+        .map(|class| java_major_of_class(*class))
+        .unwrap_or(LEGACY_SPIGOT_JDK)
+}
+
 /// The JDK a given revision must be built with.
 ///
 /// BuildTools refuses outright when the running Java is outside the range the
 /// revision declares, so this is not advisory — building 1.21.1 under Java 25
-/// stops with an error and produces nothing. The lower bound is taken because
-/// it is the one most likely to still be installable.
-///
-/// Revisions old enough to predate the field — 1.8.8 and its contemporaries —
-/// were built under Java 7 or 8, so that is what they get.
+/// stops with an error and produces nothing.
 async fn spigot_jdk(client: &reqwest::Client, game: &str) -> u32 {
-    const LEGACY: u32 = 8;
-
     let url = format!("{SPIGOT_HUB}/versions/{game}.json");
     let Ok(revision) = get_json::<SpigotRevision>(client, &url).await else {
-        return LEGACY;
+        return LEGACY_SPIGOT_JDK;
     };
-    revision
-        .java_versions
-        .as_ref()
-        .and_then(|versions| versions.first())
-        .map(|class| java_major_of_class(*class))
-        .unwrap_or(LEGACY)
+    jdk_for_revision(revision.java_versions.as_deref())
 }
 
 async fn spigot_builder(client: &reqwest::Client, game: &str) -> Result<Builder> {
@@ -1054,6 +1059,23 @@ mod tests {
         // Four parts: date-style Minecraft versions, carried verbatim.
         assert!(neoforge_mc_candidates("26.1.2.109").contains(&"26.1.2".to_string()));
         assert!(neoforge_mc_candidates("26.2.0.87").contains(&"26.2".to_string()));
+    }
+
+    #[test]
+    fn a_revisions_declared_range_picks_the_jdk_to_build_with() {
+        // Live values: 1.21.1 declares [65, 67] and 26.2 declares [69, 70].
+        assert_eq!(jdk_for_revision(Some(&[65, 67])), 21);
+        assert_eq!(jdk_for_revision(Some(&[69, 70])), 25);
+    }
+
+    #[test]
+    fn a_revision_too_old_to_declare_a_range_is_built_under_java_8() {
+        // 1.8.8's document has no javaVersions key at all. Reaching for a
+        // modern JDK there means BuildTools stopping with a refusal, so the
+        // fallback has to be the Java those revisions were actually built with.
+        assert_eq!(jdk_for_revision(None), 8);
+        // An empty array says no more than a missing one.
+        assert_eq!(jdk_for_revision(Some(&[])), 8);
     }
 
     #[test]
