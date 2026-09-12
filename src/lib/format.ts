@@ -40,6 +40,28 @@ export function relativeTime(input: string | number | null | undefined): string 
   return "a long time ago";
 }
 
+/**
+ * Display name for a content source.
+ *
+ * A function rather than a ternary at each call site: there are three sources
+ * now, and every `x === "modrinth" ? … : …` quietly labelled the third one
+ * CurseForge.
+ */
+export function providerLabel(provider: string): string {
+  if (provider === "modrinth") return "Modrinth";
+  if (provider === "curseforge") return "CurseForge";
+  if (provider === "spiget") return "SpigotMC";
+  return titleCase(provider);
+}
+
+/** Short form, for rows too tight for the full name. */
+export function providerShort(provider: string): string {
+  if (provider === "modrinth") return "MR";
+  if (provider === "curseforge") return "CF";
+  if (provider === "spiget") return "Spigot";
+  return provider.slice(0, 2).toUpperCase();
+}
+
 export function titleCase(s: string): string {
   return s
     .split(/[-_\s]+/)

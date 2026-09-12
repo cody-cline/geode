@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 
 import { api } from "../../lib/api";
-import { fileSize } from "../../lib/format";
+import { fileSize, providerShort } from "../../lib/format";
 import { useStore } from "../../lib/store";
 import type { ContentItem, ContentKind, Instance, UpdateCandidate } from "../../lib/types";
 
@@ -341,7 +341,7 @@ export default function ContentTab({
                     )}
                     {item.provider && (
                       <span className={clsx("badge", `badge-${item.provider}`)}>
-                        {item.provider === "modrinth" ? "MR" : "CF"}
+                        {providerShort(item.provider)}
                       </span>
                     )}
                   </div>

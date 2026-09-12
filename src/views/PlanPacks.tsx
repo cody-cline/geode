@@ -17,7 +17,7 @@ import PlanSourceTabs from "../components/PlanSourceTabs";
 import type { PlanSource } from "../components/PlanSourceTabs";
 import ProjectPanel from "../components/ProjectPanel";
 import { api } from "../lib/api";
-import { compactNumber } from "../lib/format";
+import { compactNumber, providerLabel } from "../lib/format";
 import { modKey, planModFromProject } from "../lib/plan";
 import { useBackHandler } from "../lib/useBackHandler";
 import { renderProviderBody } from "../lib/richtext";
@@ -363,7 +363,7 @@ export default function PlanPacks({
                       </span>
                       <span className={styles.modName}>{mod.name}</span>
                       <span className={clsx("badge", `badge-${mod.provider}`)}>
-                        {mod.provider === "modrinth" ? "Modrinth" : "CurseForge"}
+                        {providerLabel(mod.provider)}
                       </span>
                       {busy && <Loader2 size={13} className="spin" />}
                       {added ? (
