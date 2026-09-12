@@ -5,31 +5,77 @@
   color: var(--text-faint);
 }
 
-.header {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 14px 22px;
-  border-bottom: 1px solid var(--border);
+/* The shell, deliberately identical to an instance's. A server is a profile
+   with a console attached, and presenting it as a different kind of object made
+   it feel like a different application. Kept in step with
+   InstanceView.module.css by hand: the two are near-copies, which is cheaper
+   here than an abstraction over two files that are each read as a whole. */
+
+.hero {
+  position: relative;
+  isolation: isolate;
   background: var(--surface);
 }
 
+/* A server has no pack artwork to show, so the wash is always the generated
+   one — the same treatment an instance without a banner gets, so the layout
+   never changes shape between them. */
+.heroImg {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center 38%;
+  z-index: -2;
+}
+
+.heroScrim {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background:
+    linear-gradient(
+      to bottom,
+      color-mix(in srgb, var(--bg) 22%, transparent) 0%,
+      color-mix(in srgb, var(--bg) 34%, transparent) 40%,
+      color-mix(in srgb, var(--bg) 72%, transparent) 68%,
+      color-mix(in srgb, var(--surface) 92%, transparent) 88%,
+      var(--surface) 100%
+    );
+}
+
+.header {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  padding: 22px 22px 18px;
+  background: transparent;
+}
+
 .back {
+  position: absolute;
+  top: 14px;
+  left: 16px;
+  z-index: 2;
   display: grid;
   place-items: center;
-  width: 30px;
-  height: 30px;
-  border-radius: var(--radius-sm);
-  color: var(--text-dim);
-  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  color: var(--text);
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+  backdrop-filter: blur(6px);
+  border: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
   transition:
     background 0.12s var(--ease),
-    color 0.12s var(--ease);
+    transform 0.12s var(--ease);
 }
 
 .back:hover {
-  background: var(--surface-2);
-  color: var(--text);
+  background: color-mix(in srgb, var(--bg) 75%, transparent);
+  transform: translateX(-1px);
 }
 
 .headText {
@@ -38,8 +84,8 @@
 }
 
 .name {
-  font-size: 17px;
-  letter-spacing: -0.01em;
+  font-size: 23px;
+  letter-spacing: -0.015em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -48,11 +94,26 @@
 .meta {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin-top: 3px;
-  font-size: 12px;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 5px;
+  font-size: 12.5px;
   color: var(--text-dim);
-  text-transform: capitalize;
+}
+
+.stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 6px;
+}
+
+.stats span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--text-faint);
 }
 
 .live {
@@ -62,20 +123,65 @@
 
 .actions {
   display: flex;
-  align-items: center;
   gap: 8px;
+  flex-shrink: 0;
 }
 
 .tabs {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 8px 22px;
+  gap: 2px;
+  padding: 0 22px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
+  border-top: 1px solid var(--border);
 }
 
 .tab {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 13px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-dim);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.tab:hover {
+  color: var(--text);
+}
+
+.tabActive,
+.tabActive:hover {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.tabCount {
+  padding: 0 6px;
+  height: 16px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 99px;
+  background: var(--surface-3);
+  color: var(--text-faint);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* The folder switcher inside the Content tab. Its own classes rather than the
+   nav's: these are a segmented control sitting in a toolbar, and giving them
+   the nav's underline would read as a second row of tabs. */
+.folderTab {
   height: 30px;
   padding: 0 12px;
   border-radius: var(--radius-sm);
@@ -87,13 +193,13 @@
     color 0.12s var(--ease);
 }
 
-.tab:hover {
+.folderTab:hover {
   background: var(--surface-2);
   color: var(--text);
 }
 
-.tabActive,
-.tabActive:hover {
+.folderTabActive,
+.folderTabActive:hover {
   background: color-mix(in srgb, var(--accent) 14%, transparent);
   color: var(--accent);
 }

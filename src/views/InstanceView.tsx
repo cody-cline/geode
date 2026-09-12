@@ -207,7 +207,7 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
         {active === "content" && (
           <ContentTab instance={instance} onBrowse={() => setBrowsing(true)} />
         )}
-        {active === "graph" && <GraphTab instance={instance} />}
+        {active === "graph" && <GraphTab id={instance.id} source="instance" />}
         {active === "pack" && <PackTab instance={instance} />}
         {active === "logs" && <LogsTab instanceId={id} />}
         {active === "settings" && <SettingsTab instance={instance} />}

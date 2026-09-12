@@ -12,6 +12,7 @@ import clsx from "clsx";
 import {
   ArrowLeft,
   ChevronRight,
+  Clock,
   ExternalLink,
   FolderOpen,
   Loader2,
@@ -22,10 +23,12 @@ import {
   Trash2,
 } from "lucide-react";
 
+import InstanceIcon from "../components/InstanceIcon";
 import Modal from "../components/Modal";
 import Browse from "./Browse";
+import GraphTab from "./instance/GraphTab";
 import { api } from "../lib/api";
-import { fileSize, providerShort, relativeTime } from "../lib/format";
+import { fileSize, hashHue, providerShort, relativeTime } from "../lib/format";
 import { useStore } from "../lib/store";
 import type {
   BackupInfo,
@@ -44,6 +47,9 @@ import styles from "./ServerView.module.css";
 const TABS = [
   { id: "console", label: "Console" },
   { id: "content", label: "Content" },
+  // The same dependency field an instance draws. A server's mods folder is a
+  // mods folder, and it keeps the same provenance records.
+  { id: "graph", label: "Dependencies" },
   // Backups on a timer and commands on a timer are the same idea — things the
   // server does without being asked — so they share a tab.
   { id: "backups", label: "Automation" },
@@ -51,6 +57,13 @@ const TABS = [
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
+
+/**
+ * The folders a server actually has. Narrower than `ContentKind` on purpose —
+ * a server has no resource packs or shaders of its own, and browsing for one
+ * would offer somewhere to put it that does not exist.
+ */
+type ServerFolder = Extract<ContentKind, "plugin" | "mod" | "datapack">;
 
 /**
  * A server's console line, as the server writes it:
@@ -89,7 +102,7 @@ export default function ServerView({ id }: { id: string }) {
 
   // Which folder is being added to, and what is already in it — so browsing
   // can mark the rows that are.
-  const [adding, setAdding] = useState<ContentKind | null>(null);
+  const [adding, setAdding] = useState<ServerFolder | null>(null);
   const [present, setPresent] = useState<Set<string>>(new Set());
 
   // Which log the console is showing. Null is the live one; anything else is
@@ -179,7 +192,7 @@ export default function ServerView({ id }: { id: string }) {
         server={{
           name: server.name,
           installed: present,
-          kind: adding === "plugin" ? "plugin" : "mod",
+          kind: adding,
           onInstall: (project) => {
             void api
               .installServerContent(id, project.provider, project.id, adding)
@@ -296,9 +309,21 @@ export default function ServerView({ id }: { id: string }) {
     }
   }
 
+  // A server has no pack artwork, so it gets the same generated wash an
+  // instance without a banner gets — the layout is then identical either way.
+  const hue = hashHue(server.id);
+
   return (
     <>
-      <header className={styles.header}>
+      <div className={styles.hero}>
+        <span
+          className={styles.heroImg}
+          style={{
+            background: `linear-gradient(135deg, hsl(${hue} 44% 30%), hsl(${(hue + 55) % 360} 42% 18%))`,
+          }}
+        />
+        <span className={styles.heroScrim} />
+
         <button
           className={styles.back}
           onClick={() => navigate({ view: "servers" })}
@@ -307,13 +332,33 @@ export default function ServerView({ id }: { id: string }) {
           <ArrowLeft size={17} />
         </button>
 
+        <header className={styles.header}>
+        {/* Servers have no icon of their own, and InstanceIcon only needs a
+            name to generate one — so the treatment is shared rather than
+            reimplemented. */}
+        <InstanceIcon
+          instance={{ id: server.id, name: server.name }}
+          size={64}
+          radius={16}
+        />
+
         <div className={styles.headText}>
           <h1 className={styles.name}>{server.name}</h1>
           <div className={styles.meta}>
-            <span className="badge badge-accent">{server.kind}</span>
-            <span>{server.mcVersion}</span>
-            {server.build && <span>build {server.build}</span>}
+            <span className="badge badge-accent">{server.kindName}</span>
+            <span>Minecraft {server.mcVersion}</span>
+            {server.build && <span className="badge">build {server.build}</span>}
             {server.running && <span className={styles.live}>running</span>}
+          </div>
+          <div className={styles.stats}>
+            <span>
+              <Clock size={11} />
+              {server.lastStarted
+                ? `Last started ${relativeTime(server.lastStarted)}`
+                : "Never started"}
+            </span>
+            <span>{server.settings.memoryMb} MB</span>
+            {server.javaMajor && <span>Java {server.javaMajor}</span>}
           </div>
         </div>
 
@@ -339,8 +384,12 @@ export default function ServerView({ id }: { id: string }) {
             <button
               className="btn btn-primary"
               onClick={() => void start(server)}
-              disabled={busy || !server.jar}
-              title={server.jar ? undefined : "This server has no jar yet"}
+              disabled={busy || !server.installed}
+              title={
+                server.installed
+                  ? undefined
+                  : "This server has no software installed yet"
+              }
             >
               {busy ? (
                 <Loader2 size={14} className="spin" />
@@ -351,7 +400,8 @@ export default function ServerView({ id }: { id: string }) {
             </button>
           )}
         </div>
-      </header>
+        </header>
+      </div>
 
       <nav className={styles.tabs}>
         {TABS.map((tab) => (
@@ -389,6 +439,7 @@ export default function ServerView({ id }: { id: string }) {
         )}
       </nav>
 
+      <div className={styles.body}>
       {active === "console" ? (
         <div className={styles.console}>
           <div
@@ -445,11 +496,14 @@ export default function ServerView({ id }: { id: string }) {
         </div>
       ) : active === "content" ? (
         <ContentPane server={server} onAdd={setAdding} />
+      ) : active === "graph" ? (
+        <GraphTab id={server.id} source="server" />
       ) : active === "backups" ? (
         <BackupsPane server={server} />
       ) : (
         <SettingsTab server={server} />
       )}
+      </div>
 
       {askEula && (
         <Modal
@@ -509,17 +563,24 @@ function ContentPane({
   onAdd,
 }: {
   server: Server;
-  onAdd: (kind: ContentKind) => void;
+  onAdd: (kind: ServerFolder) => void;
 }) {
   const reportError = useStore((s) => s.reportError);
   const refreshServers = useStore((s) => s.refreshServers);
 
   // Capabilities come from the server rather than its kind. A Fabric server
   // with Cardboard installed takes Bukkit plugins, and no amount of knowing
-  // what "fabric" means would reveal that.
-  const [folder, setFolder] = useState<ContentKind>(
-    server.takesPlugins ? "plugin" : "mod",
-  );
+  // what "fabric" means would reveal that. Datapacks are the world's rather
+  // than the loader's, so even a vanilla server has somewhere to put them.
+  const folders = useMemo(() => {
+    const out: { id: ServerFolder; label: string }[] = [];
+    if (server.takesPlugins) out.push({ id: "plugin", label: "Plugins" });
+    if (server.takesMods) out.push({ id: "mod", label: "Mods" });
+    if (server.hasWorld) out.push({ id: "datapack", label: "Data Packs" });
+    return out;
+  }, [server.takesPlugins, server.takesMods, server.hasWorld]);
+
+  const [folder, setFolder] = useState<ServerFolder>(folders[0]?.id ?? "mod");
   const [items, setItems] = useState<ContentItem[] | null>(null);
   const [addingCardboard, setAddingCardboard] = useState(false);
 
@@ -560,9 +621,9 @@ function ContentPane({
     }
   }
 
-  const both = server.takesPlugins && server.takesMods;
-  const takesNothing = !server.takesPlugins && !server.takesMods;
-  const noun = folder === "plugin" ? "plugins" : "mods";
+  const takesNothing = folders.length === 0;
+  const noun =
+    folders.find((f) => f.id === folder)?.label.toLowerCase() ?? "files";
 
   async function addCardboard() {
     setAddingCardboard(true);
@@ -582,8 +643,8 @@ function ContentPane({
     return (
       <div className={styles.settings}>
         <p className={styles.pending}>
-          This server loads neither plugins nor mods — it is the game and
-          nothing else.
+          A proxy hosts no world of its own — it sits in front of other servers,
+          so there is nothing here to install into.
         </p>
       </div>
     );
@@ -592,18 +653,18 @@ function ContentPane({
   return (
     <div className={styles.settings}>
       <div className={styles.contentHead}>
-        {both && (
+        {folders.length > 1 && (
           <div className={styles.folders}>
-            {(["plugin", "mod"] as const).map((option) => (
+            {folders.map((option) => (
               <button
-                key={option}
+                key={option.id}
                 className={clsx(
-                  styles.tab,
-                  folder === option && styles.tabActive,
+                  styles.folderTab,
+                  folder === option.id && styles.folderTabActive,
                 )}
-                onClick={() => setFolder(option)}
+                onClick={() => setFolder(option.id)}
               >
-                {option === "plugin" ? "Plugins" : "Mods"}
+                {option.label}
               </button>
             ))}
           </div>
@@ -639,8 +700,13 @@ function ContentPane({
         </div>
       ) : items.length === 0 ? (
         <p className={styles.pending}>
-          No {noun} installed. Anything you add lands in the server&apos;s{" "}
-          <code>{folder === "plugin" ? "plugins" : "mods"}</code> folder.
+          No {noun} installed. Anything you add lands in{" "}
+          {/* Datapacks go inside the world, which is where the server reads
+              them from — not in a folder beside it. */}
+          <code>
+            {folder === "datapack" ? "<world>/datapacks" : folder === "plugin" ? "plugins" : "mods"}
+          </code>
+          .
         </p>
       ) : (
         <div className={styles.rows}>

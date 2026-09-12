@@ -296,6 +296,19 @@ impl Server {
         self.kind.takes_mods()
     }
 
+    /// Whether the software is actually in place and this server can start.
+    ///
+    /// Not the same question as "does it have a jar". From 1.17 a Forge or
+    /// NeoForge server has no jar whatsoever — its installer leaves an argument
+    /// file instead — so asking about the jar alone calls a perfectly good
+    /// server uninstalled and refuses to start it.
+    pub fn is_installed(&self) -> bool {
+        match &self.launch {
+            installer::LaunchKind::Jar => !self.jar.is_empty(),
+            installer::LaunchKind::ArgFile(file) => !file.is_empty(),
+        }
+    }
+
     /// Cardboard sitting in this server's mods folder.
     pub fn has_cardboard(&self) -> bool {
         self.content.iter().any(|c| {
@@ -443,6 +456,46 @@ pub async fn delete(paths: &Paths, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// The world folder's name, as `server.properties` declares it.
+///
+/// Pure so it can be tested without a server on disk. Blank counts as absent:
+/// a half-edited properties file should not send datapacks to the run root.
+fn level_name(declared: Option<&str>) -> String {
+    declared
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("world")
+        .to_string()
+}
+
+/// Where a server keeps one kind of content.
+///
+/// Everything lives in the run directory under its own name, with one
+/// exception that matters: a server reads datapacks from *inside its world*,
+/// not from the run root. Putting them in `run/datapacks` would create a folder
+/// the server never looks at — files that appear installed and do nothing.
+pub async fn content_dir(
+    paths: &Paths,
+    id: &str,
+    kind: crate::instance::content::ContentKind,
+) -> std::path::PathBuf {
+    let run = paths.server_run(id);
+    if kind != crate::instance::content::ContentKind::DataPack {
+        return run.join(kind.folder());
+    }
+
+    let declared = properties::read(paths, id)
+        .await
+        .ok()
+        .and_then(|props| {
+            props
+                .into_iter()
+                .find(|p| p.key == "level-name")
+                .map(|p| p.value)
+        });
+    run.join(level_name(declared.as_deref())).join(kind.folder())
+}
+
 /// Write `eula.txt`, which Mojang requires before a server will start.
 ///
 /// Only ever called after the user has actually agreed in the UI. Writing it
@@ -579,6 +632,40 @@ mod tests {
         assert!(!server.can_add_cardboard());
         // It changes nothing about mods.
         assert!(server.takes_mods());
+    }
+
+    #[test]
+    fn datapacks_go_inside_the_world_the_properties_name() {
+        // The server reads them from its world folder. A renamed world moves
+        // them with it, and anything in the run root is never looked at.
+        assert_eq!(level_name(Some("survival")), "survival");
+        // Absent, or present but blank, is Minecraft's own default.
+        assert_eq!(level_name(None), "world");
+        assert_eq!(level_name(Some("   ")), "world");
+        assert_eq!(level_name(Some(" hardcore ")), "hardcore");
+    }
+
+    #[test]
+    fn a_forge_server_is_installed_even_though_it_has_no_jar() {
+        let mut forge = Server::new("F".into(), ServerKind::Forge, "1.20.1".into());
+        assert!(!forge.is_installed(), "nothing has been installed yet");
+
+        // What the installer actually leaves: an argument file and no jar.
+        forge.launch = installer::LaunchKind::ArgFile(
+            "libraries/net/minecraftforge/forge/1.20.1-47.3.0/unix_args.txt".into(),
+        );
+        assert!(
+            forge.is_installed(),
+            "a server that launches from an argument file needs no jar, and \
+             refusing to start it is the bug this guards"
+        );
+        assert!(forge.jar.is_empty());
+
+        // The ordinary case still turns on the jar being there.
+        let mut paper = Server::new("P".into(), ServerKind::Paper, "1.21.1".into());
+        assert!(!paper.is_installed());
+        paper.jar = "paper-1.21.1-123.jar".into();
+        assert!(paper.is_installed());
     }
 
     #[test]

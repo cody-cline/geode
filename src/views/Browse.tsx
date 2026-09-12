@@ -93,8 +93,11 @@ export interface ServerBrowse {
   name: string;
   /** `provider:projectId` already installed in this folder. */
   installed: Set<string>;
-  /** Which folder an install lands in. */
-  kind: "plugin" | "mod";
+  /**
+   * Which folder an install lands in. Datapacks belong to the world rather
+   * than the loader, so every server that hosts one takes them.
+   */
+  kind: "plugin" | "mod" | "datapack";
   onInstall: (project: Project) => void;
 }
 

@@ -201,6 +201,19 @@ export interface Server {
   takesPlugins: boolean;
   takesMods: boolean;
   canAddCardboard: boolean;
+  /**
+   * Whether the software is in place and the server can start. Not the same as
+   * having a jar: a modern Forge server has none and launches from an argument
+   * file instead.
+   */
+  installed: boolean;
+  /** The software's proper name — "NeoForge" rather than the id's "neoforge". */
+  kindName: string;
+  /**
+   * Whether it hosts a world. A proxy does not, so it has nowhere to put
+   * datapacks.
+   */
+  hasWorld: boolean;
 }
 
 /** One choice in the "what kind of server" picker. */

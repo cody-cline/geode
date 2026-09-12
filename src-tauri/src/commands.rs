@@ -1034,6 +1034,15 @@ pub struct ServerView {
     pub takes_plugins: bool,
     pub takes_mods: bool,
     pub can_add_cardboard: bool,
+    /// Whether its software is in place, which is not the same as having a jar
+    /// — modern Forge and NeoForge servers have none.
+    pub installed: bool,
+    /// The software's proper name — "NeoForge", not the "neoforge" the id uses.
+    /// Sent rather than mapped in the UI, so there is one list of these.
+    pub kind_name: String,
+    /// Whether it hosts a world of its own. A proxy does not, so it has no
+    /// place to put datapacks and no level to configure.
+    pub has_world: bool,
 }
 
 fn server_view(server: crate::server::Server, state: &AppState) -> ServerView {
@@ -1042,6 +1051,9 @@ fn server_view(server: crate::server::Server, state: &AppState) -> ServerView {
         takes_plugins: server.takes_plugins(),
         takes_mods: server.takes_mods(),
         can_add_cardboard: server.can_add_cardboard(),
+        installed: server.is_installed(),
+        kind_name: server.kind.display_name().to_string(),
+        has_world: !server.kind.is_proxy(),
         // Moved last, so the capabilities above can still read it.
         server,
     }
@@ -1370,7 +1382,7 @@ pub async fn list_server_content(
 ) -> Result<Vec<ContentItem>> {
     let kind = parse_kind(&kind)?;
     let server = crate::server::load(&state.paths, &id).await?;
-    let dir = state.paths.server_run(&id).join(kind.folder());
+    let dir = crate::server::content_dir(&state.paths, &id, kind).await;
     instance::content::list_in(&dir, &server.content, kind, &state.jars).await
 }
 
@@ -1383,7 +1395,7 @@ pub async fn remove_server_content(
 ) -> Result<()> {
     let kind = parse_kind(&kind)?;
     let mut server = crate::server::load(&state.paths, &id).await?;
-    let dir = state.paths.server_run(&id).join(kind.folder());
+    let dir = crate::server::content_dir(&state.paths, &id, kind).await;
     instance::content::remove_in(&dir, &mut server.content, kind, &file).await?;
     server.save(&state.paths).await
 }
@@ -1397,7 +1409,7 @@ pub async fn set_server_content_enabled(
     enabled: bool,
 ) -> Result<String> {
     let kind = parse_kind(&kind)?;
-    let dir = state.paths.server_run(&id).join(kind.folder());
+    let dir = crate::server::content_dir(&state.paths, &id, kind).await;
     instance::content::set_enabled_in(&dir, &file, enabled).await
 }
 
@@ -1474,7 +1486,7 @@ pub async fn install_server_content(
     })?;
 
     let progress = Progress::new(app, format!("server-content:{id}:{project_id}"));
-    let dir = state.paths.server_run(&id).join(kind.folder());
+    let dir = crate::server::content_dir(&state.paths, &id, kind).await;
     progress.stage("Installing", 1).await;
 
     let file = crate::install::content::install_into(

@@ -13,7 +13,7 @@ import {
 
 import { api } from "../../lib/api";
 import { useStore } from "../../lib/store";
-import type { ContentItem, Instance } from "../../lib/types";
+import type { ContentItem } from "../../lib/types";
 
 import styles from "./GraphTab.module.css";
 
@@ -338,7 +338,22 @@ function buildField(all: ContentItem[]) {
   };
 }
 
-export default function GraphTab({ instance }: { instance: Instance }) {
+export default function GraphTab({
+  id,
+  source,
+}: {
+  id: string;
+  /**
+   * Which folder the mods are read from. A server keeps exactly the same
+   * provenance records as an instance, so the field itself is identical — only
+   * the call that lists the folder differs.
+   *
+   * A discriminator rather than a loader function on purpose: an inline
+   * callback would be a new value every render, and the effect below would
+   * re-read the folder forever.
+   */
+  source: "instance" | "server";
+}) {
   const reportError = useStore((s) => s.reportError);
 
   const [items, setItems] = useState<ContentItem[] | null>(null);
@@ -359,8 +374,11 @@ export default function GraphTab({ instance }: { instance: Instance }) {
 
   useEffect(() => {
     let cancelled = false;
-    api
-      .listContent(instance.id, "mod")
+    const listing =
+      source === "server"
+        ? api.listServerContent(id, "mod")
+        : api.listContent(id, "mod");
+    listing
       .then((found) => !cancelled && setItems(found))
       .catch((e) => {
         if (!cancelled) {
@@ -371,7 +389,7 @@ export default function GraphTab({ instance }: { instance: Instance }) {
     return () => {
       cancelled = true;
     };
-  }, [instance.id, reportError]);
+  }, [id, source, reportError]);
 
   const field = useMemo(() => buildField(items ?? []), [items]);
 
