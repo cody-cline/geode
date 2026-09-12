@@ -12,7 +12,8 @@ import {
   Trash2,
 } from "lucide-react";
 
-import PlanSourcePanel from "../components/PlanSourcePanel";
+import PlanPacks from "./PlanPacks";
+import type { PlanSource } from "../components/PlanSourceTabs";
 import Browse from "./Browse";
 import { api } from "../lib/api";
 import { titleCase } from "../lib/format";
@@ -58,7 +59,7 @@ export default function PlanView({ id }: { id: string }) {
   const [resolving, setResolving] = useState(false);
   const [chosen, setChosen] = useState(0);
   const [adding, setAdding] = useState(false);
-  const [copying, setCopying] = useState(false);
+  const [addSource, setAddSource] = useState<PlanSource>("mods");
   const [building, setBuilding] = useState(false);
   const [name, setName] = useState("");
 
@@ -198,26 +199,28 @@ export default function PlanView({ id }: { id: string }) {
   }
 
   // Adding takes over the whole view rather than squeezing into a rail: this
-  // is the browse experience, filters and all, and it needs the room.
+  // is the browse experience, filters and all, and it needs the room. Packs
+  // are a sibling of it, not a panel inside it — opening one has a list of its
+  // own to show.
   if (adding) {
-    return (
+    return addSource === "packs" ? (
+      <PlanPacks
+        name={plan.name}
+        inPlan={present}
+        onAdd={addMods}
+        onDone={() => setAdding(false)}
+        source={addSource}
+        onSource={setAddSource}
+      />
+    ) : (
       <Browse
-        onDone={() => {
-          setAdding(false);
-          setCopying(false);
-        }}
+        onDone={() => setAdding(false)}
         plan={{
           name: plan.name,
           inPlan: present,
           onAdd: (projects) => addMods(projects.map(planModFromProject)),
-          onCopy: () => setCopying((open) => !open),
-          copyPanel: copying ? (
-            <PlanSourcePanel
-              present={present}
-              onAdd={addMods}
-              onClose={() => setCopying(false)}
-            />
-          ) : null,
+          source: addSource,
+          onSource: setAddSource,
         }}
       />
     );

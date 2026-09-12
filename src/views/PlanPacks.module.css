@@ -1,0 +1,281 @@
+.body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 18px 22px 90px;
+}
+
+.lead {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.where {
+  display: flex;
+  gap: 4px;
+  margin-left: 6px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+}
+
+.rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* One pack, in the list of packs ----------------------------------------- */
+
+.packRow {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  padding: 12px 16px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  text-align: left;
+  transition:
+    border-color 0.14s var(--ease),
+    background 0.14s var(--ease);
+}
+
+.packRow:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-2);
+}
+
+.packIcon {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 11px;
+  background: var(--surface-3);
+  color: var(--text-faint);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.packIcon img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.packText {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.packName {
+  font-size: 14.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.packSummary {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.packMeta {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.openHint {
+  font-size: 12px;
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+
+/* One pack, opened -------------------------------------------------------- */
+
+.detail {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* The pack leads with its own artwork, so an opened pack is unmistakably a
+   different place from the list it came from. */
+.banner {
+  position: relative;
+  height: 168px;
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--surface-2);
+  flex-shrink: 0;
+}
+
+.banner img,
+.bannerFallback {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.bannerFallback {
+  background: linear-gradient(135deg, var(--surface-3), var(--surface));
+}
+
+.bannerScrim {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    to bottom,
+    transparent 30%,
+    color-mix(in srgb, var(--bg) 55%, transparent) 68%,
+    color-mix(in srgb, var(--bg) 88%, transparent) 100%
+  );
+}
+
+.bannerText {
+  position: absolute;
+  left: 18px;
+  right: 18px;
+  bottom: 14px;
+}
+
+.bannerName {
+  font-size: 20px;
+  letter-spacing: -0.015em;
+  text-shadow: 0 1px 12px rgb(0 0 0 / 0.5);
+}
+
+.bannerMeta {
+  margin-top: 3px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  text-shadow: 0 1px 10px rgb(0 0 0 / 0.5);
+}
+
+.description {
+  margin: 0;
+}
+
+/* A pack description can run to thousands of words, and the mod list is what
+   this screen is for — so it opens folded. */
+.clamped {
+  max-height: 150px;
+  overflow: hidden;
+  mask-image: linear-gradient(to bottom, #000 60%, transparent 100%);
+}
+
+.more {
+  align-self: flex-start;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.more:hover {
+  text-decoration: underline;
+}
+
+.plainDescription {
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.6;
+}
+
+.modsHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+  margin-top: 2px;
+}
+
+.modsTitle {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  padding-top: 10px;
+}
+
+.allIn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding-top: 10px;
+  font-size: 12px;
+  color: var(--accent);
+}
+
+.modRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.modIcon {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 7px;
+  background: var(--surface-3);
+  color: var(--text-faint);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.modIcon img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.modName {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.added {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.note {
+  padding: 30px 14px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-faint);
+}

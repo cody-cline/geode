@@ -1,10 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
 import clsx from "clsx";
 import {
   AlertTriangle,
   ClipboardList,
-  Copy,
   Download,
   Info,
   Loader2,
@@ -12,6 +10,8 @@ import {
 } from "lucide-react";
 
 import InstallTargetModal from "../components/InstallTargetModal";
+import PlanSourceTabs from "../components/PlanSourceTabs";
+import type { PlanSource } from "../components/PlanSourceTabs";
 import InstanceIcon from "../components/InstanceIcon";
 import ProjectCard from "../components/ProjectCard";
 import ProjectPanel from "../components/ProjectPanel";
@@ -74,9 +74,9 @@ export interface PlanBrowse {
   /** `provider:projectId` for everything already on the list. */
   inPlan: Set<string>;
   onAdd: (projects: Project[]) => void;
-  onCopy: () => void;
-  /** The bulk-copy panel, shown beside the results while it is open. */
-  copyPanel?: ReactNode;
+  /** Which source the plan is adding from; packs are a whole other view. */
+  source: PlanSource;
+  onSource: (next: PlanSource) => void;
 }
 
 export default function Browse({
@@ -721,10 +721,7 @@ export default function Browse({
 
       <div className={styles.tabs}>
         {plan ? (
-          <button className="btn btn-sm" onClick={plan.onCopy}>
-            <Copy size={13} />
-            Copy from an instance or pack
-          </button>
+          <PlanSourceTabs source={plan.source} onSource={plan.onSource} />
         ) : (
           kinds.map((k) => (
             <button
@@ -752,7 +749,7 @@ export default function Browse({
         </select>
       </div>
 
-      <div className={clsx(styles.body, plan?.copyPanel && styles.bodyPanelled)}>
+      <div className={styles.body}>
         <aside className={styles.filters}>
           <section className={styles.filterSection}>
             <h3 className={styles.filterTitle}>Source</h3>
@@ -925,8 +922,6 @@ export default function Browse({
             </>
           )}
         </div>
-
-        {plan?.copyPanel}
       </div>
 
       {selected && (
