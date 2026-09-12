@@ -234,6 +234,15 @@
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
   background: var(--surface);
+  cursor: pointer;
+  transition:
+    border-color 0.12s var(--ease),
+    background 0.12s var(--ease);
+}
+
+.modRow:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-2);
 }
 
 .modIcon {

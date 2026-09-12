@@ -6,6 +6,7 @@ import {
   ClipboardList,
   Download,
   Info,
+  Loader2,
   Package,
   Plus,
   Search,
@@ -14,9 +15,10 @@ import {
 import InstanceIcon from "../components/InstanceIcon";
 import PlanSourceTabs from "../components/PlanSourceTabs";
 import type { PlanSource } from "../components/PlanSourceTabs";
+import ProjectPanel from "../components/ProjectPanel";
 import { api } from "../lib/api";
 import { compactNumber } from "../lib/format";
-import { modKey } from "../lib/plan";
+import { modKey, planModFromProject } from "../lib/plan";
 import { renderProviderBody } from "../lib/richtext";
 import { useStore } from "../lib/store";
 import { LOADERS } from "../lib/types";
@@ -65,6 +67,25 @@ export default function PlanPacks({
   const [mods, setMods] = useState<PlanMod[] | null>(null);
   const [description, setDescription] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
+
+  // A pack lists its contents by identity alone, so opening one of them means
+  // fetching the project behind it before the panel has anything to show.
+  const [selected, setSelected] = useState<Project | null>(null);
+  const [opening, setOpening] = useState<string | null>(null);
+
+  const openMod = useCallback(
+    async (mod: PlanMod) => {
+      setOpening(modKey(mod));
+      try {
+        setSelected(await api.getProject(mod.provider, mod.projectId));
+      } catch (e) {
+        reportError(`Could not open ${mod.name}`, e);
+      } finally {
+        setOpening(null);
+      }
+    },
+    [reportError],
+  );
 
   useEffect(() => {
     const timer = setTimeout(() => setDebounced(query), 280);
@@ -319,8 +340,14 @@ export default function PlanPacks({
               <div className={styles.rows}>
                 {mods.map((mod) => {
                   const added = inPlan.has(modKey(mod));
+                  const busy = opening === modKey(mod);
                   return (
-                    <div key={modKey(mod)} className={styles.modRow}>
+                    <div
+                      key={modKey(mod)}
+                      className={styles.modRow}
+                      onClick={() => void openMod(mod)}
+                      title={`Open ${mod.name}`}
+                    >
                       <span className={styles.modIcon}>
                         {mod.iconUrl ? (
                           <img src={mod.iconUrl} alt="" loading="lazy" />
@@ -332,6 +359,7 @@ export default function PlanPacks({
                       <span className={clsx("badge", `badge-${mod.provider}`)}>
                         {mod.provider === "modrinth" ? "Modrinth" : "CurseForge"}
                       </span>
+                      {busy && <Loader2 size={13} className="spin" />}
                       {added ? (
                         <span className={styles.added}>
                           <Check size={13} />
@@ -340,7 +368,11 @@ export default function PlanPacks({
                       ) : (
                         <button
                           className="btn btn-sm"
-                          onClick={() => onAdd([mod])}
+                          // The row opens the mod; only this adds it.
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onAdd([mod]);
+                          }}
                         >
                           <Plus size={13} />
                           Add
@@ -423,6 +455,18 @@ export default function PlanPacks({
           </div>
         )}
       </div>
+
+      {selected && (
+        <ProjectPanel
+          project={selected}
+          onClose={() => setSelected(null)}
+          // Stays open after adding: the panel re-renders as "already on the
+          // plan", which is the confirmation.
+          onRequestInstall={(project) => onAdd([planModFromProject(project)])}
+          planMode
+          added={inPlan.has(`${selected.provider}:${selected.id}`)}
+        />
+      )}
     </>
   );
 }
