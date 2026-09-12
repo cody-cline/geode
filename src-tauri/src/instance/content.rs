@@ -249,7 +249,14 @@ pub async fn list_in(
         metas.push(meta);
     }
 
-    if kind == ContentKind::Mod {
+    // Plugins get edges too, now that servers draw the same dependency field.
+    // Their jars declare nothing we can read — a Bukkit `plugin.yml` is not a
+    // mod manifest — so `metas` is all `None` and only the project ids recorded
+    // at install time contribute. That is still worth drawing, and it stays
+    // honest either way: `declares_deps` is false, saying the jar did not tell
+    // us, and `unused` only ever marks something installed *as* a dependency,
+    // so a plugin dropped in by hand is never called unneeded.
+    if matches!(kind, ContentKind::Mod | ContentKind::Plugin) {
         link(&mut items, &metas, records);
     }
 
@@ -443,6 +450,32 @@ mod tests {
         }
     }
 
+    fn plugin(file: &str, dependency: bool) -> ContentItem {
+        ContentItem {
+            file_name: file.into(),
+            kind: ContentKind::Plugin,
+            name: file.into(),
+            dependency,
+            ..Default::default()
+        }
+    }
+
+    fn record(file: &str, kind: ContentKind, project: &str, requires: &[&str]) -> ContentRecord {
+        ContentRecord {
+            file_name: file.into(),
+            kind,
+            provider: "modrinth".into(),
+            project_id: project.into(),
+            version_id: "1".into(),
+            name: file.into(),
+            version_number: "1".into(),
+            slug: None,
+            icon_url: None,
+            dependency: false,
+            requires: Some(requires.iter().map(|s| s.to_string()).collect()),
+        }
+    }
+
     fn meta(primary: &[&str], requires: &[&str]) -> Option<JarMeta> {
         Some(JarMeta {
             primary: primary.iter().map(|s| s.to_string()).collect(),
@@ -597,6 +630,99 @@ mod tests {
         assert_eq!(items[1].required_by, vec!["mod.jar"]);
         assert!(!items[1].unused);
         assert!(!items[0].declares_deps);
+    }
+
+    #[test]
+    fn plugins_link_through_their_records_too() {
+        // A Bukkit jar declares nothing we can read — `plugin.yml` is not a mod
+        // manifest — so `metas` is all None and the ids recorded at install
+        // time are the only edges available. This is the path a server's
+        // dependency field depends on entirely.
+        let mut items = vec![plugin("essentials.jar", false), plugin("vault.jar", true)];
+        items[0].provider = Some("modrinth".into());
+        items[0].project_id = Some("AAA".into());
+        items[1].provider = Some("modrinth".into());
+        items[1].project_id = Some("BBB".into());
+
+        let records = vec![record("essentials.jar", ContentKind::Plugin, "AAA", &["BBB"])];
+        link(&mut items, &[None, None], &records);
+
+        assert_eq!(items[0].requires, vec!["vault.jar"]);
+        assert_eq!(items[1].required_by, vec!["essentials.jar"]);
+        // The jar told us nothing; only the install record did, and saying so
+        // is how the UI knows not to trust this as a complete picture.
+        assert!(!items[0].declares_deps);
+        // It arrived as a dependency and something still needs it.
+        assert!(!items[1].unused);
+    }
+
+    /// The gate this covers lives in `list_in`, not in `link`. Linking was
+    /// always kind-agnostic; plugins were simply never handed to it, so every
+    /// plugin came back with empty edges and a server's dependency field drew
+    /// a row of disconnected discs. A `link`-level test would pass either way,
+    /// which is why this one goes through the folder.
+    #[tokio::test]
+    async fn a_plugins_folder_comes_back_with_its_edges() {
+        let dir = std::env::temp_dir()
+            .join(format!("geode-plugin-link-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.expect("create");
+
+        // The bytes do not matter: a plugin jar is never opened, because there
+        // is no reader for a Bukkit manifest.
+        for name in ["essentials.jar", "vault.jar"] {
+            tokio::fs::write(dir.join(name), b"PK").await.expect("write");
+        }
+
+        let records = vec![
+            record("essentials.jar", ContentKind::Plugin, "AAA", &["BBB"]),
+            record("vault.jar", ContentKind::Plugin, "BBB", &[]),
+        ];
+
+        let items = list_in(
+            &dir,
+            &records,
+            ContentKind::Plugin,
+            &crate::instance::jar::MetaCache::new(),
+        )
+        .await
+        .expect("the folder should list");
+
+        let essentials = items
+            .iter()
+            .find(|i| i.file_name == "essentials.jar")
+            .expect("essentials");
+        let vault = items
+            .iter()
+            .find(|i| i.file_name == "vault.jar")
+            .expect("vault");
+
+        assert_eq!(
+            essentials.requires,
+            vec!["vault.jar"],
+            "a plugin's recorded dependency should become an edge"
+        );
+        assert_eq!(vault.required_by, vec!["essentials.jar"]);
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[test]
+    fn a_record_of_another_kind_is_never_borrowed() {
+        // The same file name can sit in mods/ and in plugins/. Matching on the
+        // name alone would hang one folder's dependencies off the other's file.
+        let mut items = vec![plugin("shared.jar", false), plugin("dep.jar", true)];
+        items[0].provider = Some("modrinth".into());
+        items[0].project_id = Some("AAA".into());
+        items[1].provider = Some("modrinth".into());
+        items[1].project_id = Some("BBB".into());
+
+        // A mod's record, for a plugin of the same name.
+        let records = vec![record("shared.jar", ContentKind::Mod, "AAA", &["BBB"])];
+        link(&mut items, &[None, None], &records);
+
+        assert!(items[0].requires.is_empty());
+        assert!(items[1].required_by.is_empty());
     }
 
     #[test]

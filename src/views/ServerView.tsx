@@ -404,7 +404,12 @@ export default function ServerView({ id }: { id: string }) {
       </div>
 
       <nav className={styles.tabs}>
-        {TABS.map((tab) => (
+        {TABS.filter(
+          // A server that keeps neither mods nor plugins — a proxy, or plain
+          // vanilla — has nothing to draw a dependency field from.
+          (tab) =>
+            tab.id !== "graph" || server.takesMods || server.takesPlugins,
+        ).map((tab) => (
           <button
             key={tab.id}
             className={clsx(styles.tab, active === tab.id && styles.tabActive)}
@@ -497,7 +502,14 @@ export default function ServerView({ id }: { id: string }) {
       ) : active === "content" ? (
         <ContentPane server={server} onAdd={setAdding} />
       ) : active === "graph" ? (
-        <GraphTab id={server.id} source="server" />
+        // Whichever folder this server actually keeps its content in: a Paper
+        // server has no mods, and drawing that folder would show an empty
+        // field beside a full plugins one.
+        <GraphTab
+          id={server.id}
+          source="server"
+          folder={server.takesMods ? "mod" : "plugin"}
+        />
       ) : active === "backups" ? (
         <BackupsPane server={server} />
       ) : (

@@ -13,7 +13,7 @@ import {
 
 import { api } from "../../lib/api";
 import { useStore } from "../../lib/store";
-import type { ContentItem } from "../../lib/types";
+import type { ContentItem, ContentKind } from "../../lib/types";
 
 import styles from "./GraphTab.module.css";
 
@@ -341,8 +341,15 @@ function buildField(all: ContentItem[]) {
 export default function GraphTab({
   id,
   source,
+  folder,
 }: {
   id: string;
+  /**
+   * Which folder to draw. Not always mods: a Paper server keeps no mods at
+   * all, and drawing that folder would show it an empty field while its
+   * plugins sat in the one next door.
+   */
+  folder: ContentKind;
   /**
    * Which folder the mods are read from. A server keeps exactly the same
    * provenance records as an instance, so the field itself is identical — only
@@ -355,6 +362,12 @@ export default function GraphTab({
   source: "instance" | "server";
 }) {
   const reportError = useStore((s) => s.reportError);
+
+  // The field is the same either way; only what the things in it are called
+  // changes, and calling a plugin a mod is the sort of thing that makes a
+  // screen feel like it was written for something else.
+  const one = folder === "plugin" ? "plugin" : "mod";
+  const many = `${one}s`;
 
   const [items, setItems] = useState<ContentItem[] | null>(null);
   const [query, setQuery] = useState("");
@@ -376,20 +389,23 @@ export default function GraphTab({
     let cancelled = false;
     const listing =
       source === "server"
-        ? api.listServerContent(id, "mod")
-        : api.listContent(id, "mod");
+        ? api.listServerContent(id, folder)
+        : api.listContent(id, folder);
     listing
       .then((found) => !cancelled && setItems(found))
       .catch((e) => {
         if (!cancelled) {
-          reportError("Could not read the mods folder", e);
+          reportError(
+            `Could not read the ${folder === "plugin" ? "plugins" : "mods"} folder`,
+            e,
+          );
           setItems([]);
         }
       });
     return () => {
       cancelled = true;
     };
-  }, [id, source, reportError]);
+  }, [id, source, folder, reportError]);
 
   const field = useMemo(() => buildField(items ?? []), [items]);
 
@@ -586,14 +602,14 @@ export default function GraphTab({
           <Search size={14} className={styles.searchIcon} />
           <input
             className={clsx("input", styles.search)}
-            placeholder="Find a mod"
+            placeholder={`Find a ${one}`}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
         </div>
         {items !== null && field.nodes.length > 0 && (
           <p className={styles.summary}>
-            {field.linked} of {field.nodes.length} mods are connected to
+            {field.linked} of {field.nodes.length} {many} are connected to
             something.
             {field.omitted.length > 0 && (
               <span className={styles.omitted}>
@@ -603,7 +619,7 @@ export default function GraphTab({
             )}
           </p>
         )}
-        <span className={styles.hint}>drag a mod to move it</span>
+        <span className={styles.hint}>drag a {one} to move it</span>
         <div className={styles.zoom}>
           <button
             className="btn btn-icon btn-sm"
@@ -638,7 +654,7 @@ export default function GraphTab({
       ) : field.nodes.length === 0 ? (
         <div className={styles.centre}>
           <Share2 size={28} className={styles.emptyIcon} />
-          <p>No mods installed yet.</p>
+          <p>No {many} installed yet.</p>
         </div>
       ) : (
         <svg
