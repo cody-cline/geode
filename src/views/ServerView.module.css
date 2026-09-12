@@ -101,6 +101,32 @@
   color: var(--text-dim);
 }
 
+/* The pack a server was built from, said the way an instance says it. */
+.packLink {
+  cursor: pointer;
+  transition:
+    border-color 0.12s var(--ease),
+    color 0.12s var(--ease);
+}
+
+.packLink:hover {
+  border-color: var(--text-faint);
+  color: var(--text);
+}
+
+.packSummary {
+  margin-top: 7px;
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.5;
+  max-width: 74ch;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
 .stats {
   display: flex;
   flex-wrap: wrap;

@@ -131,6 +131,8 @@ pub fn run() {
             commands::apply_server_content_update,
             commands::link_untracked_server_content,
             commands::create_server_from_plan,
+            commands::server_kinds_for_pack,
+            commands::create_server_from_modpack,
             commands::list_server_logs,
             commands::read_server_log,
             commands::delete_server_log,

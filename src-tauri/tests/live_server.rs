@@ -303,3 +303,60 @@ async fn arclight_offers_the_loader_its_mods_are_built_for() {
     println!("arclight {} -> {}", versions[0], jar.file_name);
 }
 
+
+/// The question Browse asks before offering to host a pack: what can run this?
+///
+/// Two packs on two different loaders, because the answer is derived from the
+/// pack's published metadata and a single fixture would not show the derivation
+/// working — only that one pack happens to parse.
+#[tokio::test]
+#[ignore = "hits the network"]
+async fn a_published_pack_names_the_servers_that_can_host_it() {
+    let client = net::client();
+    let paths = geode_lib::paths::Paths {
+        root: std::env::temp_dir().join(format!("geode-pack-kinds-{}", std::process::id())),
+    };
+    paths.ensure_all().await.expect("scratch dirs");
+
+    for slug in ["fabulously-optimized", "the-pixelmon-modpack"] {
+        let pack = geode_lib::plan::pack::detailed(
+            &client,
+            &paths,
+            geode_lib::providers::Provider::Modrinth,
+            slug,
+            None,
+            None,
+            &geode_lib::net::Progress::silent("test"),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{slug}: {e}"));
+
+        let loader = pack.loader.as_str();
+        let kinds = geode_lib::server::from_pack::kinds_for(loader);
+        assert!(
+            !kinds.is_empty(),
+            "{slug} is a {loader} pack and nothing was offered to host it"
+        );
+        // The picker's promise: every option runs the pack's own loader, and
+        // the plain loader is offered first.
+        for &kind in &kinds {
+            assert_eq!(
+                kind.mod_loader(),
+                Some(loader),
+                "{} does not run {loader}",
+                kind.display_name()
+            );
+        }
+        println!(
+            "{slug} ({loader}, mc {}) -> {}",
+            pack.mc_version,
+            kinds
+                .iter()
+                .map(|k| k.display_name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    let _ = tokio::fs::remove_dir_all(&paths.root).await;
+}

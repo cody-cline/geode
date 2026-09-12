@@ -192,6 +192,12 @@ export interface Server {
   /** Absolute paths to those images, resolved by the backend. */
   iconPath: string | null;
   bannerPath: string | null;
+  /**
+   * The modpack this server was built from, if it was. The same record an
+   * instance keeps, so a server made from a pack can show its artwork and link
+   * back to its page.
+   */
+  pack?: PackSource | null;
   /** `paper`, `fabric`, `mohist`, … */
   kind: string;
   mcVersion: string;

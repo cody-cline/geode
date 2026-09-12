@@ -224,6 +224,36 @@ export const api = {
       gameVersion,
       name: name ?? null,
     }),
+  /**
+   * Which server software could run this modpack. Answered from the published
+   * version's loader rather than by downloading it, so the choice can be
+   * offered before committing to the download.
+   */
+  serverKindsForPack: (
+    provider: Provider,
+    projectId: string,
+    versionId?: string,
+  ) =>
+    invoke<ServerKindInfo[]>("server_kinds_for_pack", {
+      provider,
+      projectId,
+      versionId: versionId ?? null,
+    }),
+  /** Install a modpack as a server rather than as an instance. */
+  createServerFromModpack: (
+    provider: Provider,
+    projectId: string,
+    kind: string,
+    versionId?: string,
+    name?: string,
+  ) =>
+    invoke<ServerBuildReport>("create_server_from_modpack", {
+      provider,
+      projectId,
+      versionId: versionId ?? null,
+      kind,
+      name: name ?? null,
+    }),
   packContents: (
     provider: Provider,
     projectId: string,

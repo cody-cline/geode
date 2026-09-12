@@ -11,6 +11,7 @@
 //! assumes one or the other cannot describe them.
 
 pub mod backup;
+pub mod from_pack;
 pub mod from_plan;
 pub mod install;
 pub mod installer;
@@ -27,7 +28,7 @@ use crate::paths::Paths;
 
 /// The server software, which decides both where the jar comes from and what
 /// kind of content the folder takes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ServerKind {
     /// Mojang's own server jar. No plugins, no mods.
@@ -244,6 +245,13 @@ pub struct Server {
     pub banner: Option<String>,
     pub kind: ServerKind,
     pub mc_version: String,
+    /// The modpack this server was built from, when it was built from one.
+    ///
+    /// Exactly what an instance records, and the same type: a server made from
+    /// a pack is as much that pack as an instance made from it, and should be
+    /// able to say so — its name, its artwork, and a way back to its page.
+    #[serde(default)]
+    pub pack: Option<crate::instance::PackSource>,
     /// The build or loader version of the jar in place, for update checks.
     #[serde(default)]
     pub build: String,
@@ -351,6 +359,7 @@ impl Server {
             name,
             icon: None,
             banner: None,
+            pack: None,
             kind,
             mc_version,
             build: String::new(),

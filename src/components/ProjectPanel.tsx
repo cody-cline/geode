@@ -9,6 +9,7 @@ import {
   Package,
   Play,
   Plus,
+  Server,
   ShieldAlert,
   X,
 } from "lucide-react";
@@ -34,6 +35,7 @@ export default function ProjectPanel({
   target,
   onClose,
   onRequestInstall,
+  onRequestServer,
   directInstall,
   installedInstance,
   planMode,
@@ -44,6 +46,8 @@ export default function ProjectPanel({
   target?: Instance;
   onClose: () => void;
   onRequestInstall: (project: Project, versionId?: string) => void;
+  /** Modpacks only: host it rather than play it. Absent where that can't apply. */
+  onRequestServer?: (project: Project, versionId?: string) => void;
   /** True when the destination is already fixed, so no dialog follows. */
   directInstall?: boolean;
   /** For modpacks: the instance this pack already built, if any. */
@@ -217,6 +221,14 @@ export default function ProjectPanel({
                 : directInstall
                   ? "Install"
                   : "Install\u2026"}
+            </button>
+          )}
+          {/* Offered even once the pack is installed: playing it and hosting
+              it are separate things to want, and wanting both is normal. */}
+          {isModpack && !blocked && onRequestServer && (
+            <button className="btn" onClick={() => onRequestServer(project)}>
+              <Server size={14} />
+              Host as server…
             </button>
           )}
           <button className="btn" onClick={() => void openUrl(source.pageUrl)}>

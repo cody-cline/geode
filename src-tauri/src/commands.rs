@@ -1207,18 +1207,119 @@ pub struct ServerKindInfo {
     pub is_proxy: bool,
 }
 
+fn kind_info(kind: crate::server::ServerKind) -> ServerKindInfo {
+    ServerKindInfo {
+        id: kind.as_str().to_string(),
+        name: kind.display_name().to_string(),
+        takes_plugins: kind.takes_plugins(),
+        takes_mods: kind.takes_mods(),
+        is_proxy: kind.is_proxy(),
+    }
+}
+
 #[tauri::command]
 pub async fn server_kinds() -> Result<Vec<ServerKindInfo>> {
     Ok(crate::server::ServerKind::ALL
         .iter()
-        .map(|&kind| ServerKindInfo {
-            id: kind.as_str().to_string(),
-            name: kind.display_name().to_string(),
-            takes_plugins: kind.takes_plugins(),
-            takes_mods: kind.takes_mods(),
-            is_proxy: kind.is_proxy(),
-        })
+        .map(|&kind| kind_info(kind))
         .collect())
+}
+
+/// Which server software could run this modpack.
+///
+/// Answered from the published version's own loader list rather than by
+/// downloading the pack, so the choice can be offered before committing to a
+/// few hundred megabytes. A Forge pack comes back as Forge, Mohist and
+/// Arclight — the last two run the same mods and take Bukkit plugins as well,
+/// which is the reason for asking rather than assuming.
+#[tauri::command]
+pub async fn server_kinds_for_pack(
+    state: State<'_, AppState>,
+    provider: String,
+    project_id: String,
+    version_id: Option<String>,
+) -> Result<Vec<ServerKindInfo>> {
+    let provider = Provider::parse(&provider).ok_or_else(|| Error::msg("unknown provider"))?;
+    let config = state.config().await;
+    let cf_key = config.effective_curseforge_key();
+
+    // Packs are never filtered by loader or version: the pack chose those.
+    let versions =
+        providers::versions(&state.http, provider, &project_id, None, None, cf_key.as_deref())
+            .await?;
+    let version = match &version_id {
+        Some(want) => versions.iter().find(|v| &v.id == want),
+        None => crate::install::content::pick_best(&versions),
+    }
+    .ok_or_else(|| Error::msg("that pack version is no longer available"))?;
+
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for loader in &version.loaders {
+        for kind in crate::server::from_pack::kinds_for(loader) {
+            if seen.insert(kind) {
+                out.push(kind_info(kind));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Install a modpack as a server rather than as an instance.
+#[tauri::command]
+pub async fn create_server_from_modpack(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    provider: String,
+    project_id: String,
+    version_id: Option<String>,
+    kind: String,
+    name: Option<String>,
+) -> Result<crate::server::from_plan::ServerBuildReport> {
+    let provider = Provider::parse(&provider).ok_or_else(|| Error::msg("unknown provider"))?;
+    let kind = parse_server_kind(&kind)?;
+    let config = state.config().await;
+    let cf_key = config.effective_curseforge_key();
+    let cf_key = cf_key.as_deref();
+
+    let progress = Progress::new(app, format!("pack-server:{project_id}"));
+    state.register_cancel(progress.id(), progress.cancel_flag());
+
+    let result = async {
+        let contents = crate::plan::pack::detailed(
+            &state.http,
+            &state.paths,
+            provider,
+            &project_id,
+            version_id.as_deref(),
+            cf_key,
+            &progress,
+        )
+        .await?;
+        crate::server::from_pack::from_modpack(
+            &state.http,
+            &state.paths,
+            &contents,
+            kind,
+            name,
+            cf_key,
+            &progress,
+        )
+        .await
+    }
+    .await;
+
+    state.clear_cancel(progress.id());
+    match result {
+        Ok(report) => {
+            progress.finish().await;
+            Ok(report)
+        }
+        Err(e) => {
+            progress.fail(&e.to_string()).await;
+            Err(e)
+        }
+    }
 }
 
 fn parse_server_kind(s: &str) -> Result<crate::server::ServerKind> {

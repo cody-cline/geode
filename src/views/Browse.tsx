@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 
 import InstallTargetModal from "../components/InstallTargetModal";
+import PackServerModal from "../components/PackServerModal";
 import PlanSourceTabs from "../components/PlanSourceTabs";
 import type { PlanSource } from "../components/PlanSourceTabs";
 import ServerTargetModal from "../components/ServerTargetModal";
@@ -123,6 +124,7 @@ export default function Browse({
   const reportError = useStore((s) => s.reportError);
   const toast = useStore((s) => s.toast);
   const refreshInstances = useStore((s) => s.refreshInstances);
+  const refreshServers = useStore((s) => s.refreshServers);
 
   const [query, setQuery] = useState("");
   const [debounced, setDebounced] = useState("");
@@ -163,6 +165,11 @@ export default function Browse({
   } | null>(null);
   /** A plugin found in the global view, waiting to be told which server. */
   const [askServer, setAskServer] = useState<Project | null>(null);
+  /** A pack being hosted rather than played, waiting on a software choice. */
+  const [askPackServer, setAskPackServer] = useState<{
+    project: Project;
+    versionId?: string;
+  } | null>(null);
   const [installing, setInstalling] = useState<string | null>(null);
 
   const progressMap = useStore((s) => s.progress);
@@ -351,6 +358,43 @@ export default function Browse({
       // A partial import still leaves a usable instance, so refresh either way.
       await refreshInstances();
       reportError(`Could not install ${project.name}`, e);
+    } finally {
+      setInstalling(null);
+    }
+  }
+
+  async function hostPack(project: Project, kind: string, versionId?: string) {
+    setInstalling(project.id);
+    try {
+      const report = await api.createServerFromModpack(
+        project.provider,
+        project.id,
+        kind,
+        versionId,
+      );
+      await refreshServers();
+      toast({
+        kind: "success",
+        title: `Built ${report.serverName}`,
+        body: `${report.installed.length} server-side ${
+          report.installed.length === 1 ? "mod" : "mods"
+        } from the pack.`,
+      });
+      if (report.skipped.length > 0) {
+        toast({
+          kind: "error",
+          title: "Some of the pack was skipped",
+          body: report.skipped.join("; "),
+        });
+      }
+      // Unlike a pack install, this does navigate: a fresh server has
+      // properties to set and a world to generate before it is worth
+      // anything, and all of that lives on its page.
+      navigate({ view: "server", id: report.serverId });
+    } catch (e) {
+      // A half-built server is still a server, so let the list catch up.
+      await refreshServers();
+      reportError(`Could not host ${project.name}`, e);
     } finally {
       setInstalling(null);
     }
@@ -1016,9 +1060,32 @@ export default function Browse({
           installedInstance={packInstance(selected)}
           onClose={() => setSelected(null)}
           onRequestInstall={requestInstall}
+          // Hosting is a global act, so it is not offered while browsing on
+          // behalf of one instance, one plan, or one existing server.
+          onRequestServer={
+            lockedInstance || plan || server
+              ? undefined
+              : (project, versionId) => {
+                  setSelected(null);
+                  setAskPackServer({ project, versionId });
+                }
+          }
           directInstall={Boolean(lockedInstance)}
           planMode={Boolean(plan)}
           added={isInstalled(selected)}
+        />
+      )}
+
+      {askPackServer && (
+        <PackServerModal
+          project={askPackServer.project}
+          versionId={askPackServer.versionId}
+          onClose={() => setAskPackServer(null)}
+          onChoose={(kind) => {
+            const { project, versionId } = askPackServer;
+            setAskPackServer(null);
+            void hostPack(project, kind, versionId);
+          }}
         />
       )}
 

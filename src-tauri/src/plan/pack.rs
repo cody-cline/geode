@@ -18,6 +18,18 @@ use crate::providers::{self, Provider};
 
 use super::PlanMod;
 
+/// A pack's mod list, together with what the pack says about itself.
+pub struct PackContents {
+    /// The pack project, so a build made from it can record where it came from.
+    pub project: providers::Project,
+    pub version_id: String,
+    pub version_number: String,
+    /// What the pack targets. Anything built from it has to match.
+    pub mc_version: String,
+    pub loader: crate::meta::Loader,
+    pub mods: Vec<PlanMod>,
+}
+
 /// Download a pack and list the mods in it, versionless.
 pub async fn contents(
     client: &reqwest::Client,
@@ -28,6 +40,24 @@ pub async fn contents(
     curseforge_key: Option<&str>,
     progress: &Progress,
 ) -> Result<Vec<PlanMod>> {
+    Ok(
+        detailed(client, paths, provider, project_id, version_id, curseforge_key, progress)
+            .await?
+            .mods,
+    )
+}
+
+/// The same read, keeping the target and provenance a plan throws away.
+#[allow(clippy::too_many_arguments)] // one pack's coordinates, travelling together
+pub async fn detailed(
+    client: &reqwest::Client,
+    paths: &Paths,
+    provider: Provider,
+    project_id: &str,
+    version_id: Option<&str>,
+    curseforge_key: Option<&str>,
+    progress: &Progress,
+) -> Result<PackContents> {
     let project = providers::project(client, provider, project_id, curseforge_key).await?;
     if project.kind != providers::ProjectKind::Modpack {
         return Err(Error::msg(format!("{} is not a modpack", project.name)));
@@ -49,6 +79,9 @@ pub async fn contents(
     if let Some(reason) = &version.blocked_reason {
         return Err(Error::msg(reason.clone()));
     }
+    // Taken now, while `version` is still borrowed from the list.
+    let chosen_id = version.id.clone();
+    let chosen_number = version.version_number.clone();
     let file = version
         .primary_file()
         .ok_or_else(|| Error::msg(format!("{} has no downloadable file", project.name)))?;
@@ -66,6 +99,8 @@ pub async fn contents(
     progress.advance(1, &file.filename).await;
 
     progress.stage("Reading pack contents", 1).await;
+    // What the pack was built for. A server made from it has to be that.
+    let target = modpack::preview(archive.clone()).await?;
     let mods = match modpack::index_mods(archive).await? {
         PackMods::Modrinth(ids) => {
             let projects = providers::modrinth::projects_by_ids(client, &ids).await?;
@@ -101,5 +136,12 @@ pub async fn contents(
     };
     progress.finish().await;
 
-    Ok(mods)
+    Ok(PackContents {
+        project,
+        version_id: chosen_id,
+        version_number: chosen_number,
+        mc_version: target.mc_version,
+        loader: target.loader,
+        mods,
+    })
 }

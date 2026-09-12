@@ -17,6 +17,7 @@ import {
   ExternalLink,
   FolderOpen,
   Loader2,
+  Package,
   Play,
   Plus,
   Square,
@@ -381,8 +382,16 @@ export default function ServerView({ id }: { id: string }) {
   return (
     <>
       <div className={styles.hero}>
+        {/* An uploaded banner wins, then the modpack's own artwork if this
+            server was built from one, then the generated wash. */}
         {server.bannerPath ? (
           <img className={styles.heroImg} src={convertFileSrc(server.bannerPath)} alt="" />
+        ) : server.pack?.bannerUrl ?? server.pack?.iconUrl ? (
+          <img
+            className={styles.heroImg}
+            src={(server.pack?.bannerUrl ?? server.pack?.iconUrl) as string}
+            alt=""
+          />
         ) : (
           <span
             className={styles.heroImg}
@@ -421,8 +430,28 @@ export default function ServerView({ id }: { id: string }) {
             <span className="badge badge-accent">{server.kindName}</span>
             <span>Minecraft {server.mcVersion}</span>
             {server.build && <span className="badge">build {server.build}</span>}
+            {server.pack &&
+              (server.pack.pageUrl ? (
+                <button
+                  className={clsx("badge", styles.packLink)}
+                  onClick={() => void openUrl(server.pack!.pageUrl!)}
+                  title={`Open ${server.pack.name}`}
+                >
+                  <Package size={10} />
+                  {server.pack.name} {server.pack.version}
+                  <ExternalLink size={9} />
+                </button>
+              ) : (
+                <span className="badge">
+                  <Package size={10} />
+                  {server.pack.name} {server.pack.version}
+                </span>
+              ))}
             {server.running && <span className={styles.live}>running</span>}
           </div>
+          {server.pack?.summary && (
+            <p className={styles.packSummary}>{server.pack.summary}</p>
+          )}
           <div className={styles.stats}>
             <span>
               <Clock size={11} />
