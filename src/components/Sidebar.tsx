@@ -7,6 +7,7 @@ import {
   Loader2,
   Play,
   Plus,
+  Server as ServerIcon,
   Settings as SettingsIcon,
   UserRound,
 } from "lucide-react";
@@ -14,6 +15,7 @@ import {
 import AccountsModal from "./AccountsModal";
 import InstanceIcon from "./InstanceIcon";
 import NewInstanceModal from "./NewInstanceModal";
+import NewServerModal from "./NewServerModal";
 import { hashHue, initials } from "../lib/format";
 import { useStore } from "../lib/store";
 import type { Route } from "../lib/store";
@@ -29,6 +31,7 @@ export default function Sidebar() {
   const progress = useStore((s) => s.progress);
 
   const [creating, setCreating] = useState(false);
+  const [creatingServer, setCreatingServer] = useState(false);
   const [managingAccounts, setManagingAccounts] = useState(false);
 
   const active = accounts.find((a) => a.active);
@@ -94,6 +97,17 @@ export default function Sidebar() {
           <ClipboardList size={17} />
           Plans
         </button>
+        <button
+          className={clsx(
+            styles.navItem,
+            (route.view === "servers" || route.view === "server") &&
+              styles.navActive,
+          )}
+          onClick={() => navigate({ view: "servers" })}
+        >
+          <ServerIcon size={17} />
+          Servers
+        </button>
       </nav>
 
       <div className={styles.sectionHead}>
@@ -141,9 +155,9 @@ export default function Sidebar() {
         <span>Servers</span>
         <button
           className={styles.addBtn}
-          onClick={() => navigate({ view: "servers" })}
-          title="All servers"
-          aria-label="All servers"
+          onClick={() => setCreatingServer(true)}
+          title="New server"
+          aria-label="New server"
         >
           <Plus size={15} />
         </button>
@@ -217,6 +231,15 @@ export default function Sidebar() {
       </div>
 
       {creating && <NewInstanceModal onClose={() => setCreating(false)} />}
+      {creatingServer && (
+        <NewServerModal
+          onClose={() => setCreatingServer(false)}
+          onCreated={(server) => {
+            setCreatingServer(false);
+            navigate({ view: "server", id: server.id });
+          }}
+        />
+      )}
       {managingAccounts && (
         <AccountsModal onClose={() => setManagingAccounts(false)} />
       )}
