@@ -94,26 +94,20 @@ pub struct Support {
 
 impl Support {
     pub fn from_versions(versions: &[Version]) -> Self {
-        let mut pairs = HashSet::new();
-        for version in versions {
-            // A file that cannot be downloaded cannot support anything — the
-            // same rule the Connector matrix applies.
-            if version.blocked_reason.is_some() || version.primary_file().is_none() {
-                continue;
-            }
-            for loader in &version.loaders {
-                let loader = loader.to_ascii_lowercase();
-                if !LOADER_ORDER.contains(&loader.as_str()) {
-                    continue;
-                }
-                for game in &version.game_versions {
-                    if is_release(game) {
-                        pairs.insert((loader.clone(), game.clone()));
-                    }
-                }
+        Self::from_pairs(providers::pairs_from_versions(versions))
+    }
+
+    /// Keep the pairs a plan can actually target: a loader we can install, and
+    /// a plain Minecraft release.
+    pub fn from_pairs(pairs: impl IntoIterator<Item = (String, String)>) -> Self {
+        let mut kept = HashSet::new();
+        for (loader, game) in pairs {
+            let loader = loader.to_ascii_lowercase();
+            if LOADER_ORDER.contains(&loader.as_str()) && is_release(&game) {
+                kept.insert((loader, game));
             }
         }
-        Self { pairs }
+        Self { pairs: kept }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -503,18 +497,12 @@ async fn support_for(
         }
         let provider = Provider::parse(&plan_mod.provider)
             .ok_or_else(|| crate::error::Error::msg("unknown provider"))?;
-        // Unfiltered on purpose: the full file list is what defines which
-        // targets are possible at all.
-        let versions = providers::versions(
-            client,
-            provider,
-            &plan_mod.project_id,
-            None,
-            None,
-            curseforge_key,
-        )
-        .await?;
-        let support = Support::from_versions(&versions);
+        // Everything the project has ever shipped, not a recent page of it:
+        // what a plan can target is defined by the whole history.
+        let pairs =
+            providers::support_pairs(client, provider, &plan_mod.project_id, curseforge_key)
+                .await?;
+        let support = Support::from_pairs(pairs);
         cache.put(&plan_mod, support.clone()).await;
         Ok(support)
     }

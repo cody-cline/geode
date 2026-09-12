@@ -234,6 +234,39 @@ async fn reads_a_published_pack_into_a_versionless_mod_list() {
     let _ = tokio::fs::remove_dir_all(&paths.root).await;
 }
 
+/// A decade-old build is still a build the planner can target.
+///
+/// JEI has shipped for Forge since 1.8, and a plan full of 1.12.2 mods is
+/// exactly the case where that matters. Reported as "it still can't detect that
+/// JEI works on Forge 1.12.2": the CurseForge copy of the same mod was being
+/// described by its fifty most recent files, none of which are from 2017.
+#[tokio::test]
+#[ignore = "hits the network"]
+async fn jei_can_still_be_planned_on_forge_1_12_2() {
+    let client = net::client();
+    let matrix = SupportCache::new().get(&client).await.expect("matrix");
+
+    let pairs = geode_lib::providers::support_pairs(&client, Provider::Modrinth, "jei", None)
+        .await
+        .expect("jei's pairs should be readable");
+    let mods = vec![(one_mod("jei"), resolve::Support::from_pairs(pairs))];
+
+    // The whole space, not the best few: an eight-year-old target is never
+    // going to be near the top of the list.
+    let targets = resolve::rank(&mods, &matrix, 500);
+    let ancient = targets
+        .iter()
+        .find(|t| t.loader == "forge" && t.game_version == "1.12.2")
+        .expect("JEI ships a Forge 1.12.2 build, so it must be an offerable target");
+
+    assert_eq!(ancient.missing, 0);
+    assert_eq!(ancient.fits[0].fit, Fit::Native);
+    println!(
+        "forge 1.12.2 offered, JEI native there ({} targets in all)",
+        targets.len()
+    );
+}
+
 /// A mod that fits nowhere must not be described by a hint that hides most of
 /// where it does fit.
 ///

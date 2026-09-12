@@ -394,6 +394,56 @@ pub async fn versions(
     }
 }
 
+/// The (loader, game version) pairs a version list actually has files behind.
+///
+/// Pairs, never the two arrays separately: a project listing both Fabric and
+/// 1.21.1 has not promised a Fabric build *for* 1.21.1.
+pub fn pairs_from_versions(versions: &[Version]) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    for version in versions {
+        // A file that cannot be downloaded cannot support anything.
+        if version.blocked_reason.is_some() || version.primary_file().is_none() {
+            continue;
+        }
+        for loader in &version.loaders {
+            for game in &version.game_versions {
+                pairs.push((loader.clone(), game.clone()));
+            }
+        }
+    }
+    pairs
+}
+
+/// Everything a project can run on, for deciding what a whole plan can run on.
+///
+/// Deliberately not `versions()`: on CurseForge that endpoint pages at fifty
+/// files, which for a mod with a decade of releases describes only this year.
+/// CurseForge publishes a complete per-version index instead, and the recent
+/// file list is unioned in to cover anything the index leaves unlabelled.
+pub async fn support_pairs(
+    client: &reqwest::Client,
+    provider: Provider,
+    project_id: &str,
+    curseforge_key: Option<&str>,
+) -> Result<Vec<(String, String)>> {
+    match provider {
+        Provider::Modrinth => {
+            let versions = modrinth::versions(client, project_id, None, None).await?;
+            Ok(pairs_from_versions(&versions))
+        }
+        Provider::CurseForge => {
+            let key = curseforge_key.ok_or_else(|| {
+                crate::error::Error::msg("a CurseForge API key is required — add one in Settings")
+            })?;
+            let mut pairs = curseforge::support_pairs(client, project_id, key).await?;
+            if let Ok(versions) = curseforge::versions(client, project_id, None, None, key).await {
+                pairs.extend(pairs_from_versions(&versions));
+            }
+            Ok(pairs)
+        }
+    }
+}
+
 pub async fn project(
     client: &reqwest::Client,
     provider: Provider,

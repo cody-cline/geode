@@ -479,6 +479,32 @@ pub async fn project(client: &reqwest::Client, id: &str, api_key: &str) -> Resul
     Ok(to_project(resp.data))
 }
 
+/// Every (loader, game version) pair this project has a file for.
+///
+/// Read from `latestFilesIndexes`, CurseForge's own index of the newest file
+/// per game version and loader. The files endpoint pages at fifty, so deriving
+/// this from [`versions`] would describe a long-lived mod by its fifty most
+/// recent files — JEI would come back supporting 1.21 and nothing before it.
+///
+/// Index entries with no `modLoader` are skipped: the pair is the point, and a
+/// version with an unknown loader cannot make one. Guessing a loader from the
+/// game version would be inventing support the files may not have.
+pub async fn support_pairs(
+    client: &reqwest::Client,
+    id: &str,
+    api_key: &str,
+) -> Result<Vec<(String, String)>> {
+    let resp: Envelope<CfMod> = get(client, &format!("{API}/mods/{id}"), api_key).await?;
+    Ok(resp
+        .data
+        .latest_files_indexes
+        .into_iter()
+        .filter_map(|index| {
+            loader_name(index.mod_loader).map(|l| (l.to_string(), index.game_version))
+        })
+        .collect())
+}
+
 /// Resolve many projects at once.
 ///
 /// A CurseForge pack manifest identifies its contents by numeric id alone, so
