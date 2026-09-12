@@ -137,17 +137,38 @@ impl Support {
             .max_by_key(|g| version_key(g))
     }
 
-    /// Where this mod *can* run, best first. Used to explain a mod that fits
-    /// nowhere near the plan's target.
-    fn best_pairs(&self, limit: usize) -> Vec<(String, String)> {
-        let mut pairs: Vec<(String, String)> = self.pairs.iter().cloned().collect();
-        pairs.sort_by(|a, b| {
-            loader_rank(&a.0)
-                .cmp(&loader_rank(&b.0))
-                .then_with(|| version_key(&b.1).cmp(&version_key(&a.1)))
-        });
-        pairs.truncate(limit);
-        pairs
+    /// Where this mod *can* run, one entry per loader it supports.
+    ///
+    /// One per loader rather than the best few overall, because the best few
+    /// overall is a lie by omission: JEI publishes for three loaders across
+    /// dozens of versions, and taking the top three by our own loader
+    /// preference listed three Fabric versions while hiding all thirty-nine
+    /// Forge ones. Every loader appears here, so the list can be read as
+    /// complete.
+    ///
+    /// The version shown is the target's own wherever the mod has it, because
+    /// "the same version, on another loader" is the most useful thing this can
+    /// say — it means change one thing, not two.
+    fn reachable_on(&self, game: &str) -> Vec<(String, String)> {
+        let mut loaders: Vec<String> = self.pairs.iter().map(|(l, _)| l.clone()).collect();
+        loaders.sort_by_key(|l| loader_rank(l));
+        loaders.dedup();
+
+        loaders
+            .into_iter()
+            .filter_map(|loader| {
+                let version = if self.has(&loader, game) {
+                    game.to_string()
+                } else {
+                    self.pairs
+                        .iter()
+                        .filter(|(l, _)| *l == loader)
+                        .map(|(_, g)| g.clone())
+                        .max_by_key(|g| version_key(g))?
+                };
+                Some((loader, version))
+            })
+            .collect()
     }
 }
 
@@ -204,8 +225,9 @@ pub struct ModFit {
     /// The game version whose file would be used, when it is not the target's.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub via_version: Option<String>,
-    /// Where this mod can run instead, when it cannot run here. Human-readable
-    /// pairs like `Fabric 1.20.1`, best first.
+    /// Where this mod can run instead, when it cannot run here: one
+    /// human-readable pair like `Fabric 1.20.1` per loader it supports, in
+    /// preference order. Complete, so it can be read as the whole answer.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub elsewhere: Vec<String>,
 }
@@ -349,7 +371,7 @@ pub fn rank(mods: &[(PlanMod, Support)], matrix: &SupportMatrix, limit: usize) -
                     via_version: via,
                     elsewhere: if fit == Fit::Missing {
                         support
-                            .best_pairs(3)
+                            .reachable_on(&game)
                             .iter()
                             .map(|(l, g)| label(l, g))
                             .collect()
@@ -739,6 +761,67 @@ mod tests {
             .expect("the stranded mod");
         assert_eq!(stranded.fit, Fit::Missing);
         assert_eq!(stranded.elsewhere, vec!["Forge 1.12.2"]);
+    }
+
+    #[test]
+    fn a_stranded_mod_names_every_loader_it_supports() {
+        // Shaped like JEI: many Forge versions, fewer elsewhere. Reporting the
+        // best three overall used to list three Fabric builds and hide Forge
+        // entirely, which is how a mod that runs almost everywhere came to read
+        // as Fabric-only.
+        let mods = vec![
+            entry("anchor", &[("fabric", "1.20.4")]),
+            entry(
+                "jei",
+                &[
+                    ("forge", "1.12.2"),
+                    ("forge", "1.20.1"),
+                    ("forge", "1.21.1"),
+                    ("neoforge", "1.21.1"),
+                    ("fabric", "26.1.2"),
+                    ("fabric", "26.2"),
+                ],
+            ),
+        ];
+        let targets = rank(&mods, &empty_matrix(), 20);
+        let at = targets
+            .iter()
+            .find(|t| t.loader == "fabric" && t.game_version == "1.20.4")
+            .expect("a 1.20.4 Fabric target");
+        let stranded = at
+            .fits
+            .iter()
+            .find(|f| f.name == "jei")
+            .expect("the stranded mod");
+
+        assert_eq!(stranded.fit, Fit::Missing);
+        // Every loader present, newest version of each, preference order.
+        assert_eq!(
+            stranded.elsewhere,
+            vec!["Fabric 26.2", "NeoForge 1.21.1", "Forge 1.21.1"]
+        );
+    }
+
+    #[test]
+    fn a_stranded_mod_points_at_the_targets_own_version_where_it_has_one() {
+        // Forge has both 1.21.1 and a newer 1.22. The useful answer is the one
+        // that changes only the loader, not the loader *and* the version.
+        let mods = vec![
+            entry("anchor", &[("fabric", "1.21.1")]),
+            entry("forge-only", &[("forge", "1.21.1"), ("forge", "1.22")]),
+        ];
+        let targets = rank(&mods, &empty_matrix(), 20);
+        let at = targets
+            .iter()
+            .find(|t| t.loader == "fabric" && t.game_version == "1.21.1")
+            .expect("a 1.21.1 Fabric target");
+        let stranded = at
+            .fits
+            .iter()
+            .find(|f| f.name == "forge-only")
+            .expect("the stranded mod");
+
+        assert_eq!(stranded.elsewhere, vec!["Forge 1.21.1"]);
     }
 
     #[test]

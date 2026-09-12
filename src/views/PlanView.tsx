@@ -275,7 +275,7 @@ export default function PlanView({ id }: { id: string }) {
                     {verdict && fit === "missing" && (
                       <span className={styles.rowWhere}>
                         {verdict.elsewhere && verdict.elsewhere.length > 0
-                          ? `Only on ${verdict.elsewhere.join(", ")}`
+                          ? `Runs on ${verdict.elsewhere.join(", ")}`
                           : "No build anywhere"}
                       </span>
                     )}
@@ -431,8 +431,8 @@ export default function PlanView({ id }: { id: string }) {
                           <span className={styles.blockName}>{blocker.name}</span>
                           <span className={styles.blockWhere}>
                             {blocker.elsewhere && blocker.elsewhere.length > 0
-                              ? blocker.elsewhere.join(", ")
-                              : "no build anywhere"}
+                              ? `Runs on ${blocker.elsewhere.join(", ")}`
+                              : "No build anywhere"}
                           </span>
                         </span>
                         <button

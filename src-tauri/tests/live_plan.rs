@@ -22,6 +22,7 @@ use geode_lib::net::{self, Progress};
 use geode_lib::paths::Paths;
 use geode_lib::plan::resolve::{self, Fit, Resolution};
 use geode_lib::plan::{Plan, PlanMod};
+use geode_lib::providers::Provider;
 
 /// A throwaway data directory per test. Named, because these run in parallel in
 /// one process and the cleanup at the end of one would otherwise delete the
@@ -36,18 +37,19 @@ fn scratch_paths(name: &str) -> Paths {
 
 /// Modrinth resolves slugs wherever it resolves ids, so a plan can be written
 /// out by name.
+fn one_mod(slug: &str) -> PlanMod {
+    PlanMod {
+        provider: "modrinth".into(),
+        project_id: slug.into(),
+        name: slug.into(),
+        slug: Some(slug.into()),
+        icon_url: None,
+    }
+}
+
 fn plan_of(slugs: &[&str]) -> Plan {
     let mut plan = Plan::new("Live test".into());
-    plan.mods = slugs
-        .iter()
-        .map(|slug| PlanMod {
-            provider: "modrinth".into(),
-            project_id: (*slug).into(),
-            name: (*slug).into(),
-            slug: Some((*slug).into()),
-            icon_url: None,
-        })
-        .collect();
+    plan.mods = slugs.iter().map(|slug| one_mod(slug)).collect();
     plan
 }
 
@@ -230,6 +232,86 @@ async fn reads_a_published_pack_into_a_versionless_mod_list() {
     }
 
     let _ = tokio::fs::remove_dir_all(&paths.root).await;
+}
+
+/// A mod that fits nowhere must not be described by a hint that hides most of
+/// where it does fit.
+///
+/// JEI publishes for Forge, NeoForge and Fabric across dozens of versions.
+/// Reporting the best few pairs overall, ordered by our own loader preference,
+/// listed three Fabric builds and dropped all thirty-nine Forge ones — so a mod
+/// that runs almost everywhere read as Fabric-only.
+#[tokio::test]
+#[ignore = "hits the network"]
+async fn a_stranded_mod_is_not_described_by_a_truncated_hint() {
+    let client = net::client();
+    let matrix = SupportCache::new().get(&client).await.expect("matrix");
+
+    // Ranked over the whole target space rather than the handful `resolve`
+    // hands back. The interesting targets are the ones JEI does *not* cover,
+    // and those are never near the top — pairing it with Fabric API, which
+    // covers far more Fabric versions than JEI ever shipped Fabric builds for,
+    // guarantees some exist.
+    let mut mods = Vec::new();
+    for slug in ["jei", "fabric-api"] {
+        let versions =
+            geode_lib::providers::versions(&client, Provider::Modrinth, slug, None, None, None)
+                .await
+                .expect("versions should be readable");
+        mods.push((
+            one_mod(slug),
+            resolve::Support::from_versions(&versions),
+        ));
+    }
+    let targets = resolve::rank(&mods, &matrix, 500);
+    println!("{} candidate targets", targets.len());
+
+    let mut checked_jei = false;
+    for target in &targets {
+        for fit in target.fits.iter().filter(|f| f.fit == Fit::Missing) {
+            // One entry per loader, never the same loader twice: that is what
+            // makes the list readable as complete rather than as a sample.
+            let loaders: Vec<&str> = fit
+                .elsewhere
+                .iter()
+                .filter_map(|entry| entry.split(' ').next())
+                .collect();
+            let mut unique = loaders.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            assert_eq!(
+                loaders.len(),
+                unique.len(),
+                "{} names a loader more than once on {} {}: {:?}",
+                fit.name,
+                target.loader,
+                target.game_version,
+                fit.elsewhere,
+            );
+
+            if fit.name == "jei" {
+                checked_jei = true;
+                println!(
+                    "jei stranded on {} {} -> {:?}",
+                    target.loader, target.game_version, fit.elsewhere
+                );
+                // The regression itself: Forge is where most of JEI lives, and
+                // it must not be the thing that gets truncated away.
+                assert!(
+                    fit.elsewhere.iter().any(|e| e.starts_with("Forge")),
+                    "jei runs on Forge, yet the hint never says so: {:?}",
+                    fit.elsewhere
+                );
+            }
+        }
+    }
+
+    // A guard that passes by never running is worse than no guard, so the case
+    // having occurred is itself an assertion.
+    assert!(
+        checked_jei,
+        "expected JEI to be stranded on at least one Fabric target it has no build for"
+    );
 }
 
 /// The whole point of the feature, end to end: a versionless list becomes a
