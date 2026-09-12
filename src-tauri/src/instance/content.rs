@@ -155,12 +155,31 @@ pub async fn list(
     kind: ContentKind,
     jars: &super::jar::MetaCache,
 ) -> Result<Vec<ContentItem>> {
-    let dir = paths.game_dir(&instance.id).join(kind.folder());
+    list_in(
+        &paths.game_dir(&instance.id).join(kind.folder()),
+        &instance.content,
+        kind,
+        jars,
+    )
+    .await
+}
+
+/// The same listing, for any folder holding content and any records describing
+/// it.
+///
+/// Servers keep both somewhere else, and nothing about reading a folder
+/// depends on which kind of thing owns it.
+pub async fn list_in(
+    dir: &Path,
+    records: &[ContentRecord],
+    kind: ContentKind,
+    jars: &super::jar::MetaCache,
+) -> Result<Vec<ContentItem>> {
     let mut items = Vec::new();
     // Kept alongside `items` by index; only mods have any.
     let mut metas: Vec<Option<super::jar::JarMeta>> = Vec::new();
 
-    let mut entries = match tokio::fs::read_dir(&dir).await {
+    let mut entries = match tokio::fs::read_dir(dir).await {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(items),
         Err(e) => return Err(e.into()),
@@ -179,8 +198,7 @@ pub async fn list(
 
         // Records are keyed by the enabled filename so toggling does not orphan
         // the provenance.
-        let record = instance
-            .content
+        let record = records
             .iter()
             .find(|r| r.file_name == base_name && r.kind == kind);
 
@@ -232,7 +250,7 @@ pub async fn list(
     }
 
     if kind == ContentKind::Mod {
-        link(&mut items, &metas, &instance.content);
+        link(&mut items, &metas, records);
     }
 
     // Sorting last keeps `items` and `metas` aligned while the graph is built.
@@ -349,29 +367,18 @@ pub fn content_dir(paths: &Paths, instance_id: &str, kind: ContentKind) -> PathB
     paths.game_dir(instance_id).join(kind.folder())
 }
 
-/// Resolve a user-supplied filename to a path inside the content folder,
-/// rejecting anything that tries to escape it.
-fn resolve_file(
-    paths: &Paths,
-    instance_id: &str,
-    kind: ContentKind,
-    file: &str,
-) -> Result<PathBuf> {
+/// Resolve a user-supplied filename inside a content folder, rejecting anything
+/// that tries to escape it.
+fn resolve_in(dir: &Path, file: &str) -> Result<PathBuf> {
     let rel = Path::new(file);
     if !crate::paths::is_safe_relative(rel) || rel.components().count() != 1 {
         return Err(Error::msg("invalid filename"));
     }
-    Ok(content_dir(paths, instance_id, kind).join(rel))
+    Ok(dir.join(rel))
 }
 
-pub async fn set_enabled(
-    paths: &Paths,
-    instance_id: &str,
-    kind: ContentKind,
-    file: &str,
-    enabled: bool,
-) -> Result<String> {
-    let current = resolve_file(paths, instance_id, kind, file)?;
+pub async fn set_enabled_in(dir: &Path, file: &str, enabled: bool) -> Result<String> {
+    let current = resolve_in(dir, file)?;
     let (base, currently_enabled) = strip_disabled(file);
     if currently_enabled == enabled {
         return Ok(file.to_string());
@@ -382,9 +389,33 @@ pub async fn set_enabled(
     } else {
         format!("{base}{DISABLED_SUFFIX}")
     };
-    let target = resolve_file(paths, instance_id, kind, &new_name)?;
+    let target = resolve_in(dir, &new_name)?;
     tokio::fs::rename(&current, &target).await?;
     Ok(new_name)
+}
+
+pub async fn remove_in(
+    dir: &Path,
+    records: &mut Vec<ContentRecord>,
+    kind: ContentKind,
+    file: &str,
+) -> Result<()> {
+    let path = resolve_in(dir, file)?;
+    tokio::fs::remove_file(&path).await?;
+
+    let (base, _) = strip_disabled(file);
+    records.retain(|r| !(r.file_name == base && r.kind == kind));
+    Ok(())
+}
+
+pub async fn set_enabled(
+    paths: &Paths,
+    instance_id: &str,
+    kind: ContentKind,
+    file: &str,
+    enabled: bool,
+) -> Result<String> {
+    set_enabled_in(&content_dir(paths, instance_id, kind), file, enabled).await
 }
 
 pub async fn remove(
@@ -393,14 +424,8 @@ pub async fn remove(
     kind: ContentKind,
     file: &str,
 ) -> Result<()> {
-    let path = resolve_file(paths, instance.id.as_str(), kind, file)?;
-    tokio::fs::remove_file(&path).await?;
-
-    let (base, _) = strip_disabled(file);
-    instance
-        .content
-        .retain(|r| !(r.file_name == base && r.kind == kind));
-    Ok(())
+    let dir = content_dir(paths, &instance.id, kind);
+    remove_in(&dir, &mut instance.content, kind, file).await
 }
 
 #[cfg(test)]

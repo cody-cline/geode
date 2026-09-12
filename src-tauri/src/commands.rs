@@ -1252,6 +1252,161 @@ pub async fn server_folder(state: State<'_, AppState>, id: String) -> Result<Str
     Ok(state.paths.server_run(&id).to_string_lossy().to_string())
 }
 
+/// Plugins or mods installed in a server, read from the folder itself.
+#[tauri::command]
+pub async fn list_server_content(
+    state: State<'_, AppState>,
+    id: String,
+    kind: String,
+) -> Result<Vec<ContentItem>> {
+    let kind = parse_kind(&kind)?;
+    let server = crate::server::load(&state.paths, &id).await?;
+    let dir = state.paths.server_run(&id).join(kind.folder());
+    instance::content::list_in(&dir, &server.content, kind, &state.jars).await
+}
+
+#[tauri::command]
+pub async fn remove_server_content(
+    state: State<'_, AppState>,
+    id: String,
+    kind: String,
+    file: String,
+) -> Result<()> {
+    let kind = parse_kind(&kind)?;
+    let mut server = crate::server::load(&state.paths, &id).await?;
+    let dir = state.paths.server_run(&id).join(kind.folder());
+    instance::content::remove_in(&dir, &mut server.content, kind, &file).await?;
+    server.save(&state.paths).await
+}
+
+#[tauri::command]
+pub async fn set_server_content_enabled(
+    state: State<'_, AppState>,
+    id: String,
+    kind: String,
+    file: String,
+    enabled: bool,
+) -> Result<String> {
+    let kind = parse_kind(&kind)?;
+    let dir = state.paths.server_run(&id).join(kind.folder());
+    instance::content::set_enabled_in(&dir, &file, enabled).await
+}
+
+/// Install a plugin or mod into a server.
+///
+/// The caller says which it is, because the two live in different folders and
+/// a project's own type cannot always tell them apart — Modrinth lists plenty
+/// of multi-platform projects as mods that are equally plugins.
+#[tauri::command]
+pub async fn install_server_content(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    provider: String,
+    project_id: String,
+    version_id: Option<String>,
+    kind: String,
+) -> Result<crate::install::content::InstallReport> {
+    let provider = Provider::parse(&provider).ok_or_else(|| Error::msg("unknown provider"))?;
+    let kind = parse_kind(&kind)?;
+    let config = state.config().await;
+    let cf_key = config.effective_curseforge_key();
+    let cf_key = cf_key.as_deref();
+
+    let mut server = crate::server::load(&state.paths, &id).await?;
+    let project = providers::project(&state.http, provider, &project_id, cf_key).await?;
+
+    // A Paper server runs Paper, Spigot and Bukkit plugins alike, so each is
+    // tried in turn rather than insisting on the most specific one.
+    let loaders: Vec<&str> = match kind {
+        ContentKind::Plugin => server.kind.plugin_loaders().to_vec(),
+        ContentKind::Mod => server.kind.mod_loader().into_iter().collect(),
+        _ => Vec::new(),
+    };
+
+    let mut chosen: Option<Version> = None;
+    for loader in loaders.iter().map(|l| Some(*l)).chain(std::iter::once(None)) {
+        let versions = providers::versions(
+            &state.http,
+            provider,
+            &project_id,
+            Some(&server.mc_version),
+            loader,
+            cf_key,
+        )
+        .await
+        .unwrap_or_default();
+
+        if let Some(want) = &version_id {
+            if let Some(exact) = versions.iter().find(|v| &v.id == want) {
+                chosen = Some(exact.clone());
+                break;
+            }
+        } else if let Some(best) = crate::install::content::pick_best(&versions) {
+            chosen = Some(best.clone());
+            break;
+        }
+        // Only fall through to an unfiltered query when there was a filter to
+        // drop; otherwise the last pass repeats the first.
+        if loaders.is_empty() {
+            break;
+        }
+    }
+
+    let version = chosen.ok_or_else(|| {
+        Error::msg(format!(
+            "{} has no build for {} {}",
+            project.name,
+            server.kind.display_name(),
+            server.mc_version
+        ))
+    })?;
+
+    let progress = Progress::new(app, format!("server-content:{id}:{project_id}"));
+    let dir = state.paths.server_run(&id).join(kind.folder());
+    progress.stage("Installing", 1).await;
+
+    let file = crate::install::content::install_into(
+        &state.http,
+        &dir,
+        &mut server.content,
+        &version,
+        kind,
+        &project.name,
+        project.icon_url.clone(),
+        Some(project.slug.clone()),
+        false,
+    )
+    .await;
+
+    match file {
+        Ok(file) => {
+            server.save(&state.paths).await?;
+            progress.finish().await;
+
+            // Dependencies are not walked yet. Naming them beats a server that
+            // fails at start-up for a reason nothing mentioned.
+            let skipped: Vec<String> = version
+                .dependencies
+                .iter()
+                .filter(|d| d.kind == providers::DependencyKind::Required)
+                .filter_map(|d| d.project_id.clone())
+                .map(|p| format!("requires {p}, which was not installed for you"))
+                .collect();
+
+            Ok(crate::install::content::InstallReport {
+                installed: vec![file],
+                skipped,
+            })
+        }
+        Err(e) => {
+            let _ = server.save(&state.paths).await;
+            progress.fail(&e.to_string()).await;
+            Err(e)
+        }
+    }
+}
+
 /// The server's own `server.properties`. Empty until it has been started once,
 /// because the server writes that file rather than us.
 #[tauri::command]

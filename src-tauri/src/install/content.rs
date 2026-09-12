@@ -29,6 +29,37 @@ pub async fn install(
     slug: Option<String>,
     as_dependency: bool,
 ) -> Result<String> {
+    let dir = crate::instance::content::content_dir(paths, &instance.id, kind);
+    install_into(
+        client,
+        &dir,
+        &mut instance.content,
+        version,
+        kind,
+        display_name,
+        icon_url,
+        slug,
+        as_dependency,
+    )
+    .await
+}
+
+/// The same install, into any content folder with any set of records.
+///
+/// A server's plugins folder is not an instance's mods folder, but nothing
+/// about downloading a file and recording where it came from cares which.
+#[allow(clippy::too_many_arguments)]
+pub async fn install_into(
+    client: &reqwest::Client,
+    dir: &std::path::Path,
+    records: &mut Vec<ContentRecord>,
+    version: &Version,
+    kind: ContentKind,
+    display_name: &str,
+    icon_url: Option<String>,
+    slug: Option<String>,
+    as_dependency: bool,
+) -> Result<String> {
     if let Some(reason) = &version.blocked_reason {
         return Err(Error::msg(reason.clone()));
     }
@@ -36,12 +67,10 @@ pub async fn install(
         .primary_file()
         .ok_or_else(|| Error::msg(format!("{display_name} has no downloadable file")))?;
 
-    let dir = crate::instance::content::content_dir(paths, &instance.id, kind);
-    tokio::fs::create_dir_all(&dir).await?;
+    tokio::fs::create_dir_all(dir).await?;
 
     // Remove the previous file for this project before writing the new one.
-    let previous: Vec<String> = instance
-        .content
+    let previous: Vec<String> = records
         .iter()
         .filter(|r| {
             r.provider == version.provider.as_str()
@@ -67,15 +96,11 @@ pub async fn install(
         let _ = tokio::fs::remove_file(dir.join(&old)).await;
         // Disabled copies carry the `.disabled` suffix.
         let _ = tokio::fs::remove_file(dir.join(format!("{old}.disabled"))).await;
-        instance
-            .content
-            .retain(|r| !(r.file_name == old && r.kind == kind));
+        records.retain(|r| !(r.file_name == old && r.kind == kind));
     }
 
-    instance
-        .content
-        .retain(|r| !(r.file_name == file.filename && r.kind == kind));
-    instance.content.push(ContentRecord {
+    records.retain(|r| !(r.file_name == file.filename && r.kind == kind));
+    records.push(ContentRecord {
         file_name: file.filename.clone(),
         kind,
         provider: version.provider.as_str().to_string(),
