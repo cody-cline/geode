@@ -287,34 +287,23 @@ export const PROPERTY_INFO: Record<string, PropertyInfo> = {
     group: "Players",
     label: "Resource pack ID",
     description:
-      "A UUID identifying the pack, so a client can recognise and replace it cleanly.",
+      "A UUID identifying the pack, so clients can keep the one they already have across reconnects instead of downloading it again.",
     control: text("00000000-0000-0000-0000-000000000000"),
-  },
-  "chat-spam-threshold-seconds": {
-    group: "Players",
-    label: "Chat spam threshold",
-    description:
-      "How much chat a player may send before being kicked for spamming. Higher is more lenient.",
-    control: int(0, undefined, "seconds"),
-  },
-  "command-spam-threshold-seconds": {
-    group: "Players",
-    label: "Command spam threshold",
-    description:
-      "The same limit for commands rather than chat. Higher is more lenient.",
-    control: int(0, undefined, "seconds"),
   },
   "enable-code-of-conduct": {
     group: "Players",
     label: "Show a code of conduct",
     description:
-      "Show players a code of conduct in their own language, which they accept before joining.",
+      "Show joining players a code of conduct, read from a codeofconduct folder beside this file and matched to their language.",
     control: bool(),
+    danger:
+      "Switched on with no code-of-conduct file present, players may not get past the join screen.",
   },
   "bug-report-link": {
     group: "Players",
     label: "Bug report link",
-    description: "Where the client offers to send players if the server crashes them.",
+    description:
+      "Where the in-game report-a-bug link sends players. Blank hides the link altogether.",
     control: text("https://…"),
   },
   "broadcast-console-to-ops": {
@@ -424,8 +413,10 @@ export const PROPERTY_INFO: Record<string, PropertyInfo> = {
     group: "Network",
     label: "Accept transferred players",
     description:
-      "Allow players sent here by another server rather than connecting directly.",
+      "Allow players sent here by another server rather than connecting to this address themselves.",
     control: bool(),
+    danger:
+      "Any server that knows your address can push players at you, so leave it off unless you control where they come from.",
   },
   "use-native-transport": {
     group: "Network",
@@ -554,6 +545,22 @@ export const PROPERTY_INFO: Record<string, PropertyInfo> = {
       "Write joining players' addresses to the log. Turn off to keep logs shareable.",
     control: bool(),
   },
+  "chat-spam-threshold-seconds": {
+    group: "Security",
+    label: "Chat spam threshold",
+    description:
+      "How much chat a player may send in quick succession before being kicked for spamming. 0 turns the kick off.",
+    control: int(0, 600, "seconds"),
+    danger: "At 0 nothing stops a player flooding chat.",
+  },
+  "command-spam-threshold-seconds": {
+    group: "Security",
+    label: "Command spam threshold",
+    description:
+      "The same limit for commands rather than chat. 0 turns the kick off.",
+    control: int(0, 600, "seconds"),
+    danger: "At 0 a player can run commands fast enough to lag the server.",
+  },
   "text-filtering-config": {
     group: "Security",
     label: "Chat filter configuration",
@@ -592,16 +599,18 @@ export const PROPERTY_INFO: Record<string, PropertyInfo> = {
   "management-server-port": {
     group: "Management API",
     label: "Port",
-    description: "Port the management API listens on. 0 leaves it switched off.",
+    description:
+      "Port the management API listens on. 0 takes a free one at startup, which means a different port after every restart — set a fixed one if a tool has to find it.",
     control: int(0, 65535),
   },
   "management-server-secret": {
     group: "Management API",
     label: "Access token",
     description:
-      "A 40-character token clients must present. Anyone holding it can control the server.",
+      "A 40-character token clients must present. Left blank, the server generates one at startup and writes it back into this file.",
     control: text(undefined, true),
-    danger: "Stored in plain text in this file, beside the world.",
+    danger:
+      "Stored in plain text beside the world, and anyone holding it can control the server.",
   },
   "management-server-tls-enabled": {
     group: "Management API",
@@ -628,7 +637,8 @@ export const PROPERTY_INFO: Record<string, PropertyInfo> = {
   "management-server-allowed-origins": {
     group: "Management API",
     label: "Allowed origins",
-    description: "Which web origins may connect to the management API.",
+    description:
+      "Comma-separated web origins allowed to connect. A request whose Origin header is not on this list is refused.",
     control: text(),
   },
   "status-heartbeat-interval": {
@@ -651,6 +661,21 @@ export const RETIRED_KEYS: Record<string, string> = {
   "resource-pack-hash": "Superseded by resource-pack-sha1.",
   "previews-chat": "Only existed in 1.19.1.",
 };
+
+/**
+ * Settings newer Minecraft versions moved out of this file and turned into
+ * game rules. They still work where they appear — an older server reads them
+ * from here — but on a current server they are set with `/gamerule` instead,
+ * which is worth saying to anyone who goes looking for one and cannot find it.
+ */
+export const NOW_A_GAMERULE = new Set([
+  "pvp",
+  "allow-nether",
+  "spawn-monsters",
+  "spawn-animals",
+  "spawn-npcs",
+  "enable-command-block",
+]);
 
 /**
  * Keys that are only read when the world is first created, so changing them on

@@ -7,6 +7,7 @@ import { useStore } from "../../lib/store";
 import {
   CREATION_ONLY,
   GROUP_ORDER,
+  NOW_A_GAMERULE,
   PROPERTY_INFO,
   RETIRED_KEYS,
   type Control,
@@ -330,6 +331,12 @@ function Field({
         <p className="hint">
           Only read when the world is created — changing it does nothing to
           chunks that already exist.
+        </p>
+      )}
+      {NOW_A_GAMERULE.has(property.key) && (
+        <p className="hint">
+          Newer versions set this with a game rule instead, which is why an
+          up-to-date server has no such line in this file.
         </p>
       )}
       {running && info?.danger && (
