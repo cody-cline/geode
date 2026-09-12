@@ -19,13 +19,25 @@ import styles from "./Properties.module.css";
 const OTHER = "Other";
 
 /**
- * The server's own `server.properties`, presented rather than dumped.
+ * A readable title for a key nobody has written a description for.
  *
- * The file stays the source of truth for which keys exist — every key in it is
- * shown, whether or not this app has ever heard of it. The catalog only
- * decorates: a label, a sentence, and the right control. Anything unrecognised
- * falls back to guessing the control from the value, which is how it behaved
- * for everything before.
+ * `max-chained-neighbor-updates` becomes "Max chained neighbor updates". Not
+ * clever, but better than a raw key, and it means a setting added by a future
+ * Minecraft version or a mod still reads like part of the page.
+ */
+function humanize(key: string): string {
+  const words = key.replace(/[.\-_]+/g, " ").trim();
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/**
+ * The server's own `server.properties`, laid out like the settings above it.
+ *
+ * The file stays the source of truth for which keys exist — every key in it
+ * gets a row, whether or not this app has heard of it. The catalog only
+ * decorates: a better label, a sentence, and the right control. That is what
+ * lets a new Minecraft version, a fork or a mod's own key appear and save
+ * without anyone updating a list.
  */
 export default function Properties({ server }: { server: Server }) {
   const reportError = useStore((s) => s.reportError);
@@ -43,7 +55,7 @@ export default function Properties({ server }: { server: Server }) {
       .catch(() => setProps([]));
   }, [server.id]);
 
-  const dirty = Object.keys(edited).length > 0;
+  const changedCount = Object.keys(edited).length;
   const valueOf = (p: ServerProperty) => edited[p.key] ?? p.value;
   const edit = (key: string, value: string) =>
     setEdited((was) => ({ ...was, [key]: value }));
@@ -51,12 +63,13 @@ export default function Properties({ server }: { server: Server }) {
   const shown = useMemo(() => {
     const query = filter.trim().toLowerCase();
     if (!query) return props ?? [];
-    // Matching the label and the description too, or searching "whitelist"
-    // would never find `white-list`.
+    // The raw key is matched even though it is no longer on screen, so
+    // searching for what the wiki calls it still works.
     return (props ?? []).filter((p) => {
       const info = PROPERTY_INFO[p.key];
       return (
         p.key.toLowerCase().includes(query) ||
+        humanize(p.key).toLowerCase().includes(query) ||
         (info?.label.toLowerCase().includes(query) ?? false) ||
         (info?.description.toLowerCase().includes(query) ?? false)
       );
@@ -71,6 +84,9 @@ export default function Properties({ server }: { server: Server }) {
       if (list) list.push(p);
       else buckets.set(group, [p]);
     }
+    // Known groups in a fixed order, then whatever is left over. A group with
+    // nothing in it never appears, so a server missing half these keys does
+    // not show half-empty headings.
     return [...GROUP_ORDER, OTHER]
       .filter((g) => buckets.has(g))
       .map((g) => [g, buckets.get(g)!] as const);
@@ -78,7 +94,7 @@ export default function Properties({ server }: { server: Server }) {
 
   /**
    * Only the edited keys are sent. The backend leaves the rest of the file
-   * exactly as it found it — comments, order and all — and that is what keeps a
+   * exactly as it found it — comments, order and all — which is what makes a
    * hand-tuned file survivable.
    */
   async function save() {
@@ -111,12 +127,12 @@ export default function Properties({ server }: { server: Server }) {
   }
 
   if (props === null) {
-    return <div className="skeleton" style={{ height: 90 }} />;
+    return <div className="skeleton" style={{ height: 120 }} />;
   }
 
   if (props.length === 0) {
     return (
-      <p className={styles.note}>
+      <p className="hint">
         This file appears the first time the server starts — it is written by
         the server, not by Geode. Start it once and its settings show up here.
       </p>
@@ -135,14 +151,17 @@ export default function Properties({ server }: { server: Server }) {
       </div>
 
       {groups.length === 0 ? (
-        <p className={styles.note}>Nothing matches “{filter}”.</p>
+        <p className="hint">Nothing matches “{filter}”.</p>
       ) : (
         groups.map(([group, rows]) => (
-          <section key={group} className={styles.group}>
-            <h3 className={styles.groupTitle}>{group}</h3>
-            <div className={styles.rows}>
+          <div key={group} className={styles.group}>
+            <h3 className={styles.groupTitle}>
+              {group}
+              <span className={styles.groupCount}>{rows.length}</span>
+            </h3>
+            <div className={styles.fields}>
               {rows.map((p) => (
-                <Row
+                <Field
                   key={p.key}
                   property={p}
                   value={valueOf(p)}
@@ -153,30 +172,30 @@ export default function Properties({ server }: { server: Server }) {
                 />
               ))}
             </div>
-          </section>
+          </div>
         ))
       )}
 
-      <div className={styles.foot}>
-        <span className={styles.note}>
-          {dirty
-            ? `${Object.keys(edited).length} changed. Restart the server to apply.`
-            : "Changes apply the next time the server starts."}
-        </span>
-        <button
-          className="btn btn-sm btn-primary"
-          onClick={save}
-          disabled={!dirty || saving}
-        >
-          {saving && <Loader2 size={12} className="spin" />}
-          Save properties
-        </button>
-      </div>
+      {changedCount > 0 && (
+        <div className={styles.saveBar}>
+          <span className={styles.saveHint}>
+            {changedCount} setting{changedCount === 1 ? "" : "s"} changed.
+            {server.running ? " Restart the server to apply." : ""}
+          </span>
+          <button className="btn" onClick={() => setEdited({})}>
+            Discard
+          </button>
+          <button className="btn btn-primary" onClick={save} disabled={saving}>
+            {saving && <Loader2 size={14} className="spin" />}
+            Save properties
+          </button>
+        </div>
+      )}
     </>
   );
 }
 
-function Row({
+function Field({
   property,
   value,
   changed,
@@ -196,8 +215,9 @@ function Row({
   const retired = RETIRED_KEYS[property.key];
   const id = `prop-${property.key}`;
 
-  // Unknown keys keep the old behaviour: guess the control from the value. A
-  // plugin's own setting gets a sensible field without anyone knowing about it.
+  // A key nobody has described still gets the right kind of box, guessed from
+  // the value the server wrote. A mod's own setting is usable without anyone
+  // here having heard of it.
   const control: Control =
     info?.control ??
     (value === "true" || value === "false"
@@ -206,16 +226,23 @@ function Row({
         ? { kind: "int" }
         : { kind: "text" });
 
+  // Free text needs the room; a checkbox or a dropdown does not.
+  const wide = control.kind === "text";
+
   return (
-    <div className={clsx(styles.row, changed && styles.rowChanged)}>
-      <div className={styles.rowHead}>
-        <label className={styles.label} htmlFor={id}>
-          {info?.label ?? property.key}
-        </label>
-        {/* The raw key stays visible: it is what the wiki, every forum answer
-            and the file itself call this setting. */}
-        <code className={styles.key}>{property.key}</code>
-      </div>
+    <div
+      className={clsx(
+        styles.field,
+        wide && styles.fieldWide,
+        changed && styles.fieldChanged,
+      )}
+    >
+      {/* The raw key lives in the tooltip rather than on screen. It is what
+          the wiki calls this setting, so it has to stay reachable — but it is
+          not what most people are looking for. */}
+      <label className="label" htmlFor={id} title={property.key}>
+        {info?.label ?? humanize(property.key)}
+      </label>
 
       <div className={styles.control}>
         {control.kind === "bool" ? (
@@ -224,7 +251,9 @@ function Row({
               id={id}
               type="checkbox"
               checked={value === "true"}
-              onChange={(e) => onEdit(property.key, e.target.checked ? "true" : "false")}
+              onChange={(e) =>
+                onEdit(property.key, e.target.checked ? "true" : "false")
+              }
             />
             <span>{value === "true" ? "On" : "Off"}</span>
           </label>
@@ -235,7 +264,7 @@ function Row({
             value={value}
             onChange={(e) => onEdit(property.key, e.target.value)}
           >
-            {/* A value the table does not list is kept and selected rather
+            {/* A value the catalog does not list is kept and selected rather
                 than silently rewritten to whatever happens to be first. */}
             {!control.options.some(
               (o) => o.value.toLowerCase() === value.toLowerCase(),
@@ -247,7 +276,7 @@ function Row({
             ))}
           </select>
         ) : control.kind === "int" ? (
-          <span className={styles.withUnit}>
+          <>
             <input
               id={id}
               className="input"
@@ -258,9 +287,9 @@ function Row({
               onChange={(e) => onEdit(property.key, e.target.value)}
             />
             {control.unit && <span className={styles.unit}>{control.unit}</span>}
-          </span>
+          </>
         ) : (
-          <span className={styles.withUnit}>
+          <>
             <input
               id={id}
               className="input"
@@ -279,7 +308,7 @@ function Row({
                 {revealed ? <EyeOff size={13} /> : <Eye size={13} />}
               </button>
             )}
-          </span>
+          </>
         )}
 
         {/* The file makes it stick; the command makes it true now. */}
@@ -295,12 +324,12 @@ function Row({
         )}
       </div>
 
-      {info?.description && <p className={styles.hint}>{info.description}</p>}
-      {retired && <p className={styles.hint}>{retired}</p>}
+      {info?.description && <p className="hint">{info.description}</p>}
+      {retired && <p className="hint">{retired}</p>}
       {CREATION_ONLY.has(property.key) && (
-        <p className={styles.hint}>
-          Only read when the world is first created — changing it does nothing
-          to chunks that already exist.
+        <p className="hint">
+          Only read when the world is created — changing it does nothing to
+          chunks that already exist.
         </p>
       )}
       {running && info?.danger && (

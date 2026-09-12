@@ -327,8 +327,26 @@
   border-radius: 4px;
 }
 
-.saveRow {
-  margin-top: 26px;
+/* Rides the bottom of the pane instead of sitting at the end of a long scroll,
+   so the thing that commits your edits is never somewhere you have to go and
+   find. Only rendered when there is something to save. */
+.saveBar {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 24px -22px -90px;
+  padding: 12px 22px;
+  background: var(--surface-2);
+  border-top: 1px solid var(--border-strong);
+  box-shadow: 0 -8px 24px -12px rgb(0 0 0 / 0.5);
+}
+
+.saveHint {
+  flex: 1;
+  font-size: 12.5px;
+  color: var(--text-dim);
 }
 
 /* Installed content ------------------------------------------------------- */

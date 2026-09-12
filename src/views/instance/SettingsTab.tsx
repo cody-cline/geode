@@ -152,32 +152,6 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
         <section className={styles.section}>
           <h2 className={styles.sectionTitle}>Identity</h2>
 
-          <div className={styles.grid2}>
-            <div>
-              <label className="label" htmlFor="inst-name">
-                Name
-              </label>
-              <input
-                id="inst-name"
-                className="input"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-              />
-            </div>
-            <div>
-              <label className="label" htmlFor="inst-group">
-                Group
-              </label>
-              <input
-                id="inst-group"
-                className="input"
-                value={group}
-                placeholder="Ungrouped"
-                onChange={(e) => setGroup(e.target.value)}
-              />
-            </div>
-          </div>
-
           {/* Pictures save the moment they are chosen rather than waiting for
               the Save button: the file is copied on the spot, and showing a
               picture that is not actually set yet would be a lie. */}
@@ -209,6 +183,32 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
               await refreshInstances();
             }}
           />
+
+          <div className={styles.grid2}>
+            <div>
+              <label className="label" htmlFor="inst-name">
+                Name
+              </label>
+              <input
+                id="inst-name"
+                className="input"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="label" htmlFor="inst-group">
+                Group
+              </label>
+              <input
+                id="inst-group"
+                className="input"
+                value={group}
+                placeholder="Ungrouped"
+                onChange={(e) => setGroup(e.target.value)}
+              />
+            </div>
+          </div>
 
           <div>
             <label className="label" htmlFor="inst-notes">

@@ -941,6 +941,10 @@ function SettingsTab({ server }: { server: Server }) {
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
+  // Images and properties save themselves, so the bar is only ever about the
+  // Java settings above it.
+  const dirty = JSON.stringify(draft) !== JSON.stringify(server.settings);
+
   async function destroy() {
     try {
       await api.deleteServer(server.id);
@@ -965,6 +969,39 @@ function SettingsTab({ server }: { server: Server }) {
 
   return (
     <div className={styles.settings}>
+      <section className={styles.section}>
+        <h2 className={styles.sectionTitle}>Appearance</h2>
+        <ImageField
+          label="Icon"
+          hint="Shown in the sidebar and on the servers list. Leave it empty for the generated initials tile."
+          path={server.iconPath}
+          onChoose={async (source) => {
+            await api.setServerImage(server.id, "icon", source);
+            await refreshServers();
+          }}
+          onClear={async () => {
+            await api.setServerImage(server.id, "icon", null);
+            await refreshServers();
+          }}
+        />
+        <div style={{ marginTop: 14 }}>
+          <ImageField
+            label="Banner"
+            hint="The artwork across the top of this server's page."
+            path={server.bannerPath}
+            wide
+            onChoose={async (source) => {
+              await api.setServerImage(server.id, "banner", source);
+              await refreshServers();
+            }}
+            onClear={async () => {
+              await api.setServerImage(server.id, "banner", null);
+              await refreshServers();
+            }}
+          />
+        </div>
+      </section>
+
       <section className={styles.section}>
         <h2 className={styles.sectionTitle}>Java</h2>
         <div className={styles.grid}>
@@ -1024,39 +1061,6 @@ function SettingsTab({ server }: { server: Server }) {
         <Properties server={server} />
       </section>
 
-      <section className={styles.section}>
-        <h2 className={styles.sectionTitle}>Appearance</h2>
-        <ImageField
-          label="Icon"
-          hint="Shown in the sidebar and on the servers list. Leave it empty for the generated initials tile."
-          path={server.iconPath}
-          onChoose={async (source) => {
-            await api.setServerImage(server.id, "icon", source);
-            await refreshServers();
-          }}
-          onClear={async () => {
-            await api.setServerImage(server.id, "icon", null);
-            await refreshServers();
-          }}
-        />
-        <div style={{ marginTop: 14 }}>
-          <ImageField
-            label="Banner"
-            hint="The artwork across the top of this server's page."
-            path={server.bannerPath}
-            wide
-            onChoose={async (source) => {
-              await api.setServerImage(server.id, "banner", source);
-              await refreshServers();
-            }}
-            onClear={async () => {
-              await api.setServerImage(server.id, "banner", null);
-              await refreshServers();
-            }}
-          />
-        </div>
-      </section>
-
       {/* Deleting lives here rather than on the card in the list, the way an
           instance's does — a list is for picking something, not for destroying
           it by a slip of the mouse. */}
@@ -1078,12 +1082,18 @@ function SettingsTab({ server }: { server: Server }) {
         </button>
       </section>
 
-      <div className={styles.saveRow}>
-        <button className="btn btn-primary" onClick={save} disabled={saving}>
-          {saving && <Loader2 size={14} className="spin" />}
-          Save
-        </button>
-      </div>
+      {dirty && (
+        <div className={styles.saveBar}>
+          <span className={styles.saveHint}>You have unsaved changes.</span>
+          <button className="btn" onClick={() => setDraft(server.settings)}>
+            Discard
+          </button>
+          <button className="btn btn-primary" onClick={save} disabled={saving}>
+            {saving && <Loader2 size={14} className="spin" />}
+            Save changes
+          </button>
+        </div>
+      )}
 
       {confirmDelete && (
         <Modal
