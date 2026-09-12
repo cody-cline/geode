@@ -518,12 +518,24 @@ pub async fn install_content(
         }
     }
 
+    // A Connector install resolves the mod's dependencies as Fabric ones —
+    // they run through the same layer, and asking for (Neo)Forge builds of them
+    // would find nothing.
+    let dep_game_version = inst.mc_version.clone();
+    let dep_loader = if via_connector {
+        "fabric"
+    } else {
+        inst.loader.as_str()
+    };
+
     let result = crate::install::content::install_with_dependencies(
         &state.http,
         &state.paths,
         &mut inst,
         version,
         &project,
+        &dep_game_version,
+        dep_loader,
         cf_key,
         &progress,
     )
@@ -823,6 +835,180 @@ pub async fn get_categories(state: State<'_, AppState>, kind: String) -> Result<
     let kind =
         providers::ProjectKind::parse(&kind).ok_or_else(|| Error::msg("unknown project type"))?;
     providers::modrinth::categories(&state.http, kind).await
+}
+
+// ---------------------------------------------------------------------------
+// Plans
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn list_plans(state: State<'_, AppState>) -> Result<Vec<crate::plan::Plan>> {
+    crate::plan::list(&state.paths).await
+}
+
+#[tauri::command]
+pub async fn get_plan(state: State<'_, AppState>, id: String) -> Result<crate::plan::Plan> {
+    crate::plan::load(&state.paths, &id).await
+}
+
+#[tauri::command]
+pub async fn create_plan(state: State<'_, AppState>, name: String) -> Result<crate::plan::Plan> {
+    crate::plan::create(&state.paths, name).await
+}
+
+/// Save a whole plan. The list of mods is small and edited as a unit, so the
+/// frontend owns it and writes it back rather than issuing an add/remove call
+/// per row.
+#[tauri::command]
+pub async fn save_plan(
+    state: State<'_, AppState>,
+    plan: crate::plan::Plan,
+) -> Result<crate::plan::Plan> {
+    crate::plan::save(&state.paths, plan).await
+}
+
+#[tauri::command]
+pub async fn delete_plan(state: State<'_, AppState>, id: String) -> Result<()> {
+    crate::plan::delete(&state.paths, &id).await
+}
+
+/// Work out which loader and game version can run this plan.
+#[tauri::command]
+pub async fn resolve_plan(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<crate::plan::resolve::Resolution> {
+    let plan = crate::plan::load(&state.paths, &id).await?;
+    let config = state.config().await;
+    let progress = Progress::new(app, format!("plan:{id}"));
+    state.register_cancel(progress.id(), progress.cancel_flag());
+
+    // Being unable to read Connector's matrix costs us the Connector option,
+    // not the answer — `resolve` says so in its warnings.
+    let matrix = state.connector.get(&state.http).await.unwrap_or_default();
+
+    let result = crate::plan::resolve::resolve(
+        &state.http,
+        &plan,
+        &matrix,
+        &state.plan_support,
+        config.effective_curseforge_key().as_deref(),
+        &progress,
+    )
+    .await;
+
+    state.clear_cancel(progress.id());
+    match result {
+        Ok(resolution) => {
+            progress.finish().await;
+            Ok(resolution)
+        }
+        Err(e) => {
+            progress.fail(&e.to_string()).await;
+            Err(e)
+        }
+    }
+}
+
+/// Create an instance at the chosen target and install the whole plan into it.
+#[tauri::command]
+pub async fn build_plan(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    loader: String,
+    game_version: String,
+    name: Option<String>,
+) -> Result<crate::plan::build::BuildReport> {
+    let plan = crate::plan::load(&state.paths, &id).await?;
+    let config = state.config().await;
+    let cf_key = config.effective_curseforge_key();
+    let cf_key = cf_key.as_deref();
+
+    let progress = Progress::new(app, format!("plan-build:{id}"));
+    state.register_cancel(progress.id(), progress.cancel_flag());
+
+    // Re-resolve rather than trusting a target round-tripped through the
+    // frontend: the per-mod verdicts decide which file each mod gets, and they
+    // are cheap to recompute against the session cache.
+    let matrix = state.connector.get(&state.http).await.unwrap_or_default();
+    let resolution = crate::plan::resolve::resolve(
+        &state.http,
+        &plan,
+        &matrix,
+        &state.plan_support,
+        cf_key,
+        &progress,
+    )
+    .await?;
+
+    let target = resolution
+        .targets
+        .iter()
+        .find(|t| t.loader == loader && t.game_version == game_version)
+        .ok_or_else(|| {
+            Error::msg(format!(
+                "{loader} {game_version} is no longer one of this plan's options — \
+                 resolve it again"
+            ))
+        })?;
+
+    let result = crate::plan::build::build(
+        &state.http,
+        &state.paths,
+        &plan,
+        target,
+        name,
+        cf_key,
+        &progress,
+    )
+    .await;
+
+    state.clear_cancel(progress.id());
+    match result {
+        Ok(report) => {
+            progress.finish().await;
+            Ok(report)
+        }
+        Err(e) => {
+            progress.fail(&e.to_string()).await;
+            Err(e)
+        }
+    }
+}
+
+/// List the mods in a published modpack, stripped of the version it was built
+/// for, so they can be copied into a plan.
+#[tauri::command]
+pub async fn pack_contents(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    provider: String,
+    project_id: String,
+    version_id: Option<String>,
+) -> Result<Vec<crate::plan::PlanMod>> {
+    let provider = Provider::parse(&provider).ok_or_else(|| Error::msg("unknown provider"))?;
+    let config = state.config().await;
+    let progress = Progress::new(app, format!("pack-read:{project_id}"));
+    state.register_cancel(progress.id(), progress.cancel_flag());
+
+    let result = crate::plan::pack::contents(
+        &state.http,
+        &state.paths,
+        provider,
+        &project_id,
+        version_id.as_deref(),
+        config.effective_curseforge_key().as_deref(),
+        &progress,
+    )
+    .await;
+
+    state.clear_cancel(progress.id());
+    if let Err(e) = &result {
+        progress.fail(&e.to_string()).await;
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------

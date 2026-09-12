@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   Account,
   AppInfo,
+  BuildReport,
   Config,
   ConnectorSupport,
   ContentItem,
@@ -16,6 +17,9 @@ import type {
   KeyCheck,
   LinkReport,
   PackPreview,
+  Plan,
+  PlanMod,
+  PlanResolution,
   Project,
   ProjectKind,
   ProjectVersion,
@@ -162,6 +166,36 @@ export const api = {
     }),
   getCategories: (kind: ProjectKind) =>
     invoke<string[]>("get_categories", { kind }),
+
+  // Plans
+  listPlans: () => invoke<Plan[]>("list_plans"),
+  getPlan: (id: string) => invoke<Plan>("get_plan", { id }),
+  createPlan: (name: string) => invoke<Plan>("create_plan", { name }),
+  savePlan: (plan: Plan) => invoke<Plan>("save_plan", { plan }),
+  deletePlan: (id: string) => invoke<void>("delete_plan", { id }),
+  resolvePlan: (id: string) => invoke<PlanResolution>("resolve_plan", { id }),
+  buildPlan: (
+    id: string,
+    loader: string,
+    gameVersion: string,
+    name?: string,
+  ) =>
+    invoke<BuildReport>("build_plan", {
+      id,
+      loader,
+      gameVersion,
+      name: name ?? null,
+    }),
+  packContents: (
+    provider: Provider,
+    projectId: string,
+    versionId?: string,
+  ) =>
+    invoke<PlanMod[]>("pack_contents", {
+      provider,
+      projectId,
+      versionId: versionId ?? null,
+    }),
 
   // Accounts
   listAccounts: () => invoke<Account[]>("list_accounts"),

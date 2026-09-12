@@ -6,6 +6,8 @@ import Toasts from "./components/Toasts";
 import Browse from "./views/Browse";
 import InstanceView from "./views/InstanceView";
 import Library from "./views/Library";
+import PlanView from "./views/PlanView";
+import Plans from "./views/Plans";
 import Settings from "./views/Settings";
 import { useStore } from "./lib/store";
 
@@ -25,6 +27,8 @@ export default function App() {
       <main className={styles.main}>
         {route.view === "library" && <Library />}
         {route.view === "browse" && <Browse />}
+        {route.view === "plans" && <Plans />}
+        {route.view === "plan" && <PlanView key={route.id} id={route.id} />}
         {route.view === "settings" && <Settings />}
         {route.view === "instance" && (
           // Remounting per instance keeps tab state from leaking between them.

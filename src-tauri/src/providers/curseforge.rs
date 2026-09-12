@@ -81,8 +81,25 @@ async fn get<T: serde::de::DeserializeOwned>(
     url: &str,
     api_key: &str,
 ) -> Result<T> {
-    let resp = client
-        .get(url)
+    finish(client.get(url), api_key).await
+}
+
+/// The batch endpoints take their ids in a JSON body rather than the query
+/// string, so they cannot go through [`get`].
+async fn post<T: serde::de::DeserializeOwned, B: serde::Serialize>(
+    client: &reqwest::Client,
+    url: &str,
+    body: &B,
+    api_key: &str,
+) -> Result<T> {
+    finish(client.post(url).json(body), api_key).await
+}
+
+async fn finish<T: serde::de::DeserializeOwned>(
+    request: reqwest::RequestBuilder,
+    api_key: &str,
+) -> Result<T> {
+    let resp = request
         .header("x-api-key", api_key)
         .header("Accept", "application/json")
         .send()
@@ -460,6 +477,24 @@ pub async fn search(
 pub async fn project(client: &reqwest::Client, id: &str, api_key: &str) -> Result<Project> {
     let resp: Envelope<CfMod> = get(client, &format!("{API}/mods/{id}"), api_key).await?;
     Ok(to_project(resp.data))
+}
+
+/// Resolve many projects at once.
+///
+/// A CurseForge pack manifest identifies its contents by numeric id alone, so
+/// without this, listing a pack's mods would mean one request per mod.
+pub async fn projects_by_ids(
+    client: &reqwest::Client,
+    ids: &[u32],
+    api_key: &str,
+) -> Result<Vec<Project>> {
+    let mut out = Vec::new();
+    for chunk in ids.chunks(200) {
+        let body = serde_json::json!({ "modIds": chunk });
+        let resp: Envelope<Vec<CfMod>> = post(client, &format!("{API}/mods"), &body, api_key).await?;
+        out.extend(resp.data.into_iter().map(to_project));
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Deserialize)]

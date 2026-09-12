@@ -42,6 +42,14 @@ impl Paths {
     pub fn instance(&self, id: &str) -> PathBuf {
         self.instances().join(id)
     }
+    /// Modpack plans. Not under `instances/` because a plan is not one: nothing
+    /// is downloaded for it, and the same plan can be built more than once.
+    pub fn plans(&self) -> PathBuf {
+        self.root.join("plans")
+    }
+    pub fn plan(&self, id: &str) -> PathBuf {
+        self.plans().join(format!("{id}.json"))
+    }
     /// The game's working directory — what vanilla calls `.minecraft`.
     pub fn game_dir(&self, id: &str) -> PathBuf {
         self.instance(id).join(".minecraft")
@@ -97,6 +105,7 @@ impl Paths {
         for d in [
             self.root.clone(),
             self.instances(),
+            self.plans(),
             self.libraries(),
             self.asset_objects(),
             self.asset_indexes(),

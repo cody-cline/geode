@@ -233,6 +233,67 @@ pub async fn preview(archive: PathBuf) -> Result<PackPreview> {
     .map_err(|e| Error::msg(format!("reading pack panicked: {e}")))?
 }
 
+/// The mods a pack installs, identified as projects rather than files.
+///
+/// This is what a *plan* wants from a pack: which mods are in it, not which
+/// builds — a plan has no version of its own to pin them to.
+#[derive(Debug, Clone)]
+pub enum PackMods {
+    /// Modrinth project ids, read straight out of the index's download URLs.
+    Modrinth(Vec<String>),
+    /// CurseForge project ids, which need the API to become names.
+    CurseForge(Vec<u32>),
+}
+
+/// Read a pack's mod list without installing anything.
+pub async fn index_mods(archive: PathBuf) -> Result<PackMods> {
+    tokio::task::spawn_blocking(move || {
+        Ok(match read_pack(&archive)? {
+            PackKind::Modrinth(index) => {
+                let mut ids = Vec::new();
+                for file in &index.files {
+                    // Only the mods folder: a plan is a list of mods, and a
+                    // pack's resource packs and shaders are not that.
+                    let path = Path::new(&file.path);
+                    let in_mods = path
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .and_then(|d| d.to_str())
+                        == Some("mods");
+                    if !in_mods {
+                        continue;
+                    }
+                    if let Some((project_id, _)) = file
+                        .downloads
+                        .iter()
+                        .find_map(|u| crate::install::content::ids_from_modrinth_url(u))
+                    {
+                        if !ids.contains(&project_id) {
+                            ids.push(project_id);
+                        }
+                    }
+                }
+                PackMods::Modrinth(ids)
+            }
+            PackKind::CurseForge(manifest) => {
+                // A CurseForge manifest does not say which folder a file lands
+                // in, so everything it lists is a candidate; resolving the ids
+                // is what reveals the resource packs, and those are dropped
+                // there rather than guessed at here.
+                let mut ids = Vec::new();
+                for file in &manifest.files {
+                    if !ids.contains(&file.project_id) {
+                        ids.push(file.project_id);
+                    }
+                }
+                PackMods::CurseForge(ids)
+            }
+        })
+    })
+    .await
+    .map_err(|e| Error::msg(format!("reading pack panicked: {e}")))?
+}
+
 /// Install a pack into an existing (already created) instance directory.
 pub async fn import_into(
     client: &reqwest::Client,

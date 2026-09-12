@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import clsx from "clsx";
 import {
   Boxes,
+  ClipboardList,
   Compass,
   Loader2,
   Play,
@@ -81,6 +82,16 @@ export default function Sidebar() {
         >
           <Compass size={17} />
           Browse
+        </button>
+        <button
+          className={clsx(
+            styles.navItem,
+            (route.view === "plans" || route.view === "plan") && styles.navActive,
+          )}
+          onClick={() => navigate({ view: "plans" })}
+        >
+          <ClipboardList size={17} />
+          Plans
         </button>
       </nav>
 

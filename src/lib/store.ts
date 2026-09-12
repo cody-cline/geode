@@ -14,6 +14,8 @@ import type {
 export type Route =
   | { view: "library" }
   | { view: "browse" }
+  | { view: "plans" }
+  | { view: "plan"; id: string }
   | { view: "settings"; tab?: string }
   | { view: "instance"; id: string; tab?: string };
 

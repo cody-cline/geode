@@ -99,6 +99,86 @@ export interface ProviderRef {
   pageUrl: string;
 }
 
+// ---------------------------------------------------------------------------
+// Plans
+// ---------------------------------------------------------------------------
+
+/** One mod in a plan. Carries no version — that is the point of a plan. */
+export interface PlanMod {
+  provider: Provider;
+  projectId: string;
+  name: string;
+  slug?: string | null;
+  iconUrl?: string | null;
+}
+
+export interface Plan {
+  id: string;
+  name: string;
+  notes: string;
+  createdAt: number;
+  updatedAt: number;
+  mods: PlanMod[];
+}
+
+/**
+ * How well one mod fits a candidate target.
+ *
+ * `native` is a file built for exactly this pair. The middle three are
+ * compromises, in roughly ascending order of risk. `missing` is a hard
+ * conflict: nothing this mod publishes runs here.
+ */
+export type Fit =
+  | "native"
+  | "nearVersion"
+  | "connector"
+  | "connectorNear"
+  | "missing";
+
+export interface ModFit {
+  provider: Provider;
+  projectId: string;
+  name: string;
+  fit: Fit;
+  /** The game version whose build would be used, when not the target's own. */
+  viaVersion?: string;
+  /** Where this mod can run instead, when it cannot run here. */
+  elsewhere?: string[];
+}
+
+/** One candidate answer: a loader, a game version, and what it costs. */
+export interface PlanTarget {
+  loader: string;
+  gameVersion: string;
+  fits: ModFit[];
+  missing: number;
+  connector: number;
+  near: number;
+  native: number;
+  cost: number;
+}
+
+export interface UnresolvedMod {
+  provider: Provider;
+  projectId: string;
+  name: string;
+  reason: string;
+}
+
+export interface PlanResolution {
+  /** Candidate targets, best first. */
+  targets: PlanTarget[];
+  unresolved: UnresolvedMod[];
+  warnings: string[];
+}
+
+export interface BuildReport {
+  instanceId: string;
+  instanceName: string;
+  installed: string[];
+  skipped: string[];
+}
+
 export interface Project {
   provider: Provider;
   id: string;

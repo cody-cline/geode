@@ -48,6 +48,13 @@ pub struct SupportMatrix {
 }
 
 impl SupportMatrix {
+    /// Build a matrix from known pairs. The planner needs this to reason about
+    /// Connector without a network round-trip, and tests need it to pin the
+    /// matrix to a known shape.
+    pub fn from_pairs(pairs: Vec<SupportPair>) -> Self {
+        Self { pairs }
+    }
+
     pub fn supports(&self, game_version: &str, loader: &str) -> bool {
         let loader = loader.to_ascii_lowercase();
         self.pairs

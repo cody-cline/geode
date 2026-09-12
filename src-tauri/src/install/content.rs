@@ -117,6 +117,11 @@ pub struct InstallReport {
 /// version of each. Optional dependencies are deliberately left alone: they are
 /// the author saying "this works better with X", not "this needs X", and
 /// pulling them in silently is how instances bloat.
+///
+/// `dep_game_version` and `dep_loader` say what the dependencies should be
+/// resolved against, which is not always the instance's own pair: a Fabric mod
+/// installed through Connector needs Fabric dependencies, and a mod taken from
+/// a neighbouring patch version wants that version's.
 #[allow(clippy::too_many_arguments)]
 pub async fn install_with_dependencies(
     client: &reqwest::Client,
@@ -124,6 +129,8 @@ pub async fn install_with_dependencies(
     instance: &mut Instance,
     version: &Version,
     project: &Project,
+    dep_game_version: &str,
+    dep_loader: &str,
     curseforge_key: Option<&str>,
     progress: &Progress,
 ) -> Result<InstallReport> {
@@ -195,8 +202,8 @@ pub async fn install_with_dependencies(
             instance,
             version.provider,
             &project_id,
-            &instance_game_version(instance),
-            instance.loader.as_str(),
+            dep_game_version,
+            dep_loader,
             curseforge_key,
         )
         .await
@@ -220,10 +227,6 @@ pub async fn install_with_dependencies(
     }
 
     Ok(report)
-}
-
-fn instance_game_version(instance: &Instance) -> String {
-    instance.mc_version.clone()
 }
 
 #[allow(clippy::too_many_arguments)]

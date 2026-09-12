@@ -10,6 +10,7 @@ pub mod launch;
 pub mod meta;
 pub mod net;
 pub mod paths;
+pub mod plan;
 pub mod providers;
 pub mod state;
 
@@ -78,6 +79,14 @@ pub fn run() {
             commands::get_project_description,
             commands::get_project_versions,
             commands::get_categories,
+            commands::list_plans,
+            commands::get_plan,
+            commands::create_plan,
+            commands::save_plan,
+            commands::delete_plan,
+            commands::resolve_plan,
+            commands::build_plan,
+            commands::pack_contents,
             commands::list_accounts,
             commands::begin_microsoft_login,
             commands::complete_microsoft_login,
