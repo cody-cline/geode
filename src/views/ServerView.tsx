@@ -32,6 +32,13 @@ import ServerContentTab from "./server/ContentTab";
 import type { ServerFolder } from "./server/ContentTab";
 import Properties from "./server/Properties";
 import { api } from "../lib/api";
+import {
+  harvest,
+  parseLine,
+  pieces,
+  suggest,
+  VANILLA_COMMANDS,
+} from "../lib/serverConsole";
 import { fileSize, hashHue, relativeTime } from "../lib/format";
 import { useStore } from "../lib/store";
 import type {
@@ -60,23 +67,45 @@ const TABS = [
 
 type TabId = (typeof TABS)[number]["id"];
 
-/**
- * A server's console line, as the server writes it:
- * `[03:52:13] [Server thread/INFO]: Done (5.123s)!`
- *
- * Plain text on purpose — unlike the game, a server does not emit structured
- * log4j XML — so the shape is read back out of the line itself.
- */
-const LINE = /^\[([^\]]+)\]\s*\[([^\]]*?)\/([A-Z]+)\]:?\s?(.*)$/;
+/** The longest start every candidate shares — what Tab completes to. */
+function commonPrefix(items: string[]): string {
+  if (items.length === 0) return "";
+  let prefix = items[0];
+  for (const item of items) {
+    while (!item.startsWith(prefix)) prefix = prefix.slice(0, -1);
+  }
+  return prefix;
+}
 
-function levelOf(entry: ServerLine): string {
-  if (entry.stream === "err") return "error";
-  const match = LINE.exec(entry.line);
-  const level = match?.[3]?.toLowerCase() ?? "";
-  if (level === "warn" || level === "warning") return "warn";
-  if (level === "error" || level === "fatal" || level === "severe") return "error";
-  if (level === "debug" || level === "trace") return "debug";
-  return "info";
+/**
+ * One line, with its parts told apart.
+ *
+ * The timestamp, the thread and the level are structure rather than content,
+ * so they recede; what the server actually said keeps the foreground, with the
+ * few things inside it worth picking out — quoted strings, addresses, numbers,
+ * the word Exception — lifted from it.
+ */
+function ConsoleLine({ entry }: { entry: ServerLine }) {
+  const parsed = parseLine(entry);
+  return (
+    <div className={clsx(styles.line, styles[parsed.level])}>
+      {parsed.time && <span className={styles.time}>[{parsed.time}] </span>}
+      {parsed.thread && (
+        <span className={styles.thread}>
+          [{parsed.thread}/{parsed.level.toUpperCase()}]{" "}
+        </span>
+      )}
+      {pieces(parsed.message).map((piece, i) =>
+        piece.kind ? (
+          <span key={i} className={styles[piece.kind]}>
+            {piece.text}
+          </span>
+        ) : (
+          <span key={i}>{piece.text}</span>
+        ),
+      )}
+    </div>
+  );
 }
 
 export default function ServerView({ id }: { id: string }) {
@@ -94,6 +123,14 @@ export default function ServerView({ id }: { id: string }) {
   const [command, setCommand] = useState("");
   const [history, setHistory] = useState<string[]>([]);
   const [historyAt, setHistoryAt] = useState<number | null>(null);
+  /**
+   * Commands the server has mentioned, on top of the vanilla set. Mods and
+   * plugins register into the same dispatcher and look exactly like built-in
+   * commands, so the only way to know about them is to notice the server
+   * naming them — which it does when you run `help`.
+   */
+  const [learned, setLearned] = useState<string[]>([]);
+  const harvested = useRef(0);
 
   // Which folder is being added to, and what is already in it — so browsing
   // can mark the rows that are.
@@ -169,6 +206,24 @@ export default function ServerView({ id }: { id: string }) {
   }, [lines]);
 
   const shown = useMemo(() => lines ?? [], [lines]);
+
+  // Only the lines that have arrived since last time. Re-reading the whole
+  // buffer on every line would mean thousands of matches per line of output.
+  useEffect(() => {
+    if (shown.length < harvested.current) harvested.current = 0;
+    if (shown.length === harvested.current) return;
+    const fresh = harvest(shown.slice(harvested.current));
+    harvested.current = shown.length;
+    if (fresh.length > 0) {
+      setLearned((was) => [...new Set([...was, ...fresh])]);
+    }
+  }, [shown]);
+
+  const commands = useMemo(
+    () => [...new Set([...VANILLA_COMMANDS, ...learned])].sort(),
+    [learned],
+  );
+  const matches = useMemo(() => suggest(command, commands), [command, commands]);
 
   if (!server) {
     return (
@@ -271,8 +326,23 @@ export default function ServerView({ id }: { id: string }) {
     }
   }
 
+  /** Complete to as much as every candidate agrees on, the way a shell does. */
+  function complete() {
+    if (matches.length === 0) return;
+    const slash = command.startsWith("/") ? "/" : "";
+    const shared = commonPrefix(matches);
+    const typed = command.replace(/^\//, "");
+    setCommand(slash + (shared.length > typed.length ? shared : matches[0]));
+  }
+
   /** Up and down walk previous commands, as a terminal does. */
   function onKey(e: KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "Tab") {
+      // Never let Tab leave the console: there is nowhere useful to go.
+      e.preventDefault();
+      complete();
+      return;
+    }
     if (e.key === "Enter") {
       void send();
       return;
@@ -472,16 +542,28 @@ export default function ServerView({ id }: { id: string }) {
                   : "Nothing yet. Start the server and its console appears here."}
               </p>
             ) : (
-              shown.map((entry, i) => (
-                <div
-                  key={i}
-                  className={clsx(styles.line, styles[levelOf(entry)])}
-                >
-                  {entry.line}
-                </div>
-              ))
+              shown.map((entry, i) => <ConsoleLine key={i} entry={entry} />)
             )}
           </div>
+
+          {/* Sits above the prompt rather than over the output, so it never
+              covers the thing you are reading while you type. */}
+          {matches.length > 0 && !viewing && server.running && (
+            <div className={styles.suggestions}>
+              {matches.map((name) => (
+                <button
+                  key={name}
+                  className={styles.suggestion}
+                  onClick={() =>
+                    setCommand((command.startsWith("/") ? "/" : "") + name + " ")
+                  }
+                >
+                  {name}
+                </button>
+              ))}
+              <span className={styles.suggestHint}>Tab to complete</span>
+            </div>
+          )}
 
           <div className={styles.prompt}>
             <ChevronRight size={15} className={styles.caret} />

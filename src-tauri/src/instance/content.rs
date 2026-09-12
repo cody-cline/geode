@@ -203,9 +203,11 @@ pub async fn list_in(
             .find(|r| r.file_name == base_name && r.kind == kind);
 
         // Every mod is read, not just the untracked ones: the jar is where the
-        // dependency graph comes from.
+        // dependency graph comes from. Plugins declare themselves too, in a
+        // different file, and reading it is what gives a plugins folder real
+        // edges rather than only the ones recorded at install time.
         let meta = match kind {
-            ContentKind::Mod => jars.get(&entry.path()).await,
+            ContentKind::Mod | ContentKind::Plugin => jars.get(&entry.path()).await,
             _ => None,
         };
 

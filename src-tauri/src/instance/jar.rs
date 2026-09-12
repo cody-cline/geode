@@ -153,9 +153,23 @@ fn declaration<R: Read + Seek>(zip: &mut zip::ZipArchive<R>) -> Option<JarMeta> 
             return Some(from_fabric(&value));
         }
     }
-    let text = entry_text(zip, "META-INF/neoforge.mods.toml")
-        .or_else(|| entry_text(zip, "META-INF/mods.toml"))?;
-    from_mods_toml(&text)
+    if let Some(text) = entry_text(zip, "META-INF/neoforge.mods.toml")
+        .or_else(|| entry_text(zip, "META-INF/mods.toml"))
+    {
+        if let Some(meta) = from_mods_toml(&text) {
+            return Some(meta);
+        }
+    }
+
+    // A Bukkit plugin. One jar may legitimately carry both manifests so it runs
+    // on Spigot and on Paper alike; Paper reads its own first, so this does too,
+    // and either way it is one thing in the graph.
+    if let Some(text) = entry_text(zip, "paper-plugin.yml") {
+        if let Some(meta) = from_paper_plugin(&text) {
+            return Some(meta);
+        }
+    }
+    from_plugin_yml(&entry_text(zip, "plugin.yml")?)
 }
 
 fn nested_jar_names<R: Read + Seek>(zip: &mut zip::ZipArchive<R>) -> Vec<String> {
@@ -180,6 +194,281 @@ fn entry_bytes<R: Read + Seek>(zip: &mut zip::ZipArchive<R>, name: &str) -> Opti
     let mut buf = Vec::new();
     entry.read_to_end(&mut buf).ok()?;
     Some(buf)
+}
+
+// ---------------------------------------------------------------------------
+// Bukkit and Paper plugin manifests
+//
+// These are YAML, and what we want out of them is five keys at known depths.
+// That is read here rather than by pulling in a YAML parser, but "read the
+// lines" is not enough on its own: a plugin.yml routinely declares a *command*
+// called `version`, so keys are anchored to indentation rather than matched
+// anywhere they appear.
+// ---------------------------------------------------------------------------
+
+/// Everything from `#` onwards, unless the `#` is inside quotes or butted up
+/// against a value — `version: 1.0#2` has no comment in it.
+fn strip_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let mut quote: Option<u8> = None;
+    for (i, &c) in bytes.iter().enumerate() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if c == b'"' || c == b'\'' => quote = Some(c),
+            None if c == b'#' && (i == 0 || bytes[i - 1].is_ascii_whitespace()) => {
+                return &line[..i];
+            }
+            None => {}
+        }
+    }
+    line
+}
+
+fn indent_of(line: &str) -> usize {
+    line.len() - line.trim_start().len()
+}
+
+/// A scalar, taken as written. Never parsed as a number: SnakeYAML reads an
+/// unquoted `version: 1.20` as a float and hands back "1.2".
+fn unquote(value: &str) -> String {
+    let v = value.trim();
+    let bytes = v.as_bytes();
+    if v.len() >= 2
+        && ((bytes[0] == b'"' && bytes[v.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[v.len() - 1] == b'\''))
+    {
+        return v[1..v.len() - 1].to_string();
+    }
+    v.to_string()
+}
+
+/// A top-level `key: value`. Only at indent zero, which is what keeps a command
+/// named `version` from answering for the plugin's own.
+fn root_scalar(text: &str, key: &str) -> Option<String> {
+    for raw in text.lines() {
+        let line = strip_comment(raw);
+        if indent_of(line) != 0 {
+            continue;
+        }
+        let Some(rest) = line.trim_end().strip_prefix(key) else {
+            continue;
+        };
+        let Some(value) = rest.strip_prefix(':') else {
+            continue;
+        };
+        let value = unquote(value);
+        if !value.is_empty() {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// Split a flow sequence's innards on commas that are not inside quotes.
+fn split_flow(inner: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    for c in inner.chars() {
+        match quote {
+            Some(q) if c == q => {
+                quote = None;
+                current.push(c);
+            }
+            Some(_) => current.push(c),
+            None if c == '"' || c == '\'' => {
+                quote = Some(c);
+                current.push(c);
+            }
+            None if c == ',' => {
+                out.push(std::mem::take(&mut current));
+            }
+            None => current.push(c),
+        }
+    }
+    out.push(current);
+    out.into_iter()
+        .map(|s| unquote(&s))
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// A top-level list, in either form it actually takes.
+///
+/// Both of these are normal, and the second is what every build plugin emits —
+/// SnakeYAML puts block dashes at the *same* column as their key, so requiring
+/// them to be indented further misses exactly the well-formed files:
+///
+/// ```yaml
+/// depend: [Vault, WorldEdit]
+/// softdepend:
+/// - PlaceholderAPI
+/// ```
+fn root_list(text: &str, key: &str) -> Vec<String> {
+    let lines: Vec<&str> = text.lines().map(strip_comment).collect();
+    let Some(at) = lines.iter().position(|line| {
+        indent_of(line) == 0
+            && line
+                .trim_end()
+                .strip_prefix(key)
+                .is_some_and(|rest| rest.starts_with(':'))
+    }) else {
+        return Vec::new();
+    };
+
+    let after = lines[at].trim_end().split_once(':').map(|(_, v)| v).unwrap_or("").trim();
+
+    // Flow form, which may run past the end of its own line.
+    if after.starts_with('[') {
+        let mut buf = String::new();
+        let mut depth = 0usize;
+        for line in &lines[at..] {
+            let part = if buf.is_empty() {
+                line.split_once(':').map(|(_, v)| v).unwrap_or(line)
+            } else {
+                line
+            };
+            for c in part.chars() {
+                if c == '[' {
+                    depth += 1;
+                    continue;
+                }
+                if c == ']' {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return split_flow(&buf);
+                    }
+                    continue;
+                }
+                if depth > 0 {
+                    buf.push(c);
+                }
+            }
+        }
+        return split_flow(&buf);
+    }
+
+    // Block form. Entries may sit at the key's own indent or deeper; anything
+    // else at indent zero ends the list.
+    let mut out = Vec::new();
+    for line in &lines[at + 1..] {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(item) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix('-')) {
+            let value = unquote(item);
+            if !value.is_empty() {
+                out.push(value);
+            }
+            continue;
+        }
+        if indent_of(line) == 0 {
+            break;
+        }
+    }
+    out
+}
+
+/// Bukkit normalises spaces to underscores on both a plugin's own name and
+/// every name it depends on, so the graph has to match the same way.
+fn plugin_id(name: &str) -> String {
+    name.trim().replace(' ', "_")
+}
+
+/// `plugin.yml` — Bukkit, Spigot, Purpur and every fork of them.
+fn from_plugin_yml(text: &str) -> Option<JarMeta> {
+    let name = root_scalar(text, "name")?;
+
+    let mut primary = vec![plugin_id(&name)];
+    // `provides` are other names this plugin answers to, exactly like an alias.
+    primary.extend(root_list(text, "provides").iter().map(|p| plugin_id(p)));
+
+    // Only `depend` is a requirement. `softdepend` is optional by definition,
+    // `loadbefore` points the other way — "load me before these" — and
+    // `libraries` are Maven coordinates that will never be a file in the
+    // plugins folder. Treating any of those as a requirement invents missing
+    // dependencies, or edges that run backwards.
+    let requires = root_list(text, "depend")
+        .iter()
+        .map(|d| plugin_id(d))
+        .collect();
+
+    Some(JarMeta {
+        name: Some(name),
+        version: root_scalar(text, "version"),
+        primary,
+        bundled: Vec::new(),
+        requires,
+    })
+}
+
+/// `paper-plugin.yml` — a map rather than lists, where `required` alone decides
+/// whether a dependency is hard and `load` alone decides ordering. The two are
+/// independent, so hardness is never inferred from the ordering.
+fn from_paper_plugin(text: &str) -> Option<JarMeta> {
+    let name = root_scalar(text, "name")?;
+
+    let lines: Vec<&str> = text.lines().map(strip_comment).collect();
+    let mut requires = Vec::new();
+
+    if let Some(at) = lines
+        .iter()
+        .position(|l| indent_of(l) == 0 && l.trim_end().starts_with("dependencies:"))
+    {
+        // Inside `dependencies`, each named plugin is a key whose block may
+        // carry `required`. Anything back at indent zero ends the section.
+        let mut pending: Option<(usize, String)> = None;
+        let mut required = true;
+        for line in &lines[at + 1..] {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let indent = indent_of(line);
+            if indent == 0 {
+                break;
+            }
+            let trimmed = line.trim();
+
+            if let Some((key_indent, plugin)) = &pending {
+                if indent > *key_indent {
+                    if let Some(rest) = trimmed.strip_prefix("required:") {
+                        required = unquote(rest) != "false";
+                    }
+                    continue;
+                }
+                if required {
+                    requires.push(plugin_id(plugin));
+                }
+                pending = None;
+            }
+
+            let Some((key, _)) = trimmed.split_once(':') else {
+                continue;
+            };
+            // `bootstrap` and `server` are the two phases, not plugin names.
+            if key == "bootstrap" || key == "server" {
+                continue;
+            }
+            pending = Some((indent, key.to_string()));
+            // Paper defaults a dependency to required.
+            required = true;
+        }
+        if let Some((_, plugin)) = pending {
+            if required {
+                requires.push(plugin_id(&plugin));
+            }
+        }
+    }
+
+    Some(JarMeta {
+        name: Some(name.clone()),
+        version: root_scalar(text, "version"),
+        primary: vec![plugin_id(&name)],
+        bundled: Vec::new(),
+        requires,
+    })
 }
 
 /// `fabric.mod.json`, and Quilt's variant of it.
@@ -312,6 +601,80 @@ mod tests {
         assert_eq!(meta.primary, vec!["sodium"]);
         // minecraft and the loader are the platform, not installed files.
         assert_eq!(meta.requires, vec!["fabric-api"]);
+    }
+
+    #[test]
+    fn a_bukkit_plugin_declares_itself() {
+        // Deliberately carries the traps: a command named `version` above the
+        // real one, a block list at its key's own indent, and two keys that
+        // look like dependencies and are not.
+        let meta = from_plugin_yml(
+            r#"
+name: Shop Keeper
+main: com.example.Main
+commands:
+  version:
+    description: shows the version
+version: '2.14.0'
+depend: [Vault, WorldEdit]
+softdepend:
+- PlaceholderAPI
+loadbefore:
+  - SomeOtherPlugin
+libraries:
+  - com.zaxxer:HikariCP:5.1.0
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(meta.name.as_deref(), Some("Shop Keeper"));
+        // The plugin's own version, not the command that shares its name.
+        assert_eq!(meta.version.as_deref(), Some("2.14.0"));
+        // Bukkit matches names with spaces turned into underscores.
+        assert_eq!(meta.primary, vec!["Shop_Keeper"]);
+        // Only the hard list. A soft dependency is optional, `loadbefore`
+        // points the other way, and a library is a Maven coordinate that will
+        // never be a file in the plugins folder.
+        assert_eq!(meta.requires, vec!["Vault", "WorldEdit"]);
+    }
+
+    #[test]
+    fn a_plugin_that_needs_nothing_says_so() {
+        let meta = from_plugin_yml("name: Solo\nversion: 1.0\ndepend: []\n").unwrap();
+        assert!(meta.requires.is_empty());
+        // Taken as written: parsed as a number this would come back as "1".
+        assert_eq!(meta.version.as_deref(), Some("1.0"));
+    }
+
+    #[test]
+    fn a_comment_is_not_part_of_the_value() {
+        let meta =
+            from_plugin_yml("name: Thing\nversion: 1.0\ndepend: [Vault] # for economy\n").unwrap();
+        assert_eq!(meta.requires, vec!["Vault"]);
+    }
+
+    #[test]
+    fn a_paper_plugin_takes_hardness_from_required_alone() {
+        let meta = from_paper_plugin(
+            r#"
+name: ShopKeeper
+version: '2.14.0'
+dependencies:
+  server:
+    Vault:
+      load: BEFORE
+      required: true
+    PlaceholderAPI:
+      load: AFTER
+      required: false
+"#,
+        )
+        .unwrap();
+
+        // Vault is required and PlaceholderAPI is not. Which way each one
+        // loads says nothing about whether it is needed.
+        assert_eq!(meta.requires, vec!["Vault"]);
+        assert_eq!(meta.primary, vec!["ShopKeeper"]);
     }
 
     #[test]
