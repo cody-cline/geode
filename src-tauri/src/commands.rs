@@ -1028,11 +1028,21 @@ pub struct ServerView {
     #[serde(flatten)]
     pub server: crate::server::Server,
     pub running: bool,
+    /// What *this* server can do, rather than what its kind can. Cardboard
+    /// makes a Fabric server take plugins, and the UI should not have to
+    /// rediscover that from the content list.
+    pub takes_plugins: bool,
+    pub takes_mods: bool,
+    pub can_add_cardboard: bool,
 }
 
 fn server_view(server: crate::server::Server, state: &AppState) -> ServerView {
     ServerView {
         running: state.servers.is_running(&server.id),
+        takes_plugins: server.takes_plugins(),
+        takes_mods: server.takes_mods(),
+        can_add_cardboard: server.can_add_cardboard(),
+        // Moved last, so the capabilities above can still read it.
         server,
     }
 }
@@ -1190,6 +1200,86 @@ pub async fn accept_server_eula(state: State<'_, AppState>, id: String) -> Resul
     Ok(server_view(server, &state))
 }
 
+/// Install Cardboard, which lets a Fabric server load Bukkit plugins.
+///
+/// Its own command rather than an ordinary mod install because of what it
+/// changes: the `plugins` folder means nothing until Cardboard is there to read
+/// it, and afterwards this server should be offered plugins it could not run
+/// before.
+#[tauri::command]
+pub async fn add_cardboard(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<ServerView> {
+    let mut server = crate::server::load(&state.paths, &id).await?;
+
+    if server.kind.takes_plugins() {
+        return Err(Error::msg(format!(
+            "a {} server already runs Bukkit plugins on its own",
+            server.kind.display_name()
+        )));
+    }
+    if !matches!(
+        server.kind,
+        crate::server::ServerKind::Fabric | crate::server::ServerKind::Quilt
+    ) {
+        return Err(Error::msg(format!(
+            "Cardboard is a Fabric mod, so it cannot run on a {} server",
+            server.kind.display_name()
+        )));
+    }
+    if server.has_cardboard() {
+        return Err(Error::msg("Cardboard is already installed here"));
+    }
+
+    let progress = Progress::new(app, format!("server:{}", server.id));
+    progress.stage("Finding Cardboard", 1).await;
+
+    let slug = crate::server::CARDBOARD_SLUG;
+    let project = providers::project(&state.http, Provider::Modrinth, slug, None).await?;
+    // Quilt runs Fabric mods, and Cardboard only publishes for Fabric.
+    let versions = providers::versions(
+        &state.http,
+        Provider::Modrinth,
+        slug,
+        Some(&server.mc_version),
+        Some("fabric"),
+        None,
+    )
+    .await?;
+    let best = crate::install::content::pick_best(&versions).ok_or_else(|| {
+        Error::msg(format!(
+            "Cardboard has no build for Minecraft {}",
+            server.mc_version
+        ))
+    })?;
+    progress.advance(1, &project.name).await;
+
+    let run = state.paths.server_run(&server.id);
+    progress.stage("Installing Cardboard", 1).await;
+    crate::install::content::install_into(
+        &state.http,
+        &run.join(ContentKind::Mod.folder()),
+        &mut server.content,
+        best,
+        ContentKind::Mod,
+        &project.name,
+        project.icon_url.clone(),
+        Some(project.slug.clone()),
+        false,
+    )
+    .await?;
+
+    // The folder a plugin gets dropped into should exist before anyone goes
+    // looking for it.
+    tokio::fs::create_dir_all(run.join(ContentKind::Plugin.folder())).await?;
+    server.save(&state.paths).await?;
+    progress.finish().await;
+
+    Ok(server_view(server, &state))
+}
+
 #[tauri::command]
 pub async fn start_server(
     app: AppHandle,
@@ -1337,8 +1427,10 @@ pub async fn install_server_content(
 
     // A Paper server runs Paper, Spigot and Bukkit plugins alike, so each is
     // tried in turn rather than insisting on the most specific one.
+    // Asked of the server rather than its kind: a Fabric server with Cardboard
+    // installed takes Bukkit plugins, and the kind alone cannot know that.
     let loaders: Vec<&str> = match kind {
-        ContentKind::Plugin => server.kind.plugin_loaders().to_vec(),
+        ContentKind::Plugin => server.plugin_loaders(),
         ContentKind::Mod => server.kind.mod_loader().into_iter().collect(),
         _ => Vec::new(),
     };

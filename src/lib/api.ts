@@ -274,6 +274,11 @@ export const api = {
     enabled: boolean,
   ) =>
     invoke<string>("set_server_content_enabled", { id, kind, file, enabled }),
+  /**
+   * Install Cardboard, so a Fabric server can load Bukkit plugins. Refused,
+   * with the reason, where it would do nothing.
+   */
+  addCardboard: (id: string) => invoke<Server>("add_cardboard", { id }),
 
   listServerLogs: (id: string) =>
     invoke<LogFile[]>("list_server_logs", { id }),

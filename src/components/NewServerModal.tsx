@@ -146,10 +146,7 @@ export default function NewServerModal({
 
           {chosen && !chosen.installable ? (
             <p className={styles.note}>
-              {chosen.name} cannot be downloaded automatically.
-              {chosen.id === "spigot"
-                ? " Its licence requires building it yourself with BuildTools — Paper runs every Spigot plugin and installs directly."
-                : " Its installer has to be run before the server exists, which is not built yet."}
+              {chosen.name} cannot be set up automatically on this machine.
             </p>
           ) : (
             <>
@@ -202,6 +199,24 @@ export default function NewServerModal({
                 You will be asked to accept Mojang&apos;s EULA before it starts
                 for the first time.
               </p>
+
+              {/* These two take noticeably longer than a download, and saying so
+                  beforehand is the difference between waiting and wondering. */}
+              {chosen?.id === "spigot" && (
+                <p className={styles.note}>
+                  Spigot is compiled here on your machine — its licence does not
+                  allow anyone to hand out a finished jar. The first build takes
+                  several minutes; later ones reuse the same work and are faster.
+                </p>
+              )}
+              {(chosen?.id === "forge" ||
+                chosen?.id === "neoforge" ||
+                chosen?.id === "quilt") && (
+                <p className={styles.note}>
+                  {chosen.name} runs its official installer to assemble the
+                  server and fetch its libraries, which takes a minute or two.
+                </p>
+              )}
             </>
           )}
         </>

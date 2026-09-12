@@ -18,6 +18,7 @@ use tokio::sync::mpsc;
 use crate::error::{Error, Result};
 use crate::paths::Paths;
 
+use super::installer::LaunchKind;
 use super::{Server, ServerKind};
 
 /// How long a server gets to shut down cleanly before it is killed.
@@ -174,8 +175,16 @@ pub fn build_args(server: &Server) -> Vec<String> {
         );
     }
 
-    args.push("-jar".into());
-    args.push(server.jar.clone());
+    match &server.launch {
+        // Forge and NeoForge from 1.17 on: the argument file carries the module
+        // path, the JVM flags and the main class, and there is no jar to name.
+        // Our heap flags go before it, which is why they are pushed first.
+        LaunchKind::ArgFile(file) => args.push(format!("@{file}")),
+        LaunchKind::Jar => {
+            args.push("-jar".into());
+            args.push(server.jar.clone());
+        }
+    }
 
     // `nogui` suppresses the little Swing window a vanilla-derived server
     // opens. A proxy has none and rejects the argument.
@@ -194,7 +203,7 @@ pub async fn start(
     java: PathBuf,
     registry: ServerRegistry,
 ) -> Result<u32> {
-    if server.jar.is_empty() {
+    if matches!(server.launch, LaunchKind::Jar) && server.jar.is_empty() {
         return Err(Error::msg(
             "this server has no jar yet — install one before starting it",
         ));
@@ -209,10 +218,16 @@ pub async fn start(
 
     let run = paths.server_run(&server.id);
     tokio::fs::create_dir_all(&run).await?;
-    if tokio::fs::metadata(run.join(&server.jar)).await.is_err() {
+    // Whatever the launch actually depends on has to be there. An installed
+    // server whose files were deleted underneath it should say so here rather
+    // than as a wall of Java output.
+    let needed = match &server.launch {
+        LaunchKind::ArgFile(file) => file.clone(),
+        LaunchKind::Jar => server.jar.clone(),
+    };
+    if tokio::fs::metadata(run.join(&needed)).await.is_err() {
         return Err(Error::msg(format!(
-            "{} is missing from the server folder — reinstall it",
-            server.jar
+            "{needed} is missing from the server folder — reinstall it"
         )));
     }
 

@@ -23,6 +23,70 @@ const PAPER_API: &str = "https://fill.papermc.io/v3";
 const PURPUR_API: &str = "https://api.purpurmc.org/v2";
 const FABRIC_META: &str = "https://meta.fabricmc.net";
 const MOHIST_API: &str = "https://api.mohistmc.com";
+const FORGE_MAVEN: &str = "https://maven.minecraftforge.net/net/minecraftforge/forge";
+const NEOFORGE_MAVEN: &str = "https://maven.neoforged.net/releases/net/neoforged/neoforge";
+const QUILT_MAVEN: &str = "https://maven.quiltmc.org/repository/release/org/quiltmc/quilt-installer";
+const QUILT_META: &str = "https://meta.quiltmc.org";
+const SPIGOT_HUB: &str = "https://hub.spigotmc.org";
+const BUILDTOOLS: &str =
+    "https://hub.spigotmc.org/jenkins/job/BuildTools/lastSuccessfulBuild/artifact/target/BuildTools.jar";
+const ARCLIGHT_RELEASES: &str = "https://api.github.com/repos/IzzelAliz/Arclight/releases?per_page=100";
+
+/// A tool that has to be run before the server exists.
+#[derive(Debug, Clone)]
+pub struct Builder {
+    pub jar: ServerJar,
+    /// Arguments for the tool. `{run}` stands for the server's run directory,
+    /// substituted once the path is known.
+    pub args: Vec<String>,
+    /// Where to run it. `None` is the run directory itself; `Some(name)` is a
+    /// shared cache folder, for tools that leave a large build tree behind that
+    /// must not end up inside the server — or inside its backups.
+    pub workspace: Option<&'static str>,
+    /// A JDK this tool insists on. `Some` also means it needs a compiler rather
+    /// than just a runtime.
+    pub jdk: Option<u32>,
+    /// Maximum heap for the tool itself, where it has an opinion. BuildTools
+    /// refuses to start with less than about 448MiB, and the JVM default
+    /// depends on how much memory the machine has.
+    pub heap_mb: Option<u32>,
+    /// Conditions to check before spending a download and several minutes.
+    pub preflight: Preflight,
+    /// What should exist when it finishes.
+    pub produces: Produces,
+    /// Shown while it runs.
+    pub stage: &'static str,
+}
+
+/// What has to be true before a tool can run at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Preflight {
+    /// Nothing beyond a working Java.
+    None,
+    /// BuildTools shells out to `git` and a POSIX shell, refuses to run in a
+    /// path containing certain characters, and self-gates on its own build
+    /// number — so a cached copy has to be replaced rather than reused.
+    BuildTools,
+}
+
+/// What running the tool is expected to leave behind.
+#[derive(Debug, Clone)]
+pub enum Produces {
+    /// Look for whatever an installer assembled — an argument file or a loader
+    /// jar, whichever it turned out to be.
+    Server,
+    /// Exactly this file, because the tool was told to write it.
+    Jar(String),
+}
+
+/// Where a server's software comes from.
+#[derive(Debug, Clone)]
+pub enum Source {
+    /// The jar *is* the server: download it and it is ready.
+    Jar(ServerJar),
+    /// The server has to be assembled or compiled first.
+    Build(Box<Builder>),
+}
 
 /// One downloadable server jar, whatever published it.
 #[derive(Debug, Clone)]
@@ -287,60 +351,17 @@ struct MohistBuild {
     file_sha256: Option<String>,
 }
 
+/// Mohist lists Minecraft versions it has never built for — 1.21.4 sits in the
+/// list with an empty build array — so the list by itself offers dead ends, and
+/// the newest entry is one of them. Nothing says which have builds, so each is
+/// asked. Banner is published by the same people through the same API, so both
+/// go through one implementation.
 async fn mohist_versions(client: &reqwest::Client) -> Result<Vec<String>> {
-    let url = format!("{MOHIST_API}/project/mohist/versions");
-    let listed: Vec<MohistVersion> = get_json(client, &url).await?;
-    let candidates = sort_newest_first(
-        listed
-            .into_iter()
-            .map(|v| v.name)
-            .filter(|v| is_release(v))
-            .collect(),
-    );
-
-    // Mohist lists Minecraft versions it has never built for — 1.21.4 sits in
-    // the list with an empty build array — so the list by itself offers dead
-    // ends, and the newest entry is one of them. Nothing says which have
-    // builds, so each is asked. A dozen small requests, once, on the way to a
-    // version picker; if that list ever grows to hundreds this wants bounding.
-    let mut checks = FuturesUnordered::new();
-    for version in candidates {
-        let client = client.clone();
-        checks.push(async move {
-            let url = format!("{MOHIST_API}/project/mohist/{version}/builds");
-            let has_builds = get_json::<Vec<MohistBuild>>(&client, &url)
-                .await
-                .map(|builds| !builds.is_empty())
-                .unwrap_or(false);
-            (version, has_builds)
-        });
-    }
-
-    let mut out = Vec::new();
-    while let Some((version, has_builds)) = checks.next().await {
-        if has_builds {
-            out.push(version);
-        }
-    }
-    Ok(sort_newest_first(out))
+    mohist_family_versions(client, "mohist").await
 }
 
 async fn mohist_jar(client: &reqwest::Client, version: &str) -> Result<ServerJar> {
-    let url = format!("{MOHIST_API}/project/mohist/{version}/builds");
-    let builds: Vec<MohistBuild> = get_json(client, &url).await?;
-    // Newest first, unlike most of the others' build lists being appended to.
-    let build = builds
-        .first()
-        .ok_or_else(|| Error::msg(format!("Mohist has no builds for Minecraft {version}")))?;
-
-    Ok(ServerJar {
-        url: format!("{MOHIST_API}/project/mohist/{version}/builds/{}/download", build.id),
-        file_name: format!("mohist-{version}-{}.jar", build.id),
-        sha1: None,
-        sha256: build.file_sha256.clone(),
-        size: None,
-        build: build.id.to_string(),
-    })
+    mohist_family_jar(client, "mohist", version).await
 }
 
 // ---------------------------------------------------------------------------
@@ -383,32 +404,474 @@ async fn vanilla_jar(client: &reqwest::Client, version: &str) -> Result<ServerJa
 }
 
 // ---------------------------------------------------------------------------
-// Dispatch
+// Shared helpers for the sources that publish no JSON
 // ---------------------------------------------------------------------------
 
-/// Why a kind cannot be set up yet, said in terms of what to do instead.
-fn unsupported(kind: ServerKind) -> Error {
-    match kind {
-        ServerKind::Spigot => Error::msg(
-            "Spigot cannot be downloaded — its licence requires you to build it yourself with \
-             BuildTools. Paper runs every Spigot plugin and can be installed directly, so pick \
-             that unless you specifically need Spigot.",
-        ),
-        ServerKind::Forge | ServerKind::NeoForge => Error::msg(format!(
-            "{} servers install from an installer jar that has to be run before the server \
-             exists. That step is not built yet.",
-            kind.display_name()
-        )),
-        ServerKind::Quilt => Error::msg(
-            "Quilt server installation is not built yet. Fabric mods run on Fabric servers, \
-             which are supported.",
-        ),
-        other => Error::msg(format!(
-            "{} is not set up automatically yet.",
-            other.display_name()
-        )),
+async fn get_text(client: &reqwest::Client, url: &str) -> Result<String> {
+    let resp = client.get(url).send().await?;
+    let status = resp.status();
+    let text = resp.text().await?;
+    if !status.is_success() {
+        return Err(Error::msg(format!("{url} returned HTTP {status}")));
     }
+    Ok(text)
 }
+
+/// Pull the contents of every `<tag>…</tag>` out of a Maven metadata document.
+///
+/// These files are small, flat and machine-generated, and the alternative is an
+/// XML parser dependency earning its keep on four elements.
+fn xml_values(body: &str, tag: &str) -> Vec<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    body.split(&open)
+        .skip(1)
+        .filter_map(|rest| rest.split(&close).next())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Every Minecraft version Mojang calls a release.
+///
+/// Used to sanity-check versions derived from someone else's numbering: if a
+/// derivation produces something Mojang never shipped, the derivation is wrong
+/// and the entry is dropped rather than offered.
+async fn mojang_releases(client: &reqwest::Client) -> Result<std::collections::HashSet<String>> {
+    let manifest = crate::meta::piston::fetch_manifest(client).await?;
+    Ok(manifest
+        .versions
+        .into_iter()
+        .filter(|v| v.kind == "release")
+        .map(|v| v.id)
+        .collect())
+}
+
+// ---------------------------------------------------------------------------
+// Forge
+// ---------------------------------------------------------------------------
+
+/// Forge names every build `<minecraft>-<forge>`, so its own versions carry the
+/// Minecraft version and nothing has to be inferred.
+async fn forge_builds(client: &reqwest::Client) -> Result<Vec<String>> {
+    let body = get_text(client, &format!("{FORGE_MAVEN}/maven-metadata.xml")).await?;
+    Ok(xml_values(&body, "version"))
+}
+
+fn forge_mc_of(build: &str) -> Option<&str> {
+    build.split_once('-').map(|(mc, _)| mc)
+}
+
+async fn forge_versions(client: &reqwest::Client) -> Result<Vec<String>> {
+    let (builds, releases) = tokio::try_join!(forge_builds(client), mojang_releases(client))?;
+    Ok(sort_newest_first(
+        builds
+            .iter()
+            .filter_map(|b| forge_mc_of(b))
+            // Forge's Maven goes back far enough to carry builds for Minecraft
+            // pre-releases — `1.7.10_pre4` among them. Offering one would mean
+            // a server nothing else in Geode can describe.
+            .filter(|mc| releases.contains(*mc))
+            .map(str::to_string)
+            .collect(),
+    ))
+}
+
+async fn forge_installer(client: &reqwest::Client, game: &str) -> Result<ServerJar> {
+    let builds = forge_builds(client).await?;
+    let mut matching: Vec<String> = builds
+        .into_iter()
+        .filter(|b| forge_mc_of(b) == Some(game))
+        .collect();
+    matching.sort_by_key(|b| {
+        version_key(b.split_once('-').map(|(_, f)| f).unwrap_or_default())
+    });
+    let build = matching
+        .pop()
+        .ok_or_else(|| Error::msg(format!("Forge has no build for Minecraft {game}")))?;
+
+    Ok(ServerJar {
+        url: format!("{FORGE_MAVEN}/{build}/forge-{build}-installer.jar"),
+        file_name: format!("forge-{build}-installer.jar"),
+        sha1: None,
+        sha256: None,
+        size: None,
+        build: build
+            .split_once('-')
+            .map(|(_, f)| f.to_string())
+            .unwrap_or(build),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// NeoForge
+// ---------------------------------------------------------------------------
+
+/// NeoForge's version carries no Minecraft version, only a numbering derived
+/// from one — and the derivation changed when Minecraft moved to date-style
+/// releases. So candidates are generated and checked against what Mojang
+/// actually shipped, instead of trusting a single rule to hold forever.
+fn neoforge_mc_candidates(version: &str) -> Vec<String> {
+    let core = version.split('-').next().unwrap_or(version);
+    let p: Vec<&str> = core.split('.').collect();
+    let mut out = Vec::new();
+    if p.len() >= 4 {
+        // 26.1.2.109 -> 26.1.2, and 26.2.0.87 -> 26.2
+        out.push(p[..3].join("."));
+        out.push(p[..2].join("."));
+    }
+    if p.len() >= 3 {
+        // 21.8.54 -> 1.21.8
+        out.push(format!("1.{}.{}", p[0], p[1]));
+        if p[1] == "0" {
+            // 21.0.167 -> 1.21
+            out.push(format!("1.{}", p[0]));
+        }
+    }
+    out
+}
+
+async fn neoforge_builds(client: &reqwest::Client) -> Result<Vec<String>> {
+    let body = get_text(client, &format!("{NEOFORGE_MAVEN}/maven-metadata.xml")).await?;
+    Ok(xml_values(&body, "version"))
+}
+
+async fn neoforge_versions(client: &reqwest::Client) -> Result<Vec<String>> {
+    let (builds, releases) = tokio::try_join!(neoforge_builds(client), mojang_releases(client))?;
+    let mut out: Vec<String> = builds
+        .iter()
+        .filter_map(|b| {
+            neoforge_mc_candidates(b)
+                .into_iter()
+                .find(|c| releases.contains(c))
+        })
+        .collect();
+    out.sort_by_key(|v| std::cmp::Reverse(version_key(v)));
+    out.dedup();
+    Ok(out)
+}
+
+async fn neoforge_installer(client: &reqwest::Client, game: &str) -> Result<ServerJar> {
+    let builds = neoforge_builds(client).await?;
+    let mut matching: Vec<String> = builds
+        .into_iter()
+        .filter(|b| !b.contains("-beta"))
+        .filter(|b| neoforge_mc_candidates(b).iter().any(|c| c == game))
+        .collect();
+    matching.sort_by_key(|b| version_key(b));
+    let build = matching
+        .pop()
+        .ok_or_else(|| Error::msg(format!("NeoForge has no build for Minecraft {game}")))?;
+
+    Ok(ServerJar {
+        url: format!("{NEOFORGE_MAVEN}/{build}/neoforge-{build}-installer.jar"),
+        file_name: format!("neoforge-{build}-installer.jar"),
+        sha1: None,
+        sha256: None,
+        size: None,
+        build,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Quilt
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct QuiltGameVersion {
+    version: String,
+    #[serde(default)]
+    stable: bool,
+}
+
+async fn quilt_versions(client: &reqwest::Client) -> Result<Vec<String>> {
+    let games: Vec<QuiltGameVersion> =
+        get_json(client, &format!("{QUILT_META}/v3/versions/game")).await?;
+    Ok(games
+        .into_iter()
+        .filter(|g| g.stable)
+        .map(|g| g.version)
+        .collect())
+}
+
+/// Quilt publishes no assembled server jar, only an installer — unlike Fabric,
+/// whose meta server hands one over directly.
+async fn quilt_installer(client: &reqwest::Client) -> Result<ServerJar> {
+    let body = get_text(client, &format!("{QUILT_MAVEN}/maven-metadata.xml")).await?;
+    let version = xml_values(&body, "release")
+        .into_iter()
+        .next()
+        .or_else(|| xml_values(&body, "latest").into_iter().next())
+        .or_else(|| xml_values(&body, "version").into_iter().next_back())
+        .ok_or_else(|| Error::msg("Quilt publishes no installer release"))?;
+
+    Ok(ServerJar {
+        url: format!("{QUILT_MAVEN}/{version}/quilt-installer-{version}.jar"),
+        file_name: format!("quilt-installer-{version}.jar"),
+        sha1: None,
+        sha256: None,
+        size: None,
+        build: version,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Spigot (built locally, because it may not be redistributed)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SpigotRevision {
+    /// Class-file versions, not Java versions: 65 means Java 21.
+    ///
+    /// The rename above is load-bearing. Without it this never matches the
+    /// `javaVersions` key, every revision silently looks like it has no
+    /// requirement, and BuildTools is then run under whatever Java the server
+    /// wanted — which it refuses outright rather than tolerating.
+    #[serde(default)]
+    java_versions: Option<Vec<u32>>,
+}
+
+/// Java major version from a class-file major version. Class 65 is Java 21, and
+/// the offset has been 44 since Java 1.1.
+fn java_major_of_class(class_version: u32) -> u32 {
+    class_version.saturating_sub(44)
+}
+
+/// Revisions BuildTools knows how to build.
+///
+/// The index also lists thousands of Jenkins build numbers, which are not
+/// versions anybody wants to pick from a menu, so it is filtered against
+/// Mojang's release list.
+async fn spigot_versions(client: &reqwest::Client) -> Result<Vec<String>> {
+    let index = format!("{SPIGOT_HUB}/versions/");
+    let (body, releases) = tokio::try_join!(get_text(client, &index), mojang_releases(client))?;
+
+    let mut out: Vec<String> = body
+        .split("href=\"")
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .filter_map(|name| name.strip_suffix(".json"))
+        .filter(|name| releases.contains(*name))
+        .map(str::to_string)
+        .collect();
+    out.sort_by_key(|v| std::cmp::Reverse(version_key(v)));
+    out.dedup();
+    Ok(out)
+}
+
+/// The JDK a given revision must be built with.
+///
+/// BuildTools refuses outright when the running Java is outside the range the
+/// revision declares, so this is not advisory — building 1.21.1 under Java 25
+/// stops with an error and produces nothing. The lower bound is taken because
+/// it is the one most likely to still be installable.
+///
+/// Revisions old enough to predate the field — 1.8.8 and its contemporaries —
+/// were built under Java 7 or 8, so that is what they get.
+async fn spigot_jdk(client: &reqwest::Client, game: &str) -> u32 {
+    const LEGACY: u32 = 8;
+
+    let url = format!("{SPIGOT_HUB}/versions/{game}.json");
+    let Ok(revision) = get_json::<SpigotRevision>(client, &url).await else {
+        return LEGACY;
+    };
+    revision
+        .java_versions
+        .as_ref()
+        .and_then(|versions| versions.first())
+        .map(|class| java_major_of_class(*class))
+        .unwrap_or(LEGACY)
+}
+
+async fn spigot_builder(client: &reqwest::Client, game: &str) -> Result<Builder> {
+    let jdk = spigot_jdk(client, game).await;
+
+    Ok(Builder {
+        jar: ServerJar {
+            url: BUILDTOOLS.to_string(),
+            file_name: "BuildTools.jar".to_string(),
+            sha1: None,
+            sha256: None,
+            size: None,
+            build: game.to_string(),
+        },
+        args: vec![
+            "--rev".into(),
+            game.to_string(),
+            "--compile".into(),
+            "spigot".into(),
+            // Without this it tries to open a Swing window.
+            "--nogui".into(),
+            "--output-dir".into(),
+            "{run}".into(),
+            // Name it ourselves so there is no pattern to guess afterwards.
+            "--final-name".into(),
+            format!("spigot-{game}.jar"),
+        ],
+        // BuildTools clones four repositories and an Apache Maven, and leaves
+        // roughly 600MB behind. That belongs in the cache, where the next build
+        // can reuse it, and never inside a server folder that gets backed up.
+        workspace: Some("buildtools"),
+        jdk: Some(jdk),
+        // It checks its own maximum heap and stops below roughly 448MiB.
+        heap_mb: Some(1024),
+        preflight: Preflight::BuildTools,
+        produces: Produces::Jar(format!("spigot-{game}.jar")),
+        stage: "Building Spigot — this takes a few minutes",
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Arclight
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct GithubRelease {
+    #[serde(default)]
+    assets: Vec<GithubAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubAsset {
+    name: String,
+    browser_download_url: String,
+    #[serde(default)]
+    size: Option<u64>,
+}
+
+/// Arclight publishes per-loader builds — `arclight-forge-1.21.1-1.0.1-<sha>.jar`
+/// and fabric and neoforge alongside. The forge variant is the one offered,
+/// matching what [`ServerKind::mod_loader`] promises Arclight mods are built for.
+fn arclight_parts(name: &str) -> Option<(String, String)> {
+    let rest = name.strip_prefix("arclight-")?.strip_suffix(".jar")?;
+    let (loader, rest) = rest.split_once('-')?;
+    let game = rest.split('-').next()?.to_string();
+    // A Minecraft version rather than something else in the same position.
+    if !game.contains('.') || !game.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    Some((loader.to_string(), game))
+}
+
+async fn arclight_assets(client: &reqwest::Client) -> Result<Vec<GithubAsset>> {
+    // GitHub rejects requests without a User-Agent, and `get_json` sets no
+    // headers, so this one is made by hand.
+    let resp = client
+        .get(ARCLIGHT_RELEASES)
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", "geode-launcher")
+        .send()
+        .await?;
+    let status = resp.status();
+    let text = resp.text().await?;
+    if !status.is_success() {
+        return Err(Error::msg(format!(
+            "Arclight's release list returned HTTP {status}"
+        )));
+    }
+    let releases: Vec<GithubRelease> =
+        serde_json::from_str(&text).map_err(|e| Error::json(ARCLIGHT_RELEASES, e))?;
+    Ok(releases.into_iter().flat_map(|r| r.assets).collect())
+}
+
+async fn arclight_versions(client: &reqwest::Client) -> Result<Vec<String>> {
+    let assets = arclight_assets(client).await?;
+    Ok(sort_newest_first(
+        assets
+            .iter()
+            .filter_map(|a| arclight_parts(&a.name))
+            .filter(|(loader, _)| loader.as_str() == "forge")
+            .map(|(_, game)| game)
+            .collect(),
+    ))
+}
+
+async fn arclight_jar(client: &reqwest::Client, game: &str) -> Result<ServerJar> {
+    let assets = arclight_assets(client).await?;
+    // Newest release first in GitHub's ordering, so the first match is current.
+    let asset = assets
+        .into_iter()
+        .find(|a| {
+            matches!(arclight_parts(&a.name), Some((loader, mc)) if loader == "forge" && mc == game)
+        })
+        .ok_or_else(|| Error::msg(format!("Arclight has no build for Minecraft {game}")))?;
+
+    Ok(ServerJar {
+        url: asset.browser_download_url,
+        file_name: asset.name.clone(),
+        sha1: None,
+        sha256: None,
+        size: asset.size,
+        build: asset.name,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Banner (the same publisher as Mohist, and the same API)
+// ---------------------------------------------------------------------------
+
+async fn mohist_family_versions(client: &reqwest::Client, project: &str) -> Result<Vec<String>> {
+    let url = format!("{MOHIST_API}/project/{project}/versions");
+    let listed: Vec<MohistVersion> = get_json(client, &url).await?;
+    let candidates = sort_newest_first(
+        listed
+            .into_iter()
+            .map(|v| v.name)
+            .filter(|v| is_release(v))
+            .collect(),
+    );
+
+    let mut checks = FuturesUnordered::new();
+    for version in candidates {
+        let client = client.clone();
+        let project = project.to_string();
+        checks.push(async move {
+            let url = format!("{MOHIST_API}/project/{project}/{version}/builds");
+            let has_builds = get_json::<Vec<MohistBuild>>(&client, &url)
+                .await
+                .map(|builds| !builds.is_empty())
+                .unwrap_or(false);
+            (version, has_builds)
+        });
+    }
+
+    let mut out = Vec::new();
+    while let Some((version, has_builds)) = checks.next().await {
+        if has_builds {
+            out.push(version);
+        }
+    }
+    Ok(sort_newest_first(out))
+}
+
+async fn mohist_family_jar(
+    client: &reqwest::Client,
+    project: &str,
+    version: &str,
+) -> Result<ServerJar> {
+    let url = format!("{MOHIST_API}/project/{project}/{version}/builds");
+    let builds: Vec<MohistBuild> = get_json(client, &url).await?;
+    let build = builds
+        .first()
+        .ok_or_else(|| Error::msg(format!("{project} has no builds for Minecraft {version}")))?;
+
+    Ok(ServerJar {
+        url: format!(
+            "{MOHIST_API}/project/{project}/{version}/builds/{}/download",
+            build.id
+        ),
+        file_name: format!("{project}-{version}-{}.jar", build.id),
+        sha1: None,
+        sha256: build.file_sha256.clone(),
+        size: None,
+        build: build.id.to_string(),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch
+// ---------------------------------------------------------------------------
 
 /// Versions of this server software that can be installed, newest first.
 pub async fn versions(client: &reqwest::Client, kind: ServerKind) -> Result<Vec<String>> {
@@ -420,26 +883,91 @@ pub async fn versions(client: &reqwest::Client, kind: ServerKind) -> Result<Vec<
         ServerKind::Fabric => fabric_versions(client).await,
         ServerKind::Vanilla => vanilla_versions(client).await,
         ServerKind::Mohist => mohist_versions(client).await,
-        other => Err(unsupported(other)),
+        ServerKind::Banner => mohist_family_versions(client, "banner").await,
+        ServerKind::Forge => forge_versions(client).await,
+        ServerKind::NeoForge => neoforge_versions(client).await,
+        ServerKind::Quilt => quilt_versions(client).await,
+        ServerKind::Spigot => spigot_versions(client).await,
+        ServerKind::Arclight => arclight_versions(client).await,
+        // Every kind is covered above; this keeps the match total rather than
+        // letting a future variant compile into a silent gap.
+        other => Err(Error::msg(format!(
+            "{} is not set up automatically yet.",
+            other.display_name()
+        ))),
     }
 }
 
-/// The jar to download for one version of one server software.
-pub async fn resolve(
-    client: &reqwest::Client,
-    kind: ServerKind,
-    version: &str,
-) -> Result<ServerJar> {
+/// Where one version of one server software comes from — a jar to download, or
+/// a tool to run that produces one.
+pub async fn resolve(client: &reqwest::Client, kind: ServerKind, version: &str) -> Result<Source> {
     if let Some(project) = paper_project(kind) {
-        return paper_jar(client, project, version).await;
+        return Ok(Source::Jar(paper_jar(client, project, version).await?));
     }
-    match kind {
-        ServerKind::Purpur => purpur_jar(client, version).await,
-        ServerKind::Fabric => fabric_jar(client, version).await,
-        ServerKind::Vanilla => vanilla_jar(client, version).await,
-        ServerKind::Mohist => mohist_jar(client, version).await,
-        other => Err(unsupported(other)),
-    }
+    Ok(match kind {
+        ServerKind::Purpur => Source::Jar(purpur_jar(client, version).await?),
+        ServerKind::Fabric => Source::Jar(fabric_jar(client, version).await?),
+        ServerKind::Vanilla => Source::Jar(vanilla_jar(client, version).await?),
+        ServerKind::Mohist => Source::Jar(mohist_jar(client, version).await?),
+        ServerKind::Banner => Source::Jar(mohist_family_jar(client, "banner", version).await?),
+        ServerKind::Arclight => Source::Jar(arclight_jar(client, version).await?),
+
+        // Forge and NeoForge ship the same installer, which assembles the
+        // server in place and — from 1.17 — produces no jar at all.
+        ServerKind::Forge | ServerKind::NeoForge => {
+            let jar = if kind == ServerKind::Forge {
+                forge_installer(client, version).await?
+            } else {
+                neoforge_installer(client, version).await?
+            };
+            Source::Build(Box::new(Builder {
+                jar,
+                args: vec!["--installServer".into(), "{run}".into()],
+                workspace: None,
+                jdk: None,
+                heap_mb: None,
+                preflight: Preflight::None,
+                produces: Produces::Server,
+                stage: "Installing the server",
+            }))
+        }
+
+        ServerKind::Quilt => Source::Build(Box::new(Builder {
+            jar: quilt_installer(client).await?,
+            args: vec![
+                "install".into(),
+                "server".into(),
+                version.to_string(),
+                "--install-dir={run}".into(),
+                // Without this there is no Minecraft for the loader to launch.
+                "--download-server".into(),
+            ],
+            workspace: None,
+            jdk: None,
+            heap_mb: None,
+            preflight: Preflight::None,
+            produces: Produces::Server,
+            stage: "Installing the server",
+        })),
+
+        ServerKind::Spigot => Source::Build(Box::new(spigot_builder(client, version).await?)),
+
+        other => {
+            return Err(Error::msg(format!(
+                "{} is not set up automatically yet.",
+                other.display_name()
+            )))
+        }
+    })
+}
+
+/// Whether Geode can install this software without help.
+///
+/// Everything is installable now: the jar-publishing platforms directly, the
+/// installer-based loaders by running their installer, and Spigot by compiling
+/// it with BuildTools the way its licence requires.
+pub fn is_installable(_kind: ServerKind) -> bool {
+    true
 }
 
 /// The Java major version this server will need.
@@ -464,14 +992,6 @@ pub async fn required_java(
     Some(crate::java::required_major(&json))
 }
 
-/// Whether Geode can install this software without help.
-pub fn is_installable(kind: ServerKind) -> bool {
-    paper_project(kind).is_some()
-        || matches!(
-            kind,
-            ServerKind::Purpur | ServerKind::Fabric | ServerKind::Vanilla | ServerKind::Mohist
-        )
-}
 
 #[cfg(test)]
 mod tests {
@@ -509,28 +1029,70 @@ mod tests {
     }
 
     #[test]
-    fn what_is_installable_is_what_has_a_resolver() {
-        for kind in [
-            ServerKind::Paper,
-            ServerKind::Folia,
-            ServerKind::Velocity,
-            ServerKind::Waterfall,
-            ServerKind::Purpur,
-            ServerKind::Fabric,
-            ServerKind::Vanilla,
-            ServerKind::Mohist,
-        ] {
-            assert!(is_installable(kind), "{kind:?}");
+    fn every_kind_can_be_installed() {
+        // The ones that used to be greyed out are the point of this: each now
+        // has a route, whether that is a download, an installer or a build.
+        for kind in ServerKind::ALL {
+            assert!(is_installable(*kind), "{kind:?}");
         }
-        for kind in [
-            ServerKind::Spigot,
-            ServerKind::Forge,
-            ServerKind::NeoForge,
-            ServerKind::Quilt,
-            ServerKind::Arclight,
-        ] {
-            assert!(!is_installable(kind), "{kind:?}");
-        }
+    }
+
+    #[test]
+    fn forges_own_version_carries_the_minecraft_one() {
+        assert_eq!(forge_mc_of("1.20.1-47.3.0"), Some("1.20.1"));
+        assert_eq!(forge_mc_of("26.2-65.1.3"), Some("26.2"));
+        assert_eq!(forge_mc_of("nonsense"), None);
+    }
+
+    #[test]
+    fn neoforge_versions_map_onto_both_eras_of_minecraft_numbering() {
+        // Three parts: the old scheme, where 1. was dropped from the front.
+        assert!(neoforge_mc_candidates("21.1.95").contains(&"1.21.1".to_string()));
+        assert!(neoforge_mc_candidates("21.8.54").contains(&"1.21.8".to_string()));
+        // A .0 patch means the release had no patch number at all.
+        assert!(neoforge_mc_candidates("21.0.167").contains(&"1.21".to_string()));
+        // Four parts: date-style Minecraft versions, carried verbatim.
+        assert!(neoforge_mc_candidates("26.1.2.109").contains(&"26.1.2".to_string()));
+        assert!(neoforge_mc_candidates("26.2.0.87").contains(&"26.2".to_string()));
+    }
+
+    #[test]
+    fn a_java_class_version_names_a_jdk() {
+        // Spigot states requirements as class-file versions, so 1.21.1 asking
+        // for [65, 67] means Java 21 to 23.
+        assert_eq!(java_major_of_class(65), 21);
+        assert_eq!(java_major_of_class(67), 23);
+        assert_eq!(java_major_of_class(52), 8);
+    }
+
+    #[test]
+    fn arclight_assets_are_split_into_loader_and_version() {
+        assert_eq!(
+            arclight_parts("arclight-forge-1.21.1-1.0.1-8ec9529.jar"),
+            Some(("forge".to_string(), "1.21.1".to_string()))
+        );
+        assert_eq!(
+            arclight_parts("arclight-neoforge-1.20.4-1.0.4-80ec5df.jar"),
+            Some(("neoforge".to_string(), "1.20.4".to_string()))
+        );
+        // The coremod's own version is shaped exactly like a Minecraft one, so
+        // parsing cannot tell them apart and does not pretend to. It is the
+        // loader filter that keeps it out of the version list.
+        assert_eq!(
+            arclight_parts("arclight-coremod-1.0.0-SNAPSHOT.jar"),
+            Some(("coremod".to_string(), "1.0.0".to_string()))
+        );
+        assert_eq!(arclight_parts("something-else.jar"), None);
+    }
+
+    #[test]
+    fn maven_metadata_is_read_without_an_xml_parser() {
+        let body = "<metadata><versioning><latest>0.15.1</latest>\
+                    <versions><version>0.14.0</version><version>0.15.1</version></versions>\
+                    </versioning></metadata>";
+        assert_eq!(xml_values(body, "version"), vec!["0.14.0", "0.15.1"]);
+        assert_eq!(xml_values(body, "latest"), vec!["0.15.1"]);
+        assert!(xml_values(body, "absent").is_empty());
     }
 
     #[test]
@@ -543,11 +1105,30 @@ mod tests {
     }
 
     #[test]
-    fn spigot_explains_itself_rather_than_failing_blankly() {
-        // A licence problem is not a bug, and the message has to say so or the
-        // user will keep retrying it.
-        let message = unsupported(ServerKind::Spigot).to_string();
-        assert!(message.contains("BuildTools"), "{message}");
-        assert!(message.contains("Paper"), "{message}");
+    fn spigot_is_built_rather_than_downloaded() {
+        // Its licence does not permit redistributing a built jar, so the only
+        // legitimate route is compiling it — which means BuildTools, a chosen
+        // JDK, and a workspace kept out of the server folder.
+        let builder = Builder {
+            jar: ServerJar {
+                url: BUILDTOOLS.into(),
+                file_name: "BuildTools.jar".into(),
+                sha1: None,
+                sha256: None,
+                size: None,
+                build: "1.21.1".into(),
+            },
+            args: vec!["--rev".into(), "1.21.1".into(), "--output-dir".into(), "{run}".into()],
+            workspace: Some("buildtools"),
+            jdk: Some(21),
+            heap_mb: Some(1024),
+            preflight: Preflight::BuildTools,
+            produces: Produces::Jar("spigot-1.21.1.jar".into()),
+            stage: "Building Spigot",
+        };
+        // 600MB of build tree must not land inside a folder we back up.
+        assert!(builder.workspace.is_some());
+        // The output still has to arrive in the server's own directory.
+        assert!(builder.args.contains(&"{run}".to_string()));
     }
 }

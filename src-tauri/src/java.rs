@@ -249,10 +249,25 @@ pub async fn provision(
     major: u32,
     progress: &Progress,
 ) -> Result<JavaInstall> {
+    provision_image(client, paths, major, "jre", progress).await
+}
+
+/// Download and unpack a Temurin runtime, choosing Adoptium's image type.
+///
+/// `jre` runs things and is all a Minecraft server needs. `jdk` additionally
+/// carries a compiler, which SpigotMC's BuildTools requires because it builds
+/// Spigot from source rather than downloading it.
+pub async fn provision_image(
+    client: &reqwest::Client,
+    paths: &Paths,
+    major: u32,
+    image: &str,
+    progress: &Progress,
+) -> Result<JavaInstall> {
     progress.stage(&format!("Finding Java {major}"), 1).await;
 
     let url = format!(
-        "https://api.adoptium.net/v3/assets/latest/{major}/hotspot?architecture={}&image_type=jre&os={}&vendor=eclipse",
+        "https://api.adoptium.net/v3/assets/latest/{major}/hotspot?architecture={}&image_type={image}&os={}&vendor=eclipse",
         adoptium_arch()?,
         adoptium_os()
     );
@@ -263,15 +278,24 @@ pub async fn provision(
         ))
     })?;
 
-    let dest_dir = paths.java().join(format!("temurin-{major}"));
+    // A JDK is kept apart from the JRE of the same version: they are different
+    // downloads, and letting one overwrite the other would mean whichever was
+    // fetched last decides whether compiling works.
+    let dest_dir = paths.java().join(if image == "jdk" {
+        format!("temurin-{major}-jdk")
+    } else {
+        format!("temurin-{major}")
+    });
     // A previous half-finished attempt would otherwise shadow the new one.
     let _ = tokio::fs::remove_dir_all(&dest_dir).await;
     tokio::fs::create_dir_all(&dest_dir).await?;
 
     let is_zip = asset.binary.package.link.ends_with(".zip");
-    let archive = paths
-        .cache()
-        .join(if is_zip { "jre.zip" } else { "jre.tar.gz" });
+    let archive = paths.cache().join(if is_zip {
+        format!("{image}.zip")
+    } else {
+        format!("{image}.tar.gz")
+    });
 
     progress
         .stage(&format!("Downloading Java {major}"), 1)
@@ -406,6 +430,34 @@ pub async fn ensure(
     }
 
     let installed = provision(client, paths, major, progress).await?;
+    Ok(installed.path)
+}
+
+/// Whether this `java` has a compiler beside it, making it a JDK.
+fn has_compiler(java: &Path) -> bool {
+    let name = if cfg!(windows) { "javac.exe" } else { "javac" };
+    java.parent().map(|d| d.join(name).is_file()).unwrap_or(false)
+}
+
+/// A JDK of exactly this major version, installed if the machine has none.
+///
+/// Distinct from [`ensure`] because a JRE cannot compile: BuildTools checks for
+/// a compiler and stops. Most systems that have Java at all have a JDK, so the
+/// download is a fallback rather than the usual path.
+pub async fn ensure_jdk(
+    client: &reqwest::Client,
+    paths: &Paths,
+    major: u32,
+    progress: &Progress,
+) -> Result<PathBuf> {
+    if let Some(found) = detect(paths)
+        .await
+        .into_iter()
+        .find(|j| j.major == major && has_compiler(&j.path))
+    {
+        return Ok(found.path);
+    }
+    let installed = provision_image(client, paths, major, "jdk", progress).await?;
     Ok(installed.path)
 }
 

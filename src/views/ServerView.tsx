@@ -34,7 +34,6 @@ import type {
   LogFile,
   Schedule,
   Server,
-  ServerKindInfo,
   ServerLine,
   ServerProperty,
   ServerSettings,
@@ -513,21 +512,16 @@ function ContentPane({
   onAdd: (kind: ContentKind) => void;
 }) {
   const reportError = useStore((s) => s.reportError);
+  const refreshServers = useStore((s) => s.refreshServers);
 
-  const [info, setInfo] = useState<ServerKindInfo | null>(null);
-  const [folder, setFolder] = useState<ContentKind>("plugin");
+  // Capabilities come from the server rather than its kind. A Fabric server
+  // with Cardboard installed takes Bukkit plugins, and no amount of knowing
+  // what "fabric" means would reveal that.
+  const [folder, setFolder] = useState<ContentKind>(
+    server.takesPlugins ? "plugin" : "mod",
+  );
   const [items, setItems] = useState<ContentItem[] | null>(null);
-
-  useEffect(() => {
-    api
-      .serverKinds()
-      .then((kinds) => {
-        const found = kinds.find((k) => k.id === server.kind) ?? null;
-        setInfo(found);
-        if (found) setFolder(found.takesPlugins ? "plugin" : "mod");
-      })
-      .catch(() => setInfo(null));
-  }, [server.kind]);
+  const [addingCardboard, setAddingCardboard] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -566,16 +560,30 @@ function ContentPane({
     }
   }
 
-  const both = Boolean(info?.takesPlugins && info?.takesMods);
-  const takesNothing = Boolean(info && !info.takesPlugins && !info.takesMods);
+  const both = server.takesPlugins && server.takesMods;
+  const takesNothing = !server.takesPlugins && !server.takesMods;
   const noun = folder === "plugin" ? "plugins" : "mods";
+
+  async function addCardboard() {
+    setAddingCardboard(true);
+    try {
+      await api.addCardboard(server.id);
+      // The server's capabilities change with it, so the view has to be re-read
+      // rather than patched here.
+      await refreshServers();
+    } catch (e) {
+      reportError("Could not add Cardboard", e);
+    } finally {
+      setAddingCardboard(false);
+    }
+  }
 
   if (takesNothing) {
     return (
       <div className={styles.settings}>
         <p className={styles.pending}>
-          A {info?.name} server loads neither plugins nor mods — it is the game
-          and nothing else.
+          This server loads neither plugins nor mods — it is the game and
+          nothing else.
         </p>
       </div>
     );
@@ -606,6 +614,22 @@ function ContentPane({
           Add {noun}
         </button>
       </div>
+
+      {/* Cardboard is a mod, but what it does is change what the server is:
+          afterwards this pane grows a Plugins folder that was not there. */}
+      {server.canAddCardboard && (
+        <p className={styles.pending}>
+          This server runs mods but not Bukkit plugins.{" "}
+          <button
+            className="btn btn-sm"
+            onClick={() => void addCardboard()}
+            disabled={addingCardboard}
+          >
+            {addingCardboard ? "Adding…" : "Add Cardboard"}
+          </button>{" "}
+          to load plugins alongside them.
+        </p>
+      )}
 
       {items === null ? (
         <div className={styles.rows}>

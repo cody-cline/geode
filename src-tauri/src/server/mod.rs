@@ -13,6 +13,7 @@
 pub mod backup;
 pub mod from_plan;
 pub mod install;
+pub mod installer;
 pub mod logs;
 pub mod meta;
 pub mod properties;
@@ -243,6 +244,11 @@ pub struct Server {
     /// File name of the jar to launch, relative to the run directory.
     #[serde(default)]
     pub jar: String,
+    /// How this server is started. Modern Forge and NeoForge produce no jar at
+    /// all — they leave an argument file and are launched from that — so the
+    /// jar name by itself cannot describe every server.
+    #[serde(default)]
+    pub launch: installer::LaunchKind,
     /// The Java major version this server needs, worked out when the jar was
     /// installed. Recorded rather than derived at start-up so starting a
     /// server does not depend on being online.
@@ -270,7 +276,56 @@ pub struct Server {
     pub notes: String,
 }
 
+/// Cardboard implements the Bukkit API as a Fabric mod, which makes plugin
+/// support a property of what a server has installed rather than only of what
+/// software it runs.
+pub const CARDBOARD_SLUG: &str = "cardboard";
+
 impl Server {
+    /// Whether this server loads Bukkit-style plugins.
+    ///
+    /// Asked of the server rather than the kind, because Cardboard turns a
+    /// Fabric server into one that takes plugins without changing what it is.
+    pub fn takes_plugins(&self) -> bool {
+        self.kind.takes_plugins() || self.has_cardboard()
+    }
+
+    /// Whether this server loads mods. Nothing installable changes this, so it
+    /// is still the kind's own answer.
+    pub fn takes_mods(&self) -> bool {
+        self.kind.takes_mods()
+    }
+
+    /// Cardboard sitting in this server's mods folder.
+    pub fn has_cardboard(&self) -> bool {
+        self.content.iter().any(|c| {
+            c.kind == crate::instance::content::ContentKind::Mod
+                && c.slug.as_deref() == Some(CARDBOARD_SLUG)
+        })
+    }
+
+    /// Whether offering to add Cardboard makes sense here: it is a Fabric mod,
+    /// and pointless on a server that already speaks Bukkit.
+    pub fn can_add_cardboard(&self) -> bool {
+        matches!(self.kind, ServerKind::Fabric | ServerKind::Quilt)
+            && !self.kind.takes_plugins()
+            && !self.has_cardboard()
+    }
+
+    /// The plugin platforms to search for this server, most specific first.
+    pub fn plugin_loaders(&self) -> Vec<&'static str> {
+        if self.kind.takes_plugins() {
+            return self.kind.plugin_loaders().to_vec();
+        }
+        if self.has_cardboard() {
+            // Cardboard reimplements Bukkit and Spigot. Paper's own extensions
+            // are not there, so Paper-only plugins are not offered as if they
+            // would work.
+            return vec!["spigot", "bukkit"];
+        }
+        Vec::new()
+    }
+
     pub fn new(name: String, kind: ServerKind, mc_version: String) -> Self {
         Self {
             id: crate::instance::slugify(&name),
@@ -279,6 +334,7 @@ impl Server {
             mc_version,
             build: String::new(),
             jar: String::new(),
+            launch: installer::LaunchKind::default(),
             java_major: None,
             created_at: chrono::Utc::now().timestamp(),
             last_started: None,
@@ -481,6 +537,77 @@ mod tests {
         }
         assert!(ServerKind::Paper.needs_eula());
         assert!(!ServerKind::Paper.is_proxy());
+    }
+
+    fn installed(
+        slug: &str,
+        kind: crate::instance::content::ContentKind,
+    ) -> crate::instance::content::ContentRecord {
+        crate::instance::content::ContentRecord {
+            file_name: format!("{slug}.jar"),
+            kind,
+            provider: "modrinth".into(),
+            project_id: "MLYQ9VGP".into(),
+            version_id: "abc".into(),
+            name: slug.into(),
+            version_number: "1.0.0".into(),
+            slug: Some(slug.into()),
+            icon_url: None,
+            dependency: false,
+            requires: None,
+        }
+    }
+
+    #[test]
+    fn a_fabric_server_takes_plugins_once_cardboard_is_installed() {
+        use crate::instance::content::ContentKind;
+
+        let mut server = Server::new("Test".into(), ServerKind::Fabric, "1.21.1".into());
+        assert!(!server.takes_plugins());
+        assert!(server.plugin_loaders().is_empty());
+        assert!(server.can_add_cardboard());
+
+        server.content.push(installed(CARDBOARD_SLUG, ContentKind::Mod));
+
+        assert!(server.has_cardboard());
+        assert!(server.takes_plugins());
+        // Bukkit and Spigot, but not Paper: Cardboard does not implement
+        // Paper's own extensions, and offering Paper plugins would promise
+        // something that does not work.
+        assert_eq!(server.plugin_loaders(), vec!["spigot", "bukkit"]);
+        // Nothing left to offer once it is there.
+        assert!(!server.can_add_cardboard());
+        // It changes nothing about mods.
+        assert!(server.takes_mods());
+    }
+
+    #[test]
+    fn cardboard_is_not_offered_where_it_would_do_nothing() {
+        // Paper already speaks Bukkit, so adding a reimplementation of it is
+        // pointless rather than merely redundant.
+        let paper = Server::new("P".into(), ServerKind::Paper, "1.21.1".into());
+        assert!(!paper.can_add_cardboard());
+        assert!(paper.takes_plugins());
+        assert_eq!(paper.plugin_loaders(), vec!["paper", "spigot", "bukkit"]);
+
+        // Vanilla loads no mods at all, so there is nowhere to put it.
+        let vanilla = Server::new("V".into(), ServerKind::Vanilla, "1.21.1".into());
+        assert!(!vanilla.can_add_cardboard());
+        assert!(!vanilla.takes_plugins());
+    }
+
+    #[test]
+    fn something_merely_named_cardboard_is_not_cardboard() {
+        use crate::instance::content::ContentKind;
+
+        let mut server = Server::new("Test".into(), ServerKind::Fabric, "1.21.1".into());
+        // The right slug in the wrong folder. A resource pack does not
+        // implement the Bukkit API.
+        server
+            .content
+            .push(installed(CARDBOARD_SLUG, ContentKind::ResourcePack));
+        assert!(!server.has_cardboard());
+        assert!(!server.takes_plugins());
     }
 
     #[test]

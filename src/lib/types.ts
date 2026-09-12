@@ -194,6 +194,13 @@ export interface Server {
   notes: string;
   /** Added by the backend view layer. */
   running: boolean;
+  /**
+   * Capabilities of this server rather than of its kind — a Fabric server with
+   * Cardboard installed takes Bukkit plugins, which `ServerKindInfo` cannot say.
+   */
+  takesPlugins: boolean;
+  takesMods: boolean;
+  canAddCardboard: boolean;
 }
 
 /** One choice in the "what kind of server" picker. */

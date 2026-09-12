@@ -52,8 +52,7 @@ fn refuse(loader: &str) -> Error {
              Fabric and build that."
         )),
         Some(kind) => Error::msg(format!(
-            "{} servers need their installer run before the server exists, \
-             which is not built yet. A Fabric target can be built now.",
+            "{} servers cannot be installed automatically.",
             kind.display_name()
         )),
     }
@@ -99,9 +98,10 @@ pub async fn from_plan(
         progress.advance(1, &fit.name).await;
 
         if matches!(fit.fit, Fit::Connector | Fit::ConnectorNear) {
-            // Only forge-family targets get Connector fits, and none of those
-            // can be built as a server yet — so this is unreachable today and
-            // says so rather than pretending to handle it.
+            // A Fabric mod reaching a Forge server through Sinytra Connector
+            // needs Connector itself installed and configured, which is not
+            // handled here. Reachable now that Forge servers can be built, so
+            // it is reported as a skip rather than silently dropped.
             report
                 .skipped
                 .push(format!("{}: needs Sinytra Connector", fit.name));
@@ -213,23 +213,29 @@ mod tests {
         assert!(never.contains("not a mod loader"), "{never}");
         assert!(never.contains("Fabric"), "{never}");
 
-        let not_yet = refuse("neoforge").to_string();
-        assert!(not_yet.contains("installer"), "{not_yet}");
-        assert!(not_yet.contains("Fabric"), "{not_yet}");
+        // NeoForge is a loader a server can run, so this arm is only reached if
+        // its software could not be installed — a different failure entirely.
+        let other = refuse("neoforge").to_string();
+        assert!(other.contains("NeoForge"), "{other}");
+        assert!(!other.contains("not a mod loader"), "{other}");
     }
 
     #[test]
-    fn only_fabric_can_be_built_today() {
-        // The honest state of things, asserted so it fails loudly the day a
-        // Forge server installer lands and nobody updates the refusal.
+    fn every_mod_loader_a_plan_targets_can_be_built() {
+        // This test previously asserted the opposite, to fail loudly the day a
+        // Forge server installer landed. It has now landed: Fabric downloads an
+        // assembled server, and Quilt, Forge and NeoForge run their installers.
         let buildable = |loader: &str| {
             server_kind_for(loader)
                 .filter(|k| meta::is_installable(*k))
                 .is_some()
         };
         assert!(buildable("fabric"));
-        assert!(!buildable("neoforge"));
-        assert!(!buildable("forge"));
-        assert!(!buildable("quilt"));
+        assert!(buildable("neoforge"));
+        assert!(buildable("forge"));
+        assert!(buildable("quilt"));
+        // Still not something a plan can resolve to: it is a server, not a
+        // loader, so there are no mods built for it.
+        assert!(!buildable("paper"));
     }
 }
