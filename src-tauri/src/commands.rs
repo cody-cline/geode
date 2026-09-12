@@ -1201,6 +1201,12 @@ pub async fn start_server(
     }
     let mut server = crate::server::load(&state.paths, &id).await?;
 
+    // The server rotates its own log as it starts, so this is the moment the
+    // oldest archive becomes one too many.
+    if let Some(keep) = server.settings.keep_logs {
+        let _ = crate::server::logs::prune(&state.paths, &id, keep as usize).await;
+    }
+
     let progress = Progress::new(app.clone(), format!("server:{id}"));
     let java = match server.settings.java_path.clone() {
         Some(path) => PathBuf::from(path),
@@ -1418,6 +1424,34 @@ pub async fn install_server_content(
             Err(e)
         }
     }
+}
+
+/// The server's logs: the one it is writing now, and the ones it rotated.
+#[tauri::command]
+pub async fn list_server_logs(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<crate::server::logs::LogFile>> {
+    crate::server::logs::list(&state.paths, &id).await
+}
+
+/// One log as text, decompressed if it has been rotated.
+#[tauri::command]
+pub async fn read_server_log(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+) -> Result<String> {
+    crate::server::logs::read(&state.paths, &id, &name).await
+}
+
+#[tauri::command]
+pub async fn delete_server_log(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+) -> Result<()> {
+    crate::server::logs::delete(&state.paths, &id, &name).await
 }
 
 #[tauri::command]

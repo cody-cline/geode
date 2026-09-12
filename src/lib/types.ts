@@ -159,6 +159,15 @@ export interface Schedule {
   lastRun: number | null;
 }
 
+/** One of a server's logs — the live one, or a rotated archive. */
+export interface LogFile {
+  name: string;
+  size: number;
+  modified: number;
+  /** The log being written right now, which is never pruned or deleted. */
+  current: boolean;
+}
+
 /** One backup of a server's files. Its name is also its timestamp. */
 export interface BackupInfo {
   name: string;

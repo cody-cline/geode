@@ -31,6 +31,7 @@ import type {
   BackupInfo,
   ContentItem,
   ContentKind,
+  LogFile,
   Schedule,
   Server,
   ServerKindInfo,
@@ -91,6 +92,39 @@ export default function ServerView({ id }: { id: string }) {
   // can mark the rows that are.
   const [adding, setAdding] = useState<ContentKind | null>(null);
   const [present, setPresent] = useState<Set<string>>(new Set());
+
+  // Which log the console is showing. Null is the live one; anything else is
+  // an archive, read once and shown read-only.
+  const [archives, setArchives] = useState<LogFile[]>([]);
+  const [viewing, setViewing] = useState<string | null>(null);
+  const [archiveText, setArchiveText] = useState<string | null>(null);
+
+  useEffect(() => {
+    api
+      .listServerLogs(id)
+      .then((found) => setArchives(found.filter((l) => !l.current)))
+      .catch(() => setArchives([]));
+  }, [id, lines]);
+
+  useEffect(() => {
+    if (!viewing) {
+      setArchiveText(null);
+      return;
+    }
+    let cancelled = false;
+    setArchiveText(null);
+    api
+      .readServerLog(id, viewing)
+      .then((text) => !cancelled && setArchiveText(text))
+      .catch((e) => {
+        if (cancelled) return;
+        reportError("Could not read that log", e);
+        setViewing(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [viewing, id, reportError]);
 
   useEffect(() => {
     if (!adding) return;
@@ -331,7 +365,24 @@ export default function ServerView({ id }: { id: string }) {
           </button>
         ))}
         <div style={{ flex: 1 }} />
-        {active === "console" && shown.length > 0 && (
+        {active === "console" && archives.length > 0 && (
+          // Old logs live with the console rather than in a tab of their own:
+          // it is the same thing, just earlier.
+          <select
+            className={clsx("select", styles.logPicker)}
+            value={viewing ?? ""}
+            onChange={(e) => setViewing(e.target.value || null)}
+            aria-label="Which log to show"
+          >
+            <option value="">Live console</option>
+            {archives.map((log) => (
+              <option key={log.name} value={log.name}>
+                {log.name} · {fileSize(log.size)}
+              </option>
+            ))}
+          </select>
+        )}
+        {active === "console" && !viewing && shown.length > 0 && (
           <button className="btn btn-sm" onClick={() => clearServerLog(id)}>
             <Trash2 size={13} />
             Clear
@@ -350,7 +401,13 @@ export default function ServerView({ id }: { id: string }) {
                 el.scrollHeight - el.scrollTop - el.clientHeight < 40;
             }}
           >
-            {shown.length === 0 ? (
+            {viewing ? (
+              archiveText === null ? (
+                <p className={styles.quiet}>Reading {viewing}…</p>
+              ) : (
+                <div className={styles.line}>{archiveText}</div>
+              )
+            ) : shown.length === 0 ? (
               <p className={styles.quiet}>
                 {server.running
                   ? "Waiting for output…"
@@ -374,9 +431,13 @@ export default function ServerView({ id }: { id: string }) {
               className={styles.input}
               value={command}
               placeholder={
-                server.running ? "Type a command and press Enter" : "Server is not running"
+                viewing
+                  ? "Showing an old log — switch to the live console to type"
+                  : server.running
+                    ? "Type a command and press Enter"
+                    : "Server is not running"
               }
-              disabled={!server.running}
+              disabled={!server.running || Boolean(viewing)}
               onChange={(e) => setCommand(e.target.value)}
               onKeyDown={onKey}
               spellCheck={false}

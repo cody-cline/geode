@@ -326,6 +326,12 @@
   color: var(--danger);
 }
 
+.logPicker {
+  width: 230px;
+  height: 28px;
+  font-size: 12px;
+}
+
 .scheduleKind {
   width: 130px;
   height: 28px;

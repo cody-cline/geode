@@ -12,6 +12,7 @@
 
 pub mod backup;
 pub mod install;
+pub mod logs;
 pub mod meta;
 pub mod properties;
 pub mod run;

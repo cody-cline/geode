@@ -17,6 +17,7 @@ import type {
   JavaInstall,
   KeyCheck,
   LinkReport,
+  LogFile,
   PackPreview,
   Plan,
   PlanMod,
@@ -255,6 +256,13 @@ export const api = {
     enabled: boolean,
   ) =>
     invoke<string>("set_server_content_enabled", { id, kind, file, enabled }),
+
+  listServerLogs: (id: string) =>
+    invoke<LogFile[]>("list_server_logs", { id }),
+  readServerLog: (id: string, name: string) =>
+    invoke<string>("read_server_log", { id, name }),
+  deleteServerLog: (id: string, name: string) =>
+    invoke<void>("delete_server_log", { id, name }),
 
   listServerBackups: (id: string) =>
     invoke<BackupInfo[]>("list_server_backups", { id }),
