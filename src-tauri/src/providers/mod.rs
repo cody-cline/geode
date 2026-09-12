@@ -8,6 +8,7 @@
 
 pub mod curseforge;
 pub mod modrinth;
+pub mod spiget;
 
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +19,8 @@ use crate::error::Result;
 pub enum Provider {
     Modrinth,
     CurseForge,
+    /// SpigotMC, read through the Spiget index. Plugins only.
+    Spiget,
 }
 
 impl Provider {
@@ -25,6 +28,7 @@ impl Provider {
         match self {
             Provider::Modrinth => "modrinth",
             Provider::CurseForge => "curseforge",
+            Provider::Spiget => "spiget",
         }
     }
 
@@ -32,6 +36,7 @@ impl Provider {
         match s.to_ascii_lowercase().as_str() {
             "modrinth" => Some(Provider::Modrinth),
             "curseforge" | "curse" => Some(Provider::CurseForge),
+            "spiget" | "spigot" | "spigotmc" => Some(Provider::Spiget),
             _ => None,
         }
     }
@@ -391,6 +396,8 @@ pub async fn versions(
             })?;
             curseforge::versions(client, project_id, game_version, loader, key).await
         }
+        // Spiget serves one file per resource, so there is nothing to filter.
+        Provider::Spiget => spiget::versions(client, project_id).await,
     }
 }
 
@@ -441,6 +448,14 @@ pub async fn support_pairs(
             }
             Ok(pairs)
         }
+        // This answers "what can a modpack plan target", and a plan targets
+        // client loaders. A Spigot resource is a server plugin: its pairs would
+        // all be filtered out, leaving it looking like a mod that publishes
+        // nothing rather than one that was never a mod. Saying so puts it in
+        // the resolver's unresolved list with a reason attached.
+        Provider::Spiget => Err(crate::error::Error::msg(
+            "SpigotMC resources are server plugins, so they cannot be planned as mods",
+        )),
     }
 }
 
@@ -458,6 +473,7 @@ pub async fn project(
             })?;
             curseforge::project(client, id, key).await
         }
+        Provider::Spiget => spiget::project(client, id).await,
     }
 }
 
@@ -476,6 +492,7 @@ pub async fn description(
             })?;
             curseforge::description(client, id, key).await
         }
+        Provider::Spiget => spiget::description(client, id).await,
     }
 }
 
