@@ -21,6 +21,9 @@ pub enum ContentKind {
     ResourcePack,
     ShaderPack,
     DataPack,
+    /// Server plugins. Only servers have a `plugins/` folder; an instance that
+    /// somehow has one lists nothing, which is the honest answer.
+    Plugin,
 }
 
 impl ContentKind {
@@ -30,6 +33,7 @@ impl ContentKind {
             ContentKind::ResourcePack => "resourcepacks",
             ContentKind::ShaderPack => "shaderpacks",
             ContentKind::DataPack => "datapacks",
+            ContentKind::Plugin => "plugins",
         }
     }
 
@@ -39,6 +43,7 @@ impl ContentKind {
             "resourcepack" => Some(ContentKind::ResourcePack),
             "shaderpack" | "shader" => Some(ContentKind::ShaderPack),
             "datapack" => Some(ContentKind::DataPack),
+            "plugin" => Some(ContentKind::Plugin),
             _ => None,
         }
     }
@@ -134,7 +139,9 @@ fn is_content_file(name: &str, kind: ContentKind) -> bool {
     let (base, _) = strip_disabled(name);
     let lower = base.to_ascii_lowercase();
     match kind {
-        ContentKind::Mod => lower.ends_with(".jar"),
+        // A plugin is a jar as much as a mod is. What differs is the folder it
+        // belongs in and what loads it, neither of which the name can show.
+        ContentKind::Mod | ContentKind::Plugin => lower.ends_with(".jar"),
         ContentKind::ResourcePack | ContentKind::DataPack => lower.ends_with(".zip"),
         ContentKind::ShaderPack => lower.ends_with(".zip") || lower.ends_with(".zip.txt"),
     }

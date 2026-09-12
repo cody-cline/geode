@@ -8,9 +8,22 @@ export const LOADERS: { id: Loader; label: string }[] = [
   { id: "forge", label: "Forge" },
 ];
 
-export type Provider = "modrinth" | "curseforge";
-export type ProjectKind = "mod" | "modpack" | "resourcepack" | "shader" | "datapack";
-export type ContentKind = "mod" | "resourcepack" | "shaderpack" | "datapack";
+/** `spiget` is SpigotMC, read through the Spiget index. Plugins only. */
+export type Provider = "modrinth" | "curseforge" | "spiget";
+export type ProjectKind =
+  | "mod"
+  | "modpack"
+  | "resourcepack"
+  | "shader"
+  | "datapack"
+  | "plugin";
+/** `plugin` only ever applies to a server — instances have no plugins folder. */
+export type ContentKind =
+  | "mod"
+  | "resourcepack"
+  | "shaderpack"
+  | "datapack"
+  | "plugin";
 
 export interface GameVersion {
   id: string;

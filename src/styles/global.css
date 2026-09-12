@@ -359,6 +359,14 @@ h4 {
   color: #fb8f65;
 }
 
+/* Gold rather than orange, so SpigotMC does not read as CurseForge at a
+   glance — the two sit side by side on plugin rows. */
+.badge-spiget {
+  background: color-mix(in srgb, #e0a92c 14%, transparent);
+  border-color: color-mix(in srgb, #e0a92c 32%, transparent);
+  color: #e8bd52;
+}
+
 .badge-warn {
   background: color-mix(in srgb, var(--warn) 14%, transparent);
   border-color: color-mix(in srgb, var(--warn) 32%, transparent);

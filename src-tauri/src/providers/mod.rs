@@ -50,6 +50,10 @@ pub enum ProjectKind {
     ResourcePack,
     Shader,
     DataPack,
+    /// A server plugin: Bukkit, Spigot, Paper, Velocity and the rest. Loaded by
+    /// the server rather than by the game, and so never installed into an
+    /// instance.
+    Plugin,
 }
 
 impl ProjectKind {
@@ -60,6 +64,7 @@ impl ProjectKind {
             "resourcepack" => Some(ProjectKind::ResourcePack),
             "shader" | "shaderpack" => Some(ProjectKind::Shader),
             "datapack" => Some(ProjectKind::DataPack),
+            "plugin" => Some(ProjectKind::Plugin),
             _ => None,
         }
     }
@@ -76,6 +81,7 @@ impl ProjectKind {
             ProjectKind::ResourcePack => Some(ContentKind::ResourcePack),
             ProjectKind::Shader => Some(ContentKind::ShaderPack),
             ProjectKind::DataPack => Some(ContentKind::DataPack),
+            ProjectKind::Plugin => Some(ContentKind::Plugin),
             ProjectKind::Modpack => None,
         }
     }
@@ -245,10 +251,15 @@ pub async fn search(
     query: &SearchQuery,
     curseforge_key: Option<&str>,
 ) -> Result<SearchResults> {
-    let wanted = query
-        .providers
-        .clone()
-        .unwrap_or_else(|| vec![Provider::Modrinth, Provider::CurseForge]);
+    // SpigotMC carries nothing but plugins, so it joins the search only when
+    // that is what is being looked for.
+    let wanted = query.providers.clone().unwrap_or_else(|| {
+        if query.kind == ProjectKind::Plugin {
+            vec![Provider::Modrinth, Provider::CurseForge, Provider::Spiget]
+        } else {
+            vec![Provider::Modrinth, Provider::CurseForge]
+        }
+    });
 
     let mut warnings = Vec::new();
 
@@ -271,7 +282,15 @@ pub async fn search(
         }
     };
 
-    let (mr, cf) = futures::join!(modrinth_fut, curseforge_fut);
+    let spiget_fut = async {
+        if wanted.contains(&Provider::Spiget) {
+            Some(spiget::search(client, query).await)
+        } else {
+            None
+        }
+    };
+
+    let (mr, cf, sp) = futures::join!(modrinth_fut, curseforge_fut, spiget_fut);
 
     let mut modrinth_hits = Vec::new();
     match mr {
@@ -293,8 +312,19 @@ pub async fn search(
         }
     }
 
+    let mut spiget_hits = Vec::new();
+    match sp {
+        Some(Ok(hits)) => spiget_hits = hits,
+        Some(Err(e)) => warnings.push(format!("SpigotMC: {e}")),
+        None => {}
+    }
+
+    // Merged twice rather than three ways at once: the first pass makes
+    // Modrinth canonical, and the second folds SpigotMC into whatever that
+    // produced, so a plugin on all three is still one row.
+    let merged = merge(modrinth_hits, curseforge_hits, query.sort);
     Ok(SearchResults {
-        hits: merge(modrinth_hits, curseforge_hits, query.sort),
+        hits: merge(merged, spiget_hits, query.sort),
         warnings,
     })
 }

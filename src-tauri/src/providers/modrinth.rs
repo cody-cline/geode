@@ -19,6 +19,7 @@ fn kind_facet(kind: ProjectKind) -> &'static str {
         ProjectKind::ResourcePack => "resourcepack",
         ProjectKind::Shader => "shader",
         ProjectKind::DataPack => "datapack",
+        ProjectKind::Plugin => "plugin",
     }
 }
 

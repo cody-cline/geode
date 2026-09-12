@@ -24,11 +24,15 @@ fn class_id(kind: ProjectKind) -> u32 {
         ProjectKind::Modpack => 4471,
         ProjectKind::Shader => 6552,
         ProjectKind::DataPack => 6945,
+        // Bukkit Plugins — what dev.bukkit.org became once CurseForge absorbed
+        // it. Unverified against the live API, which needs the user's key.
+        ProjectKind::Plugin => 5,
     }
 }
 
 fn kind_from_class(class_id: Option<u32>) -> ProjectKind {
     match class_id {
+        Some(5) => ProjectKind::Plugin,
         Some(12) => ProjectKind::ResourcePack,
         Some(4471) => ProjectKind::Modpack,
         Some(6552) => ProjectKind::Shader,

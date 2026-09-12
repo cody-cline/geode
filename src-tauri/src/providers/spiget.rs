@@ -94,9 +94,12 @@ fn to_project(resource: Resource) -> Project {
         provider: Provider::Spiget,
         page_url: page_url(resource.id),
         id: resource.id.to_string(),
-        // Spigot resources have no slug of their own; the numeric id is the
-        // identity, and the name is what cross-platform matching can use.
-        slug: resource.id.to_string(),
+        // Deliberately empty. Spigot resources have no slug, and putting the
+        // numeric id here would make cross-platform matching key on "28140" —
+        // which matches nothing, so LuckPerms would appear twice rather than as
+        // one row carrying both sources. Empty falls back to the name, which is
+        // what actually matches.
+        slug: String::new(),
         name: resource.name,
         summary: resource.tag,
         icon_url,
@@ -105,7 +108,7 @@ fn to_project(resource: Resource) -> Project {
         // Only an author id is published here, and resolving it would cost a
         // request per row for a byline.
         author: String::new(),
-        kind: ProjectKind::Mod,
+        kind: ProjectKind::Plugin,
         categories: Vec::new(),
         // What it is published for. A Paper server is offered Spigot plugins
         // because Paper implements the Spigot API, and that rule lives with the
@@ -267,8 +270,21 @@ mod tests {
         let project = to_project(resource());
         assert!(project.distribution_allowed);
         assert_eq!(project.id, "28140");
+        assert_eq!(project.kind, ProjectKind::Plugin);
         assert_eq!(project.loaders, vec!["spigot"]);
         assert_eq!(project.page_url, "https://www.spigotmc.org/resources/28140/");
+    }
+
+    #[test]
+    fn the_slug_is_left_empty_so_the_name_can_match_across_platforms() {
+        // A numeric slug would key on "28140" and match nothing, leaving the
+        // same plugin listed once per platform.
+        let project = to_project(resource());
+        assert!(project.slug.is_empty());
+        assert_eq!(
+            super::super::identity_key(&project.slug, &project.name),
+            super::super::identity_key("luckperms", "LuckPerms"),
+        );
     }
 
     #[test]
