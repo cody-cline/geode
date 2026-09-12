@@ -97,6 +97,11 @@
   min-height: 0;
 }
 
+/* A third column while a plan's bulk-copy panel is open beside the results. */
+.bodyPanelled {
+  grid-template-columns: 218px 1fr auto;
+}
+
 .filters {
   overflow-y: auto;
   padding: 18px 16px 90px;

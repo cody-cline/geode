@@ -23,6 +23,7 @@ export default function ProjectCard({
   busy,
   progress,
   directInstall,
+  actionLabel,
   viaConnector,
   fabricAlso,
   nativeLoaderLabel,
@@ -43,6 +44,8 @@ export default function ProjectCard({
   progress?: ProgressEvent;
   /** True when the destination is already fixed, so no dialog follows. */
   directInstall?: boolean;
+  /** Overrides the button's wording, e.g. "Add" when filling a plan. */
+  actionLabel?: string;
   /** This is a Fabric mod being offered on a (Neo)Forge target. */
   viaConnector?: boolean;
   /** It builds for both loaders, so the row offers the choice. */
@@ -243,15 +246,17 @@ export default function ProjectCard({
             title={
               blocked
                 ? "The author disabled third-party downloads — open the project page"
-                : viaConnector
-                  ? "Installs the Fabric build, plus Sinytra Connector, Forgified Fabric API and Connector Extras"
-                  : directInstall
-                    ? undefined
-                    : "Choose an instance to install into"
+                : actionLabel
+                  ? "Add to the plan"
+                  : viaConnector
+                    ? "Installs the Fabric build, plus Sinytra Connector, Forgified Fabric API and Connector Extras"
+                    : directInstall
+                      ? undefined
+                      : "Choose an instance to install into"
             }
           >
             {busy ? <Loader2 size={12} className="spin" /> : <Plus size={13} />}
-            {directInstall ? "Install" : "Install…"}
+            {actionLabel ?? (directInstall ? "Install" : "Install…")}
           </button>
         )}
       </div>

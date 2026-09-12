@@ -13,8 +13,10 @@ import {
 } from "lucide-react";
 
 import PlanSourcePanel from "../components/PlanSourcePanel";
+import Browse from "./Browse";
 import { api } from "../lib/api";
 import { titleCase } from "../lib/format";
+import { modKey, planModFromProject } from "../lib/plan";
 import { useStore } from "../lib/store";
 import { LOADERS } from "../lib/types";
 import type {
@@ -45,9 +47,6 @@ const FIT_LABEL: Record<Fit, string> = {
   missing: "no build",
 };
 
-const modKey = (mod: { provider: string; projectId: string }) =>
-  `${mod.provider}:${mod.projectId}`;
-
 export default function PlanView({ id }: { id: string }) {
   const navigate = useStore((s) => s.navigate);
   const toast = useStore((s) => s.toast);
@@ -59,6 +58,7 @@ export default function PlanView({ id }: { id: string }) {
   const [resolving, setResolving] = useState(false);
   const [chosen, setChosen] = useState(0);
   const [adding, setAdding] = useState(false);
+  const [copying, setCopying] = useState(false);
   const [building, setBuilding] = useState(false);
   const [name, setName] = useState("");
 
@@ -197,6 +197,32 @@ export default function PlanView({ id }: { id: string }) {
     );
   }
 
+  // Adding takes over the whole view rather than squeezing into a rail: this
+  // is the browse experience, filters and all, and it needs the room.
+  if (adding) {
+    return (
+      <Browse
+        onDone={() => {
+          setAdding(false);
+          setCopying(false);
+        }}
+        plan={{
+          name: plan.name,
+          inPlan: present,
+          onAdd: (projects) => addMods(projects.map(planModFromProject)),
+          onCopy: () => setCopying((open) => !open),
+          copyPanel: copying ? (
+            <PlanSourcePanel
+              present={present}
+              onAdd={addMods}
+              onClose={() => setCopying(false)}
+            />
+          ) : null,
+        }}
+      />
+    );
+  }
+
   const blockers = (target?.fits ?? []).filter((f) => f.fit === "missing");
 
   return (
@@ -237,10 +263,7 @@ export default function PlanView({ id }: { id: string }) {
             )}
             Re-check
           </button>
-          <button
-            className={clsx("btn", !adding && "btn-primary")}
-            onClick={() => setAdding((open) => !open)}
-          >
+          <button className="btn btn-primary" onClick={() => setAdding(true)}>
             <Plus size={14} />
             Add mods
           </button>
@@ -327,184 +350,176 @@ export default function PlanView({ id }: { id: string }) {
           )}
         </div>
 
-        {adding ? (
-          <PlanSourcePanel
-            present={present}
-            onAdd={addMods}
-            onClose={() => setAdding(false)}
-          />
-        ) : (
-          <aside className={styles.rail}>
-            <h2 className={styles.railTitle}>Where this can run</h2>
+        <aside className={styles.rail}>
+          <h2 className={styles.railTitle}>Where this can run</h2>
 
-            {plan.mods.length === 0 ? (
-              <p className={styles.railNote}>
-                Add some mods and Geode will work out which loader and Minecraft
-                version can run all of them.
-              </p>
-            ) : resolving && !resolution ? (
-              <div className={styles.railSkeletons}>
-                {Array.from({ length: 3 }, (_, i) => (
-                  <div key={i} className="skeleton" style={{ height: 74 }} />
+          {plan.mods.length === 0 ? (
+            <p className={styles.railNote}>
+              Add some mods and Geode will work out which loader and Minecraft
+              version can run all of them.
+            </p>
+          ) : resolving && !resolution ? (
+            <div className={styles.railSkeletons}>
+              {Array.from({ length: 3 }, (_, i) => (
+                <div key={i} className="skeleton" style={{ height: 74 }} />
+              ))}
+            </div>
+          ) : !resolution || resolution.targets.length === 0 ? (
+            <p className={styles.railNote}>
+              No loader and version combination runs any of these mods. Check
+              the list below for mods with no usable build.
+            </p>
+          ) : (
+            <>
+              <div className={styles.targets}>
+                {resolution.targets.map((option, index) => (
+                  <button
+                    key={`${option.loader}:${option.gameVersion}`}
+                    className={clsx(
+                      styles.target,
+                      index === chosen && styles.targetChosen,
+                      option.missing > 0 && styles.targetIncomplete,
+                    )}
+                    onClick={() => setChosen(index)}
+                  >
+                    <span className={styles.targetHead}>
+                      <span className={styles.targetLoader}>
+                        {loaderLabel(option.loader)}
+                      </span>
+                      <span className={styles.targetVersion}>
+                        {option.gameVersion}
+                      </span>
+                      {index === 0 && (
+                        <span className={styles.best}>best</span>
+                      )}
+                    </span>
+
+                    <span
+                      className={clsx(
+                        styles.coverage,
+                        option.missing === 0 && styles.coverageFull,
+                      )}
+                    >
+                      {option.missing === 0
+                        ? `All ${option.fits.length} mods run here`
+                        : `${option.fits.length - option.missing} of ${option.fits.length} — ${option.missing} left out`}
+                    </span>
+
+                    {(option.connector > 0 || option.near > 0) && (
+                      <span className={styles.compromises}>
+                        {option.connector > 0 && (
+                          <span className={clsx(styles.fit, styles.connector)}>
+                            <Blocks size={10} />
+                            {option.connector} via Connector
+                          </span>
+                        )}
+                        {option.near > 0 && (
+                          <span className={clsx(styles.fit, styles.nearVersion)}>
+                            {option.near} other version
+                          </span>
+                        )}
+                      </span>
+                    )}
+                  </button>
                 ))}
               </div>
-            ) : !resolution || resolution.targets.length === 0 ? (
-              <p className={styles.railNote}>
-                No loader and version combination runs any of these mods. Check
-                the list below for mods with no usable build.
-              </p>
-            ) : (
-              <>
-                <div className={styles.targets}>
-                  {resolution.targets.map((option, index) => (
-                    <button
-                      key={`${option.loader}:${option.gameVersion}`}
-                      className={clsx(
-                        styles.target,
-                        index === chosen && styles.targetChosen,
-                        option.missing > 0 && styles.targetIncomplete,
-                      )}
-                      onClick={() => setChosen(index)}
-                    >
-                      <span className={styles.targetHead}>
-                        <span className={styles.targetLoader}>
-                          {loaderLabel(option.loader)}
-                        </span>
-                        <span className={styles.targetVersion}>
-                          {option.gameVersion}
-                        </span>
-                        {index === 0 && (
-                          <span className={styles.best}>best</span>
-                        )}
-                      </span>
 
-                      <span
-                        className={clsx(
-                          styles.coverage,
-                          option.missing === 0 && styles.coverageFull,
-                        )}
+              {target && target.connector > 0 && (
+                <p className={styles.soft}>
+                  <Blocks size={12} />
+                  <span>
+                    {target.connector} mod{target.connector === 1 ? "" : "s"}{" "}
+                    here {target.connector === 1 ? "has" : "have"} no{" "}
+                    {loaderLabel(target.loader)} build, so{" "}
+                    {target.connector === 1 ? "it runs" : "they run"} on
+                    Sinytra Connector. That works, but it is a compatibility
+                    layer — a target without it is the safer pack.
+                  </span>
+                </p>
+              )}
+
+              {target && target.near > 0 && (
+                <p className={styles.soft}>
+                  <AlertTriangle size={12} />
+                  <span>
+                    {target.near} mod{target.near === 1 ? "" : "s"} would use a
+                    build from a neighbouring version. Usually fine on Fabric,
+                    less reliable on Forge and NeoForge.
+                  </span>
+                </p>
+              )}
+
+              {blockers.length > 0 && (
+                <section className={styles.blockers}>
+                  <h3 className={styles.blockTitle}>
+                    Remove to use this target
+                  </h3>
+                  {blockers.map((blocker) => (
+                    <div key={modKey(blocker)} className={styles.blocker}>
+                      <span className={styles.blockText}>
+                        <span className={styles.blockName}>{blocker.name}</span>
+                        <span className={styles.blockWhere}>
+                          {blocker.elsewhere && blocker.elsewhere.length > 0
+                            ? `Runs on ${blocker.elsewhere.join(", ")}`
+                            : "No build anywhere"}
+                        </span>
+                      </span>
+                      <button
+                        className="btn btn-sm"
+                        onClick={() =>
+                          removeMod({
+                            provider: blocker.provider,
+                            projectId: blocker.projectId,
+                            name: blocker.name,
+                          })
+                        }
                       >
-                        {option.missing === 0
-                          ? `All ${option.fits.length} mods run here`
-                          : `${option.fits.length - option.missing} of ${option.fits.length} — ${option.missing} left out`}
-                      </span>
-
-                      {(option.connector > 0 || option.near > 0) && (
-                        <span className={styles.compromises}>
-                          {option.connector > 0 && (
-                            <span className={clsx(styles.fit, styles.connector)}>
-                              <Blocks size={10} />
-                              {option.connector} via Connector
-                            </span>
-                          )}
-                          {option.near > 0 && (
-                            <span className={clsx(styles.fit, styles.nearVersion)}>
-                              {option.near} other version
-                            </span>
-                          )}
-                        </span>
-                      )}
-                    </button>
+                        Remove
+                      </button>
+                    </div>
                   ))}
-                </div>
+                </section>
+              )}
 
-                {target && target.connector > 0 && (
-                  <p className={styles.soft}>
-                    <Blocks size={12} />
-                    <span>
-                      {target.connector} mod{target.connector === 1 ? "" : "s"}{" "}
-                      here {target.connector === 1 ? "has" : "have"} no{" "}
-                      {loaderLabel(target.loader)} build, so{" "}
-                      {target.connector === 1 ? "it runs" : "they run"} on
-                      Sinytra Connector. That works, but it is a compatibility
-                      layer — a target without it is the safer pack.
-                    </span>
-                  </p>
-                )}
+              {resolution.unresolved.length > 0 && (
+                <section className={styles.blockers}>
+                  <h3 className={styles.blockTitle}>Could not be checked</h3>
+                  {resolution.unresolved.map((mod) => (
+                    <div key={modKey(mod)} className={styles.blocker}>
+                      <span className={styles.blockText}>
+                        <span className={styles.blockName}>{mod.name}</span>
+                        <span className={styles.blockWhere}>{mod.reason}</span>
+                      </span>
+                    </div>
+                  ))}
+                </section>
+              )}
 
-                {target && target.near > 0 && (
-                  <p className={styles.soft}>
-                    <AlertTriangle size={12} />
-                    <span>
-                      {target.near} mod{target.near === 1 ? "" : "s"} would use a
-                      build from a neighbouring version. Usually fine on Fabric,
-                      less reliable on Forge and NeoForge.
-                    </span>
-                  </p>
-                )}
+              {resolution.warnings.map((warning) => (
+                <p key={warning} className={styles.warning}>
+                  <AlertTriangle size={12} />
+                  <span>{warning}</span>
+                </p>
+              ))}
+            </>
+          )}
 
-                {blockers.length > 0 && (
-                  <section className={styles.blockers}>
-                    <h3 className={styles.blockTitle}>
-                      Remove to use this target
-                    </h3>
-                    {blockers.map((blocker) => (
-                      <div key={modKey(blocker)} className={styles.blocker}>
-                        <span className={styles.blockText}>
-                          <span className={styles.blockName}>{blocker.name}</span>
-                          <span className={styles.blockWhere}>
-                            {blocker.elsewhere && blocker.elsewhere.length > 0
-                              ? `Runs on ${blocker.elsewhere.join(", ")}`
-                              : "No build anywhere"}
-                          </span>
-                        </span>
-                        <button
-                          className="btn btn-sm"
-                          onClick={() =>
-                            removeMod({
-                              provider: blocker.provider,
-                              projectId: blocker.projectId,
-                              name: blocker.name,
-                            })
-                          }
-                        >
-                          Remove
-                        </button>
-                      </div>
-                    ))}
-                  </section>
-                )}
-
-                {resolution.unresolved.length > 0 && (
-                  <section className={styles.blockers}>
-                    <h3 className={styles.blockTitle}>Could not be checked</h3>
-                    {resolution.unresolved.map((mod) => (
-                      <div key={modKey(mod)} className={styles.blocker}>
-                        <span className={styles.blockText}>
-                          <span className={styles.blockName}>{mod.name}</span>
-                          <span className={styles.blockWhere}>{mod.reason}</span>
-                        </span>
-                      </div>
-                    ))}
-                  </section>
-                )}
-
-                {resolution.warnings.map((warning) => (
-                  <p key={warning} className={styles.warning}>
-                    <AlertTriangle size={12} />
-                    <span>{warning}</span>
-                  </p>
-                ))}
-              </>
-            )}
-
-            {target && (
-              <button
-                className={clsx("btn btn-primary", styles.build)}
-                onClick={build}
-                disabled={building}
-                title={`Create a ${loaderLabel(target.loader)} ${target.gameVersion} instance and install the plan`}
-              >
-                {building ? (
-                  <Loader2 size={14} className="spin" />
-                ) : (
-                  <Hammer size={14} />
-                )}
-                Build on {loaderLabel(target.loader)} {target.gameVersion}
-              </button>
-            )}
-          </aside>
-        )}
+          {target && (
+            <button
+              className={clsx("btn btn-primary", styles.build)}
+              onClick={build}
+              disabled={building}
+              title={`Create a ${loaderLabel(target.loader)} ${target.gameVersion} instance and install the plan`}
+            >
+              {building ? (
+                <Loader2 size={14} className="spin" />
+              ) : (
+                <Hammer size={14} />
+              )}
+              Build on {loaderLabel(target.loader)} {target.gameVersion}
+            </button>
+          )}
+        </aside>
       </div>
     </>
   );

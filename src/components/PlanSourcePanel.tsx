@@ -3,35 +3,26 @@ import clsx from "clsx";
 import { Check, Package, Plus, Search, X } from "lucide-react";
 
 import { api } from "../lib/api";
+import { modKey, planModFromProject } from "../lib/plan";
 import { useStore } from "../lib/store";
 import type { PlanMod, Project } from "../lib/types";
 
 import styles from "./PlanSourcePanel.module.css";
 
-type Mode = "search" | "instance" | "pack";
+type Mode = "instance" | "pack";
 
 const MODES: { id: Mode; label: string }[] = [
-  { id: "search", label: "Search" },
   { id: "instance", label: "An instance" },
   { id: "pack", label: "A modpack" },
 ];
 
-function toPlanMod(project: Project): PlanMod {
-  return {
-    provider: project.provider,
-    projectId: project.id,
-    name: project.name,
-    slug: project.slug,
-    iconUrl: project.iconUrl ?? null,
-  };
-}
-
 /**
- * The side-by-side source for adding mods to a plan.
+ * Copying a whole existing mod list into a plan.
  *
- * Everything it hands back is versionless — that is the whole point of copying
- * *into* a plan. A pack built for 1.20.1 Forge contributes its mods, not its
- * version, so the planner stays free to re-target the lot.
+ * Searching for individual mods is the browse view's job — this is for taking
+ * a set wholesale. Everything it hands back is versionless: a pack built for
+ * 1.20.1 Forge contributes its mods, not its target, so the planner stays free
+ * to re-aim the lot.
  */
 export default function PlanSourcePanel({
   present,
@@ -46,17 +37,16 @@ export default function PlanSourcePanel({
   const instances = useStore((s) => s.instances);
   const reportError = useStore((s) => s.reportError);
 
-  const [mode, setMode] = useState<Mode>("search");
+  const [mode, setMode] = useState<Mode>("instance");
   const [query, setQuery] = useState("");
   const [debounced, setDebounced] = useState("");
   const [loading, setLoading] = useState(false);
   const [found, setFound] = useState<PlanMod[]>([]);
 
-  // Pack mode has two steps: pick a pack, then read what is in it.
+  // Pack mode has two steps: find a pack, then read what is inside it.
   const [packs, setPacks] = useState<Project[]>([]);
   const [openPack, setOpenPack] = useState<Project | null>(null);
 
-  // Instance mode: which instance's mods are being shown.
   const [instanceId, setInstanceId] = useState("");
 
   useEffect(() => {
@@ -64,45 +54,6 @@ export default function PlanSourcePanel({
     return () => clearTimeout(timer);
   }, [query]);
 
-  const key = (mod: PlanMod) => `${mod.provider}:${mod.projectId}`;
-
-  // Mods are searched with no version or loader filter at all. Narrowing here
-  // would quietly bake a target into a plan that is meant not to have one.
-  const runSearch = useCallback(async () => {
-    setLoading(true);
-    try {
-      const results = await api.searchProjects({
-        query: debounced,
-        kind: mode === "pack" ? "modpack" : "mod",
-        gameVersion: null,
-        loader: null,
-        categories: [],
-        sort: debounced ? "relevance" : "downloads",
-        offset: 0,
-        limit: 30,
-      });
-      if (mode === "pack") {
-        setPacks(results.hits);
-        setFound([]);
-      } else {
-        setFound(results.hits.map(toPlanMod));
-        setPacks([]);
-      }
-    } catch (e) {
-      reportError("Search failed", e);
-    } finally {
-      setLoading(false);
-    }
-  }, [debounced, mode, reportError]);
-
-  useEffect(() => {
-    if (mode === "instance") return;
-    setOpenPack(null);
-    void runSearch();
-  }, [runSearch, mode]);
-
-  // An instance's mods become plan mods by dropping everything version-shaped:
-  // the file, the build, the loader it happened to be installed for.
   const loadInstance = useCallback(
     async (id: string) => {
       setInstanceId(id);
@@ -113,6 +64,8 @@ export default function PlanSourcePanel({
       setLoading(true);
       try {
         const items = await api.listContent(id, "mod");
+        // Dropping the file, the build and the loader it was installed for is
+        // the point: what survives is which mods.
         setFound(
           items
             .filter((item) => item.projectId && item.provider)
@@ -134,9 +87,39 @@ export default function PlanSourcePanel({
     [reportError],
   );
 
-  // Switching source is an explicit act, so it loads explicitly. Driving this
-  // from an effect keyed on the selected instance meant the first pick fetched
-  // twice, and coming back to a source you had already chosen showed nothing.
+  const searchPacks = useCallback(async () => {
+    setLoading(true);
+    try {
+      const results = await api.searchProjects({
+        query: debounced,
+        kind: "modpack",
+        gameVersion: null,
+        loader: null,
+        categories: [],
+        sort: debounced ? "relevance" : "downloads",
+        offset: 0,
+        limit: 30,
+      });
+      setPacks(results.hits);
+    } catch (e) {
+      reportError("Could not search modpacks", e);
+    } finally {
+      setLoading(false);
+    }
+  }, [debounced, reportError]);
+
+  useEffect(() => {
+    if (mode !== "pack" || openPack) return;
+    void searchPacks();
+  }, [mode, openPack, searchPacks]);
+
+  // The first instance loads on open, since that is the default source.
+  useEffect(() => {
+    if (mode === "instance" && !instanceId && instances.length > 0) {
+      void loadInstance(instances[0].id);
+    }
+  }, [mode, instanceId, instances, loadInstance]);
+
   function switchMode(next: Mode) {
     setMode(next);
     setQuery("");
@@ -163,7 +146,7 @@ export default function PlanSourcePanel({
   }
 
   const missing = useMemo(
-    () => found.filter((mod) => !present.has(key(mod))),
+    () => found.filter((mod) => !present.has(modKey(mod))),
     [found, present],
   );
 
@@ -217,7 +200,7 @@ export default function PlanSourcePanel({
             <Search size={14} className={styles.searchIcon} />
             <input
               className={clsx("input", styles.search)}
-              placeholder={mode === "pack" ? "Search modpacks" : "Search mods"}
+              placeholder="Search modpacks"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               autoFocus
@@ -248,7 +231,7 @@ export default function PlanSourcePanel({
           ) : (
             packs.map((pack) => (
               <button
-                key={`${pack.provider}:${pack.id}`}
+                key={modKey(planModFromProject(pack))}
                 className={styles.row}
                 onClick={() => void readPack(pack)}
               >
@@ -273,13 +256,13 @@ export default function PlanSourcePanel({
               ? instances.length === 0
                 ? "You have no instances to copy from yet."
                 : "Nothing here came from Modrinth or CurseForge, so there is no project to copy."
-              : "Nothing found."}
+              : "This pack lists no mods we can identify."}
           </p>
         ) : (
           found.map((mod) => {
-            const added = present.has(key(mod));
+            const added = present.has(modKey(mod));
             return (
-              <div key={key(mod)} className={styles.row}>
+              <div key={modKey(mod)} className={styles.row}>
                 <span className={styles.icon}>
                   {mod.iconUrl ? (
                     <img src={mod.iconUrl} alt="" loading="lazy" />
@@ -310,16 +293,13 @@ export default function PlanSourcePanel({
         )}
       </div>
 
-      {mode === "instance" && (
-        <p className={styles.footNote}>
-          Copied without their versions — the plan re-targets them itself.
-        </p>
-      )}
-      {mode === "pack" && openPack && (
-        <p className={styles.footNote}>
-          {openPack.name}&apos;s mods, stripped of the version it was built for.
-        </p>
-      )}
+      <p className={styles.footNote}>
+        {mode === "instance"
+          ? "Copied without their versions — the plan re-targets them itself."
+          : openPack
+            ? `${openPack.name}'s mods, stripped of the version it was built for.`
+            : "Open a pack to see what is in it."}
+      </p>
     </aside>
   );
 }

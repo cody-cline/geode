@@ -1,6 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import clsx from "clsx";
-import { AlertTriangle, Download, Info, Loader2, Search } from "lucide-react";
+import {
+  AlertTriangle,
+  ClipboardList,
+  Copy,
+  Download,
+  Info,
+  Loader2,
+  Search,
+} from "lucide-react";
 
 import InstallTargetModal from "../components/InstallTargetModal";
 import InstanceIcon from "../components/InstanceIcon";
@@ -53,9 +62,27 @@ function projectKeys(p: Project): string[] {
   ];
 }
 
+/**
+ * Browsing to fill a plan rather than to install.
+ *
+ * Nothing is downloaded and nothing needs a destination, so the whole
+ * install apparatus — the picker, progress, the Connector option — stands down
+ * and the action becomes "add to the list".
+ */
+export interface PlanBrowse {
+  name: string;
+  /** `provider:projectId` for everything already on the list. */
+  inPlan: Set<string>;
+  onAdd: (projects: Project[]) => void;
+  onCopy: () => void;
+  /** The bulk-copy panel, shown beside the results while it is open. */
+  copyPanel?: ReactNode;
+}
+
 export default function Browse({
   lockedInstance,
   onDone,
+  plan,
 }: {
   /**
    * Set when browsing from inside an instance. The destination is then implied
@@ -64,6 +91,7 @@ export default function Browse({
    */
   lockedInstance?: Instance;
   onDone?: () => void;
+  plan?: PlanBrowse;
 } = {}) {
   const instances = useStore((s) => s.instances);
   const config = useStore((s) => s.config);
@@ -190,9 +218,14 @@ export default function Browse({
     );
   };
 
+  // For a plan, "installed" means "already on the list" — and it counts under
+  // any identity the project answers to, so the CurseForge twin of a Modrinth
+  // entry does not offer itself a second time.
   const isInstalled = (project: Project) =>
-    installed.has(`${project.provider}:${project.id}`) ||
-    project.alsoOn.some((ref) => installed.has(`${ref.provider}:${ref.id}`));
+    plan
+      ? projectKeys(project).some((key) => plan.inPlan.has(key))
+      : installed.has(`${project.provider}:${project.id}`) ||
+        project.alsoOn.some((ref) => installed.has(`${ref.provider}:${ref.id}`));
 
   // Which instances already have the project the picker is open for.
   const [installedIn, setInstalledIn] = useState<Set<string>>(new Set());
@@ -221,6 +254,12 @@ export default function Browse({
   }, [askTarget, instances, contentKeys]);
 
   function requestInstall(project: Project, versionId?: string) {
+    // Adding to a plan is the whole transaction: no version to choose, no
+    // instance to choose, nothing to download.
+    if (plan) {
+      plan.onAdd([project]);
+      return;
+    }
     // A pack already carries its own name, version and loader, so there is
     // nothing to ask — it creates its own instance straight away, even when
     // invoked from inside another one.
@@ -415,7 +454,9 @@ export default function Browse({
     };
   }, [lockedInstance, filterVersion, filterLoader]);
 
-  const connectorOffered = kind === "mod" && Boolean(connector?.supported);
+  // Not offered for a plan: whether a mod needs Connector is the planner's
+  // decision once it knows the whole list, not a search filter.
+  const connectorOffered = !plan && kind === "mod" && Boolean(connector?.supported);
 
   // Turning the target off should not leave the option silently applied.
   useEffect(() => {
@@ -553,13 +594,20 @@ export default function Browse({
   // A modpack builds its own instance rather than going into one, so it is not
   // a thing you can add to the profile you are already in.
   const kinds = useMemo(
-    () => (lockedInstance ? KINDS.filter((k) => k.id !== "modpack") : KINDS),
-    [lockedInstance],
+    () =>
+      plan
+        ? // A plan is a list of mods, so there is nothing else to browse for.
+          KINDS.filter((k) => k.id === "mod")
+        : lockedInstance
+          ? KINDS.filter((k) => k.id !== "modpack")
+          : KINDS,
+    [lockedInstance, plan],
   );
 
   useEffect(() => {
     if (lockedInstance && kind === "modpack") setKind("mod");
-  }, [lockedInstance, kind]);
+    if (plan && kind !== "mod") setKind("mod");
+  }, [lockedInstance, plan, kind]);
 
   const kindLabel = useMemo(
     () => KINDS.find((k) => k.id === kind)?.label.toLowerCase() ?? "results",
@@ -581,7 +629,48 @@ export default function Browse({
         </div>
 
         <div className={styles.target}>
-          {lockedInstance ? (
+          {plan ? (
+            <>
+              <span className={styles.targetLabel}>Adding to</span>
+              <span className={styles.lockedTarget}>
+                <ClipboardList size={14} />
+                {plan.name}
+              </span>
+              {/* These narrow the search, not the plan. A plan has no version
+                  of its own and picking one here does not give it one. */}
+              <select
+                className="select"
+                style={{ width: 140 }}
+                value={filterVersion}
+                onChange={(e) => setFilterVersion(e.target.value)}
+                aria-label="Filter by Minecraft version"
+              >
+                <option value="">Any version</option>
+                {gameVersions.map((v) => (
+                  <option key={v} value={v}>
+                    {v}
+                  </option>
+                ))}
+              </select>
+              <select
+                className="select"
+                style={{ width: 125 }}
+                value={filterLoader}
+                onChange={(e) => setFilterLoader(e.target.value)}
+                aria-label="Filter by mod loader"
+              >
+                <option value="">Any loader</option>
+                {LOADERS.filter((l) => l.id !== "vanilla").map((l) => (
+                  <option key={l.id} value={l.id}>
+                    {l.label}
+                  </option>
+                ))}
+              </select>
+              <button className="btn btn-sm btn-primary" onClick={onDone}>
+                Done
+              </button>
+            </>
+          ) : lockedInstance ? (
             <>
               <span className={styles.targetLabel}>Adding to</span>
               <span className={styles.lockedTarget}>
@@ -631,15 +720,22 @@ export default function Browse({
       </header>
 
       <div className={styles.tabs}>
-        {kinds.map((k) => (
-          <button
-            key={k.id}
-            className={clsx(styles.tab, kind === k.id && styles.tabActive)}
-            onClick={() => setKind(k.id)}
-          >
-            {k.label}
+        {plan ? (
+          <button className="btn btn-sm" onClick={plan.onCopy}>
+            <Copy size={13} />
+            Copy from an instance or pack
           </button>
-        ))}
+        ) : (
+          kinds.map((k) => (
+            <button
+              key={k.id}
+              className={clsx(styles.tab, kind === k.id && styles.tabActive)}
+              onClick={() => setKind(k.id)}
+            >
+              {k.label}
+            </button>
+          ))
+        )}
         <div style={{ flex: 1 }} />
         <select
           className="select"
@@ -656,7 +752,7 @@ export default function Browse({
         </select>
       </div>
 
-      <div className={styles.body}>
+      <div className={clsx(styles.body, plan?.copyPanel && styles.bodyPanelled)}>
         <aside className={styles.filters}>
           <section className={styles.filterSection}>
             <h3 className={styles.filterTitle}>Source</h3>
@@ -689,6 +785,17 @@ export default function Browse({
               </p>
             )}
           </section>
+
+          {plan && (
+            <section className={styles.filterSection}>
+              <h3 className={styles.filterTitle}>Versions</h3>
+              <p className={styles.filterNote}>
+                A plan has no Minecraft version, so filtering only narrows what
+                you are looking at. Geode works out which loader and version can
+                run the finished list.
+              </p>
+            </section>
+          )}
 
           {lockedInstance && (
             <section className={styles.filterSection}>
@@ -786,6 +893,7 @@ export default function Browse({
                     busy={installing === project.id}
                     progress={progressFor(project)}
                     directInstall={Boolean(lockedInstance)}
+                    actionLabel={plan ? "Add" : undefined}
                     onOpen={() => setSelected(project)}
                     onRequestInstall={requestInstall}
                     viaConnector={project.viaConnector}
@@ -817,6 +925,8 @@ export default function Browse({
             </>
           )}
         </div>
+
+        {plan?.copyPanel}
       </div>
 
       {selected && (
@@ -827,6 +937,8 @@ export default function Browse({
           onClose={() => setSelected(null)}
           onRequestInstall={requestInstall}
           directInstall={Boolean(lockedInstance)}
+          planMode={Boolean(plan)}
+          added={isInstalled(selected)}
         />
       )}
 

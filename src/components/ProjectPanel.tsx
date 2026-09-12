@@ -28,6 +28,8 @@ export default function ProjectPanel({
   onRequestInstall,
   directInstall,
   installedInstance,
+  planMode,
+  added,
 }: {
   project: Project;
   /** Only used to scope the version list; never an install destination. */
@@ -38,6 +40,10 @@ export default function ProjectPanel({
   directInstall?: boolean;
   /** For modpacks: the instance this pack already built, if any. */
   installedInstance?: Instance;
+  /** Filling a plan: the mod is added whole, without picking a version. */
+  planMode?: boolean;
+  /** Already on the plan's list. */
+  added?: boolean;
 }) {
 
   // A merged card can be installed from either platform.
@@ -164,6 +170,18 @@ export default function ProjectPanel({
                 Open instance
               </button>
             </>
+          ) : planMode ? (
+            added ? (
+              <span className={styles.installedTag}>Already on the plan</span>
+            ) : (
+              <button
+                className="btn btn-primary"
+                onClick={() => onRequestInstall(project)}
+              >
+                <Plus size={15} />
+                Add to plan
+              </button>
+            )
           ) : (
             <button
               className="btn btn-primary"
@@ -281,7 +299,7 @@ export default function ProjectPanel({
                     </div>
                     {isModpack && installedInstance ? (
                       <span className={styles.installedTag}>Installed</span>
-                    ) : (
+                    ) : planMode ? null : ( // A plan takes the mod, not one of its builds.
                       <button
                         className="btn btn-sm"
                         onClick={() => onRequestInstall(project, version.id)}
