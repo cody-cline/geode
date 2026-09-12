@@ -1252,6 +1252,25 @@ pub async fn server_folder(state: State<'_, AppState>, id: String) -> Result<Str
     Ok(state.paths.server_run(&id).to_string_lossy().to_string())
 }
 
+/// The server's own `server.properties`. Empty until it has been started once,
+/// because the server writes that file rather than us.
+#[tauri::command]
+pub async fn read_server_properties(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<crate::server::properties::Property>> {
+    crate::server::properties::read(&state.paths, &id).await
+}
+
+#[tauri::command]
+pub async fn write_server_properties(
+    state: State<'_, AppState>,
+    id: String,
+    properties: Vec<crate::server::properties::Property>,
+) -> Result<()> {
+    crate::server::properties::write(&state.paths, &id, &properties).await
+}
+
 // ---------------------------------------------------------------------------
 // Accounts
 // ---------------------------------------------------------------------------

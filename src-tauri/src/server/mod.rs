@@ -12,6 +12,7 @@
 
 pub mod install;
 pub mod meta;
+pub mod properties;
 pub mod run;
 
 use serde::{Deserialize, Serialize};

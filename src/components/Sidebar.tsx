@@ -24,6 +24,7 @@ export default function Sidebar() {
   const route = useStore((s) => s.route);
   const navigate = useStore((s) => s.navigate);
   const instances = useStore((s) => s.instances);
+  const servers = useStore((s) => s.servers);
   const accounts = useStore((s) => s.accounts);
   const progress = useStore((s) => s.progress);
 
@@ -107,6 +108,7 @@ export default function Sidebar() {
         </button>
       </div>
 
+      <div className={styles.sections}>
       <div className={styles.instanceList}>
         {recent.length === 0 && (
           <p className={styles.emptyHint}>Nothing here yet — create one.</p>
@@ -133,6 +135,41 @@ export default function Sidebar() {
             </button>
           );
         })}
+      </div>
+
+      <div className={styles.sectionHead}>
+        <span>Servers</span>
+        <button
+          className={styles.addBtn}
+          onClick={() => navigate({ view: "servers" })}
+          title="All servers"
+          aria-label="All servers"
+        >
+          <Plus size={15} />
+        </button>
+      </div>
+
+      <div className={styles.instanceList}>
+        {servers.length === 0 && (
+          <p className={styles.emptyHint}>No servers yet.</p>
+        )}
+        {servers.slice(0, 8).map((server) => (
+          <button
+            key={server.id}
+            className={clsx(
+              styles.instanceItem,
+              route.view === "server" &&
+                route.id === server.id &&
+                styles.navActive,
+            )}
+            onClick={() => navigate({ view: "server", id: server.id })}
+            title={server.name}
+          >
+            <span className={styles.serverDot} data-live={server.running} />
+            <span className={styles.instanceName}>{server.name}</span>
+          </button>
+        ))}
+      </div>
       </div>
 
       <div className={styles.footer}>

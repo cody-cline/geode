@@ -100,6 +100,78 @@ export interface ProviderRef {
 }
 
 // ---------------------------------------------------------------------------
+// Servers
+// ---------------------------------------------------------------------------
+
+/** Provenance for one installed plugin or mod. */
+export interface ContentRecord {
+  fileName: string;
+  kind: ContentKind;
+  provider: string;
+  projectId: string;
+  versionId: string;
+  name: string;
+  versionNumber: string;
+  slug?: string | null;
+  iconUrl?: string | null;
+  dependency: boolean;
+  requires?: string[] | null;
+}
+
+export interface ServerSettings {
+  memoryMb: number;
+  javaPath: string | null;
+  javaArgs: string | null;
+  autoRestart: boolean;
+  /** How many rotated logs to keep. `null` keeps everything. */
+  keepLogs: number | null;
+}
+
+export interface Server {
+  id: string;
+  name: string;
+  /** `paper`, `fabric`, `mohist`, … */
+  kind: string;
+  mcVersion: string;
+  build: string;
+  jar: string;
+  javaMajor: number | null;
+  createdAt: number;
+  lastStarted: number | null;
+  eulaAccepted: boolean;
+  settings: ServerSettings;
+  content: ContentRecord[];
+  notes: string;
+  /** Added by the backend view layer. */
+  running: boolean;
+}
+
+/** One choice in the "what kind of server" picker. */
+export interface ServerKindInfo {
+  id: string;
+  name: string;
+  /** False when it cannot be fetched automatically — Spigot, Forge, NeoForge. */
+  installable: boolean;
+  takesPlugins: boolean;
+  takesMods: boolean;
+  isProxy: boolean;
+}
+
+export interface ServerLine {
+  serverId: string;
+  line: string;
+  /** `err` is the JVM talking, not the game. */
+  stream: "out" | "err";
+}
+
+export interface ServerExit {
+  serverId: string;
+  code: number | null;
+  success: boolean;
+  ranSeconds: number;
+}
+
+// ---------------------------------------------------------------------------
 // Plans
 // ---------------------------------------------------------------------------
 

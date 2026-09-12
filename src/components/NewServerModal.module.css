@@ -1,0 +1,79 @@
+.loading {
+  display: grid;
+  place-items: center;
+  padding: 40px;
+  color: var(--text-faint);
+}
+
+.kinds {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
+  gap: 6px;
+}
+
+.kind {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 9px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  text-align: left;
+  transition:
+    border-color 0.12s var(--ease),
+    background 0.12s var(--ease);
+}
+
+.kind:hover {
+  border-color: var(--border-strong);
+}
+
+.kindActive,
+.kindActive:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+/* Still selectable: the panel explains why it cannot be installed, which is
+   more useful than a choice that silently is not there. */
+.kindOff {
+  opacity: 0.5;
+}
+
+.kindName {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.kindTags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.field {
+  min-width: 0;
+}
+
+.note {
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--text-faint);
+  line-height: 1.55;
+}

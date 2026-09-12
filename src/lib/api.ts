@@ -26,6 +26,9 @@ import type {
   Provider,
   SearchQuery,
   SearchResults,
+  Server,
+  ServerKindInfo,
+  ServerSettings,
   UpdateCandidate,
 } from "./types";
 
@@ -196,6 +199,29 @@ export const api = {
       projectId,
       versionId: versionId ?? null,
     }),
+
+  // Servers
+  serverKinds: () => invoke<ServerKindInfo[]>("server_kinds"),
+  serverVersions: (kind: string) =>
+    invoke<string[]>("server_versions", { kind }),
+  listServers: () => invoke<Server[]>("list_servers"),
+  getServer: (id: string) => invoke<Server>("get_server", { id }),
+  createServer: (name: string, kind: string, version: string) =>
+    invoke<Server>("create_server", { name, kind, version }),
+  deleteServer: (id: string) => invoke<void>("delete_server", { id }),
+  updateServer: (
+    id: string,
+    patch: { name?: string; notes?: string; settings?: ServerSettings },
+  ) => invoke<Server>("update_server", { id, patch }),
+  acceptServerEula: (id: string) =>
+    invoke<Server>("accept_server_eula", { id }),
+  startServer: (id: string) => invoke<number>("start_server", { id }),
+  stopServer: (id: string) => invoke<boolean>("stop_server", { id }),
+  killServer: (id: string) => invoke<boolean>("kill_server", { id }),
+  sendServerCommand: (id: string, command: string) =>
+    invoke<boolean>("send_server_command", { id, command }),
+  runningServers: () => invoke<string[]>("running_servers"),
+  serverFolder: (id: string) => invoke<string>("server_folder", { id }),
 
   // Accounts
   listAccounts: () => invoke<Account[]>("list_accounts"),

@@ -9,6 +9,9 @@ import type {
   Instance,
   LogEntry,
   ProgressEvent,
+  Server,
+  ServerExit,
+  ServerLine,
 } from "./types";
 
 export type Route =
@@ -16,6 +19,8 @@ export type Route =
   | { view: "browse" }
   | { view: "plans" }
   | { view: "plan"; id: string }
+  | { view: "servers" }
+  | { view: "server"; id: string; tab?: string }
   | { view: "settings"; tab?: string }
   | { view: "instance"; id: string; tab?: string };
 
@@ -37,6 +42,9 @@ function sameRoute(a: Route, b: Route): boolean {
     return a.id === b.id && a.tab === b.tab;
   }
   if (a.view === "plan" && b.view === "plan") return a.id === b.id;
+  if (a.view === "server" && b.view === "server") {
+    return a.id === b.id && a.tab === b.tab;
+  }
   if (a.view === "settings" && b.view === "settings") return a.tab === b.tab;
   return true;
 }
@@ -65,6 +73,13 @@ interface State {
   instances: Instance[];
   instancesLoaded: boolean;
   refreshInstances: () => Promise<void>;
+
+  servers: Server[];
+  serversLoaded: boolean;
+  refreshServers: () => Promise<void>;
+  /** Console output per server, newest last. */
+  serverLogs: Record<string, ServerLine[]>;
+  clearServerLog: (serverId: string) => void;
 
   accounts: Account[];
   refreshAccounts: () => Promise<void>;
@@ -140,6 +155,20 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
+  servers: [],
+  serversLoaded: false,
+  refreshServers: async () => {
+    try {
+      set({ servers: await api.listServers(), serversLoaded: true });
+    } catch (e) {
+      get().reportError("Could not load servers", e);
+      set({ serversLoaded: true });
+    }
+  },
+  serverLogs: {},
+  clearServerLog: (serverId) =>
+    set((s) => ({ serverLogs: { ...s.serverLogs, [serverId]: [] } })),
+
   accounts: [],
   refreshAccounts: async () => {
     try {
@@ -171,6 +200,7 @@ export const useStore = create<State>((set, get) => ({
     await Promise.all([
       get().loadConfig().catch((e) => get().reportError("Could not load settings", e)),
       get().refreshInstances(),
+      get().refreshServers(),
       get().refreshAccounts(),
     ]);
 
@@ -196,6 +226,35 @@ export const useStore = create<State>((set, get) => ({
             ? [...existing.slice(existing.length - MAX_LOG_LINES + 1), payload]
             : [...existing, payload];
         return { logs: { ...s.logs, [payload.instanceId]: next } };
+      });
+    });
+
+    // A server's console is plain text on two streams, unlike the game's
+    // structured log, so it is kept as lines and rendered as a terminal.
+    await listen<ServerLine>("geode://server-log", ({ payload }) => {
+      set((s) => {
+        const existing = s.serverLogs[payload.serverId] ?? [];
+        const next =
+          existing.length >= MAX_LOG_LINES
+            ? [...existing.slice(existing.length - MAX_LOG_LINES + 1), payload]
+            : [...existing, payload];
+        return { serverLogs: { ...s.serverLogs, [payload.serverId]: next } };
+      });
+    });
+
+    await listen<ServerExit>("geode://server-exit", ({ payload }) => {
+      get().refreshServers();
+      const name =
+        get().servers.find((s) => s.id === payload.serverId)?.name ??
+        payload.serverId;
+      get().toast({
+        kind: payload.success ? "info" : "error",
+        title: payload.success ? `${name} stopped` : `${name} exited`,
+        body: payload.success
+          ? `Ran for ${formatDuration(payload.ranSeconds)}.`
+          : payload.code === null
+            ? "The process was stopped."
+            : `Exit code ${payload.code}. Check the console for the cause.`,
       });
     });
 

@@ -93,13 +93,33 @@
   color: var(--text);
 }
 
-.instanceList {
+/* Instances and servers share the sidebar's spare height and scroll together,
+   so neither section can squeeze the other out of view. */
+.sections {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+}
+
+.instanceList {
   display: flex;
   flex-direction: column;
   gap: 1px;
+}
+
+/* A server has no icon of its own, so its state is the mark. */
+.serverDot {
+  width: 7px;
+  height: 7px;
+  margin: 0 7px;
+  border-radius: 50%;
+  background: var(--border-strong);
+  flex-shrink: 0;
+}
+
+.serverDot[data-live="true"] {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
 .emptyHint {

@@ -8,6 +8,8 @@ import InstanceView from "./views/InstanceView";
 import Library from "./views/Library";
 import PlanView from "./views/PlanView";
 import Plans from "./views/Plans";
+import ServerView from "./views/ServerView";
+import Servers from "./views/Servers";
 import Settings from "./views/Settings";
 import { useStore } from "./lib/store";
 
@@ -53,6 +55,8 @@ export default function App() {
         {route.view === "browse" && <Browse />}
         {route.view === "plans" && <Plans />}
         {route.view === "plan" && <PlanView key={route.id} id={route.id} />}
+        {route.view === "servers" && <Servers />}
+        {route.view === "server" && <ServerView key={route.id} id={route.id} />}
         {route.view === "settings" && <Settings />}
         {route.view === "instance" && (
           // Remounting per instance keeps tab state from leaking between them.

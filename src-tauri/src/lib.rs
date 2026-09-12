@@ -105,6 +105,8 @@ pub fn run() {
             commands::send_server_command,
             commands::running_servers,
             commands::server_folder,
+            commands::read_server_properties,
+            commands::write_server_properties,
             commands::list_accounts,
             commands::begin_microsoft_login,
             commands::complete_microsoft_login,
