@@ -84,13 +84,26 @@ export default function PlanView({ id }: { id: string }) {
     let cancelled = false;
     api
       .getPlan(id)
-      .then((loaded) => {
+      .then(async (loaded) => {
         if (cancelled) return;
-        setPlan(loaded);
-        setName(loaded.name);
+        // A plan saved before mods were matched to Modrinth can still hold
+        // CurseForge entries for mods that live on both — including two rows
+        // for the same mod. Saving is what re-checks that, and merges the
+        // duplicates it resolves; a failure here just leaves the plan as it is.
+        let plan = loaded;
+        if (loaded.mods.some((mod) => mod.provider === "curseforge")) {
+          try {
+            plan = await api.savePlan(loaded);
+          } catch {
+            plan = loaded;
+          }
+        }
+        if (cancelled) return;
+        setPlan(plan);
+        setName(plan.name);
         // Answering the plan's whole question on open is the point of the
         // view; the backend caches per project, so reopening is nearly free.
-        if (loaded.mods.length > 0) void resolve();
+        if (plan.mods.length > 0) void resolve();
       })
       .catch((e) => !cancelled && reportError("Could not open that plan", e));
     return () => {
