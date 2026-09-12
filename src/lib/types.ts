@@ -138,6 +138,15 @@ export interface ServerSettings {
   autoRestart: boolean;
   /** How many rotated logs to keep. `null` keeps everything. */
   keepLogs: number | null;
+  /** How many backups to keep. `null` keeps every one ever taken. */
+  keepBackups: number | null;
+}
+
+/** One backup of a server's files. Its name is also its timestamp. */
+export interface BackupInfo {
+  name: string;
+  size: number;
+  createdAt: number;
 }
 
 export interface Server {

@@ -63,6 +63,11 @@ impl Paths {
     pub fn server_run(&self, id: &str) -> PathBuf {
         self.server(id).join("run")
     }
+    /// Beside the run directory rather than inside it, so a backup is never
+    /// swept into the next one.
+    pub fn server_backups(&self, id: &str) -> PathBuf {
+        self.server(id).join("backups")
+    }
     /// The game's working directory — what vanilla calls `.minecraft`.
     pub fn game_dir(&self, id: &str) -> PathBuf {
         self.instance(id).join(".minecraft")

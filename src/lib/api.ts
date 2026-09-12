@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   Account,
   AppInfo,
+  BackupInfo,
   BuildReport,
   Config,
   ConnectorSupport,
@@ -248,6 +249,15 @@ export const api = {
     enabled: boolean,
   ) =>
     invoke<string>("set_server_content_enabled", { id, kind, file, enabled }),
+
+  listServerBackups: (id: string) =>
+    invoke<BackupInfo[]>("list_server_backups", { id }),
+  createServerBackup: (id: string) =>
+    invoke<BackupInfo>("create_server_backup", { id }),
+  deleteServerBackup: (id: string, name: string) =>
+    invoke<void>("delete_server_backup", { id, name }),
+  restoreServerBackup: (id: string, name: string) =>
+    invoke<void>("restore_server_backup", { id, name }),
 
   readServerProperties: (id: string) =>
     invoke<ServerProperty[]>("read_server_properties", { id }),

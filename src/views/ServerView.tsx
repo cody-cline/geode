@@ -25,9 +25,10 @@ import {
 import Modal from "../components/Modal";
 import Browse from "./Browse";
 import { api } from "../lib/api";
-import { fileSize, providerShort } from "../lib/format";
+import { fileSize, providerShort, relativeTime } from "../lib/format";
 import { useStore } from "../lib/store";
 import type {
+  BackupInfo,
   ContentItem,
   ContentKind,
   Server,
@@ -42,6 +43,7 @@ import styles from "./ServerView.module.css";
 const TABS = [
   { id: "console", label: "Console" },
   { id: "content", label: "Content" },
+  { id: "backups", label: "Backups" },
   { id: "settings", label: "Settings" },
 ] as const;
 
@@ -380,6 +382,8 @@ export default function ServerView({ id }: { id: string }) {
         </div>
       ) : active === "content" ? (
         <ContentPane server={server} onAdd={setAdding} />
+      ) : active === "backups" ? (
+        <BackupsPane server={server} />
       ) : (
         <SettingsTab server={server} />
       )}
@@ -600,6 +604,196 @@ function ContentPane({
             </div>
           ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A server's backups: taking them, putting them back, and not keeping them
+ * forever.
+ */
+function BackupsPane({ server }: { server: Server }) {
+  const reportError = useStore((s) => s.reportError);
+  const toast = useStore((s) => s.toast);
+  const refreshServers = useStore((s) => s.refreshServers);
+
+  const [items, setItems] = useState<BackupInfo[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState<BackupInfo | null>(null);
+  const [keep, setKeep] = useState(server.settings.keepBackups);
+
+  const load = useCallback(async () => {
+    try {
+      setItems(await api.listServerBackups(server.id));
+    } catch (e) {
+      reportError("Could not list backups", e);
+      setItems([]);
+    }
+  }, [server.id, reportError]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function take() {
+    setBusy(true);
+    try {
+      const info = await api.createServerBackup(server.id);
+      await load();
+      toast({
+        kind: "success",
+        title: "Backup taken",
+        body: `${info.name} · ${fileSize(info.size)}`,
+      });
+    } catch (e) {
+      reportError("Could not back up the server", e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function restore(info: BackupInfo) {
+    setBusy(true);
+    setConfirming(null);
+    try {
+      await api.restoreServerBackup(server.id, info.name);
+      toast({ kind: "success", title: `Restored ${info.name}` });
+    } catch (e) {
+      reportError("Could not restore that backup", e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(info: BackupInfo) {
+    try {
+      await api.deleteServerBackup(server.id, info.name);
+      await load();
+    } catch (e) {
+      reportError("Could not delete that backup", e);
+    }
+  }
+
+  async function saveRetention(value: number | null) {
+    setKeep(value);
+    try {
+      await api.updateServer(server.id, {
+        settings: { ...server.settings, keepBackups: value },
+      });
+      await refreshServers();
+    } catch (e) {
+      reportError("Could not save the retention setting", e);
+    }
+  }
+
+  return (
+    <div className={styles.settings}>
+      <div className={styles.contentHead}>
+        <label className={styles.retention}>
+          Keep
+          <input
+            className={clsx("input", styles.keepInput)}
+            type="number"
+            min={1}
+            max={999}
+            value={keep ?? ""}
+            placeholder="all"
+            onChange={(e) =>
+              void saveRetention(
+                e.target.value ? Number(e.target.value) : null,
+              )
+            }
+          />
+          {keep === null ? "backups — every one is kept" : "newest backups"}
+        </label>
+        <div style={{ flex: 1 }} />
+        <button
+          className="btn btn-sm btn-primary"
+          onClick={take}
+          disabled={busy}
+        >
+          {busy ? <Loader2 size={13} className="spin" /> : <Plus size={13} />}
+          Back up now
+        </button>
+      </div>
+
+      {items === null ? (
+        <div className={styles.rows}>
+          {Array.from({ length: 3 }, (_, i) => (
+            <div key={i} className="skeleton" style={{ height: 44 }} />
+          ))}
+        </div>
+      ) : items.length === 0 ? (
+        <p className={styles.pending}>
+          No backups yet. A backup is a zip of everything the server needs to be
+          itself — its world, configs and plugins — without the logs it writes
+          afresh every run.
+        </p>
+      ) : (
+        <div className={styles.rows}>
+          {items.map((info) => (
+            <div key={info.name} className={styles.row}>
+              <span className={styles.rowText}>
+                <span className={styles.rowName}>{info.name}</span>
+                <span className={styles.rowMeta}>
+                  <span>{relativeTime(info.createdAt)}</span>
+                  <span>{fileSize(info.size)}</span>
+                </span>
+              </span>
+
+              <button
+                className="btn btn-sm"
+                onClick={() => setConfirming(info)}
+                disabled={busy || server.running}
+                title={
+                  server.running
+                    ? "Stop the server before restoring"
+                    : "Put these files back"
+                }
+              >
+                Restore
+              </button>
+              <button
+                className={styles.rowRemove}
+                onClick={() => void remove(info)}
+                title={`Delete ${info.name}`}
+                aria-label={`Delete ${info.name}`}
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {confirming && (
+        <Modal
+          title="Restore this backup?"
+          subtitle={confirming.name}
+          onClose={() => setConfirming(null)}
+          width={460}
+          footer={
+            <>
+              <button className="btn" onClick={() => setConfirming(null)}>
+                Cancel
+              </button>
+              <button
+                className="btn btn-danger"
+                onClick={() => void restore(confirming)}
+                disabled={busy}
+              >
+                Restore
+              </button>
+            </>
+          }
+        >
+          <p className={styles.eula}>
+            Every file in the backup is written over what is there now. Files
+            added since — a plugin you installed today, say — are left alone
+            rather than deleted, so this puts back rather than rewinds.
+          </p>
+        </Modal>
       )}
     </div>
   );

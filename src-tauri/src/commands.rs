@@ -1407,6 +1407,66 @@ pub async fn install_server_content(
     }
 }
 
+#[tauri::command]
+pub async fn list_server_backups(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<crate::server::backup::BackupInfo>> {
+    crate::server::backup::list(&state.paths, &id).await
+}
+
+#[tauri::command]
+pub async fn create_server_backup(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<crate::server::backup::BackupInfo> {
+    let server = crate::server::load(&state.paths, &id).await?;
+    let progress = Progress::new(app, format!("server-backup:{id}"));
+
+    let result = crate::server::backup::create(&state.paths, &id, &progress).await;
+    match result {
+        Ok(info) => {
+            progress.finish().await;
+            // Retention is the point of the setting; applying it only when a
+            // new backup lands keeps the folder bounded without a sweeper.
+            if let Some(keep) = server.settings.keep_backups {
+                let _ = crate::server::backup::prune(&state.paths, &id, keep as usize).await;
+            }
+            Ok(info)
+        }
+        Err(e) => {
+            progress.fail(&e.to_string()).await;
+            Err(e)
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn delete_server_backup(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+) -> Result<()> {
+    crate::server::backup::delete(&state.paths, &id, &name).await
+}
+
+/// Unpack a backup over the server's files.
+///
+/// Refused while it is running: restoring underneath a live server would have
+/// it writing over what was just put back.
+#[tauri::command]
+pub async fn restore_server_backup(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+) -> Result<()> {
+    if state.servers.is_running(&id) {
+        return Err(Error::msg("stop the server before restoring a backup"));
+    }
+    crate::server::backup::restore(&state.paths, &id, &name).await
+}
+
 /// The server's own `server.properties`. Empty until it has been started once,
 /// because the server writes that file rather than us.
 #[tauri::command]

@@ -10,6 +10,7 @@
 //! precisely to load Bukkit plugins alongside Forge mods, and a manager that
 //! assumes one or the other cannot describe them.
 
+pub mod backup;
 pub mod install;
 pub mod meta;
 pub mod properties;
@@ -208,6 +209,9 @@ pub struct ServerSettings {
     pub auto_restart: bool,
     /// Keep this many rotated logs. `None` keeps everything.
     pub keep_logs: Option<u32>,
+    /// Keep this many backups, deleting the oldest as new ones are taken.
+    /// `None` keeps every backup ever made.
+    pub keep_backups: Option<u32>,
 }
 
 impl Default for ServerSettings {
@@ -218,6 +222,7 @@ impl Default for ServerSettings {
             java_args: None,
             auto_restart: false,
             keep_logs: Some(20),
+            keep_backups: Some(10),
         }
     }
 }
