@@ -318,13 +318,20 @@ pub struct UpdateCandidate {
 }
 
 /// Check every tracked item for a newer version compatible with this instance.
+/// Newer versions of whatever is installed.
+///
+/// Takes the records and the target rather than an instance: a server keeps
+/// exactly the same provenance and asks exactly the same question of it, and
+/// there is no sense in two copies of this.
 pub async fn check_updates(
     client: &reqwest::Client,
-    instance: &Instance,
+    records: &[ContentRecord],
+    game_version: &str,
+    mod_loader: Option<&str>,
     curseforge_key: Option<&str>,
     progress: &Progress,
 ) -> Result<Vec<UpdateCandidate>> {
-    let tracked: Vec<ContentRecord> = instance.content.clone();
+    let tracked: Vec<ContentRecord> = records.to_vec();
     progress
         .stage("Checking for updates", tracked.len() as u64)
         .await;
@@ -341,13 +348,17 @@ pub async fn check_updates(
             continue;
         }
 
-        // Resource packs and shaders are not loader-specific.
-        let loader = (record.kind == ContentKind::Mod).then(|| instance.loader.as_str());
+        // Resource packs, shaders and datapacks are not loader-specific, and
+        // neither is a plugin: its platform is not a mod loader, so asking for
+        // one would match nothing.
+        let loader = (record.kind == ContentKind::Mod)
+            .then_some(mod_loader)
+            .flatten();
         let versions = match providers::versions(
             client,
             provider,
             &record.project_id,
-            Some(&instance.mc_version),
+            Some(game_version),
             loader,
             curseforge_key,
         )

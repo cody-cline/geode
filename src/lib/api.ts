@@ -279,6 +279,24 @@ export const api = {
    * with the reason, where it would do nothing.
    */
   addCardboard: (id: string) => invoke<Server>("add_cardboard", { id }),
+  addLocalServerContent: (id: string, kind: ContentKind, files: string[]) =>
+    invoke<number>("add_local_server_content", { id, kind, files }),
+  checkServerContentUpdates: (id: string) =>
+    invoke<UpdateCandidate[]>("check_server_content_updates", { id }),
+  applyServerContentUpdate: (
+    id: string,
+    provider: Provider,
+    projectId: string,
+    versionId: string,
+    kind: ContentKind,
+  ) =>
+    invoke<InstallReport>("apply_server_content_update", {
+      id,
+      provider,
+      projectId,
+      versionId,
+      kind,
+    }),
 
   listServerLogs: (id: string) =>
     invoke<LogFile[]>("list_server_logs", { id }),

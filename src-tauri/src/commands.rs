@@ -732,7 +732,9 @@ pub async fn check_content_updates(
 
     let result = crate::install::content::check_updates(
         &state.http,
-        &inst,
+        &inst.content,
+        &inst.mc_version,
+        Some(inst.loader.as_str()),
         config.effective_curseforge_key().as_deref(),
         &progress,
     )
@@ -1411,6 +1413,81 @@ pub async fn set_server_content_enabled(
     let kind = parse_kind(&kind)?;
     let dir = crate::server::content_dir(&state.paths, &id, kind).await;
     instance::content::set_enabled_in(&dir, &file, enabled).await
+}
+
+/// Copy files the user picked into one of a server's folders.
+///
+/// The same affordance an instance has. Nothing is looked up: a file put here
+/// by hand stays untracked until something identifies it, exactly as it would
+/// in an instance.
+#[tauri::command]
+pub async fn add_local_server_content(
+    state: State<'_, AppState>,
+    id: String,
+    kind: String,
+    files: Vec<String>,
+) -> Result<usize> {
+    let kind = parse_kind(&kind)?;
+    let dir = crate::server::content_dir(&state.paths, &id, kind).await;
+    tokio::fs::create_dir_all(&dir).await?;
+
+    let mut added = 0;
+    for file in files {
+        let source = PathBuf::from(&file);
+        let Some(name) = source.file_name() else {
+            continue;
+        };
+        if tokio::fs::copy(&source, dir.join(name)).await.is_ok() {
+            added += 1;
+        }
+    }
+    Ok(added)
+}
+
+/// Newer versions available for what is installed in a server.
+#[tauri::command]
+pub async fn check_server_content_updates(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<crate::install::content::UpdateCandidate>> {
+    let config = state.config().await;
+    let server = crate::server::load(&state.paths, &id).await?;
+    let progress = Progress::new(app, format!("updates:{id}"));
+    state.register_cancel(progress.id(), progress.cancel_flag());
+
+    let result = crate::install::content::check_updates(
+        &state.http,
+        &server.content,
+        &server.mc_version,
+        server.kind.mod_loader(),
+        config.effective_curseforge_key().as_deref(),
+        &progress,
+    )
+    .await;
+
+    state.clear_cancel(progress.id());
+    if let Err(e) = &result {
+        progress.fail(&e.to_string()).await;
+    }
+    result
+}
+
+/// Install a named newer version over what a server has.
+///
+/// The kind travels with it because a server's folders are not implied by the
+/// project: the same file is a mod in one folder and a plugin in another.
+#[tauri::command]
+pub async fn apply_server_content_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    provider: String,
+    project_id: String,
+    version_id: String,
+    kind: String,
+) -> Result<crate::install::content::InstallReport> {
+    install_server_content(app, state, id, provider, project_id, Some(version_id), kind).await
 }
 
 /// Install a plugin or mod into a server.
