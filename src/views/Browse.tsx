@@ -7,6 +7,7 @@ import {
   Info,
   Loader2,
   Search,
+  Server as ServerIcon,
 } from "lucide-react";
 
 import InstallTargetModal from "../components/InstallTargetModal";
@@ -79,10 +80,27 @@ export interface PlanBrowse {
   onSource: (next: PlanSource) => void;
 }
 
+/**
+ * Browsing to fill a server.
+ *
+ * Like an instance the destination is fixed, but what lands where depends on
+ * the folder rather than the project: a Paper server takes plugins, a Fabric
+ * one takes mods, and a hybrid takes both in different places.
+ */
+export interface ServerBrowse {
+  name: string;
+  /** `provider:projectId` already installed in this folder. */
+  installed: Set<string>;
+  /** Which folder an install lands in. */
+  kind: "plugin" | "mod";
+  onInstall: (project: Project) => void;
+}
+
 export default function Browse({
   lockedInstance,
   onDone,
   plan,
+  server,
 }: {
   /**
    * Set when browsing from inside an instance. The destination is then implied
@@ -92,6 +110,7 @@ export default function Browse({
   lockedInstance?: Instance;
   onDone?: () => void;
   plan?: PlanBrowse;
+  server?: ServerBrowse;
 } = {}) {
   const instances = useStore((s) => s.instances);
   const config = useStore((s) => s.config);
@@ -224,8 +243,10 @@ export default function Browse({
   const isInstalled = (project: Project) =>
     plan
       ? projectKeys(project).some((key) => plan.inPlan.has(key))
-      : installed.has(`${project.provider}:${project.id}`) ||
-        project.alsoOn.some((ref) => installed.has(`${ref.provider}:${ref.id}`));
+      : server
+        ? projectKeys(project).some((key) => server.installed.has(key))
+        : installed.has(`${project.provider}:${project.id}`) ||
+          project.alsoOn.some((ref) => installed.has(`${ref.provider}:${ref.id}`));
 
   // Which instances already have the project the picker is open for.
   const [installedIn, setInstalledIn] = useState<Set<string>>(new Set());
@@ -258,6 +279,10 @@ export default function Browse({
     // instance to choose, nothing to download.
     if (plan) {
       plan.onAdd([project]);
+      return;
+    }
+    if (server) {
+      server.onInstall(project);
       return;
     }
     // A pack already carries its own name, version and loader, so there is
@@ -456,7 +481,8 @@ export default function Browse({
 
   // Not offered for a plan: whether a mod needs Connector is the planner's
   // decision once it knows the whole list, not a search filter.
-  const connectorOffered = !plan && kind === "mod" && Boolean(connector?.supported);
+  const connectorOffered =
+    !plan && !server && kind === "mod" && Boolean(connector?.supported);
 
   // Turning the target off should not leave the option silently applied.
   useEffect(() => {
@@ -598,16 +624,20 @@ export default function Browse({
       plan
         ? // A plan is a list of mods, so there is nothing else to browse for.
           KINDS.filter((k) => k.id === "mod")
-        : lockedInstance
-          ? KINDS.filter((k) => k.id !== "modpack")
-          : KINDS,
-    [lockedInstance, plan],
+        : server
+          ? // The folder decides: a plugin search for plugins/, mods for mods/.
+            KINDS.filter((k) => k.id === server.kind)
+          : lockedInstance
+            ? KINDS.filter((k) => k.id !== "modpack")
+            : KINDS,
+    [lockedInstance, plan, server],
   );
 
   useEffect(() => {
     if (lockedInstance && kind === "modpack") setKind("mod");
     if (plan && kind !== "mod") setKind("mod");
-  }, [lockedInstance, plan, kind]);
+    if (server && kind !== server.kind) setKind(server.kind);
+  }, [lockedInstance, plan, server, kind]);
 
   const kindLabel = useMemo(
     () => KINDS.find((k) => k.id === kind)?.label.toLowerCase() ?? "results",
@@ -629,7 +659,18 @@ export default function Browse({
         </div>
 
         <div className={styles.target}>
-          {plan ? (
+          {server ? (
+            <>
+              <span className={styles.targetLabel}>Adding to</span>
+              <span className={styles.lockedTarget}>
+                <ServerIcon size={14} />
+                {server.name}
+              </span>
+              <button className="btn btn-sm btn-primary" onClick={onDone}>
+                Done
+              </button>
+            </>
+          ) : plan ? (
             <>
               <span className={styles.targetLabel}>Adding to</span>
               <span className={styles.lockedTarget}>
@@ -889,7 +930,7 @@ export default function Browse({
                     installedInstance={packInstance(project)}
                     busy={installing === project.id}
                     progress={progressFor(project)}
-                    directInstall={Boolean(lockedInstance)}
+                    directInstall={Boolean(lockedInstance) || Boolean(server)}
                     actionLabel={plan ? "Add" : undefined}
                     onOpen={() => setSelected(project)}
                     onRequestInstall={requestInstall}

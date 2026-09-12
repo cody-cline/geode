@@ -1,4 +1,11 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { KeyboardEvent } from "react";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import clsx from "clsx";
@@ -8,16 +15,23 @@ import {
   ExternalLink,
   FolderOpen,
   Loader2,
+  Package,
   Play,
+  Plus,
   Square,
   Trash2,
 } from "lucide-react";
 
 import Modal from "../components/Modal";
+import Browse from "./Browse";
 import { api } from "../lib/api";
+import { fileSize, providerShort } from "../lib/format";
 import { useStore } from "../lib/store";
 import type {
+  ContentItem,
+  ContentKind,
   Server,
+  ServerKindInfo,
   ServerLine,
   ServerProperty,
   ServerSettings,
@@ -27,6 +41,7 @@ import styles from "./ServerView.module.css";
 
 const TABS = [
   { id: "console", label: "Console" },
+  { id: "content", label: "Content" },
   { id: "settings", label: "Settings" },
 ] as const;
 
@@ -67,6 +82,32 @@ export default function ServerView({ id }: { id: string }) {
   const [history, setHistory] = useState<string[]>([]);
   const [historyAt, setHistoryAt] = useState<number | null>(null);
 
+  // Which folder is being added to, and what is already in it — so browsing
+  // can mark the rows that are.
+  const [adding, setAdding] = useState<ContentKind | null>(null);
+  const [present, setPresent] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (!adding) return;
+    let cancelled = false;
+    api
+      .listServerContent(id, adding)
+      .then((items) => {
+        if (cancelled) return;
+        setPresent(
+          new Set(
+            items
+              .filter((i) => i.provider && i.projectId)
+              .map((i) => `${i.provider}:${i.projectId}`),
+          ),
+        );
+      })
+      .catch(() => !cancelled && setPresent(new Set()));
+    return () => {
+      cancelled = true;
+    };
+  }, [adding, id]);
+
   const server = servers.find((s) => s.id === id);
 
   useEffect(() => {
@@ -88,6 +129,38 @@ export default function ServerView({ id }: { id: string }) {
       <div className={styles.loading}>
         <Loader2 size={20} className="spin" />
       </div>
+    );
+  }
+
+  // Adding takes over the view, the way it does for an instance: this is the
+  // browse experience and it needs the room.
+  if (adding) {
+    return (
+      <Browse
+        onDone={() => setAdding(null)}
+        server={{
+          name: server.name,
+          installed: present,
+          kind: adding === "plugin" ? "plugin" : "mod",
+          onInstall: (project) => {
+            void api
+              .installServerContent(id, project.provider, project.id, adding)
+              .then((report) => {
+                setPresent((was) =>
+                  new Set(was).add(`${project.provider}:${project.id}`),
+                );
+                if (report.skipped.length > 0) {
+                  toast({
+                    kind: "error",
+                    title: `${project.name} needs more than itself`,
+                    body: report.skipped.join("; "),
+                  });
+                }
+              })
+              .catch((e) => reportError(`Could not install ${project.name}`, e));
+          },
+        }}
+      />
     );
   }
 
@@ -305,6 +378,8 @@ export default function ServerView({ id }: { id: string }) {
             />
           </div>
         </div>
+      ) : active === "content" ? (
+        <ContentPane server={server} onAdd={setAdding} />
       ) : (
         <SettingsTab server={server} />
       )}
@@ -352,6 +427,181 @@ export default function ServerView({ id }: { id: string }) {
         </Modal>
       )}
     </>
+  );
+}
+
+/**
+ * What is installed in the server's folders.
+ *
+ * Which folders exist depends on the software, and the backend is the one that
+ * knows: a hybrid has both `plugins/` and `mods/`, and it is the only case
+ * where the switcher is worth showing.
+ */
+function ContentPane({
+  server,
+  onAdd,
+}: {
+  server: Server;
+  onAdd: (kind: ContentKind) => void;
+}) {
+  const reportError = useStore((s) => s.reportError);
+
+  const [info, setInfo] = useState<ServerKindInfo | null>(null);
+  const [folder, setFolder] = useState<ContentKind>("plugin");
+  const [items, setItems] = useState<ContentItem[] | null>(null);
+
+  useEffect(() => {
+    api
+      .serverKinds()
+      .then((kinds) => {
+        const found = kinds.find((k) => k.id === server.kind) ?? null;
+        setInfo(found);
+        if (found) setFolder(found.takesPlugins ? "plugin" : "mod");
+      })
+      .catch(() => setInfo(null));
+  }, [server.kind]);
+
+  const load = useCallback(async () => {
+    try {
+      setItems(await api.listServerContent(server.id, folder));
+    } catch (e) {
+      reportError("Could not read the server folder", e);
+      setItems([]);
+    }
+  }, [server.id, folder, reportError]);
+
+  useEffect(() => {
+    setItems(null);
+    void load();
+  }, [load]);
+
+  async function toggle(item: ContentItem) {
+    try {
+      await api.setServerContentEnabled(
+        server.id,
+        folder,
+        item.fileName,
+        !item.enabled,
+      );
+      await load();
+    } catch (e) {
+      reportError("Could not toggle that file", e);
+    }
+  }
+
+  async function remove(item: ContentItem) {
+    try {
+      await api.removeServerContent(server.id, folder, item.fileName);
+      await load();
+    } catch (e) {
+      reportError(`Could not delete ${item.name}`, e);
+    }
+  }
+
+  const both = Boolean(info?.takesPlugins && info?.takesMods);
+  const takesNothing = Boolean(info && !info.takesPlugins && !info.takesMods);
+  const noun = folder === "plugin" ? "plugins" : "mods";
+
+  if (takesNothing) {
+    return (
+      <div className={styles.settings}>
+        <p className={styles.pending}>
+          A {info?.name} server loads neither plugins nor mods — it is the game
+          and nothing else.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className={styles.settings}>
+      <div className={styles.contentHead}>
+        {both && (
+          <div className={styles.folders}>
+            {(["plugin", "mod"] as const).map((option) => (
+              <button
+                key={option}
+                className={clsx(
+                  styles.tab,
+                  folder === option && styles.tabActive,
+                )}
+                onClick={() => setFolder(option)}
+              >
+                {option === "plugin" ? "Plugins" : "Mods"}
+              </button>
+            ))}
+          </div>
+        )}
+        <div style={{ flex: 1 }} />
+        <button className="btn btn-sm btn-primary" onClick={() => onAdd(folder)}>
+          <Plus size={13} />
+          Add {noun}
+        </button>
+      </div>
+
+      {items === null ? (
+        <div className={styles.rows}>
+          {Array.from({ length: 4 }, (_, i) => (
+            <div key={i} className="skeleton" style={{ height: 46 }} />
+          ))}
+        </div>
+      ) : items.length === 0 ? (
+        <p className={styles.pending}>
+          No {noun} installed. Anything you add lands in the server&apos;s{" "}
+          <code>{folder === "plugin" ? "plugins" : "mods"}</code> folder.
+        </p>
+      ) : (
+        <div className={styles.rows}>
+          {items.map((item) => (
+            <div
+              key={item.fileName}
+              className={clsx(styles.row, !item.enabled && styles.rowOff)}
+            >
+              <label className={styles.rowToggle}>
+                <input
+                  type="checkbox"
+                  checked={item.enabled}
+                  onChange={() => void toggle(item)}
+                  aria-label={`${item.enabled ? "Disable" : "Enable"} ${item.name}`}
+                />
+              </label>
+
+              <span className={styles.rowIcon}>
+                {item.iconUrl ? (
+                  <img src={item.iconUrl} alt="" loading="lazy" />
+                ) : (
+                  <Package size={15} />
+                )}
+              </span>
+
+              <span className={styles.rowText}>
+                <span className={styles.rowName}>{item.name}</span>
+                <span className={styles.rowMeta}>
+                  {item.version && <span>{item.version}</span>}
+                  <span>{fileSize(item.size)}</span>
+                  {item.fromDisk && <span>added by hand</span>}
+                </span>
+              </span>
+
+              {item.provider && (
+                <span className={clsx("badge", `badge-${item.provider}`)}>
+                  {providerShort(item.provider)}
+                </span>
+              )}
+
+              <button
+                className={styles.rowRemove}
+                onClick={() => void remove(item)}
+                title={`Delete ${item.name}`}
+                aria-label={`Delete ${item.name}`}
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 

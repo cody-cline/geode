@@ -223,6 +223,32 @@ export const api = {
     invoke<boolean>("send_server_command", { id, command }),
   runningServers: () => invoke<string[]>("running_servers"),
   serverFolder: (id: string) => invoke<string>("server_folder", { id }),
+  listServerContent: (id: string, kind: ContentKind) =>
+    invoke<ContentItem[]>("list_server_content", { id, kind }),
+  installServerContent: (
+    id: string,
+    provider: Provider,
+    projectId: string,
+    kind: ContentKind,
+    versionId?: string,
+  ) =>
+    invoke<InstallReport>("install_server_content", {
+      id,
+      provider,
+      projectId,
+      versionId: versionId ?? null,
+      kind,
+    }),
+  removeServerContent: (id: string, kind: ContentKind, file: string) =>
+    invoke<void>("remove_server_content", { id, kind, file }),
+  setServerContentEnabled: (
+    id: string,
+    kind: ContentKind,
+    file: string,
+    enabled: boolean,
+  ) =>
+    invoke<string>("set_server_content_enabled", { id, kind, file, enabled }),
+
   readServerProperties: (id: string) =>
     invoke<ServerProperty[]>("read_server_properties", { id }),
   /** Only the settings passed are changed; the rest of the file is left alone. */
