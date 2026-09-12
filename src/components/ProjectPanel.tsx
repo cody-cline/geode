@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import clsx from "clsx";
 import {
@@ -92,7 +93,11 @@ export default function ProjectPanel({
   const blocked = !project.distributionAllowed;
   const isModpack = project.kind === "modpack";
 
-  return (
+  // Portalled to the body rather than rendered in place. A custom-styled
+  // scrollbar is painted with its own scroller, above overlapping positioned
+  // siblings, so the results list's scrollbar drew straight over this panel
+  // however high its z-index went. Leaving the subtree is what settles it.
+  return createPortal(
     <div className={styles.backdrop} onMouseDown={onClose}>
       <aside
         className={styles.panel}
@@ -319,6 +324,7 @@ export default function ProjectPanel({
           )}
         </div>
       </aside>
-    </div>
+    </div>,
+    document.body,
   );
 }
