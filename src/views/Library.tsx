@@ -195,19 +195,22 @@ function InstanceCard({
         <span className={styles.iconRing}>
           <InstanceIcon instance={instance} size={46} />
         </span>
-        <div className={styles.cardText}>
-          <h3 className={styles.cardName}>{instance.name}</h3>
-          <p className={styles.cardMeta}>
+        {/* Spans, not headings and paragraphs: this all sits inside a button,
+            and block elements are not allowed there. The classes carry the
+            display, so nothing moves. */}
+        <span className={styles.cardText}>
+          <span className={styles.cardName}>{instance.name}</span>
+          <span className={styles.cardMeta}>
             {instance.mcVersion}
             {instance.loader !== "vanilla" && ` · ${loaderLabel}`}
-          </p>
+          </span>
           {instance.pack && (
-            <p className={styles.cardPack}>
+            <span className={styles.cardPack}>
               <Package size={10} />
               {instance.pack.name} {instance.pack.version}
-            </p>
+            </span>
           )}
-          <div className={styles.cardStats}>
+          <span className={styles.cardStats}>
             {instance.modCount > 0 && (
               <span className={styles.stat}>
                 {instance.modCount} mod{instance.modCount === 1 ? "" : "s"}
@@ -219,8 +222,8 @@ function InstanceCard({
                 {formatDuration(instance.playSeconds)}
               </span>
             )}
-          </div>
-        </div>
+          </span>
+        </span>
       </button>
 
       <div className={styles.cardFoot}>

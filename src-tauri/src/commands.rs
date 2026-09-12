@@ -1202,9 +1202,6 @@ fn server_view(server: crate::server::Server, state: &AppState) -> ServerView {
 pub struct ServerKindInfo {
     pub id: String,
     pub name: String,
-    /// False when the software cannot be fetched automatically — the dialog
-    /// shows why rather than offering a dead end.
-    pub installable: bool,
     pub takes_plugins: bool,
     pub takes_mods: bool,
     pub is_proxy: bool,
@@ -1217,7 +1214,6 @@ pub async fn server_kinds() -> Result<Vec<ServerKindInfo>> {
         .map(|&kind| ServerKindInfo {
             id: kind.as_str().to_string(),
             name: kind.display_name().to_string(),
-            installable: crate::server::meta::is_installable(kind),
             takes_plugins: kind.takes_plugins(),
             takes_mods: kind.takes_mods(),
             is_proxy: kind.is_proxy(),
@@ -1700,6 +1696,29 @@ pub async fn install_server_content(
     let mut server = crate::server::load(&state.paths, &id).await?;
     let project = providers::project(&state.http, provider, &project_id, cf_key).await?;
 
+    // SpigotMC lists Bukkit plugins and nothing else. A proxy speaks its own
+    // plugin API and would take the jar, write it into plugins/, and fail at
+    // start-up for a reason nothing had mentioned.
+    if provider == Provider::Spiget && kind == ContentKind::Plugin {
+        let speaks_bukkit = server
+            .plugin_loaders()
+            .iter()
+            .any(|l| *l == "bukkit" || *l == "spigot");
+        if !speaks_bukkit {
+            return Err(Error::msg(format!(
+                "{} is a Bukkit plugin, and a {} server does not load those. \
+                 Look for a {} plugin instead.",
+                project.name,
+                server.kind.display_name(),
+                server
+                    .plugin_loaders()
+                    .first()
+                    .copied()
+                    .unwrap_or("different"),
+            )));
+        }
+    }
+
     // A Paper server runs Paper, Spigot and Bukkit plugins alike, so each is
     // tried in turn rather than insisting on the most specific one.
     // Asked of the server rather than its kind: a Fabric server with Cardboard
@@ -1750,43 +1769,36 @@ pub async fn install_server_content(
 
     let progress = Progress::new(app, format!("server-content:{id}:{project_id}"));
     let dir = crate::server::content_dir(&state.paths, &id, kind).await;
-    progress.stage("Installing", 1).await;
 
-    let file = crate::install::content::install_into(
+    // The same walk an instance gets, from the same code: a mod that needs
+    // three others brings the three. The loader is whichever one matched the
+    // version above, so a plugin's dependencies are looked up as plugins.
+    let dep_loader = loaders.first().copied().unwrap_or_default();
+    let mc_version = server.mc_version.clone();
+    let result = crate::install::content::install_with_dependencies_into(
         &state.http,
         &dir,
         &mut server.content,
         &version,
+        &project,
         kind,
-        &project.name,
-        project.icon_url.clone(),
-        Some(project.slug.clone()),
-        false,
+        &mc_version,
+        dep_loader,
+        cf_key,
+        &progress,
     )
     .await;
 
-    match file {
-        Ok(file) => {
-            server.save(&state.paths).await?;
+    // Saved either way: a walk that failed part-way through still put files on
+    // disk, and a record list that does not mention them is worse than none.
+    let _ = server.save(&state.paths).await;
+
+    match result {
+        Ok(report) => {
             progress.finish().await;
-
-            // Dependencies are not walked yet. Naming them beats a server that
-            // fails at start-up for a reason nothing mentioned.
-            let skipped: Vec<String> = version
-                .dependencies
-                .iter()
-                .filter(|d| d.kind == providers::DependencyKind::Required)
-                .filter_map(|d| d.project_id.clone())
-                .map(|p| format!("requires {p}, which was not installed for you"))
-                .collect();
-
-            Ok(crate::install::content::InstallReport {
-                installed: vec![file],
-                skipped,
-            })
+            Ok(report)
         }
         Err(e) => {
-            let _ = server.save(&state.paths).await;
             progress.fail(&e.to_string()).await;
             Err(e)
         }

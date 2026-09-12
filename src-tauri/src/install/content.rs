@@ -2,6 +2,7 @@
 //! resolution and update checking.
 
 use std::collections::HashSet;
+use std::path::Path;
 
 use serde::Serialize;
 
@@ -166,16 +167,52 @@ pub async fn install_with_dependencies(
             project.name
         ))
     })?;
+    let dir = crate::instance::content::content_dir(paths, &instance.id, kind);
+    install_with_dependencies_into(
+        client,
+        &dir,
+        &mut instance.content,
+        version,
+        project,
+        kind,
+        dep_game_version,
+        dep_loader,
+        curseforge_key,
+        progress,
+    )
+    .await
+}
+
+/// The same, into a folder and a record list rather than an instance.
+///
+/// A server keeps identical provenance records and wants identical behaviour —
+/// installing a mod that needs three others should bring the three — so it runs
+/// the same walk rather than a second copy of it. The caller says which folder
+/// and which kind, because a server decides that differently: the same project
+/// is a mod in one folder and a plugin in another.
+#[allow(clippy::too_many_arguments)] // one install's coordinates, travelling together
+pub async fn install_with_dependencies_into(
+    client: &reqwest::Client,
+    dir: &Path,
+    records: &mut Vec<ContentRecord>,
+    version: &Version,
+    project: &Project,
+    kind: ContentKind,
+    dep_game_version: &str,
+    dep_loader: &str,
+    curseforge_key: Option<&str>,
+    progress: &Progress,
+) -> Result<InstallReport> {
     let mut report = InstallReport {
         installed: Vec::new(),
         skipped: Vec::new(),
     };
 
     progress.stage("Installing", 1).await;
-    let file = install(
+    let file = install_into(
         client,
-        paths,
-        instance,
+        dir,
+        records,
         version,
         kind,
         &project.name,
@@ -187,12 +224,14 @@ pub async fn install_with_dependencies(
     report.installed.push(file);
     progress.advance(1, &project.name).await;
 
-    if kind != ContentKind::Mod {
+    // Only things that load other things have dependencies worth chasing. A
+    // plugin's are plugins, and they belong in the same folder as their parent,
+    // which is why the kind travels down rather than being assumed to be a mod.
+    if !matches!(kind, ContentKind::Mod | ContentKind::Plugin) {
         return Ok(report);
     }
 
-    let mut seen: HashSet<String> = instance
-        .content
+    let mut seen: HashSet<String> = records
         .iter()
         .filter(|r| r.provider == version.provider.as_str())
         .map(|r| r.project_id.clone())
@@ -223,10 +262,11 @@ pub async fn install_with_dependencies(
 
         match resolve_dependency(
             client,
-            paths,
-            instance,
+            dir,
+            records,
             version.provider,
             &project_id,
+            kind,
             dep_game_version,
             dep_loader,
             curseforge_key,
@@ -257,10 +297,11 @@ pub async fn install_with_dependencies(
 #[allow(clippy::too_many_arguments)]
 async fn resolve_dependency(
     client: &reqwest::Client,
-    paths: &Paths,
-    instance: &mut Instance,
+    dir: &Path,
+    records: &mut Vec<ContentRecord>,
     provider: Provider,
     project_id: &str,
+    kind: ContentKind,
     game_version: &str,
     loader: &str,
     curseforge_key: Option<&str>,
@@ -280,12 +321,12 @@ async fn resolve_dependency(
         return Ok(None);
     };
 
-    let filename = install(
+    let filename = install_into(
         client,
-        paths,
-        instance,
+        dir,
+        records,
         best,
-        ContentKind::Mod,
+        kind,
         &project.name,
         project.icon_url.clone(),
         Some(project.slug.clone()),

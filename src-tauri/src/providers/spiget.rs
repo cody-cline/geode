@@ -138,9 +138,13 @@ pub async fn search(client: &reqwest::Client, query: &SearchQuery) -> Result<Vec
             query.offset / size.max(1) + 1
         )
     } else {
+        // `page` matters as much here as on the browse endpoint: without it
+        // every "load more" asks for page one again, and the results dedupe
+        // down to nothing new.
         format!(
-            "{API}/search/resources/{}?field=name&size={size}&sort=-downloads",
-            urlencoding::encode(query.query.trim())
+            "{API}/search/resources/{}?field=name&size={size}&page={}&sort=-downloads",
+            urlencoding::encode(query.query.trim()),
+            query.offset / size.max(1) + 1
         )
     };
 

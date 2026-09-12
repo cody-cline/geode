@@ -20,7 +20,7 @@ use crate::plan::resolve::{Fit, Target};
 use crate::plan::Plan;
 use crate::providers::{self, Provider};
 
-use super::{meta, ServerKind};
+use super::ServerKind;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,17 +45,14 @@ fn server_kind_for(loader: &str) -> Option<ServerKind> {
 }
 
 /// Why this target cannot become a server, in terms of what to do instead.
+///
+/// Only one reason is left: every loader a server *can* run, Geode can now
+/// install. What remains is targets that are not mod loaders at all.
 fn refuse(loader: &str) -> Error {
-    match server_kind_for(loader) {
-        None => Error::msg(format!(
-            "{loader} is not a mod loader a server can run. Resolve the plan to \
-             Fabric and build that."
-        )),
-        Some(kind) => Error::msg(format!(
-            "{} servers cannot be installed automatically.",
-            kind.display_name()
-        )),
-    }
+    Error::msg(format!(
+        "{loader} is not a mod loader a server can run. Resolve the plan to \
+         Fabric and build that."
+    ))
 }
 
 /// Create a server at this target and install the plan's server-capable mods.
@@ -68,8 +65,7 @@ pub async fn from_plan(
     curseforge_key: Option<&str>,
     progress: &Progress,
 ) -> Result<ServerBuildReport> {
-    let kind = server_kind_for(&target.loader).filter(|k| meta::is_installable(*k));
-    let Some(kind) = kind else {
+    let Some(kind) = server_kind_for(&target.loader) else {
         return Err(refuse(&target.loader));
     };
 
@@ -213,11 +209,6 @@ mod tests {
         assert!(never.contains("not a mod loader"), "{never}");
         assert!(never.contains("Fabric"), "{never}");
 
-        // NeoForge is a loader a server can run, so this arm is only reached if
-        // its software could not be installed — a different failure entirely.
-        let other = refuse("neoforge").to_string();
-        assert!(other.contains("NeoForge"), "{other}");
-        assert!(!other.contains("not a mod loader"), "{other}");
     }
 
     #[test]
@@ -225,11 +216,7 @@ mod tests {
         // This test previously asserted the opposite, to fail loudly the day a
         // Forge server installer landed. It has now landed: Fabric downloads an
         // assembled server, and Quilt, Forge and NeoForge run their installers.
-        let buildable = |loader: &str| {
-            server_kind_for(loader)
-                .filter(|k| meta::is_installable(*k))
-                .is_some()
-        };
+        let buildable = |loader: &str| server_kind_for(loader).is_some();
         assert!(buildable("fabric"));
         assert!(buildable("neoforge"));
         assert!(buildable("forge"));

@@ -40,10 +40,6 @@ export default function NewServerModal({
 
   // Versions belong to the software, not to Minecraft: Velocity's are its own.
   useEffect(() => {
-    if (!chosen?.installable) {
-      setVersions([]);
-      return;
-    }
     let cancelled = false;
     setVersions(null);
     api
@@ -57,7 +53,7 @@ export default function NewServerModal({
     return () => {
       cancelled = true;
     };
-  }, [kind, chosen?.installable]);
+  }, [kind]);
 
   const suggested = chosen ? `${chosen.name} ${version}`.trim() : "";
 
@@ -90,7 +86,7 @@ export default function NewServerModal({
           <button
             className="btn btn-primary"
             onClick={create}
-            disabled={busy || !version || !chosen?.installable}
+            disabled={busy || !version}
           >
             {busy ? (
               <Loader2 size={14} className="spin" />
@@ -115,14 +111,8 @@ export default function NewServerModal({
                 className={clsx(
                   styles.kind,
                   kind === option.id && styles.kindActive,
-                  !option.installable && styles.kindOff,
                 )}
                 onClick={() => setKind(option.id)}
-                title={
-                  option.installable
-                    ? undefined
-                    : "Geode cannot download this one automatically"
-                }
               >
                 <span className={styles.kindName}>{option.name}</span>
                 <span className={styles.kindTags}>
@@ -144,81 +134,73 @@ export default function NewServerModal({
             ))}
           </div>
 
-          {chosen && !chosen.installable ? (
-            <p className={styles.note}>
-              {chosen.name} cannot be set up automatically on this machine.
-            </p>
-          ) : (
-            <>
-              <div className={styles.row}>
-                <div className={styles.field}>
-                  <label className="label" htmlFor="server-version">
-                    {chosen?.isProxy ? "Version" : "Minecraft version"}
-                  </label>
-                  {versions === null ? (
-                    <div className="skeleton" style={{ height: 34 }} />
-                  ) : versions.length === 0 ? (
-                    <p className={styles.note}>No versions available.</p>
-                  ) : (
-                    <select
-                      id="server-version"
-                      className="select"
-                      value={version}
-                      onChange={(e) => setVersion(e.target.value)}
-                    >
-                      {versions.map((v) => (
-                        <option key={v} value={v}>
-                          {v}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                </div>
-                <div className={styles.field}>
-                  <label className="label" htmlFor="server-name">
-                    Name
-                  </label>
-                  <input
-                    id="server-name"
-                    className="input"
-                    value={name}
-                    placeholder={suggested}
-                    onChange={(e) => setName(e.target.value)}
-                  />
-                </div>
+            <div className={styles.row}>
+              <div className={styles.field}>
+                <label className="label" htmlFor="server-version">
+                  {chosen?.isProxy ? "Version" : "Minecraft version"}
+                </label>
+                {versions === null ? (
+                  <div className="skeleton" style={{ height: 34 }} />
+                ) : versions.length === 0 ? (
+                  <p className={styles.note}>No versions available.</p>
+                ) : (
+                  <select
+                    id="server-version"
+                    className="select"
+                    value={version}
+                    onChange={(e) => setVersion(e.target.value)}
+                  >
+                    {versions.map((v) => (
+                      <option key={v} value={v}>
+                        {v}
+                      </option>
+                    ))}
+                  </select>
+                )}
               </div>
+              <div className={styles.field}>
+                <label className="label" htmlFor="server-name">
+                  Name
+                </label>
+                <input
+                  id="server-name"
+                  className="input"
+                  value={name}
+                  placeholder={suggested}
+                  onChange={(e) => setName(e.target.value)}
+                />
+              </div>
+            </div>
 
+            <p className={styles.note}>
+              {chosen?.takesPlugins && chosen?.takesMods
+                ? "Runs Bukkit plugins and mods side by side."
+                : chosen?.takesPlugins
+                  ? "Runs Bukkit-style plugins."
+                  : chosen?.takesMods
+                    ? "Runs mods."
+                    : "Runs no plugins or mods."}{" "}
+              You will be asked to accept Mojang&apos;s EULA before it starts
+              for the first time.
+            </p>
+
+            {/* These two take noticeably longer than a download, and saying so
+                beforehand is the difference between waiting and wondering. */}
+            {chosen?.id === "spigot" && (
               <p className={styles.note}>
-                {chosen?.takesPlugins && chosen?.takesMods
-                  ? "Runs Bukkit plugins and mods side by side."
-                  : chosen?.takesPlugins
-                    ? "Runs Bukkit-style plugins."
-                    : chosen?.takesMods
-                      ? "Runs mods."
-                      : "Runs no plugins or mods."}{" "}
-                You will be asked to accept Mojang&apos;s EULA before it starts
-                for the first time.
+                Spigot is compiled here on your machine — its licence does not
+                allow anyone to hand out a finished jar. The first build takes
+                several minutes; later ones reuse the same work and are faster.
               </p>
-
-              {/* These two take noticeably longer than a download, and saying so
-                  beforehand is the difference between waiting and wondering. */}
-              {chosen?.id === "spigot" && (
-                <p className={styles.note}>
-                  Spigot is compiled here on your machine — its licence does not
-                  allow anyone to hand out a finished jar. The first build takes
-                  several minutes; later ones reuse the same work and are faster.
-                </p>
-              )}
-              {(chosen?.id === "forge" ||
-                chosen?.id === "neoforge" ||
-                chosen?.id === "quilt") && (
-                <p className={styles.note}>
-                  {chosen.name} runs its official installer to assemble the
-                  server and fetch its libraries, which takes a minute or two.
-                </p>
-              )}
-            </>
-          )}
+            )}
+            {(chosen?.id === "forge" ||
+              chosen?.id === "neoforge" ||
+              chosen?.id === "quilt") && (
+              <p className={styles.note}>
+                {chosen.name} runs its official installer to assemble the
+                server and fetch its libraries, which takes a minute or two.
+              </p>
+            )}
         </>
       )}
     </Modal>

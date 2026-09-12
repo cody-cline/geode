@@ -27,11 +27,6 @@ async fn every_kind_lists_versions_and_resolves_something() {
     let client = net::client();
 
     for &kind in ServerKind::ALL {
-        assert!(
-            meta::is_installable(kind),
-            "{kind:?} is offered but not claimed installable"
-        );
-
         let versions = meta::versions(&client, kind)
             .await
             .unwrap_or_else(|e| panic!("{kind:?} versions: {e}"));
@@ -308,11 +303,3 @@ async fn arclight_offers_the_loader_its_mods_are_built_for() {
     println!("arclight {} -> {}", versions[0], jar.file_name);
 }
 
-#[test]
-fn every_kind_has_a_route() {
-    // No network: what Geode claims it can set up is a local decision. This
-    // previously asserted the opposite for Spigot, Forge, NeoForge and Quilt.
-    for &kind in ServerKind::ALL {
-        assert!(meta::is_installable(kind), "{kind:?}");
-    }
-}

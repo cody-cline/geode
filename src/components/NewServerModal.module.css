@@ -35,11 +35,6 @@
   background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
 
-/* Still selectable: the panel explains why it cannot be installed, which is
-   more useful than a choice that silently is not there. */
-.kindOff {
-  opacity: 0.5;
-}
 
 .kindName {
   font-size: 13px;

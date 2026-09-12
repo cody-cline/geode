@@ -234,8 +234,6 @@ export interface Server {
 export interface ServerKindInfo {
   id: string;
   name: string;
-  /** False when it cannot be fetched automatically — Spigot, Forge, NeoForge. */
-  installable: boolean;
   takesPlugins: boolean;
   takesMods: boolean;
   isProxy: boolean;

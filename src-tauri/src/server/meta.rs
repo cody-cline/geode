@@ -966,15 +966,6 @@ pub async fn resolve(client: &reqwest::Client, kind: ServerKind, version: &str) 
     })
 }
 
-/// Whether Geode can install this software without help.
-///
-/// Everything is installable now: the jar-publishing platforms directly, the
-/// installer-based loaders by running their installer, and Spigot by compiling
-/// it with BuildTools the way its licence requires.
-pub fn is_installable(_kind: ServerKind) -> bool {
-    true
-}
-
 /// The Java major version this server will need.
 ///
 /// Mojang states it per Minecraft version, which covers everything built on
@@ -1031,15 +1022,6 @@ mod tests {
         // Purpur is its own publisher, not a PaperMC project.
         assert_eq!(paper_project(ServerKind::Purpur), None);
         assert_eq!(paper_project(ServerKind::Fabric), None);
-    }
-
-    #[test]
-    fn every_kind_can_be_installed() {
-        // The ones that used to be greyed out are the point of this: each now
-        // has a route, whether that is a download, an installer or a build.
-        for kind in ServerKind::ALL {
-            assert!(is_installable(*kind), "{kind:?}");
-        }
     }
 
     #[test]
@@ -1118,10 +1100,9 @@ mod tests {
     }
 
     #[test]
-    fn the_one_hybrid_we_can_install_is_installable() {
+    fn the_one_hybrid_takes_both_kinds_of_content() {
         // Mohist is the "mods and plugins together" case, so it mattering is
         // the point of supporting it at all.
-        assert!(is_installable(ServerKind::Mohist));
         assert!(ServerKind::Mohist.takes_mods());
         assert!(ServerKind::Mohist.takes_plugins());
     }

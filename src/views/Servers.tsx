@@ -211,12 +211,14 @@ function ServerCard({
             size={46}
           />
         </span>
-        <div className={styles.cardText}>
-          <h3 className={styles.cardName}>{server.name}</h3>
-          <p className={styles.cardMeta}>
+        {/* Spans for the same reason as the library card: this is inside a
+            button, where block elements are not allowed. */}
+        <span className={styles.cardText}>
+          <span className={styles.cardName}>{server.name}</span>
+          <span className={styles.cardMeta}>
             {server.mcVersion} · {server.kindName}
-          </p>
-          <div className={styles.cardStats}>
+          </span>
+          <span className={styles.cardStats}>
             {contentCount > 0 && (
               <span className={styles.stat}>
                 {contentCount} item{contentCount === 1 ? "" : "s"}
@@ -226,8 +228,8 @@ function ServerCard({
               <Cpu size={11} />
               {server.settings.memoryMb} MB
             </span>
-          </div>
-        </div>
+          </span>
+        </span>
       </button>
 
       <div className={styles.cardFoot}>
