@@ -47,6 +47,11 @@ pub struct JarMeta {
     /// fabric-resource-loader-v0 does not stop Fabric API being what actually
     /// answers for it — and that relationship is the point of the graph.
     pub requires: Vec<String>,
+    /// Commands it registers, where the format declares them.
+    ///
+    /// Only Bukkit-family plugins do: a mod registers its commands in code, so
+    /// the only way to learn those is to ask a running server.
+    pub commands: Vec<String>,
 }
 
 /// A read, stamped with the size and mtime it was valid for.
@@ -132,7 +137,14 @@ pub fn read(path: &Path) -> Option<JarMeta> {
 }
 
 fn normalise(meta: &mut JarMeta) {
-    for list in [&mut meta.primary, &mut meta.bundled, &mut meta.requires] {
+    for list in [
+        &mut meta.primary,
+        &mut meta.bundled,
+        &mut meta.requires,
+        // A plugin routinely gives two commands an alias in common —
+        // EssentialsX declares 697 entries and means 694.
+        &mut meta.commands,
+    ] {
         for id in list.iter_mut() {
             *id = id.trim().to_ascii_lowercase();
         }
@@ -401,7 +413,81 @@ fn from_plugin_yml(text: &str) -> Option<JarMeta> {
         primary,
         bundled: Vec::new(),
         requires,
+        commands: declared_commands(text),
     })
+}
+
+/// The commands a `plugin.yml` registers, with their aliases.
+///
+/// Bukkit requires every command to be declared here — a plugin that forgets
+/// gets a null command back at runtime — so unlike mods, whose commands are
+/// registered in code and only knowable by asking a running server, a plugin's
+/// are readable from the jar while the server is stopped.
+///
+/// ```yaml
+/// commands:
+///   heal:
+///     description: Heals a player
+///     aliases: [h, mend]
+///   feed:
+/// ```
+fn declared_commands(text: &str) -> Vec<String> {
+    let lines: Vec<&str> = text.lines().map(strip_comment).collect();
+    let Some(at) = lines
+        .iter()
+        .position(|l| indent_of(l) == 0 && l.trim_end().starts_with("commands:"))
+    else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    // The first non-empty line decides the column commands sit at. Anything
+    // deeper is a command's own settings; anything shallower ends the section.
+    let mut column: Option<usize> = None;
+    for line in &lines[at + 1..] {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let indent = indent_of(line);
+        let at_column = *column.get_or_insert(indent);
+        if indent < at_column {
+            break;
+        }
+        if indent > at_column {
+            // A command's own block. `aliases` is the only part worth having:
+            // a server accepts them exactly as it accepts the command.
+            if line.trim_start().starts_with("aliases:") {
+                out.extend(nested_list(line));
+            }
+            continue;
+        }
+        if let Some((name, _)) = line.trim().split_once(':') {
+            let name = unquote(name);
+            if !name.is_empty() {
+                out.push(name);
+            }
+        }
+    }
+    out.into_iter().map(|c| c.to_lowercase()).collect()
+}
+
+/// The values of an inline `aliases: [a, b]` or `aliases: a`.
+///
+/// Only the flow and scalar forms. The block form puts its entries on later
+/// lines, which the caller is already walking one at a time — and a plugin
+/// writing aliases that way is rare enough to be worth less than the tangle of
+/// threading state through that walk.
+fn nested_list(line: &str) -> Vec<String> {
+    let after = line.split_once(':').map(|(_, v)| v).unwrap_or("").trim();
+    if let Some(inner) = after.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+        return split_flow(inner);
+    }
+    let single = unquote(after);
+    if single.is_empty() {
+        Vec::new()
+    } else {
+        vec![single]
+    }
 }
 
 /// `paper-plugin.yml` — a map rather than lists, where `required` alone decides
@@ -468,6 +554,9 @@ fn from_paper_plugin(text: &str) -> Option<JarMeta> {
         primary: vec![plugin_id(&name)],
         bundled: Vec::new(),
         requires,
+        // paper-plugin.yml has no commands section — Paper plugins register
+        // theirs in code, the way a mod does.
+        commands: Vec::new(),
     })
 }
 
@@ -515,6 +604,7 @@ fn from_fabric(value: &serde_json::Value) -> JarMeta {
         primary,
         bundled: Vec::new(),
         requires,
+        commands: Vec::new(),
     }
 }
 
@@ -578,6 +668,7 @@ fn from_mods_toml(text: &str) -> Option<JarMeta> {
         primary,
         bundled: Vec::new(),
         requires,
+        commands: Vec::new(),
     })
 }
 
@@ -690,6 +781,47 @@ dependencies:
         // Optional dependencies are the author saying "works well with", and
         // pulling them into the graph would make half a folder look required.
         assert_eq!(meta.requires, vec!["cloth-config"]);
+    }
+
+    /// EssentialsX's own shape, near enough: commands at one column, their
+    /// settings deeper, aliases worth as much as the command itself.
+    #[test]
+    fn reads_the_commands_a_plugin_registers() {
+        let meta = from_plugin_yml(
+            r#"
+name: Essentials
+version: 2.20.1
+depend: [Vault]
+commands:
+  heal:
+    description: Heals a player
+    usage: /<command> [player]
+    aliases: [h]
+  feed:
+    description: Feeds a player
+    aliases:
+      - eat
+  version:
+    description: Shows the plugin version
+permissions:
+  essentials.heal:
+    default: op
+"#,
+        )
+        .unwrap();
+        // `version` is a command here *and* a root key, which is the trap this
+        // file's header warns about: it must be read as one, not the other.
+        assert_eq!(meta.version.as_deref(), Some("2.20.1"));
+        assert_eq!(meta.commands, vec!["heal", "h", "feed", "version"]);
+        // The section ends where indentation returns; permissions are not
+        // commands, and `essentials.heal` is nobody's command name.
+        assert!(!meta.commands.iter().any(|c| c.contains("essentials")));
+    }
+
+    #[test]
+    fn a_plugin_with_no_commands_declares_none() {
+        let meta = from_plugin_yml("name: Vault\nversion: 1.7\n").unwrap();
+        assert!(meta.commands.is_empty());
     }
 
     #[test]

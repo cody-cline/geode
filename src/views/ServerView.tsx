@@ -20,6 +20,7 @@ import {
   Package,
   Play,
   Plus,
+  Sparkles,
   Square,
   Trash2,
 } from "lucide-react";
@@ -219,6 +220,24 @@ export default function ServerView({ id }: { id: string }) {
       setLearned((was) => [...new Set([...was, ...fresh])]);
     }
   }, [shown]);
+
+  // Plugins declare their commands in plugin.yml, so those are known from the
+  // jars without the server ever running. Mods register theirs in code, which
+  // is why `help` is still offered below.
+  useEffect(() => {
+    if (!server?.takesPlugins) return;
+    let cancelled = false;
+    api
+      .serverPluginCommands(id)
+      .then((found) => {
+        if (cancelled || found.length === 0) return;
+        setLearned((was) => [...new Set([...was, ...found])]);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [id, server?.takesPlugins]);
 
   const commands = useMemo(
     () => [...new Set([...VANILLA_COMMANDS, ...learned])].sort(),
@@ -611,6 +630,20 @@ export default function ServerView({ id }: { id: string }) {
               onKeyDown={onKey}
               spellCheck={false}
             />
+            {/* A mod's commands exist only in its code, so the only way to
+                learn them is to ask the server. That prints its whole command
+                list into the console, which is worth doing on purpose and not
+                worth doing behind the user's back. */}
+            {server.running && !viewing && (
+              <button
+                className={clsx("btn", "btn-sm", styles.learn)}
+                onClick={() => void api.sendServerCommand(id, "help")}
+                title="Runs `help`, and reads the commands out of its reply — including any a mod or plugin added"
+              >
+                <Sparkles size={13} />
+                Learn commands
+              </button>
+            )}
           </div>
         </div>
       ) : active === "content" ? (

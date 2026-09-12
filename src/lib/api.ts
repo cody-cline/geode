@@ -268,6 +268,14 @@ export const api = {
 
   // Servers
   serverKinds: () => invoke<ServerKindInfo[]>("server_kinds"),
+  /**
+   * Commands the server's installed plugins declare, read from their jars.
+   *
+   * Plugins only: a mod's commands live in its code, and the console asks a
+   * running server for those instead.
+   */
+  serverPluginCommands: (id: string) =>
+    invoke<string[]>("server_plugin_commands", { id }),
   /** Whether compiling Spigot is possible here, and what would make it so. */
   gitStatus: () => invoke<GitStatus>("git_status"),
   /** Only ever after the user has read `plan` and said yes. */

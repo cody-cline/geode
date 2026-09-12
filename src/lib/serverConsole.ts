@@ -134,9 +134,14 @@ export const VANILLA_COMMANDS = [
  * prints one usage line per command: `/give <targets> <item>`. Paper and Spigot
  * replace it with Bukkit's index: `/give: Gives an item to a player`.
  *
- * Nothing is ever sent to get this. Running `help` would dump ninety-odd lines
- * into the console the user is reading, so it is harvested only when they ask
- * for it themselves.
+ * This is how a *mod's* commands become known, since a mod registers them in
+ * code and nothing in its jar says so. A plugin is the easier case and does not
+ * depend on this: Bukkit makes it declare its commands in `plugin.yml`, which
+ * Geode reads off the jar with the server stopped.
+ *
+ * Nothing is ever sent to get this. Running `help` dumps ninety-odd lines into
+ * the console the user is reading, so it happens when they ask for it — by
+ * running it themselves, or with the console's own button.
  */
 export function harvest(lines: ServerLine[]): string[] {
   const found = new Set<string>();

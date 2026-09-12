@@ -133,6 +133,7 @@ pub fn run() {
             commands::create_server_from_plan,
             commands::server_kinds_for_pack,
             commands::create_server_from_modpack,
+            commands::server_plugin_commands,
             commands::git_status,
             commands::install_git,
             commands::list_server_logs,

@@ -1322,6 +1322,38 @@ pub async fn create_server_from_modpack(
     }
 }
 
+/// The commands this server's installed plugins register.
+///
+/// Bukkit requires a plugin to declare its commands in `plugin.yml`, so these
+/// are readable from the jars with the server stopped. Mods have no equivalent
+/// — they register in code — which is why the console offers to ask a running
+/// server as well.
+#[tauri::command]
+pub async fn server_plugin_commands(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<String>> {
+    let dir = crate::server::content_dir(&state.paths, &id, ContentKind::Plugin).await;
+    let mut entries = match tokio::fs::read_dir(&dir).await {
+        Ok(e) => e,
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    let mut found: Vec<String> = Vec::new();
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path.extension().map(|e| e != "jar").unwrap_or(true) {
+            continue;
+        }
+        if let Some(meta) = state.jars.get(&path).await {
+            found.extend(meta.commands);
+        }
+    }
+    found.sort();
+    found.dedup();
+    Ok(found)
+}
+
 /// Whether this machine has the Git that compiling Spigot needs, and what
 /// Geode would do about it if not.
 ///

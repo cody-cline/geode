@@ -708,3 +708,10 @@
 .eulaLink:hover {
   text-decoration: underline;
 }
+
+/* Sits inside the prompt row, so it reads as part of the console rather than
+   as a toolbar button that happens to be nearby. */
+.learn {
+  flex-shrink: 0;
+  margin-left: 8px;
+}
