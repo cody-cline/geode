@@ -30,9 +30,33 @@ export interface Toast {
  *  lines and unbounded retention is how a launcher ends up using a gigabyte. */
 const MAX_LOG_LINES = 3000;
 
+/** Two routes that would render the same screen. */
+function sameRoute(a: Route, b: Route): boolean {
+  if (a.view !== b.view) return false;
+  if (a.view === "instance" && b.view === "instance") {
+    return a.id === b.id && a.tab === b.tab;
+  }
+  if (a.view === "plan" && b.view === "plan") return a.id === b.id;
+  if (a.view === "settings" && b.view === "settings") return a.tab === b.tab;
+  return true;
+}
+
+/** A session's worth of screens, not a lifetime's. */
+const MAX_HISTORY = 50;
+
 interface State {
   route: Route;
+  /** Where back goes, oldest first. */
+  history: Route[];
   navigate: (route: Route) => void;
+  goBack: () => void;
+  /**
+   * Overlays that want back for themselves, outermost first. Registered
+   * through `useBackHandler` rather than touched directly.
+   */
+  backHandlers: { id: number; run: () => void }[];
+  pushBackHandler: (id: number, run: () => void) => void;
+  popBackHandler: (id: number) => void;
 
   config: Config | null;
   loadConfig: () => Promise<void>;
@@ -62,7 +86,36 @@ let toastSeq = 0;
 
 export const useStore = create<State>((set, get) => ({
   route: { view: "library" },
-  navigate: (route) => set({ route }),
+  history: [],
+  navigate: (route) =>
+    set((s) =>
+      sameRoute(s.route, route)
+        ? {}
+        : { route, history: [...s.history, s.route].slice(-MAX_HISTORY) },
+    ),
+
+  backHandlers: [],
+  pushBackHandler: (id, run) =>
+    set((s) => ({ backHandlers: [...s.backHandlers, { id, run }] })),
+  popBackHandler: (id) =>
+    set((s) => ({ backHandlers: s.backHandlers.filter((h) => h.id !== id) })),
+
+  goBack: () => {
+    // Whatever is open on top goes first. It removes its own handler as it
+    // closes, so there is nothing to pop here.
+    const open = get().backHandlers;
+    const innermost = open[open.length - 1];
+    if (innermost) {
+      innermost.run();
+      return;
+    }
+    set((s) => {
+      if (s.history.length === 0) return {};
+      const history = [...s.history];
+      const route = history.pop()!;
+      return { route, history };
+    });
+  },
 
   config: null,
   loadConfig: async () => {

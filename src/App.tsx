@@ -21,6 +21,30 @@ export default function App() {
     void init();
   }, [init]);
 
+  // The mouse's back button, and Alt+Left for the same gesture without one.
+  // Bound once at the window rather than per view, so it reaches every screen
+  // and every overlay instead of only the handful that remembered to ask.
+  useEffect(() => {
+    const onMouse = (e: MouseEvent) => {
+      // 3 is X1 ("back"); 4 is X2, left alone so forward stays unclaimed.
+      if (e.button !== 3) return;
+      e.preventDefault();
+      useStore.getState().goBack();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.altKey && e.key === "ArrowLeft") {
+        e.preventDefault();
+        useStore.getState().goBack();
+      }
+    };
+    window.addEventListener("mouseup", onMouse);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mouseup", onMouse);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, []);
+
   return (
     <div className={styles.app}>
       <Sidebar />

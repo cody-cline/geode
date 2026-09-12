@@ -18,6 +18,7 @@ import Browse from "./Browse";
 import { api } from "../lib/api";
 import { titleCase } from "../lib/format";
 import { modKey, planModFromProject } from "../lib/plan";
+import { useBackHandler } from "../lib/useBackHandler";
 import { useStore } from "../lib/store";
 import { LOADERS } from "../lib/types";
 import type {
@@ -62,6 +63,10 @@ export default function PlanView({ id }: { id: string }) {
   const [addSource, setAddSource] = useState<PlanSource>("mods");
   const [building, setBuilding] = useState(false);
   const [name, setName] = useState("");
+
+  // Adding takes over the view, so back should come out of it rather than
+  // leaving the plan behind entirely.
+  useBackHandler(adding, () => setAdding(false));
 
   // Guards against a slow resolve landing after a newer one.
   const resolveSeq = useRef(0);

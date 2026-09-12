@@ -20,6 +20,7 @@ import LogsTab from "./instance/LogsTab";
 import PackTab from "./instance/PackTab";
 import SettingsTab from "./instance/SettingsTab";
 import { api } from "../lib/api";
+import { useBackHandler } from "../lib/useBackHandler";
 import { launchInstance, stopInstance } from "../lib/actions";
 import { hashHue, relativeTime } from "../lib/format";
 import { formatDuration, useStore } from "../lib/store";
@@ -50,6 +51,10 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
   // Browsing happens inside the instance rather than navigating to the global
   // Browse view, so the sidebar stays put and the destination stays obvious.
   const [browsing, setBrowsing] = useState(false);
+
+  // Browsing is a place you came from the instance to, so back returns to it
+  // rather than leaving the instance altogether.
+  useBackHandler(browsing, () => setBrowsing(false));
 
   const instance = instances.find((i) => i.id === id);
 

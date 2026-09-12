@@ -15,6 +15,7 @@ import {
 
 import { api } from "../lib/api";
 import { renderProviderBody } from "../lib/richtext";
+import { useBackHandler } from "../lib/useBackHandler";
 import { launchInstance } from "../lib/actions";
 import { useStore } from "../lib/store";
 import { compactNumber, fileSize, relativeTime, titleCase } from "../lib/format";
@@ -89,6 +90,10 @@ export default function ProjectPanel({
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
+
+  // Back closes the panel before it changes screen — it is the thing in front
+  // of you, so it is what the gesture is aimed at.
+  useBackHandler(true, onClose);
 
   const blocked = !project.distributionAllowed;
   const isModpack = project.kind === "modpack";

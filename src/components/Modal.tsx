@@ -1,6 +1,8 @@
 import { useEffect, useRef } from "react";
 import { X } from "lucide-react";
 
+import { useBackHandler } from "../lib/useBackHandler";
+
 import styles from "./Modal.module.css";
 
 export default function Modal({
@@ -19,6 +21,9 @@ export default function Modal({
   width?: number;
 }) {
   const panel = useRef<HTMLDivElement>(null);
+
+  // A dialog is dismissed by back, never navigated past.
+  useBackHandler(true, onClose);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

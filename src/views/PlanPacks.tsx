@@ -19,6 +19,7 @@ import ProjectPanel from "../components/ProjectPanel";
 import { api } from "../lib/api";
 import { compactNumber } from "../lib/format";
 import { modKey, planModFromProject } from "../lib/plan";
+import { useBackHandler } from "../lib/useBackHandler";
 import { renderProviderBody } from "../lib/richtext";
 import { useStore } from "../lib/store";
 import { LOADERS } from "../lib/types";
@@ -72,6 +73,11 @@ export default function PlanPacks({
   // fetching the project behind it before the panel has anything to show.
   const [selected, setSelected] = useState<Project | null>(null);
   const [opening, setOpening] = useState<string | null>(null);
+
+  // An opened pack is a place of its own: back returns to the list of packs.
+  // The mod panel registers later and so closes first, which gives the whole
+  // chain — panel, pack, adding, screen — one step at a time.
+  useBackHandler(Boolean(open), () => setOpen(null));
 
   const openMod = useCallback(
     async (mod: PlanMod) => {
