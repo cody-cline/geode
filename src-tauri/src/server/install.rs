@@ -85,7 +85,7 @@ pub async fn install_jar(
             };
 
             if builder.preflight == meta::Preflight::BuildTools {
-                installer::preflight_buildtools(&workspace).await?;
+                installer::preflight_buildtools(paths, &workspace).await?;
                 // BuildTools refuses to build a revision newer than itself and
                 // says so only after being run, so a copy kept from last time
                 // goes stale without any sign of it.
@@ -109,6 +109,7 @@ pub async fn install_jar(
                 &args,
                 builder.heap_mb,
                 builder.stage,
+                &super::git::path_entries(paths),
                 progress,
             )
             .await?;

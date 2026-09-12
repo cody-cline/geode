@@ -13,6 +13,7 @@
 pub mod backup;
 pub mod from_pack;
 pub mod from_plan;
+pub mod git;
 pub mod install;
 pub mod installer;
 pub mod logs;

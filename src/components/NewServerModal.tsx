@@ -1,11 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
-import { Blocks, Loader2, Puzzle, Server as ServerIcon } from "lucide-react";
+import {
+  Blocks,
+  GitBranch,
+  Loader2,
+  Puzzle,
+  Server as ServerIcon,
+} from "lucide-react";
 
 import Modal from "./Modal";
 import { api } from "../lib/api";
 import { useStore } from "../lib/store";
-import type { Server, ServerKindInfo } from "../lib/types";
+import type { GitStatus, Server, ServerKindInfo } from "../lib/types";
 
 import styles from "./NewServerModal.module.css";
 
@@ -25,6 +31,38 @@ export default function NewServerModal({
   const [version, setVersion] = useState("");
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
+
+  // Spigot is the one choice that needs something of the machine. Asked when
+  // it is picked, rather than discovered ten minutes into a compile.
+  const [git, setGit] = useState<GitStatus | null>(null);
+  const [gettingGit, setGettingGit] = useState(false);
+
+  useEffect(() => {
+    if (kind !== "spigot" || git?.present) return;
+    let cancelled = false;
+    api
+      .gitStatus()
+      .then((status) => !cancelled && setGit(status))
+      .catch(() => !cancelled && setGit(null));
+    return () => {
+      cancelled = true;
+    };
+  }, [kind, git?.present]);
+
+  async function getGit() {
+    setGettingGit(true);
+    try {
+      setGit(await api.installGit());
+    } catch (e) {
+      reportError("Could not install Git", e);
+      // Whatever happened, the question is still what is on the machine now.
+      await api.gitStatus().then(setGit).catch(() => {});
+    } finally {
+      setGettingGit(false);
+    }
+  }
+
+  const gitMissing = kind === "spigot" && git !== null && !git.present;
 
   useEffect(() => {
     api
@@ -86,7 +124,7 @@ export default function NewServerModal({
           <button
             className="btn btn-primary"
             onClick={create}
-            disabled={busy || !version}
+            disabled={busy || !version || gitMissing}
           >
             {busy ? (
               <Loader2 size={14} className="spin" />
@@ -192,6 +230,41 @@ export default function NewServerModal({
                 allow anyone to hand out a finished jar. The first build takes
                 several minutes; later ones reuse the same work and are faster.
               </p>
+            )}
+            {gitMissing && (
+              <div className={styles.needs}>
+                <GitBranch size={15} />
+                <div className={styles.needsBody}>
+                  <strong>Compiling Spigot needs Git, and it is not here.</strong>
+                  <p>{git.plan}</p>
+                  {/* Shown in full before it runs, because on Linux and macOS
+                      this installs software outside Geode. */}
+                  {git.command && <code className={styles.command}>{git.command}</code>}
+                  <div className={styles.needsActions}>
+                    {git.automatic && (
+                      <button
+                        className="btn btn-primary btn-sm"
+                        onClick={getGit}
+                        disabled={gettingGit}
+                      >
+                        {gettingGit && <Loader2 size={13} className="spin" />}
+                        {gettingGit ? "Installing…" : "Install Git"}
+                      </button>
+                    )}
+                    <button
+                      className="btn btn-sm"
+                      onClick={() => void api.gitStatus().then(setGit)}
+                      disabled={gettingGit}
+                    >
+                      Check again
+                    </button>
+                  </div>
+                  <p className={styles.needsAside}>
+                    {git.manual} Or pick Paper, which runs every Spigot plugin
+                    and installs without building anything.
+                  </p>
+                </div>
+              </div>
             )}
             {(chosen?.id === "forge" ||
               chosen?.id === "neoforge" ||

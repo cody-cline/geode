@@ -1322,6 +1322,43 @@ pub async fn create_server_from_modpack(
     }
 }
 
+/// Whether this machine has the Git that compiling Spigot needs, and what
+/// Geode would do about it if not.
+///
+/// Asked by the create dialog before Spigot is confirmed, so the answer arrives
+/// while there is still something to do about it rather than ten minutes into a
+/// build.
+#[tauri::command]
+pub async fn git_status(state: State<'_, AppState>) -> Result<crate::server::git::GitStatus> {
+    Ok(crate::server::git::status(&state.paths).await)
+}
+
+/// Get Git, having been told to.
+///
+/// Only ever called from a confirmation, because on Linux and macOS this
+/// installs software system-wide — which is also why the dialog shows the
+/// exact command first.
+#[tauri::command]
+pub async fn install_git(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<crate::server::git::GitStatus> {
+    let progress = Progress::new(app, "git".to_string());
+    state.register_cancel(progress.id(), progress.cancel_flag());
+    let result = crate::server::git::install(&state.http, &state.paths, &progress).await;
+    state.clear_cancel(progress.id());
+    match result {
+        Ok(status) => {
+            progress.finish().await;
+            Ok(status)
+        }
+        Err(e) => {
+            progress.fail(&e.to_string()).await;
+            Err(e)
+        }
+    }
+}
+
 fn parse_server_kind(s: &str) -> Result<crate::server::ServerKind> {
     crate::server::ServerKind::parse(s)
         .ok_or_else(|| Error::msg(format!("unknown server type '{s}'")))

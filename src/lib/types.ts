@@ -236,6 +236,26 @@ export interface Server {
   hasWorld: boolean;
 }
 
+/**
+ * Whether Git is on this machine, and what Geode would do about it.
+ *
+ * Only Spigot needs it: it is compiled from source rather than downloaded.
+ */
+export interface GitStatus {
+  present: boolean;
+  version?: string | null;
+  /** True when this is Geode's own copy rather than the machine's. */
+  portable: boolean;
+  /** One sentence describing what confirming would do. */
+  plan: string;
+  /** The exact command Geode would run, shown before it runs. */
+  command?: string | null;
+  /** Whether Geode can finish the job itself once confirmed. */
+  automatic: boolean;
+  /** What to do by hand, always offered as a way out. */
+  manual: string;
+}
+
 /** One choice in the "what kind of server" picker. */
 export interface ServerKindInfo {
   id: string;

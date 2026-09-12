@@ -9,7 +9,7 @@
 //! cargo test --test live_server -- --ignored --nocapture
 //! ```
 
-use geode_lib::net;
+use geode_lib::net::{self, Progress};
 use geode_lib::server::{meta, ServerKind};
 
 /// The downloadable jar behind either kind of source — the server itself, or
@@ -357,6 +357,41 @@ async fn a_published_pack_names_the_servers_that_can_host_it() {
                 .join(", ")
         );
     }
+
+    let _ = tokio::fs::remove_dir_all(&paths.root).await;
+}
+
+/// The Windows answer to a missing Git, exercised from Linux.
+///
+/// Everything up to running the binary is platform-independent — find the
+/// newest release, pick the right asset out of the dozen on it, download,
+/// unpack — and that is where this can go wrong. Running the result cannot be
+/// checked here; what can be checked is that the two things BuildTools needs
+/// are in the archive, which is the part that would otherwise only be
+/// discovered by a Windows user halfway through a Spigot build.
+#[tokio::test]
+#[ignore = "hits the network, downloads ~50 MB"]
+async fn the_portable_git_geode_would_fetch_contains_what_buildtools_needs() {
+    let client = net::client();
+    let paths = geode_lib::paths::Paths {
+        root: std::env::temp_dir().join(format!("geode-mingit-{}", std::process::id())),
+    };
+    let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    paths.ensure_all().await.expect("scratch dirs");
+
+    geode_lib::server::git::fetch_mingit(&client, &paths, &Progress::silent("test"))
+        .await
+        .expect("fetching the portable Git should succeed");
+
+    // What the build's PATH is built from, so an empty answer here is the bug
+    // a Windows user would hit as "git: not found" mid-compile.
+    let entries = geode_lib::server::git::path_entries(&paths);
+    assert_eq!(entries.len(), 2, "a usable portable Git contributes two directories");
+    for (dir, needed) in entries.iter().zip(["git.exe", "sh.exe"]) {
+        let path = dir.join(needed);
+        assert!(path.is_file(), "{} is missing, and BuildTools asks for it", path.display());
+    }
+    println!("portable git unpacked to {}", paths.root.display());
 
     let _ = tokio::fs::remove_dir_all(&paths.root).await;
 }

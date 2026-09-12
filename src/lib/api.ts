@@ -31,6 +31,7 @@ import type {
   Schedule,
   Server,
   ServerBuildReport,
+  GitStatus,
   ServerKindInfo,
   ServerProperty,
   ServerSettings,
@@ -267,6 +268,10 @@ export const api = {
 
   // Servers
   serverKinds: () => invoke<ServerKindInfo[]>("server_kinds"),
+  /** Whether compiling Spigot is possible here, and what would make it so. */
+  gitStatus: () => invoke<GitStatus>("git_status"),
+  /** Only ever after the user has read `plan` and said yes. */
+  installGit: () => invoke<GitStatus>("install_git"),
   serverVersions: (kind: string) =>
     invoke<string[]>("server_versions", { kind }),
   listServers: () => invoke<Server[]>("list_servers"),

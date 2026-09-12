@@ -23,6 +23,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::error::{Error, Result};
 use crate::net::{Download, Progress};
+use crate::paths::Paths;
 
 /// How to start what an installer produced.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +59,7 @@ pub async fn run_tool(
     args: &[String],
     heap_mb: Option<u32>,
     stage: &str,
+    path_prefix: &[std::path::PathBuf],
     progress: &Progress,
 ) -> Result<()> {
     tokio::fs::create_dir_all(work_dir).await?;
@@ -81,6 +83,20 @@ pub async fn run_tool(
     // how BuildTools ends up refusing to start on a small one.
     if let Some(mb) = heap_mb {
         command.arg(format!("-Xmx{mb}M"));
+    }
+    // Prepended, so a Git of Geode's own is found by a tool that shells out to
+    // one — and so a Git the machine already has still wins, because the check
+    // that produced this list would have found that first and left it empty.
+    if !path_prefix.is_empty() {
+        let existing = std::env::var_os("PATH").unwrap_or_default();
+        let combined = std::env::join_paths(
+            path_prefix
+                .iter()
+                .cloned()
+                .chain(std::env::split_paths(&existing)),
+        )
+        .map_err(|e| Error::msg(format!("could not build a PATH for the tool: {e}")))?;
+        command.env("PATH", combined);
     }
     let mut child = command
         .arg("-jar")
@@ -162,7 +178,7 @@ const AWKWARD_PATH_CHARS: &str = "'#~()";
 /// Each of these is something it checks itself and then exits on, with a
 /// message aimed at someone watching a terminal. Checking first means the
 /// answer arrives immediately and says what to do about it.
-pub async fn preflight_buildtools(workspace: &Path) -> Result<()> {
+pub async fn preflight_buildtools(paths: &Paths, workspace: &Path) -> Result<()> {
     let path = workspace.to_string_lossy().to_string();
     if let Some(bad) = path.chars().find(|c| AWKWARD_PATH_CHARS.contains(*c)) {
         return Err(Error::msg(format!(
@@ -171,11 +187,21 @@ pub async fn preflight_buildtools(workspace: &Path) -> Result<()> {
         )));
     }
 
-    if !runs("git", &["--version"]).await {
-        return Err(Error::msg(missing_git_advice()));
+    // The frontend asks about Git before it gets here and offers to sort it
+    // out, so this is the backstop for the case where it was never asked —
+    // a plan build, a retry after Git was uninstalled.
+    if super::git::find(paths).await.is_none() {
+        return Err(Error::msg(
+            "Spigot is compiled with SpigotMC's BuildTools, which needs Git, and Git is \
+             not on this machine. Open Add server and pick Spigot again to have Geode \
+             sort that out — or choose Paper, which runs every Spigot plugin and installs \
+             without building anything.",
+        ));
     }
 
     // BuildTools runs `sh -c exit` before anything else and stops if it cannot.
+    // On Windows that `sh` comes from Git, so this is only worth asking where
+    // the system is expected to have one of its own.
     #[cfg(unix)]
     if !runs("sh", &["-c", "exit"]).await {
         return Err(Error::msg(
@@ -186,31 +212,8 @@ pub async fn preflight_buildtools(workspace: &Path) -> Result<()> {
     Ok(())
 }
 
-/// What to do about a missing Git, in terms of the machine it is missing on.
-///
-/// Geode does not install it. On Windows that would be defensible — Git's own
-/// Windows distribution publishes a portable build that unpacks anywhere — but
-/// there is no equivalent from the Git project for Linux or macOS. The static
-/// builds that exist are one person's repository each, and silently fetching
-/// and running an unofficial copy of the one tool that then executes hooks and
-/// pulls source is not a thing to do on somebody's behalf.
-fn missing_git_advice() -> String {
-    let opening = "Spigot is compiled with SpigotMC's BuildTools, which needs Git.";
-    let how = if cfg!(target_os = "windows") {
-        "Install Git for Windows from https://git-scm.com/download/win."
-    } else if cfg!(target_os = "macos") {
-        "Run `xcode-select --install` to get it from Apple."
-    } else {
-        "Install it with your package manager — `sudo apt install git`, \
-         `sudo dnf install git`, or `sudo pacman -S git`."
-    };
-    format!(
-        "{opening} {how} Or choose Paper, which runs every Spigot plugin and \
-         installs without building anything."
-    )
-}
-
 /// Whether a command can be run at all and exits cleanly.
+#[cfg(unix)]
 async fn runs(program: &str, args: &[&str]) -> bool {
     tokio::process::Command::new(program)
         .args(args)

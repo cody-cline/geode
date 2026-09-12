@@ -384,7 +384,7 @@ fn unpack_targz(archive: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-fn unpack_zip(archive: &Path, dest: &Path) -> Result<()> {
+pub(crate) fn unpack_zip(archive: &Path, dest: &Path) -> Result<()> {
     let file = std::fs::File::open(archive)?;
     let mut zip = zip::ZipArchive::new(file)?;
     for i in 0..zip.len() {
