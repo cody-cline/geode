@@ -46,6 +46,9 @@ pub fn run() {
                 // Leaving orphaned JVMs behind is worse than a hard stop.
                 if let Some(state) = window.app_handle().try_state::<AppState>() {
                     state.games.stop_all();
+                    // Servers get the same treatment: an orphaned server still
+                    // holds its port and its world files.
+                    state.servers.stop_all();
                 }
             }
         })
@@ -88,6 +91,20 @@ pub fn run() {
             commands::resolve_plan,
             commands::build_plan,
             commands::pack_contents,
+            commands::server_kinds,
+            commands::server_versions,
+            commands::list_servers,
+            commands::get_server,
+            commands::create_server,
+            commands::delete_server,
+            commands::update_server,
+            commands::accept_server_eula,
+            commands::start_server,
+            commands::stop_server,
+            commands::kill_server,
+            commands::send_server_command,
+            commands::running_servers,
+            commands::server_folder,
             commands::list_accounts,
             commands::begin_microsoft_login,
             commands::complete_microsoft_login,

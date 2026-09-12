@@ -1019,6 +1019,240 @@ pub async fn pack_contents(
 }
 
 // ---------------------------------------------------------------------------
+// Servers
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerView {
+    #[serde(flatten)]
+    pub server: crate::server::Server,
+    pub running: bool,
+}
+
+fn server_view(server: crate::server::Server, state: &AppState) -> ServerView {
+    ServerView {
+        running: state.servers.is_running(&server.id),
+        server,
+    }
+}
+
+/// What the create dialog needs to describe each choice.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerKindInfo {
+    pub id: String,
+    pub name: String,
+    /// False when the software cannot be fetched automatically — the dialog
+    /// shows why rather than offering a dead end.
+    pub installable: bool,
+    pub takes_plugins: bool,
+    pub takes_mods: bool,
+    pub is_proxy: bool,
+}
+
+#[tauri::command]
+pub async fn server_kinds() -> Result<Vec<ServerKindInfo>> {
+    Ok(crate::server::ServerKind::ALL
+        .iter()
+        .map(|&kind| ServerKindInfo {
+            id: kind.as_str().to_string(),
+            name: kind.display_name().to_string(),
+            installable: crate::server::meta::is_installable(kind),
+            takes_plugins: kind.takes_plugins(),
+            takes_mods: kind.takes_mods(),
+            is_proxy: kind.is_proxy(),
+        })
+        .collect())
+}
+
+fn parse_server_kind(s: &str) -> Result<crate::server::ServerKind> {
+    crate::server::ServerKind::parse(s)
+        .ok_or_else(|| Error::msg(format!("unknown server type '{s}'")))
+}
+
+#[tauri::command]
+pub async fn server_versions(state: State<'_, AppState>, kind: String) -> Result<Vec<String>> {
+    crate::server::meta::versions(&state.http, parse_server_kind(&kind)?).await
+}
+
+#[tauri::command]
+pub async fn list_servers(state: State<'_, AppState>) -> Result<Vec<ServerView>> {
+    Ok(crate::server::list(&state.paths)
+        .await?
+        .into_iter()
+        .map(|s| server_view(s, &state))
+        .collect())
+}
+
+#[tauri::command]
+pub async fn get_server(state: State<'_, AppState>, id: String) -> Result<ServerView> {
+    Ok(server_view(
+        crate::server::load(&state.paths, &id).await?,
+        &state,
+    ))
+}
+
+/// Create the server and put its jar in place.
+#[tauri::command]
+pub async fn create_server(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+    kind: String,
+    version: String,
+) -> Result<ServerView> {
+    let kind = parse_server_kind(&kind)?;
+    let mut server = crate::server::create(&state.paths, name, kind, version).await?;
+
+    let progress = Progress::new(app, format!("server:{}", server.id));
+    state.register_cancel(progress.id(), progress.cancel_flag());
+    let result =
+        crate::server::install::install_jar(&state.http, &state.paths, &mut server, &progress).await;
+    state.clear_cancel(progress.id());
+
+    match result {
+        Ok(()) => {
+            progress.finish().await;
+            Ok(server_view(server, &state))
+        }
+        Err(e) => {
+            // The folder stays: a server with no jar is something the UI can
+            // offer to retry, and deleting it would throw away the name and
+            // settings the user just chose.
+            progress.fail(&e.to_string()).await;
+            Err(e)
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn delete_server(state: State<'_, AppState>, id: String) -> Result<()> {
+    if state.servers.is_running(&id) {
+        return Err(Error::msg("stop the server before deleting it"));
+    }
+    crate::server::delete(&state.paths, &id).await
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerPatch {
+    pub name: Option<String>,
+    pub notes: Option<String>,
+    pub settings: Option<crate::server::ServerSettings>,
+}
+
+#[tauri::command]
+pub async fn update_server(
+    state: State<'_, AppState>,
+    id: String,
+    patch: ServerPatch,
+) -> Result<ServerView> {
+    let mut server = crate::server::load(&state.paths, &id).await?;
+    if let Some(name) = patch.name {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return Err(Error::msg("the server needs a name"));
+        }
+        server.name = name;
+    }
+    if let Some(notes) = patch.notes {
+        server.notes = notes;
+    }
+    if let Some(settings) = patch.settings {
+        server.settings = settings;
+    }
+    server.save(&state.paths).await?;
+    Ok(server_view(server, &state))
+}
+
+/// Record that the user accepted Mojang's EULA, and write `eula.txt`.
+///
+/// Its own command because it is the user's act: the UI asks, they answer, and
+/// only then does the file exist.
+#[tauri::command]
+pub async fn accept_server_eula(state: State<'_, AppState>, id: String) -> Result<ServerView> {
+    let mut server = crate::server::load(&state.paths, &id).await?;
+    crate::server::accept_eula(&state.paths, &mut server).await?;
+    Ok(server_view(server, &state))
+}
+
+#[tauri::command]
+pub async fn start_server(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<u32> {
+    if state.servers.is_running(&id) {
+        return Err(Error::msg("that server is already running"));
+    }
+    let mut server = crate::server::load(&state.paths, &id).await?;
+
+    let progress = Progress::new(app.clone(), format!("server:{id}"));
+    let java = match server.settings.java_path.clone() {
+        Some(path) => PathBuf::from(path),
+        None => match server.java_major {
+            Some(major) => {
+                crate::java::ensure(&state.http, &state.paths, major, None, &progress).await?
+            }
+            // Nothing told us which Java this wants — a proxy, or a jar
+            // installed before we started asking. The newest one is the best
+            // guess available.
+            None => crate::java::detect(&state.paths)
+                .await
+                .into_iter()
+                .next()
+                .map(|j| j.path)
+                .ok_or_else(|| Error::msg("no Java runtime was found on this system"))?,
+        },
+    };
+
+    let pid = crate::server::run::start(
+        &app,
+        &state.paths,
+        &server,
+        java,
+        state.servers.clone(),
+    )
+    .await?;
+
+    server.last_started = Some(chrono::Utc::now().timestamp());
+    server.save(&state.paths).await?;
+    Ok(pid)
+}
+
+/// Ask the server to stop the way an operator would, so it saves first.
+#[tauri::command]
+pub async fn stop_server(state: State<'_, AppState>, id: String) -> Result<bool> {
+    let server = crate::server::load(&state.paths, &id).await?;
+    Ok(state.servers.stop(&id, server.kind))
+}
+
+#[tauri::command]
+pub async fn kill_server(state: State<'_, AppState>, id: String) -> Result<bool> {
+    Ok(state.servers.kill(&id))
+}
+
+#[tauri::command]
+pub async fn send_server_command(
+    state: State<'_, AppState>,
+    id: String,
+    command: String,
+) -> Result<bool> {
+    Ok(state.servers.send(&id, &command))
+}
+
+#[tauri::command]
+pub async fn running_servers(state: State<'_, AppState>) -> Result<Vec<String>> {
+    Ok(state.servers.running_ids())
+}
+
+#[tauri::command]
+pub async fn server_folder(state: State<'_, AppState>, id: String) -> Result<String> {
+    Ok(state.paths.server_run(&id).to_string_lossy().to_string())
+}
+
+// ---------------------------------------------------------------------------
 // Accounts
 // ---------------------------------------------------------------------------
 

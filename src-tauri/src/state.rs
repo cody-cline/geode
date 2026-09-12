@@ -72,6 +72,8 @@ pub struct AppState {
     /// genuinely CurseForge-only mod does not re-ask on every save.
     pub plan_twins: crate::plan::prefer::TwinCache,
     pub games: GameRegistry,
+    /// Which servers have a process attached, and the pipe to each console.
+    pub servers: crate::server::run::ServerRegistry,
     /// Cached so every command does not re-read config.json from disk.
     config: tokio::sync::RwLock<Config>,
     /// Cancellation flags for in-flight installs, keyed by progress id.
@@ -89,6 +91,7 @@ impl AppState {
             plan_support: crate::plan::resolve::SupportCache::new(),
             plan_twins: crate::plan::prefer::TwinCache::new(),
             games: GameRegistry::default(),
+            servers: crate::server::run::ServerRegistry::default(),
             config: tokio::sync::RwLock::new(config),
             cancels: Mutex::new(HashMap::new()),
         }

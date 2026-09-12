@@ -442,6 +442,28 @@ pub async fn resolve(
     }
 }
 
+/// The Java major version this server will need.
+///
+/// Mojang states it per Minecraft version, which covers everything built on
+/// one. A proxy tracks its own schedule and says nothing we can read, so it
+/// gets `None` and the newest Java on the machine.
+///
+/// Best-effort: a failure here should cost the server a precise answer, not
+/// its installation.
+pub async fn required_java(
+    client: &reqwest::Client,
+    kind: ServerKind,
+    version: &str,
+) -> Option<u32> {
+    if kind.is_proxy() {
+        return None;
+    }
+    let manifest = crate::meta::piston::fetch_manifest(client).await.ok()?;
+    let entry = manifest.versions.iter().find(|v| v.id == version)?;
+    let json: crate::meta::piston::VersionJson = get_json(client, &entry.url).await.ok()?;
+    Some(crate::java::required_major(&json))
+}
+
 /// Whether Geode can install this software without help.
 pub fn is_installable(kind: ServerKind) -> bool {
     paper_project(kind).is_some()

@@ -12,6 +12,7 @@
 
 pub mod install;
 pub mod meta;
+pub mod run;
 
 use serde::{Deserialize, Serialize};
 
@@ -45,6 +46,25 @@ pub enum ServerKind {
 }
 
 impl ServerKind {
+    /// Every kind, in the order a picker should offer them: what most people
+    /// want first, the modded loaders next, hybrids and proxies last.
+    pub const ALL: &'static [ServerKind] = &[
+        ServerKind::Paper,
+        ServerKind::Purpur,
+        ServerKind::Folia,
+        ServerKind::Spigot,
+        ServerKind::Vanilla,
+        ServerKind::Fabric,
+        ServerKind::Quilt,
+        ServerKind::NeoForge,
+        ServerKind::Forge,
+        ServerKind::Mohist,
+        ServerKind::Arclight,
+        ServerKind::Banner,
+        ServerKind::Velocity,
+        ServerKind::Waterfall,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             ServerKind::Vanilla => "vanilla",
@@ -214,6 +234,11 @@ pub struct Server {
     /// File name of the jar to launch, relative to the run directory.
     #[serde(default)]
     pub jar: String,
+    /// The Java major version this server needs, worked out when the jar was
+    /// installed. Recorded rather than derived at start-up so starting a
+    /// server does not depend on being online.
+    #[serde(default)]
+    pub java_major: Option<u32>,
     #[serde(default)]
     pub created_at: i64,
     #[serde(default)]
@@ -242,6 +267,7 @@ impl Server {
             mc_version,
             build: String::new(),
             jar: String::new(),
+            java_major: None,
             created_at: chrono::Utc::now().timestamp(),
             last_started: None,
             eula_accepted: false,

@@ -48,5 +48,8 @@ pub async fn install_jar(
 
     server.jar = jar.file_name;
     server.build = jar.build;
+    // Asked now, while we are certainly online, so starting the server later
+    // never needs the network to find out which Java it wants.
+    server.java_major = meta::required_java(client, server.kind, &server.mc_version).await;
     server.save(paths).await
 }
