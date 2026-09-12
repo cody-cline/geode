@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde::Serialize;
 use sha1::{Digest, Sha1};
+use sha2::Sha256;
 use tauri::{AppHandle, Emitter};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
@@ -160,6 +161,9 @@ pub struct Download {
     pub url: String,
     pub dest: PathBuf,
     pub sha1: Option<String>,
+    /// Some publishers checksum with SHA-256 instead — PaperMC does — and a
+    /// hash we cannot check is a hash that protects nothing.
+    pub sha256: Option<String>,
     pub size: Option<u64>,
     /// Human-readable name shown in the progress detail line.
     pub label: String,
@@ -176,6 +180,7 @@ impl Download {
             url,
             dest,
             sha1: None,
+            sha256: None,
             size: None,
             label,
         }
@@ -183,6 +188,11 @@ impl Download {
 
     pub fn sha1(mut self, hash: Option<String>) -> Self {
         self.sha1 = hash;
+        self
+    }
+
+    pub fn sha256(mut self, hash: Option<String>) -> Self {
+        self.sha256 = hash;
         self
     }
 
@@ -204,6 +214,13 @@ pub async fn sha1_file(path: &Path) -> Result<String> {
     Ok(hex::encode(h.finalize()))
 }
 
+pub async fn sha256_file(path: &Path) -> Result<String> {
+    let bytes = tokio::fs::read(path).await?;
+    let mut h = Sha256::new();
+    h.update(&bytes);
+    Ok(hex::encode(h.finalize()))
+}
+
 /// True when the file already on disk matches what we were going to download.
 /// When we have a hash we trust only the hash; otherwise we fall back to size,
 /// and with neither we accept any existing file.
@@ -213,6 +230,9 @@ async fn already_valid(d: &Download) -> bool {
     };
     if !meta.is_file() {
         return false;
+    }
+    if let Some(expect) = &d.sha256 {
+        return matches!(sha256_file(&d.dest).await, Ok(actual) if actual.eq_ignore_ascii_case(expect));
     }
     if let Some(expect) = &d.sha1 {
         return matches!(sha1_file(&d.dest).await, Ok(actual) if actual.eq_ignore_ascii_case(expect));
@@ -262,19 +282,32 @@ async fn try_fetch(client: &reqwest::Client, d: &Download) -> Result<()> {
         d.dest.extension().and_then(|e| e.to_str()).unwrap_or("tmp")
     ));
     let mut file = tokio::fs::File::create(&tmp).await?;
-    let mut hasher = Sha1::new();
+    // Only hash what we were given something to compare against.
+    let mut sha1 = d.sha1.as_ref().map(|_| Sha1::new());
+    let mut sha256 = d.sha256.as_ref().map(|_| Sha256::new());
     let mut stream = resp.bytes_stream();
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
-        hasher.update(&chunk);
+        if let Some(h) = &mut sha1 {
+            h.update(&chunk);
+        }
+        if let Some(h) = &mut sha256 {
+            h.update(&chunk);
+        }
         file.write_all(&chunk).await?;
     }
     file.flush().await?;
     drop(file);
 
-    if let Some(expect) = &d.sha1 {
-        let actual = hex::encode(hasher.finalize());
+    let checked = [
+        (d.sha256.as_ref(), sha256.map(|h| hex::encode(h.finalize()))),
+        (d.sha1.as_ref(), sha1.map(|h| hex::encode(h.finalize()))),
+    ];
+    for (expect, actual) in checked {
+        let (Some(expect), Some(actual)) = (expect, actual) else {
+            continue;
+        };
         if !actual.eq_ignore_ascii_case(expect) {
             let _ = tokio::fs::remove_file(&tmp).await;
             return Err(Error::Checksum {

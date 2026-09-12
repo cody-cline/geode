@@ -12,6 +12,7 @@ pub mod net;
 pub mod paths;
 pub mod plan;
 pub mod providers;
+pub mod server;
 pub mod state;
 
 use tauri::Manager;

@@ -50,6 +50,19 @@ impl Paths {
     pub fn plan(&self, id: &str) -> PathBuf {
         self.plans().join(format!("{id}.json"))
     }
+    pub fn servers(&self) -> PathBuf {
+        self.root.join("servers")
+    }
+    pub fn server(&self, id: &str) -> PathBuf {
+        self.servers().join(id)
+    }
+    /// A server's working directory — where the jar runs, and where the world,
+    /// `server.properties` and `eula.txt` live. Kept beside `server.json`
+    /// rather than containing it, so a backup of the run directory is exactly
+    /// the server's own data and none of our bookkeeping.
+    pub fn server_run(&self, id: &str) -> PathBuf {
+        self.server(id).join("run")
+    }
     /// The game's working directory — what vanilla calls `.minecraft`.
     pub fn game_dir(&self, id: &str) -> PathBuf {
         self.instance(id).join(".minecraft")
@@ -106,6 +119,7 @@ impl Paths {
             self.root.clone(),
             self.instances(),
             self.plans(),
+            self.servers(),
             self.libraries(),
             self.asset_objects(),
             self.asset_indexes(),
