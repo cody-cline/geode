@@ -859,11 +859,18 @@ pub async fn create_plan(state: State<'_, AppState>, name: String) -> Result<cra
 /// Save a whole plan. The list of mods is small and edited as a unit, so the
 /// frontend owns it and writes it back rather than issuing an add/remove call
 /// per row.
+///
+/// Every mod enters a plan through here, whatever route it came by, which makes
+/// this the one place worth asking whether a CurseForge entry is really a
+/// Modrinth mod wearing the wrong name.
 #[tauri::command]
 pub async fn save_plan(
     state: State<'_, AppState>,
-    plan: crate::plan::Plan,
+    mut plan: crate::plan::Plan,
 ) -> Result<crate::plan::Plan> {
+    crate::plan::prefer::prefer_modrinth(&state.http, &mut plan.mods, &state.plan_twins).await;
+    // Rewriting identities can turn two entries into one, so de-duplication —
+    // which `save` does — has to happen after, not before.
     crate::plan::save(&state.paths, plan).await
 }
 

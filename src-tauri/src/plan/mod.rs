@@ -11,6 +11,7 @@
 
 pub mod build;
 pub mod pack;
+pub mod prefer;
 pub mod resolve;
 
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,16 @@ impl PlanMod {
     /// search and again from a pack — is one mod.
     pub fn key(&self) -> (String, String) {
         (self.provider.to_ascii_lowercase(), self.project_id.clone())
+    }
+
+    pub fn from_project(project: &crate::providers::Project) -> Self {
+        Self {
+            provider: project.provider.as_str().to_string(),
+            project_id: project.id.clone(),
+            name: project.name.clone(),
+            slug: Some(project.slug.clone()),
+            icon_url: project.icon_url.clone(),
+        }
     }
 }
 

@@ -68,6 +68,9 @@ pub struct AppState {
     /// Per-project file coverage, so re-resolving a plan after one edit does
     /// not re-read every mod in it.
     pub plan_support: crate::plan::resolve::SupportCache,
+    /// Which CurseForge projects have a Modrinth twin, so a plan that keeps a
+    /// genuinely CurseForge-only mod does not re-ask on every save.
+    pub plan_twins: crate::plan::prefer::TwinCache,
     pub games: GameRegistry,
     /// Cached so every command does not re-read config.json from disk.
     config: tokio::sync::RwLock<Config>,
@@ -84,6 +87,7 @@ impl AppState {
             connector: crate::connector::SupportCache::new(),
             jars: crate::instance::jar::MetaCache::new(),
             plan_support: crate::plan::resolve::SupportCache::new(),
+            plan_twins: crate::plan::prefer::TwinCache::new(),
             games: GameRegistry::default(),
             config: tokio::sync::RwLock::new(config),
             cancels: Mutex::new(HashMap::new()),

@@ -347,17 +347,24 @@ fn merge(modrinth: Vec<Project>, curseforge: Vec<Project>, sort: SortBy) -> Vec<
     }
 }
 
+fn match_key(p: &Project) -> String {
+    identity_key(&p.slug, &p.name)
+}
+
 /// Identity key for cross-platform matching.
 ///
 /// Slugs agree far more often than not (`jei`, `sodium`, `create`), and where
 /// they disagree the normalised display name usually catches it. We compare
 /// both and treat a hit on either as the same project.
-fn match_key(p: &Project) -> String {
-    let by_slug = normalize(&p.slug);
+///
+/// Public because the same question is asked outside search: a plan copied out
+/// of a CurseForge pack wants to know which Modrinth project each entry is.
+pub fn identity_key(slug: &str, name: &str) -> String {
+    let by_slug = normalize(slug);
     if by_slug.len() >= 3 {
         return by_slug;
     }
-    normalize(&p.name)
+    normalize(name)
 }
 
 fn normalize(s: &str) -> String {

@@ -74,7 +74,7 @@ pub async fn contents(
             // thing filtered here is an id that resolved to nothing.
             ids.iter()
                 .filter_map(|id| projects.iter().find(|p| &p.id == id))
-                .map(to_plan_mod)
+                .map(PlanMod::from_project)
                 .collect()
         }
         PackMods::CurseForge(ids) => {
@@ -95,21 +95,11 @@ pub async fn contents(
                 // The manifest does not distinguish mods from resource packs,
                 // so the project's own type is what settles it.
                 .filter(|p| p.kind == providers::ProjectKind::Mod)
-                .map(to_plan_mod)
+                .map(PlanMod::from_project)
                 .collect()
         }
     };
     progress.finish().await;
 
     Ok(mods)
-}
-
-fn to_plan_mod(project: &providers::Project) -> PlanMod {
-    PlanMod {
-        provider: project.provider.as_str().to_string(),
-        project_id: project.id.clone(),
-        name: project.name.clone(),
-        slug: Some(project.slug.clone()),
-        icon_url: project.icon_url.clone(),
-    }
 }
