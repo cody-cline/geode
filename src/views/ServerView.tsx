@@ -16,7 +16,6 @@ import {
   ExternalLink,
   FolderOpen,
   Loader2,
-  Package,
   Play,
   Plus,
   Square,
@@ -27,13 +26,13 @@ import InstanceIcon from "../components/InstanceIcon";
 import Modal from "../components/Modal";
 import Browse from "./Browse";
 import GraphTab from "./instance/GraphTab";
+import ServerContentTab from "./server/ContentTab";
+import type { ServerFolder } from "./server/ContentTab";
 import { api } from "../lib/api";
-import { fileSize, hashHue, providerShort, relativeTime } from "../lib/format";
+import { fileSize, hashHue, relativeTime } from "../lib/format";
 import { useStore } from "../lib/store";
 import type {
   BackupInfo,
-  ContentItem,
-  ContentKind,
   LogFile,
   Schedule,
   Server,
@@ -57,13 +56,6 @@ const TABS = [
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
-
-/**
- * The folders a server actually has. Narrower than `ContentKind` on purpose —
- * a server has no resource packs or shaders of its own, and browsing for one
- * would offer somewhere to put it that does not exist.
- */
-type ServerFolder = Extract<ContentKind, "plugin" | "mod" | "datapack">;
 
 /**
  * A server's console line, as the server writes it:
@@ -500,7 +492,7 @@ export default function ServerView({ id }: { id: string }) {
           </div>
         </div>
       ) : active === "content" ? (
-        <ContentPane server={server} onAdd={setAdding} />
+        <ServerContentTab server={server} onBrowse={setAdding} />
       ) : active === "graph" ? (
         // Whichever folder this server actually keeps its content in: a Paper
         // server has no mods, and drawing that folder would show an empty
@@ -560,218 +552,6 @@ export default function ServerView({ id }: { id: string }) {
         </Modal>
       )}
     </>
-  );
-}
-
-/**
- * What is installed in the server's folders.
- *
- * Which folders exist depends on the software, and the backend is the one that
- * knows: a hybrid has both `plugins/` and `mods/`, and it is the only case
- * where the switcher is worth showing.
- */
-function ContentPane({
-  server,
-  onAdd,
-}: {
-  server: Server;
-  onAdd: (kind: ServerFolder) => void;
-}) {
-  const reportError = useStore((s) => s.reportError);
-  const refreshServers = useStore((s) => s.refreshServers);
-
-  // Capabilities come from the server rather than its kind. A Fabric server
-  // with Cardboard installed takes Bukkit plugins, and no amount of knowing
-  // what "fabric" means would reveal that. Datapacks are the world's rather
-  // than the loader's, so even a vanilla server has somewhere to put them.
-  const folders = useMemo(() => {
-    const out: { id: ServerFolder; label: string }[] = [];
-    if (server.takesPlugins) out.push({ id: "plugin", label: "Plugins" });
-    if (server.takesMods) out.push({ id: "mod", label: "Mods" });
-    if (server.hasWorld) out.push({ id: "datapack", label: "Data Packs" });
-    return out;
-  }, [server.takesPlugins, server.takesMods, server.hasWorld]);
-
-  const [folder, setFolder] = useState<ServerFolder>(folders[0]?.id ?? "mod");
-  const [items, setItems] = useState<ContentItem[] | null>(null);
-  const [addingCardboard, setAddingCardboard] = useState(false);
-
-  const load = useCallback(async () => {
-    try {
-      setItems(await api.listServerContent(server.id, folder));
-    } catch (e) {
-      reportError("Could not read the server folder", e);
-      setItems([]);
-    }
-  }, [server.id, folder, reportError]);
-
-  useEffect(() => {
-    setItems(null);
-    void load();
-  }, [load]);
-
-  async function toggle(item: ContentItem) {
-    try {
-      await api.setServerContentEnabled(
-        server.id,
-        folder,
-        item.fileName,
-        !item.enabled,
-      );
-      await load();
-    } catch (e) {
-      reportError("Could not toggle that file", e);
-    }
-  }
-
-  async function remove(item: ContentItem) {
-    try {
-      await api.removeServerContent(server.id, folder, item.fileName);
-      await load();
-    } catch (e) {
-      reportError(`Could not delete ${item.name}`, e);
-    }
-  }
-
-  const takesNothing = folders.length === 0;
-  const noun =
-    folders.find((f) => f.id === folder)?.label.toLowerCase() ?? "files";
-
-  async function addCardboard() {
-    setAddingCardboard(true);
-    try {
-      await api.addCardboard(server.id);
-      // The server's capabilities change with it, so the view has to be re-read
-      // rather than patched here.
-      await refreshServers();
-    } catch (e) {
-      reportError("Could not add Cardboard", e);
-    } finally {
-      setAddingCardboard(false);
-    }
-  }
-
-  if (takesNothing) {
-    return (
-      <div className={styles.settings}>
-        <p className={styles.pending}>
-          A proxy hosts no world of its own — it sits in front of other servers,
-          so there is nothing here to install into.
-        </p>
-      </div>
-    );
-  }
-
-  return (
-    <div className={styles.settings}>
-      <div className={styles.contentHead}>
-        {folders.length > 1 && (
-          <div className={styles.folders}>
-            {folders.map((option) => (
-              <button
-                key={option.id}
-                className={clsx(
-                  styles.folderTab,
-                  folder === option.id && styles.folderTabActive,
-                )}
-                onClick={() => setFolder(option.id)}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-        )}
-        <div style={{ flex: 1 }} />
-        <button className="btn btn-sm btn-primary" onClick={() => onAdd(folder)}>
-          <Plus size={13} />
-          Add {noun}
-        </button>
-      </div>
-
-      {/* Cardboard is a mod, but what it does is change what the server is:
-          afterwards this pane grows a Plugins folder that was not there. */}
-      {server.canAddCardboard && (
-        <p className={styles.pending}>
-          This server runs mods but not Bukkit plugins.{" "}
-          <button
-            className="btn btn-sm"
-            onClick={() => void addCardboard()}
-            disabled={addingCardboard}
-          >
-            {addingCardboard ? "Adding…" : "Add Cardboard"}
-          </button>{" "}
-          to load plugins alongside them.
-        </p>
-      )}
-
-      {items === null ? (
-        <div className={styles.rows}>
-          {Array.from({ length: 4 }, (_, i) => (
-            <div key={i} className="skeleton" style={{ height: 46 }} />
-          ))}
-        </div>
-      ) : items.length === 0 ? (
-        <p className={styles.pending}>
-          No {noun} installed. Anything you add lands in{" "}
-          {/* Datapacks go inside the world, which is where the server reads
-              them from — not in a folder beside it. */}
-          <code>
-            {folder === "datapack" ? "<world>/datapacks" : folder === "plugin" ? "plugins" : "mods"}
-          </code>
-          .
-        </p>
-      ) : (
-        <div className={styles.rows}>
-          {items.map((item) => (
-            <div
-              key={item.fileName}
-              className={clsx(styles.row, !item.enabled && styles.rowOff)}
-            >
-              <label className={styles.rowToggle}>
-                <input
-                  type="checkbox"
-                  checked={item.enabled}
-                  onChange={() => void toggle(item)}
-                  aria-label={`${item.enabled ? "Disable" : "Enable"} ${item.name}`}
-                />
-              </label>
-
-              <span className={styles.rowIcon}>
-                {item.iconUrl ? (
-                  <img src={item.iconUrl} alt="" loading="lazy" />
-                ) : (
-                  <Package size={15} />
-                )}
-              </span>
-
-              <span className={styles.rowText}>
-                <span className={styles.rowName}>{item.name}</span>
-                <span className={styles.rowMeta}>
-                  {item.version && <span>{item.version}</span>}
-                  <span>{fileSize(item.size)}</span>
-                  {item.fromDisk && <span>added by hand</span>}
-                </span>
-              </span>
-
-              {item.provider && (
-                <span className={clsx("badge", `badge-${item.provider}`)}>
-                  {providerShort(item.provider)}
-                </span>
-              )}
-
-              <button
-                className={styles.rowRemove}
-                onClick={() => void remove(item)}
-                title={`Delete ${item.name}`}
-                aria-label={`Delete ${item.name}`}
-              >
-                <Trash2 size={14} />
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
   );
 }
 

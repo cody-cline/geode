@@ -119,6 +119,7 @@ pub fn run() {
             commands::add_local_server_content,
             commands::check_server_content_updates,
             commands::apply_server_content_update,
+            commands::link_untracked_server_content,
             commands::create_server_from_plan,
             commands::list_server_logs,
             commands::read_server_log,

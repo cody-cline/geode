@@ -1490,6 +1490,57 @@ pub async fn apply_server_content_update(
     install_server_content(app, state, id, provider, project_id, Some(version_id), kind).await
 }
 
+/// Identify files dropped into a server's folders by hand, by their hashes.
+#[tauri::command]
+pub async fn link_untracked_server_content(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<crate::install::content::LinkReport> {
+    let mut server = crate::server::load(&state.paths, &id).await?;
+    let progress = Progress::new(app, format!("link:{id}"));
+    state.register_cancel(progress.id(), progress.cancel_flag());
+
+    // Only the folders this server actually has. Looking in the others would
+    // hash nothing and report on a folder that does not exist.
+    let mut wanted = Vec::new();
+    if server.takes_mods() {
+        wanted.push(ContentKind::Mod);
+    }
+    if server.takes_plugins() {
+        wanted.push(ContentKind::Plugin);
+    }
+    if !server.kind.is_proxy() {
+        wanted.push(ContentKind::DataPack);
+    }
+
+    let mut folders = Vec::new();
+    for kind in wanted {
+        folders.push((kind, crate::server::content_dir(&state.paths, &id, kind).await));
+    }
+
+    let result = crate::install::content::link_untracked_in(
+        &state.http,
+        &folders,
+        &mut server.content,
+        &state.jars,
+        &progress,
+    )
+    .await;
+
+    state.clear_cancel(progress.id());
+    match result {
+        Ok(report) => {
+            server.save(&state.paths).await?;
+            Ok(report)
+        }
+        Err(e) => {
+            progress.fail(&e.to_string()).await;
+            Err(e)
+        }
+    }
+}
+
 /// Install a plugin or mod into a server.
 ///
 /// The caller says which it is, because the two live in different folders and

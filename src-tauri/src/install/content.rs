@@ -521,22 +521,41 @@ pub async fn link_untracked(
 ) -> Result<LinkReport> {
     use crate::instance::content::{self as content, ContentKind};
 
-    let kinds = [
+    let folders: Vec<(ContentKind, std::path::PathBuf)> = [
         ContentKind::Mod,
         ContentKind::ResourcePack,
         ContentKind::ShaderPack,
         ContentKind::DataPack,
-    ];
+    ]
+    .into_iter()
+    .map(|kind| (kind, content::content_dir(paths, &instance.id, kind)))
+    .collect();
+
+    link_untracked_in(client, &folders, &mut instance.content, jars, progress).await
+}
+
+/// The same, over whatever folders the caller names.
+///
+/// A server's are not an instance's: it holds plugins, it has no shaders at
+/// all, and its datapacks live inside its world rather than beside it. So the
+/// folders are given rather than assumed from an id.
+pub async fn link_untracked_in(
+    client: &reqwest::Client,
+    folders: &[(crate::instance::content::ContentKind, std::path::PathBuf)],
+    records: &mut Vec<ContentRecord>,
+    jars: &crate::instance::jar::MetaCache,
+    progress: &Progress,
+) -> Result<LinkReport> {
+    use crate::instance::content::{self as content, ContentKind};
 
     // Collect the untracked files first so the hash lookup is one request.
     let mut pending: Vec<(ContentKind, String, String)> = Vec::new();
-    for kind in kinds {
-        let items = content::list(paths, instance, kind, jars).await?;
-        let dir = content::content_dir(paths, &instance.id, kind);
+    for (kind, dir) in folders {
+        let items = content::list_in(dir, records, *kind, jars).await?;
         for item in items.into_iter().filter(|i| i.from_disk) {
             let path = dir.join(&item.file_name);
             if let Ok(sha1) = crate::net::sha1_file(&path).await {
-                pending.push((kind, item.file_name, sha1.to_lowercase()));
+                pending.push((*kind, item.file_name, sha1.to_lowercase()));
             }
         }
     }
@@ -582,10 +601,8 @@ pub async fn link_untracked(
             .unwrap_or(&file_name)
             .to_string();
 
-        instance
-            .content
-            .retain(|r| !(r.file_name == base && r.kind == kind));
-        instance.content.push(ContentRecord {
+        records.retain(|r| !(r.file_name == base && r.kind == kind));
+        records.push(ContentRecord {
             file_name: base,
             kind,
             provider: Provider::Modrinth.as_str().to_string(),

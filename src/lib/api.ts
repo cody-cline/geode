@@ -283,6 +283,8 @@ export const api = {
     invoke<number>("add_local_server_content", { id, kind, files }),
   checkServerContentUpdates: (id: string) =>
     invoke<UpdateCandidate[]>("check_server_content_updates", { id }),
+  linkUntrackedServerContent: (id: string) =>
+    invoke<LinkReport>("link_untracked_server_content", { id }),
   applyServerContentUpdate: (
     id: string,
     provider: Provider,
