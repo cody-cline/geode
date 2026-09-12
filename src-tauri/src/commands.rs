@@ -215,9 +215,22 @@ pub struct InstanceView {
     pub instance: Instance,
     pub running: bool,
     pub mod_count: usize,
+    /// Absolute paths to the uploaded images, or `None` when none is set or the
+    /// file has since gone. Resolved here so the UI never builds a path or
+    /// needs to know where the data directory is.
+    pub icon_path: Option<String>,
+    pub banner_path: Option<String>,
+}
+
+/// An uploaded image's full path, if it is still there.
+fn media_path(dir: &std::path::Path, name: &Option<String>) -> Option<String> {
+    let name = name.as_ref()?;
+    let path = dir.join(name);
+    path.is_file().then(|| path.to_string_lossy().to_string())
 }
 
 fn view(instance: Instance, state: &AppState) -> InstanceView {
+    let media = state.paths.instance_media(&instance.id);
     InstanceView {
         running: state.games.is_running(&instance.id),
         mod_count: instance
@@ -225,8 +238,49 @@ fn view(instance: Instance, state: &AppState) -> InstanceView {
             .iter()
             .filter(|c| c.kind == ContentKind::Mod)
             .count(),
+        icon_path: media_path(&media, &instance.icon),
+        banner_path: media_path(&media, &instance.banner),
         instance,
     }
+}
+
+/// Which picture is being set.
+fn parse_slot(slot: &str) -> Result<&'static str> {
+    match slot {
+        "icon" => Ok("icon"),
+        "banner" => Ok("banner"),
+        _ => Err(Error::msg("unknown image slot")),
+    }
+}
+
+/// Copy a chosen image into an owner's `media` folder and hand back its name.
+///
+/// The name carries a timestamp rather than being just `icon.png`: the webview
+/// caches by URL, and reusing a name leaves it showing the picture you replaced.
+async fn store_image(dir: &std::path::Path, slot: &str, source: &str) -> Result<String> {
+    /// Generous for artwork, small enough that a mistaken video is refused.
+    const MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+    let source = PathBuf::from(source);
+    let ext = source
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .filter(|e| matches!(e.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif"))
+        .ok_or_else(|| Error::msg("pick a PNG, JPEG, WebP or GIF"))?;
+
+    let size = tokio::fs::metadata(&source)
+        .await
+        .map_err(|_| Error::msg("that file could not be read"))?
+        .len();
+    if size > MAX_BYTES {
+        return Err(Error::msg("that image is larger than 8 MB"));
+    }
+
+    tokio::fs::create_dir_all(dir).await?;
+    let name = format!("{slot}-{}.{ext}", chrono::Utc::now().timestamp_millis());
+    tokio::fs::copy(&source, dir.join(&name)).await?;
+    Ok(name)
 }
 
 #[tauri::command]
@@ -296,9 +350,6 @@ pub async fn update_instance(
         }
         inst.name = name;
     }
-    if let Some(icon) = patch.icon {
-        inst.icon = icon;
-    }
     if let Some(group) = patch.group {
         inst.group = group.filter(|g| !g.trim().is_empty());
     }
@@ -320,6 +371,83 @@ pub async fn update_instance(
 
     inst.save(&state.paths).await?;
     Ok(view(inst, &state))
+}
+
+/// Set or clear an instance's icon or banner.
+///
+/// Its own command rather than part of the patch, because it has to touch the
+/// filesystem: a picture is a file to copy, not a string to store.
+#[tauri::command]
+pub async fn set_instance_image(
+    state: State<'_, AppState>,
+    id: String,
+    slot: String,
+    source: Option<String>,
+) -> Result<InstanceView> {
+    let slot = parse_slot(&slot)?;
+    let mut inst = instance::load(&state.paths, &id).await?;
+    let dir = state.paths.instance_media(&id);
+
+    let previous = if slot == "icon" {
+        inst.icon.clone()
+    } else {
+        inst.banner.clone()
+    };
+    // The new file lands before the old one goes, so a failed copy leaves the
+    // instance with the picture it already had.
+    let next = match source {
+        Some(path) => Some(store_image(&dir, slot, &path).await?),
+        None => None,
+    };
+    if let Some(old) = previous {
+        if Some(&old) != next.as_ref() {
+            let _ = tokio::fs::remove_file(dir.join(old)).await;
+        }
+    }
+
+    if slot == "icon" {
+        inst.icon = next;
+    } else {
+        inst.banner = next;
+    }
+    inst.save(&state.paths).await?;
+    Ok(view(inst, &state))
+}
+
+/// The same for a server.
+#[tauri::command]
+pub async fn set_server_image(
+    state: State<'_, AppState>,
+    id: String,
+    slot: String,
+    source: Option<String>,
+) -> Result<ServerView> {
+    let slot = parse_slot(&slot)?;
+    let mut server = crate::server::load(&state.paths, &id).await?;
+    let dir = state.paths.server_media(&id);
+
+    let previous = if slot == "icon" {
+        server.icon.clone()
+    } else {
+        server.banner.clone()
+    };
+    let next = match source {
+        Some(path) => Some(store_image(&dir, slot, &path).await?),
+        None => None,
+    };
+    if let Some(old) = previous {
+        if Some(&old) != next.as_ref() {
+            let _ = tokio::fs::remove_file(dir.join(old)).await;
+        }
+    }
+
+    if slot == "icon" {
+        server.icon = next;
+    } else {
+        server.banner = next;
+    }
+    server.save(&state.paths).await?;
+    Ok(server_view(server, &state))
 }
 
 #[tauri::command]
@@ -1045,10 +1173,17 @@ pub struct ServerView {
     /// Whether it hosts a world of its own. A proxy does not, so it has no
     /// place to put datapacks and no level to configure.
     pub has_world: bool,
+    /// Absolute paths to the uploaded images, resolved the same way an
+    /// instance's are.
+    pub icon_path: Option<String>,
+    pub banner_path: Option<String>,
 }
 
 fn server_view(server: crate::server::Server, state: &AppState) -> ServerView {
+    let media = state.paths.server_media(&server.id);
     ServerView {
+        icon_path: media_path(&media, &server.icon),
+        banner_path: media_path(&media, &server.banner),
         running: state.servers.is_running(&server.id),
         takes_plugins: server.takes_plugins(),
         takes_mods: server.takes_mods(),

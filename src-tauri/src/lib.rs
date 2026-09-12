@@ -29,6 +29,14 @@ pub fn run() {
         .setup(|app| {
             let paths = Paths::new();
 
+            // Let the webview load images out of Geode's own data directory.
+            // The scope in tauri.conf.json is a guess at where that is — it
+            // cannot know about GEODE_HOME, and its platform globs do not all
+            // match what `dirs::data_dir` returns. This is the real path.
+            if let Err(e) = app.asset_protocol_scope().allow_directory(&paths.root, true) {
+                eprintln!("geode: could not allow images from the data directory: {e}");
+            }
+
             // Config has to exist before the first command lands, and `setup`
             // is synchronous, so block just for this one read.
             let config = tauri::async_runtime::block_on(async {
@@ -116,6 +124,8 @@ pub fn run() {
             commands::remove_server_content,
             commands::set_server_content_enabled,
             commands::add_cardboard,
+            commands::set_instance_image,
+            commands::set_server_image,
             commands::add_local_server_content,
             commands::check_server_content_updates,
             commands::apply_server_content_update,

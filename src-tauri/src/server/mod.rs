@@ -236,6 +236,12 @@ impl Default for ServerSettings {
 pub struct Server {
     pub id: String,
     pub name: String,
+    /// An uploaded image, named relative to the server's `media` folder.
+    #[serde(default)]
+    pub icon: Option<String>,
+    /// The artwork across the top of the server's page.
+    #[serde(default)]
+    pub banner: Option<String>,
     pub kind: ServerKind,
     pub mc_version: String,
     /// The build or loader version of the jar in place, for update checks.
@@ -343,6 +349,8 @@ impl Server {
         Self {
             id: crate::instance::slugify(&name),
             name,
+            icon: None,
+            banner: None,
             kind,
             mc_version,
             build: String::new(),

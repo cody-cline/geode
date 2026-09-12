@@ -81,7 +81,6 @@ export const api = {
     id: string,
     patch: {
       name?: string;
-      icon?: string | null;
       group?: string | null;
       notes?: string;
       gameVersion?: string;
@@ -94,6 +93,20 @@ export const api = {
   duplicateInstance: (id: string, name: string) =>
     invoke<Instance>("duplicate_instance", { id, name }),
   instanceFolder: (id: string) => invoke<string>("instance_folder", { id }),
+  /**
+   * Set or clear an instance's icon or banner. `source` is a path on disk; the
+   * backend copies it into the instance's own media folder. `null` clears it.
+   */
+  setInstanceImage: (
+    id: string,
+    slot: "icon" | "banner",
+    source: string | null,
+  ) => invoke<Instance>("set_instance_image", { id, slot, source }),
+  setServerImage: (
+    id: string,
+    slot: "icon" | "banner",
+    source: string | null,
+  ) => invoke<Server>("set_server_image", { id, slot, source }),
 
   // Content
   listContent: (id: string, kind: ContentKind) =>

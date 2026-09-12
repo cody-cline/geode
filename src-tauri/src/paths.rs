@@ -42,6 +42,13 @@ impl Paths {
     pub fn instance(&self, id: &str) -> PathBuf {
         self.instances().join(id)
     }
+    /// Images the user uploaded for this instance — its icon and its banner.
+    ///
+    /// Beside `instance.json` rather than inside `.minecraft`, so exporting or
+    /// wiping the game directory never takes the artwork with it.
+    pub fn instance_media(&self, id: &str) -> PathBuf {
+        self.instance(id).join("media")
+    }
     /// Modpack plans. Not under `instances/` because a plan is not one: nothing
     /// is downloaded for it, and the same plan can be built more than once.
     pub fn plans(&self) -> PathBuf {
@@ -55,6 +62,11 @@ impl Paths {
     }
     pub fn server(&self, id: &str) -> PathBuf {
         self.servers().join(id)
+    }
+    /// A server's uploaded icon and banner, kept out of the run directory so a
+    /// backup of the server is the server and not its decoration.
+    pub fn server_media(&self, id: &str) -> PathBuf {
+        self.server(id).join("media")
     }
     /// A server's working directory — where the jar runs, and where the world,
     /// `server.properties` and `eula.txt` live. Kept beside `server.json`

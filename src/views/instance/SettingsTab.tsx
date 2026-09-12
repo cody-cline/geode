@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { Copy, Loader2, PackageOpen, Trash2 } from "lucide-react";
 
+import ImageField from "../../components/ImageField";
 import Modal from "../../components/Modal";
 import { api } from "../../lib/api";
 import { useStore } from "../../lib/store";
@@ -31,7 +32,6 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
   const refreshInstances = useStore((s) => s.refreshInstances);
 
   const [name, setName] = useState(instance.name);
-  const [icon, setIcon] = useState(instance.icon ?? "");
   const [group, setGroup] = useState(instance.group ?? "");
   const [notes, setNotes] = useState(instance.notes);
   const [overrides, setOverrides] = useState<InstanceOverrides>(instance.overrides);
@@ -73,7 +73,6 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
 
   const dirty =
     name !== instance.name ||
-    icon !== (instance.icon ?? "") ||
     group !== (instance.group ?? "") ||
     notes !== instance.notes ||
     loader !== instance.loader ||
@@ -85,7 +84,6 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
     try {
       await api.updateInstance(instance.id, {
         name,
-        icon: textOrNull(icon),
         group: textOrNull(group),
         notes,
         loader,
@@ -180,20 +178,37 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
             </div>
           </div>
 
-          <div>
-            <label className="label" htmlFor="inst-icon">
-              Icon
-            </label>
-            <input
-              id="inst-icon"
-              className="input"
-              value={icon}
-              placeholder="Paste an emoji, e.g. 🌋"
-              maxLength={8}
-              onChange={(e) => setIcon(e.target.value)}
-            />
-            <p className="hint">Leave empty to use the generated initials tile.</p>
-          </div>
+          {/* Pictures save the moment they are chosen rather than waiting for
+              the Save button: the file is copied on the spot, and showing a
+              picture that is not actually set yet would be a lie. */}
+          <ImageField
+            label="Icon"
+            hint="Shown in the sidebar and on the library card. Leave it empty for the generated initials tile."
+            path={instance.iconPath}
+            onChoose={async (source) => {
+              await api.setInstanceImage(instance.id, "icon", source);
+              await refreshInstances();
+            }}
+            onClear={async () => {
+              await api.setInstanceImage(instance.id, "icon", null);
+              await refreshInstances();
+            }}
+          />
+
+          <ImageField
+            label="Banner"
+            hint="The artwork across the top of this instance's page. A modpack's own banner is used when there is none."
+            path={instance.bannerPath}
+            wide
+            onChoose={async (source) => {
+              await api.setInstanceImage(instance.id, "banner", source);
+              await refreshInstances();
+            }}
+            onClear={async () => {
+              await api.setInstanceImage(instance.id, "banner", null);
+              await refreshInstances();
+            }}
+          />
 
           <div>
             <label className="label" htmlFor="inst-notes">
@@ -446,7 +461,6 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
             className="btn"
             onClick={() => {
               setName(instance.name);
-              setIcon(instance.icon ?? "");
               setGroup(instance.group ?? "");
               setNotes(instance.notes);
               setLoader(instance.loader);

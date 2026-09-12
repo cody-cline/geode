@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 import type { KeyboardEvent } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import clsx from "clsx";
 import {
@@ -22,6 +23,7 @@ import {
   Trash2,
 } from "lucide-react";
 
+import ImageField from "../components/ImageField";
 import InstanceIcon from "../components/InstanceIcon";
 import Modal from "../components/Modal";
 import Browse from "./Browse";
@@ -309,12 +311,16 @@ export default function ServerView({ id }: { id: string }) {
   return (
     <>
       <div className={styles.hero}>
-        <span
-          className={styles.heroImg}
-          style={{
-            background: `linear-gradient(135deg, hsl(${hue} 44% 30%), hsl(${(hue + 55) % 360} 42% 18%))`,
-          }}
-        />
+        {server.bannerPath ? (
+          <img className={styles.heroImg} src={convertFileSrc(server.bannerPath)} alt="" />
+        ) : (
+          <span
+            className={styles.heroImg}
+            style={{
+              background: `linear-gradient(135deg, hsl(${hue} 44% 30%), hsl(${(hue + 55) % 360} 42% 18%))`,
+            }}
+          />
+        )}
         <span className={styles.heroScrim} />
 
         <button
@@ -330,7 +336,11 @@ export default function ServerView({ id }: { id: string }) {
             name to generate one — so the treatment is shared rather than
             reimplemented. */}
         <InstanceIcon
-          instance={{ id: server.id, name: server.name }}
+          instance={{
+            id: server.id,
+            name: server.name,
+            iconPath: server.iconPath,
+          }}
           size={64}
           radius={16}
         />
@@ -1012,6 +1022,39 @@ function SettingsTab({ server }: { server: Server }) {
       <section className={styles.section}>
         <h2 className={styles.sectionTitle}>server.properties</h2>
         <Properties server={server} />
+      </section>
+
+      <section className={styles.section}>
+        <h2 className={styles.sectionTitle}>Appearance</h2>
+        <ImageField
+          label="Icon"
+          hint="Shown in the sidebar and on the servers list. Leave it empty for the generated initials tile."
+          path={server.iconPath}
+          onChoose={async (source) => {
+            await api.setServerImage(server.id, "icon", source);
+            await refreshServers();
+          }}
+          onClear={async () => {
+            await api.setServerImage(server.id, "icon", null);
+            await refreshServers();
+          }}
+        />
+        <div style={{ marginTop: 14 }}>
+          <ImageField
+            label="Banner"
+            hint="The artwork across the top of this server's page."
+            path={server.bannerPath}
+            wide
+            onChoose={async (source) => {
+              await api.setServerImage(server.id, "banner", source);
+              await refreshServers();
+            }}
+            onClear={async () => {
+              await api.setServerImage(server.id, "banner", null);
+              await refreshServers();
+            }}
+          />
+        </div>
       </section>
 
       {/* Deleting lives here rather than on the card in the list, the way an

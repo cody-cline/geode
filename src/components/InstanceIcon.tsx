@@ -1,23 +1,37 @@
 import { useState } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 
 import { hashHue, initials } from "../lib/format";
-import type { Instance } from "../lib/types";
+import type { PackSource } from "../lib/types";
 
-/** Emoji render at a different optical size than text, so they get a nudge. */
-const EMOJI_RE = /\p{Extended_Pictographic}/u;
-
+/**
+ * The little square that stands for an instance or a server.
+ *
+ * In order: an image the user uploaded, then a modpack's own artwork, then
+ * initials on a colour generated from the id. The id is the only thing needed
+ * for that last one, which is why a server — which has no artwork of its own
+ * unless someone gives it one — can use this too.
+ */
 export default function InstanceIcon({
   instance,
   size = 40,
   radius,
 }: {
-  instance: Pick<Instance, "id" | "name" | "icon"> & {
-    pack?: Instance["pack"];
+  /**
+   * Structural rather than an `Instance`, so a server can be passed as
+   * `{ id, name, iconPath }` without pretending to be one.
+   */
+  instance: {
+    id: string;
+    name: string;
+    iconPath?: string | null;
+    pack?: PackSource | null;
   };
   size?: number;
   radius?: number;
 }) {
-  // Remote art can fail — offline, or the project pulled the image.
+  // Art can fail: a project can pull its image, and an uploaded file can be
+  // deleted out from under us.
   const [artFailed, setArtFailed] = useState(false);
 
   const hue = hashHue(instance.id);
@@ -37,18 +51,21 @@ export default function InstanceIcon({
     userSelect: "none",
   };
 
-  const icon = instance.icon?.trim();
+  const uploaded = instance.iconPath;
 
-  // An explicit icon wins — pack artwork is a default, not a lock.
-  if (icon && EMOJI_RE.test(icon)) {
+  // An uploaded image wins — pack artwork is a default, not a lock.
+  if (uploaded && !artFailed) {
     return (
-      <span style={{ ...style, background: "var(--surface-3)", fontSize: size * 0.52 }}>
-        {icon}
-      </span>
+      <img
+        src={convertFileSrc(uploaded)}
+        alt=""
+        style={{ ...style, background: "var(--surface-3)", objectFit: "cover" }}
+        onError={() => setArtFailed(true)}
+      />
     );
   }
 
-  if (!icon && instance.pack?.iconUrl && !artFailed) {
+  if (!uploaded && instance.pack?.iconUrl && !artFailed) {
     return (
       <img
         src={instance.pack.iconUrl}

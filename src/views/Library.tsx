@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import clsx from "clsx";
 import {
   Boxes,
@@ -161,7 +162,9 @@ function InstanceCard({
   const preparing = Boolean(progress) && !instance.running;
 
   const [artFailed, setArtFailed] = useState(false);
-  const banner = instance.pack?.bannerUrl ?? instance.pack?.iconUrl ?? null;
+  const banner = instance.bannerPath
+    ? convertFileSrc(instance.bannerPath)
+    : (instance.pack?.bannerUrl ?? instance.pack?.iconUrl ?? null);
   const hue = hashHue(instance.id);
 
   return (

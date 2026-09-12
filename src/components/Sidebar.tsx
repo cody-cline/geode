@@ -183,7 +183,11 @@ export default function Sidebar() {
                 generate one, and a server is no less a thing you recognise by
                 sight in a list. */}
             <InstanceIcon
-              instance={{ id: server.id, name: server.name }}
+              instance={{
+                id: server.id,
+                name: server.name,
+                iconPath: server.iconPath,
+              }}
               size={22}
             />
             <span className={styles.instanceName}>{server.name}</span>

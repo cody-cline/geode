@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import clsx from "clsx";
 import {
@@ -93,7 +94,10 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
 
   const pack = instance.pack;
 
-  const hero = pack?.bannerUrl ?? pack?.iconUrl ?? null;
+  // An uploaded banner wins; a pack's own artwork is a default, not a lock.
+  const hero = instance.bannerPath
+    ? convertFileSrc(instance.bannerPath)
+    : (pack?.bannerUrl ?? pack?.iconUrl ?? null);
   const hue = hashHue(instance.id);
 
   return (

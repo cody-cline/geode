@@ -37,9 +37,14 @@ pub struct Instance {
     pub loader: Loader,
     #[serde(default)]
     pub loader_version: String,
-    /// An emoji, or a filename inside the instance directory.
+    /// An uploaded image, named relative to the instance's `media` folder.
+    /// Never an absolute path: `instance.json` has to survive the data
+    /// directory moving.
     #[serde(default)]
     pub icon: Option<String>,
+    /// The artwork across the top of the instance's page, same rules.
+    #[serde(default)]
+    pub banner: Option<String>,
     #[serde(default)]
     pub group: Option<String>,
     #[serde(default)]
@@ -138,6 +143,7 @@ impl Instance {
             loader,
             loader_version,
             icon: None,
+            banner: None,
             group: None,
             notes: String::new(),
             created_at: chrono::Utc::now().timestamp(),
@@ -272,6 +278,9 @@ pub async fn duplicate(paths: &Paths, id: &str, new_name: String) -> Result<Inst
     copy.play_seconds = 0;
 
     copy_dir(&paths.game_dir(id), &paths.game_dir(&copy.id)).await?;
+    // The copy keeps the original's `icon` and `banner` names, so the files
+    // they refer to have to come along or it would point at nothing.
+    let _ = copy_dir(&paths.instance_media(id), &paths.instance_media(&copy.id)).await;
     copy.save(paths).await?;
     Ok(copy)
 }

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import clsx from "clsx";
 import {
   Clock,
@@ -177,28 +178,36 @@ function ServerCard({
 
   return (
     <article className={clsx(styles.card, server.running && styles.cardRunning)}>
-      {/* A server has no artwork of its own yet, so it always takes the
-          generated wash — the same branch an instance without a banner uses,
-          which keeps one silhouette across the grid. */}
+      {/* An uploaded banner if there is one, otherwise the generated wash —
+          the same branch an instance without artwork takes, which keeps one
+          silhouette across the grid. */}
       <button
         className={styles.art}
         onClick={onOpen}
         tabIndex={-1}
         aria-hidden="true"
       >
-        <span
-          className={styles.artFallback}
-          style={{
-            background: `linear-gradient(135deg, hsl(${hue} 46% 34%), hsl(${(hue + 55) % 360} 44% 20%))`,
-          }}
-        />
+        {server.bannerPath ? (
+          <img src={convertFileSrc(server.bannerPath)} alt="" loading="lazy" />
+        ) : (
+          <span
+            className={styles.artFallback}
+            style={{
+              background: `linear-gradient(135deg, hsl(${hue} 46% 34%), hsl(${(hue + 55) % 360} 44% 20%))`,
+            }}
+          />
+        )}
         <span className={styles.artScrim} />
       </button>
 
       <button className={styles.cardBody} onClick={onOpen}>
         <span className={styles.iconRing}>
           <InstanceIcon
-            instance={{ id: server.id, name: server.name }}
+            instance={{
+              id: server.id,
+              name: server.name,
+              iconPath: server.iconPath,
+            }}
             size={46}
           />
         </span>

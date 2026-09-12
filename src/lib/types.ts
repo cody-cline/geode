@@ -67,7 +67,15 @@ export interface Instance {
   mcVersion: string;
   loader: Loader;
   loaderVersion: string;
+  /** File name of an uploaded image, inside the instance's media folder. */
   icon?: string | null;
+  banner?: string | null;
+  /**
+   * Absolute paths to those images, resolved by the backend — `null` when none
+   * is set or the file has gone. Pass through `convertFileSrc` to display.
+   */
+  iconPath: string | null;
+  bannerPath: string | null;
   group?: string | null;
   notes: string;
   createdAt: number;
@@ -178,6 +186,12 @@ export interface BackupInfo {
 export interface Server {
   id: string;
   name: string;
+  /** File name of an uploaded image, inside the server's media folder. */
+  icon?: string | null;
+  banner?: string | null;
+  /** Absolute paths to those images, resolved by the backend. */
+  iconPath: string | null;
+  bannerPath: string | null;
   /** `paper`, `fabric`, `mohist`, … */
   kind: string;
   mcVersion: string;
