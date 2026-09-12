@@ -179,8 +179,21 @@ export default function Sidebar() {
             onClick={() => navigate({ view: "server", id: server.id })}
             title={server.name}
           >
-            <span className={styles.serverDot} data-live={server.running} />
+            {/* The same icon an instance gets. It only needs a name to
+                generate one, and a server is no less a thing you recognise by
+                sight in a list. */}
+            <InstanceIcon
+              instance={{ id: server.id, name: server.name }}
+              size={22}
+            />
             <span className={styles.instanceName}>{server.name}</span>
+            {server.running && (
+              <Play
+                size={12}
+                className={styles.runningDot}
+                fill="currentColor"
+              />
+            )}
           </button>
         ))}
       </div>

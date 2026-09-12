@@ -99,6 +99,14 @@ interface State {
 
 let toastSeq = 0;
 
+/**
+ * Whether the one-time setup has run.
+ *
+ * Module scope rather than store state on purpose: it has to survive the store
+ * being read before it is written, and it is not something any view should see.
+ */
+let started = false;
+
 export const useStore = create<State>((set, get) => ({
   route: { view: "library" },
   history: [],
@@ -197,6 +205,13 @@ export const useStore = create<State>((set, get) => ({
     get().toast({ kind: "error", title, body: errorMessage(e) }),
 
   init: async () => {
+    // React's StrictMode mounts, unmounts and mounts again in development, so
+    // this runs twice. Every `listen` below is registered for the lifetime of
+    // the process and never torn down, so without this guard each event has two
+    // subscribers — which is why every console line appeared twice.
+    if (started) return;
+    started = true;
+
     await Promise.all([
       get().loadConfig().catch((e) => get().reportError("Could not load settings", e)),
       get().refreshInstances(),

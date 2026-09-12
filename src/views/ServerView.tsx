@@ -33,6 +33,7 @@ import { fileSize, hashHue, relativeTime } from "../lib/format";
 import { useStore } from "../lib/store";
 import type {
   BackupInfo,
+  ContentKind,
   LogFile,
   Schedule,
   Server,
@@ -494,13 +495,15 @@ export default function ServerView({ id }: { id: string }) {
       ) : active === "content" ? (
         <ServerContentTab server={server} onBrowse={setAdding} />
       ) : active === "graph" ? (
-        // Whichever folder this server actually keeps its content in: a Paper
-        // server has no mods, and drawing that folder would show an empty
-        // field beside a full plugins one.
+        // Whichever folders this server actually keeps content in. A Paper
+        // server has no mods, and a hybrid has both — so it gets the switch.
         <GraphTab
           id={server.id}
           source="server"
-          folder={server.takesMods ? "mod" : "plugin"}
+          folders={[
+            ...(server.takesMods ? (["mod"] as ContentKind[]) : []),
+            ...(server.takesPlugins ? (["plugin"] as ContentKind[]) : []),
+          ]}
         />
       ) : active === "backups" ? (
         <BackupsPane server={server} />
@@ -923,8 +926,20 @@ function SchedulesSection({ server }: { server: Server }) {
 function SettingsTab({ server }: { server: Server }) {
   const refreshServers = useStore((s) => s.refreshServers);
   const reportError = useStore((s) => s.reportError);
+  const navigate = useStore((s) => s.navigate);
   const [draft, setDraft] = useState<ServerSettings>(server.settings);
   const [saving, setSaving] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  async function destroy() {
+    try {
+      await api.deleteServer(server.id);
+      await refreshServers();
+      navigate({ view: "servers" });
+    } catch (e) {
+      reportError(`Could not delete ${server.name}`, e);
+    }
+  }
 
   const [props, setProps] = useState<ServerProperty[] | null>(null);
   const [edited, setEdited] = useState<Record<string, string>>({});
@@ -1116,12 +1131,57 @@ function SettingsTab({ server }: { server: Server }) {
         )}
       </section>
 
+      {/* Deleting lives here rather than on the card in the list, the way an
+          instance's does — a list is for picking something, not for destroying
+          it by a slip of the mouse. */}
+      <section className={styles.section}>
+        <h2 className={styles.sectionTitle}>Manage</h2>
+        <p className={styles.pending}>
+          Deleting a server removes its folder — its world, its configuration
+          and its backups — and cannot be undone.
+        </p>
+        <button
+          className="btn btn-danger"
+          style={{ marginTop: 12 }}
+          onClick={() => setConfirmDelete(true)}
+          disabled={server.running}
+          title={server.running ? "Stop it before deleting" : undefined}
+        >
+          <Trash2 size={14} />
+          Delete this server
+        </button>
+      </section>
+
       <div className={styles.saveRow}>
         <button className="btn btn-primary" onClick={save} disabled={saving}>
           {saving && <Loader2 size={14} className="spin" />}
           Save
         </button>
       </div>
+
+      {confirmDelete && (
+        <Modal
+          title={`Delete ${server.name}?`}
+          subtitle="This removes the whole server folder."
+          onClose={() => setConfirmDelete(false)}
+          width={460}
+          footer={
+            <>
+              <button className="btn" onClick={() => setConfirmDelete(false)}>
+                Cancel
+              </button>
+              <button className="btn btn-danger" onClick={() => void destroy()}>
+                Delete
+              </button>
+            </>
+          }
+        >
+          <p className={styles.eula}>
+            Its world, its configuration, its installed content and every backup
+            taken of it go with it. Nothing here is recoverable afterwards.
+          </p>
+        </Modal>
+      )}
     </div>
   );
 }

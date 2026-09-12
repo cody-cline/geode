@@ -103,7 +103,15 @@ export default function ProjectPanel({
   // siblings, so the results list's scrollbar drew straight over this panel
   // however high its z-index went. Leaving the subtree is what settles it.
   return createPortal(
-    <div className={styles.backdrop} onMouseDown={onClose}>
+    // Primary press only — see Modal. This backdrop is portalled over the whole
+    // window, so a back-button mousedown anywhere would otherwise close the
+    // panel and let the mouseup pop a page behind it.
+    <div
+      className={styles.backdrop}
+      onMouseDown={(e) => {
+        if (e.button === 0) onClose();
+      }}
+    >
       <aside
         className={styles.panel}
         onMouseDown={(e) => e.stopPropagation()}

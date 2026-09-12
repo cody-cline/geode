@@ -25,6 +25,7 @@ import { launchInstance, stopInstance } from "../lib/actions";
 import { hashHue, relativeTime } from "../lib/format";
 import { formatDuration, useStore } from "../lib/store";
 import { LOADERS } from "../lib/types";
+import type { ContentKind } from "../lib/types";
 
 import styles from "./InstanceView.module.css";
 
@@ -37,6 +38,9 @@ const TABS = [
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
+
+/** An instance has one folder worth graphing, so there is no choice to offer. */
+const MODS_ONLY: ContentKind[] = ["mod"];
 
 export default function InstanceView({ id, tab }: { id: string; tab?: string }) {
   const instances = useStore((s) => s.instances);
@@ -208,7 +212,7 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
           <ContentTab instance={instance} onBrowse={() => setBrowsing(true)} />
         )}
         {active === "graph" && (
-          <GraphTab id={instance.id} source="instance" folder="mod" />
+          <GraphTab id={instance.id} source="instance" folders={MODS_ONLY} />
         )}
         {active === "pack" && <PackTab instance={instance} />}
         {active === "logs" && <LogsTab instanceId={id} />}

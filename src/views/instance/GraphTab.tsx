@@ -341,19 +341,20 @@ function buildField(all: ContentItem[]) {
 export default function GraphTab({
   id,
   source,
-  folder,
+  folders,
 }: {
   id: string;
   /**
-   * Which folder to draw. Not always mods: a Paper server keeps no mods at
-   * all, and drawing that folder would show it an empty field while its
-   * plugins sat in the one next door.
+   * The folders this thing keeps content in, most interesting first. Not
+   * always just mods: a Paper server keeps none at all, and a hybrid keeps
+   * both — so where there is more than one, the field offers the choice rather
+   * than deciding on the caller's behalf.
    */
-  folder: ContentKind;
+  folders: ContentKind[];
   /**
-   * Which folder the mods are read from. A server keeps exactly the same
-   * provenance records as an instance, so the field itself is identical — only
-   * the call that lists the folder differs.
+   * Where the listing comes from. A server keeps exactly the same provenance
+   * records as an instance, so the field itself is identical — only the call
+   * that lists the folder differs.
    *
    * A discriminator rather than a loader function on purpose: an inline
    * callback would be a new value every render, and the effect below would
@@ -362,6 +363,8 @@ export default function GraphTab({
   source: "instance" | "server";
 }) {
   const reportError = useStore((s) => s.reportError);
+
+  const [folder, setFolder] = useState<ContentKind>(folders[0] ?? "mod");
 
   // The field is the same either way; only what the things in it are called
   // changes, and calling a plugin a mod is the sort of thing that makes a
@@ -598,6 +601,25 @@ export default function GraphTab({
   return (
     <div className={styles.wrap}>
       <div className={styles.toolbar}>
+        {/* Only where there is a choice to make. A hybrid server keeps mods
+            and plugins in different folders, and they are different graphs. */}
+        {folders.length > 1 && (
+          <div className={styles.zoom}>
+            {folders.map((option) => (
+              <button
+                key={option}
+                className={clsx(
+                  "btn",
+                  "btn-sm",
+                  folder === option && "btn-primary",
+                )}
+                onClick={() => setFolder(option)}
+              >
+                {option === "plugin" ? "Plugins" : "Mods"}
+              </button>
+            ))}
+          </div>
+        )}
         <div className={styles.searchWrap}>
           <Search size={14} className={styles.searchIcon} />
           <input

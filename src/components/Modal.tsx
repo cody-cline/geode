@@ -37,7 +37,16 @@ export default function Modal({
   }, [onClose]);
 
   return (
-    <div className={styles.backdrop} onMouseDown={onClose}>
+    // Only a primary press dismisses. The mouse's back button delivers a
+    // mousedown of its own, and closing on that spends the gesture here — then
+    // the matching mouseup reaches the window handler, finds nothing open, and
+    // goes back a page as well. One press, two dismissals.
+    <div
+      className={styles.backdrop}
+      onMouseDown={(e) => {
+        if (e.button === 0) onClose();
+      }}
+    >
       <div
         ref={panel}
         className={styles.panel}
