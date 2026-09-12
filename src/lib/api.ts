@@ -28,6 +28,7 @@ import type {
   SearchResults,
   Server,
   ServerKindInfo,
+  ServerProperty,
   ServerSettings,
   UpdateCandidate,
 } from "./types";
@@ -222,6 +223,11 @@ export const api = {
     invoke<boolean>("send_server_command", { id, command }),
   runningServers: () => invoke<string[]>("running_servers"),
   serverFolder: (id: string) => invoke<string>("server_folder", { id }),
+  readServerProperties: (id: string) =>
+    invoke<ServerProperty[]>("read_server_properties", { id }),
+  /** Only the settings passed are changed; the rest of the file is left alone. */
+  writeServerProperties: (id: string, properties: ServerProperty[]) =>
+    invoke<void>("write_server_properties", { id, properties }),
 
   // Accounts
   listAccounts: () => invoke<Account[]>("list_accounts"),

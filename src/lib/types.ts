@@ -157,6 +157,12 @@ export interface ServerKindInfo {
   isProxy: boolean;
 }
 
+/** One line of a server's own `server.properties`. */
+export interface ServerProperty {
+  key: string;
+  value: string;
+}
+
 export interface ServerLine {
   serverId: string;
   line: string;

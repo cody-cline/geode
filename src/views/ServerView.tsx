@@ -16,7 +16,12 @@ import {
 import Modal from "../components/Modal";
 import { api } from "../lib/api";
 import { useStore } from "../lib/store";
-import type { Server, ServerLine, ServerSettings } from "../lib/types";
+import type {
+  Server,
+  ServerLine,
+  ServerProperty,
+  ServerSettings,
+} from "../lib/types";
 
 import styles from "./ServerView.module.css";
 
@@ -356,6 +361,49 @@ function SettingsTab({ server }: { server: Server }) {
   const [draft, setDraft] = useState<ServerSettings>(server.settings);
   const [saving, setSaving] = useState(false);
 
+  const [props, setProps] = useState<ServerProperty[] | null>(null);
+  const [edited, setEdited] = useState<Record<string, string>>({});
+  const [filter, setFilter] = useState("");
+
+  useEffect(() => {
+    api
+      .readServerProperties(server.id)
+      .then(setProps)
+      .catch(() => setProps([]));
+  }, [server.id]);
+
+  const shown = useMemo(() => {
+    const query = filter.trim().toLowerCase();
+    return (props ?? []).filter(
+      (p) => !query || p.key.toLowerCase().includes(query),
+    );
+  }, [props, filter]);
+
+  const dirty = Object.keys(edited).length > 0;
+  const valueOf = (p: ServerProperty) => edited[p.key] ?? p.value;
+  const edit = (key: string, value: string) =>
+    setEdited((was) => ({ ...was, [key]: value }));
+
+  /**
+   * Only the edited settings are sent. The backend leaves everything else in
+   * the file exactly as it found it, comments and order included.
+   */
+  async function saveProperties() {
+    setSaving(true);
+    try {
+      await api.writeServerProperties(
+        server.id,
+        Object.entries(edited).map(([key, value]) => ({ key, value })),
+      );
+      setProps(await api.readServerProperties(server.id));
+      setEdited({});
+    } catch (e) {
+      reportError("Could not save server.properties", e);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function save() {
     setSaving(true);
     try {
@@ -425,12 +473,82 @@ function SettingsTab({ server }: { server: Server }) {
       </section>
 
       <section className={styles.section}>
-        <h2 className={styles.sectionTitle}>Server</h2>
-        <p className={styles.pending}>
-          Editing <code>server.properties</code> is not built yet — use the
-          Folder button for now. Backups, scheduling and plugin browsing are
-          also still to come.
-        </p>
+        <div className={styles.propsHead}>
+          <h2 className={styles.sectionTitle}>server.properties</h2>
+          {props !== null && props.length > 0 && (
+            <input
+              className={clsx("input", styles.propSearch)}
+              placeholder="Filter settings"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+            />
+          )}
+        </div>
+
+        {props === null ? (
+          <div className="skeleton" style={{ height: 90 }} />
+        ) : props.length === 0 ? (
+          <p className={styles.pending}>
+            This file appears the first time the server starts — it is written
+            by the server, not by Geode. Start it once and its settings show up
+            here.
+          </p>
+        ) : (
+          <>
+            <div className={styles.props}>
+              {shown.map((p) => {
+                const value = valueOf(p);
+                const changed = p.key in edited;
+                // The control follows the value the server wrote, so a setting
+                // added by a plugin gets a sensible field without us knowing
+                // anything about it.
+                const bool = value === "true" || value === "false";
+                const numeric = !bool && /^-?\d+$/.test(p.value);
+                return (
+                  <label
+                    key={p.key}
+                    className={clsx(styles.prop, changed && styles.propChanged)}
+                  >
+                    <span className={styles.propKey}>{p.key}</span>
+                    {bool ? (
+                      <input
+                        type="checkbox"
+                        className={styles.propCheck}
+                        checked={value === "true"}
+                        onChange={(e) =>
+                          edit(p.key, e.target.checked ? "true" : "false")
+                        }
+                      />
+                    ) : (
+                      <input
+                        className={clsx("input", styles.propValue)}
+                        type={numeric ? "number" : "text"}
+                        value={value}
+                        onChange={(e) => edit(p.key, e.target.value)}
+                      />
+                    )}
+                  </label>
+                );
+              })}
+            </div>
+
+            <div className={styles.propsFoot}>
+              <span className={styles.pending}>
+                {dirty
+                  ? `${Object.keys(edited).length} changed. Restart the server to apply.`
+                  : "Changes apply the next time the server starts."}
+              </span>
+              <button
+                className="btn btn-sm btn-primary"
+                onClick={saveProperties}
+                disabled={!dirty || saving}
+              >
+                {saving && <Loader2 size={12} className="spin" />}
+                Save properties
+              </button>
+            </div>
+          </>
+        )}
       </section>
 
       <div className={styles.saveRow}>
