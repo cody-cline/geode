@@ -326,6 +326,12 @@ export interface Project {
   bannerUrl?: string | null;
   distributionAllowed: boolean;
   /**
+   * `required`, `optional` or `unsupported`. Only Modrinth publishes these, so
+   * elsewhere they are null and nothing should be concluded from that.
+   */
+  clientSide?: string | null;
+  serverSide?: string | null;
+  /**
    * Set client-side, not by the API: install the Fabric build and run it
    * through Sinytra Connector. Always true for a hit only the Fabric search
    * found; on a [`fabricAlso`] project it is the choice the row is showing.

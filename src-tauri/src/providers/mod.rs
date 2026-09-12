@@ -125,6 +125,12 @@ pub struct Project {
     /// here can be installed automatically. Always true on Modrinth.
     #[serde(default = "yes")]
     pub distribution_allowed: bool,
+    /// `required`, `optional` or `unsupported`, where the platform says.
+    /// Only Modrinth publishes these; elsewhere they are `None`.
+    #[serde(default)]
+    pub client_side: Option<String>,
+    #[serde(default)]
+    pub server_side: Option<String>,
     /// Other platforms carrying what looks like the same project.
     #[serde(default)]
     pub also_on: Vec<ProviderRef>,
@@ -132,6 +138,21 @@ pub struct Project {
 
 fn yes() -> bool {
     true
+}
+
+impl Project {
+    /// Whether this can run on a server at all.
+    ///
+    /// Sodium, Iris and Mod Menu are `unsupported` there: they are rendering
+    /// and UI, and a server has neither. Installing them into one is at best
+    /// dead weight and at worst a crash on boot.
+    ///
+    /// Only Modrinth states this. An unknown answer is treated as "probably
+    /// fine", because the alternative filters out every CurseForge mod on the
+    /// strength of a field that platform simply does not have.
+    pub fn runs_on_a_server(&self) -> bool {
+        !matches!(self.server_side.as_deref(), Some("unsupported"))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -549,6 +570,8 @@ mod tests {
             page_url: String::new(),
             banner_url: None,
             distribution_allowed: true,
+            client_side: None,
+            server_side: None,
             also_on: vec![],
         }
     }
@@ -596,6 +619,32 @@ mod tests {
         );
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].provider, Provider::CurseForge);
+    }
+
+    #[test]
+    fn a_client_only_mod_does_not_belong_on_a_server() {
+        // Sodium and Iris are rendering; a server has nothing to render.
+        let mut sodium = project(Provider::Modrinth, "sodium", "Sodium", 0);
+        sodium.server_side = Some("unsupported".into());
+        assert!(!sodium.runs_on_a_server());
+
+        let mut create = project(Provider::Modrinth, "create", "Create", 0);
+        create.server_side = Some("required".into());
+        assert!(create.runs_on_a_server());
+
+        let mut jei = project(Provider::Modrinth, "jei", "JEI", 0);
+        jei.server_side = Some("optional".into());
+        assert!(jei.runs_on_a_server());
+    }
+
+    #[test]
+    fn a_platform_that_says_nothing_is_not_taken_as_a_no() {
+        // CurseForge publishes no such field. Reading its silence as
+        // "unsupported" would filter out that entire catalogue on the strength
+        // of a value nobody ever set.
+        let unknown = project(Provider::CurseForge, "whatever", "Whatever", 0);
+        assert!(unknown.server_side.is_none());
+        assert!(unknown.runs_on_a_server());
     }
 
     #[test]

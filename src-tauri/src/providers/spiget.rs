@@ -122,6 +122,10 @@ fn to_project(resource: Resource) -> Project {
         // An external resource is hosted elsewhere and a premium one is paid;
         // neither is ours to fetch.
         distribution_allowed: !resource.external && !resource.premium,
+        // A Bukkit plugin is server software by definition — there is no
+        // client half of it to install.
+        client_side: Some("unsupported".into()),
+        server_side: Some("required".into()),
         also_on: Vec::new(),
     }
 }

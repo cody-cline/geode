@@ -69,6 +69,10 @@ struct SearchHit {
     featured_gallery: Option<String>,
     #[serde(default)]
     gallery: Vec<String>,
+    #[serde(default)]
+    client_side: Option<String>,
+    #[serde(default)]
+    server_side: Option<String>,
 }
 
 /// Modrinth lumps loaders in with categories. Splitting them keeps the UI's
@@ -127,6 +131,8 @@ fn to_project(hit: SearchHit) -> Project {
             .featured_gallery
             .or_else(|| hit.gallery.into_iter().next()),
         distribution_allowed: true,
+        client_side: hit.client_side,
+        server_side: hit.server_side,
         also_on: Vec::new(),
     }
 }
@@ -190,6 +196,10 @@ struct ProjectResponse {
     updated: Option<String>,
     #[serde(default)]
     gallery: Vec<GalleryEntry>,
+    #[serde(default)]
+    client_side: Option<String>,
+    #[serde(default)]
+    server_side: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -229,6 +239,8 @@ pub async fn project(client: &reqwest::Client, id: &str) -> Result<Project> {
             .or_else(|| p.gallery.first())
             .map(|g| g.url.clone()),
         distribution_allowed: true,
+        client_side: p.client_side,
+        server_side: p.server_side,
         also_on: Vec::new(),
     })
 }
@@ -413,6 +425,8 @@ pub async fn projects_by_ids(client: &reqwest::Client, ids: &[String]) -> Result
                     .or_else(|| p.gallery.first())
                     .map(|g| g.url.clone()),
                 distribution_allowed: true,
+                client_side: p.client_side,
+                server_side: p.server_side,
                 also_on: Vec::new(),
             }
         }));

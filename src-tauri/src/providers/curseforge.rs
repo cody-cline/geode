@@ -440,6 +440,10 @@ fn to_project(m: CfMod) -> Project {
         // conventionally the promo image.
         banner_url: m.screenshots.into_iter().find_map(|s| s.url),
         distribution_allowed: m.allow_mod_distribution,
+        // CurseForge does not publish which sides a mod runs on, and guessing
+        // from categories would be inventing an answer.
+        client_side: None,
+        server_side: None,
         also_on: Vec::new(),
     }
 }

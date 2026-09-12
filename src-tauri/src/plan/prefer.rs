@@ -197,6 +197,8 @@ mod tests {
             page_url: String::new(),
             banner_url: None,
             distribution_allowed: true,
+            client_side: None,
+            server_side: None,
             also_on: vec![],
         }
     }
