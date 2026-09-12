@@ -172,11 +172,7 @@ pub async fn preflight_buildtools(workspace: &Path) -> Result<()> {
     }
 
     if !runs("git", &["--version"]).await {
-        return Err(Error::msg(
-            "Spigot is compiled with SpigotMC's BuildTools, which needs Git installed and on \
-             your PATH. Install Git and try again — or choose Paper, which runs every Spigot \
-             plugin and installs directly.",
-        ));
+        return Err(Error::msg(missing_git_advice()));
     }
 
     // BuildTools runs `sh -c exit` before anything else and stops if it cannot.
@@ -188,6 +184,30 @@ pub async fn preflight_buildtools(workspace: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// What to do about a missing Git, in terms of the machine it is missing on.
+///
+/// Geode does not install it. On Windows that would be defensible — Git's own
+/// Windows distribution publishes a portable build that unpacks anywhere — but
+/// there is no equivalent from the Git project for Linux or macOS. The static
+/// builds that exist are one person's repository each, and silently fetching
+/// and running an unofficial copy of the one tool that then executes hooks and
+/// pulls source is not a thing to do on somebody's behalf.
+fn missing_git_advice() -> String {
+    let opening = "Spigot is compiled with SpigotMC's BuildTools, which needs Git.";
+    let how = if cfg!(target_os = "windows") {
+        "Install Git for Windows from https://git-scm.com/download/win."
+    } else if cfg!(target_os = "macos") {
+        "Run `xcode-select --install` to get it from Apple."
+    } else {
+        "Install it with your package manager — `sudo apt install git`, \
+         `sudo dnf install git`, or `sudo pacman -S git`."
+    };
+    format!(
+        "{opening} {how} Or choose Paper, which runs every Spigot plugin and \
+         installs without building anything."
+    )
 }
 
 /// Whether a command can be run at all and exits cleanly.
