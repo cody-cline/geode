@@ -17,7 +17,8 @@ export type PropertyGroup =
   | "Players"
   | "Network"
   | "Performance"
-  | "Security";
+  | "Security"
+  | "Management API";
 
 /** The order groups are shown in — most-reached-for first. */
 export const GROUP_ORDER: PropertyGroup[] = [
@@ -26,6 +27,7 @@ export const GROUP_ORDER: PropertyGroup[] = [
   "Network",
   "Performance",
   "Security",
+  "Management API",
 ];
 
 export type Control =
@@ -184,6 +186,20 @@ export const PROPERTY_INFO: Record<string, PropertyInfo> = {
     description: "Whether villagers spawn in generated villages.",
     control: bool(),
   },
+  "initial-enabled-packs": {
+    group: "World",
+    label: "Data packs enabled at creation",
+    description:
+      "Built-in data packs switched on when the world is first created, comma separated.",
+    control: text("vanilla"),
+  },
+  "initial-disabled-packs": {
+    group: "World",
+    label: "Data packs disabled at creation",
+    description:
+      "Built-in data packs deliberately left off when the world is created.",
+    control: text(),
+  },
   "max-world-size": {
     group: "World",
     label: "World border",
@@ -266,6 +282,40 @@ export const PROPERTY_INFO: Record<string, PropertyInfo> = {
     label: "Require the resource pack",
     description: "Disconnect players who decline it.",
     control: bool(),
+  },
+  "resource-pack-id": {
+    group: "Players",
+    label: "Resource pack ID",
+    description:
+      "A UUID identifying the pack, so a client can recognise and replace it cleanly.",
+    control: text("00000000-0000-0000-0000-000000000000"),
+  },
+  "chat-spam-threshold-seconds": {
+    group: "Players",
+    label: "Chat spam threshold",
+    description:
+      "How much chat a player may send before being kicked for spamming. Higher is more lenient.",
+    control: int(0, undefined, "seconds"),
+  },
+  "command-spam-threshold-seconds": {
+    group: "Players",
+    label: "Command spam threshold",
+    description:
+      "The same limit for commands rather than chat. Higher is more lenient.",
+    control: int(0, undefined, "seconds"),
+  },
+  "enable-code-of-conduct": {
+    group: "Players",
+    label: "Show a code of conduct",
+    description:
+      "Show players a code of conduct in their own language, which they accept before joining.",
+    control: bool(),
+  },
+  "bug-report-link": {
+    group: "Players",
+    label: "Bug report link",
+    description: "Where the client offers to send players if the server crashes them.",
+    control: text("https://…"),
   },
   "broadcast-console-to-ops": {
     group: "Players",
@@ -369,6 +419,13 @@ export const PROPERTY_INFO: Record<string, PropertyInfo> = {
       "Password for remote console. Stored in plain text in this file, beside the world.",
     control: text(undefined, true),
     danger: "Stored in plain text, and RCON will not start without one.",
+  },
+  "accepts-transfers": {
+    group: "Network",
+    label: "Accept transferred players",
+    description:
+      "Allow players sent here by another server rather than connecting directly.",
+    control: bool(),
   },
   "use-native-transport": {
     group: "Network",
@@ -496,6 +553,90 @@ export const PROPERTY_INFO: Record<string, PropertyInfo> = {
     description:
       "Write joining players' addresses to the log. Turn off to keep logs shareable.",
     control: bool(),
+  },
+  "text-filtering-config": {
+    group: "Security",
+    label: "Chat filter configuration",
+    description:
+      "Configuration for a chat-filtering service. Used by Realms; blank on nearly every other server.",
+    control: text(),
+  },
+  "text-filtering-version": {
+    group: "Security",
+    label: "Chat filter version",
+    description: "Which version of that filter configuration format to read.",
+    control: int(0, 1),
+  },
+
+  // --- Management API ------------------------------------------------------
+  // A JSON-RPC API over a WebSocket, added as a better-designed replacement for
+  // RCON: a bearer token instead of a password, and TLS on by default.
+  "management-server-enabled": {
+    group: "Management API",
+    label: "Enable the management API",
+    description:
+      "Turn on the management protocol — a modern alternative to RCON for controlling the server programmatically.",
+    control: bool(),
+    danger:
+      "With TLS left on and no keystore set, enabling this stops the whole server from starting.",
+  },
+  "management-server-host": {
+    group: "Management API",
+    label: "Bind address",
+    description:
+      "Which interface the management API listens on. Leave it on localhost unless it is behind a firewall.",
+    control: text("localhost"),
+    danger:
+      "Anyone who can reach this address with the secret can control the server.",
+  },
+  "management-server-port": {
+    group: "Management API",
+    label: "Port",
+    description: "Port the management API listens on. 0 leaves it switched off.",
+    control: int(0, 65535),
+  },
+  "management-server-secret": {
+    group: "Management API",
+    label: "Access token",
+    description:
+      "A 40-character token clients must present. Anyone holding it can control the server.",
+    control: text(undefined, true),
+    danger: "Stored in plain text in this file, beside the world.",
+  },
+  "management-server-tls-enabled": {
+    group: "Management API",
+    label: "Encrypt with TLS",
+    description:
+      "Encrypt management connections. On by default, and it needs a keystore below.",
+    control: bool(),
+    danger:
+      "Leaving this on without a keystore stops the server from starting at all.",
+  },
+  "management-server-tls-keystore": {
+    group: "Management API",
+    label: "TLS keystore",
+    description: "Path to the PKCS#12 keystore holding the certificate to serve.",
+    control: text(),
+  },
+  "management-server-tls-keystore-password": {
+    group: "Management API",
+    label: "Keystore password",
+    description: "Password for that keystore file.",
+    control: text(undefined, true),
+    danger: "Stored in plain text in this file.",
+  },
+  "management-server-allowed-origins": {
+    group: "Management API",
+    label: "Allowed origins",
+    description: "Which web origins may connect to the management API.",
+    control: text(),
+  },
+  "status-heartbeat-interval": {
+    group: "Management API",
+    label: "Status heartbeat",
+    description:
+      "How often the management API pushes a status notification to connected clients. 0 turns it off.",
+    control: int(0, undefined, "seconds"),
   },
 };
 
