@@ -307,6 +307,17 @@ export interface BuildReport {
   skipped: string[];
 }
 
+/**
+ * The same, for a plan built as a server. `skipped` carries the client-only
+ * mods that were deliberately left out, not only things that failed.
+ */
+export interface ServerBuildReport {
+  serverId: string;
+  serverName: string;
+  installed: string[];
+  skipped: string[];
+}
+
 export interface Project {
   provider: Provider;
   id: string;

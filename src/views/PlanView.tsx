@@ -9,6 +9,7 @@ import {
   Package,
   Plus,
   RefreshCw,
+  Server as ServerIcon,
   Trash2,
 } from "lucide-react";
 
@@ -54,6 +55,7 @@ export default function PlanView({ id }: { id: string }) {
   const toast = useStore((s) => s.toast);
   const reportError = useStore((s) => s.reportError);
   const refreshInstances = useStore((s) => s.refreshInstances);
+  const refreshServers = useStore((s) => s.refreshServers);
 
   const [plan, setPlan] = useState<Plan | null>(null);
   const [resolution, setResolution] = useState<PlanResolution | null>(null);
@@ -62,6 +64,7 @@ export default function PlanView({ id }: { id: string }) {
   const [adding, setAdding] = useState(false);
   const [addSource, setAddSource] = useState<PlanSource>("mods");
   const [building, setBuilding] = useState(false);
+  const [buildingServer, setBuildingServer] = useState(false);
   const [name, setName] = useState("");
 
   // Adding takes over the view, so back should come out of it rather than
@@ -192,6 +195,40 @@ export default function PlanView({ id }: { id: string }) {
       reportError("Could not build the plan", e);
     } finally {
       setBuilding(false);
+    }
+  }
+
+  async function buildServer() {
+    if (!plan || !target) return;
+    setBuildingServer(true);
+    try {
+      const report = await api.createServerFromPlan(
+        plan.id,
+        target.loader,
+        target.gameVersion,
+        `${plan.name} server`,
+      );
+      await refreshServers();
+      toast({
+        kind: "success",
+        title: `Built ${report.serverName}`,
+        body: `${report.installed.length} files installed.`,
+      });
+      // Left-out mods are the interesting half: a plan full of client mods
+      // becomes a much smaller server, and saying which ones went missing is
+      // the difference between that and a puzzle.
+      if (report.skipped.length > 0) {
+        toast({
+          kind: "info",
+          title: `${report.skipped.length} left out`,
+          body: report.skipped.slice(0, 4).join("; "),
+        });
+      }
+      navigate({ view: "server", id: report.serverId });
+    } catch (e) {
+      reportError("Could not build a server from this plan", e);
+    } finally {
+      setBuildingServer(false);
     }
   }
 
@@ -525,6 +562,22 @@ export default function PlanView({ id }: { id: string }) {
                 <Hammer size={14} />
               )}
               Build on {loaderLabel(target.loader)} {target.gameVersion}
+            </button>
+          )}
+
+          {target && (
+            <button
+              className={clsx("btn", styles.buildAlt)}
+              onClick={buildServer}
+              disabled={buildingServer}
+              title="Create a server at this target and install the mods that run on one"
+            >
+              {buildingServer ? (
+                <Loader2 size={14} className="spin" />
+              ) : (
+                <ServerIcon size={14} />
+              )}
+              Build as a server
             </button>
           )}
         </aside>

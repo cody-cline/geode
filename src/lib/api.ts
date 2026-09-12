@@ -30,6 +30,7 @@ import type {
   SearchResults,
   Schedule,
   Server,
+  ServerBuildReport,
   ServerKindInfo,
   ServerProperty,
   ServerSettings,
@@ -188,6 +189,23 @@ export const api = {
     name?: string,
   ) =>
     invoke<BuildReport>("build_plan", {
+      id,
+      loader,
+      gameVersion,
+      name: name ?? null,
+    }),
+  /**
+   * Build a plan as a server instead of an instance. Refused, with the reason,
+   * for targets that cannot be one — the rule lives in the backend so it
+   * cannot drift.
+   */
+  createServerFromPlan: (
+    id: string,
+    loader: string,
+    gameVersion: string,
+    name?: string,
+  ) =>
+    invoke<ServerBuildReport>("create_server_from_plan", {
       id,
       loader,
       gameVersion,

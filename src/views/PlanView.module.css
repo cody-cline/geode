@@ -421,6 +421,14 @@
   overflow: hidden;
 }
 
+/* The second way to build the same plan. Quieter than the primary action,
+   since most plans are for playing rather than hosting. */
+.buildAlt {
+  width: 100%;
+  margin-top: 6px;
+  overflow: hidden;
+}
+
 .empty {
   max-width: 420px;
   margin: 64px auto;

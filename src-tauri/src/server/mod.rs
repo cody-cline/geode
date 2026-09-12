@@ -11,6 +11,7 @@
 //! assumes one or the other cannot describe them.
 
 pub mod backup;
+pub mod from_plan;
 pub mod install;
 pub mod logs;
 pub mod meta;

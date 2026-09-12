@@ -1427,6 +1427,74 @@ pub async fn install_server_content(
 }
 
 /// The server's logs: the one it is writing now, and the ones it rotated.
+/// Build a plan into a server rather than an instance.
+///
+/// The plan resolves exactly as it would for an instance; what differs is that
+/// mods which do not run on a server are left out and named, and that most
+/// targets cannot be a server at all.
+#[tauri::command]
+pub async fn create_server_from_plan(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    loader: String,
+    game_version: String,
+    name: Option<String>,
+) -> Result<crate::server::from_plan::ServerBuildReport> {
+    let plan = crate::plan::load(&state.paths, &id).await?;
+    let config = state.config().await;
+    let cf_key = config.effective_curseforge_key();
+    let cf_key = cf_key.as_deref();
+
+    let progress = Progress::new(app, format!("plan-server:{id}"));
+    state.register_cancel(progress.id(), progress.cancel_flag());
+
+    let matrix = state.connector.get(&state.http).await.unwrap_or_default();
+    let resolution = crate::plan::resolve::resolve(
+        &state.http,
+        &plan,
+        &matrix,
+        &state.plan_support,
+        cf_key,
+        &progress,
+    )
+    .await?;
+
+    let target = resolution
+        .targets
+        .iter()
+        .find(|t| t.loader == loader && t.game_version == game_version)
+        .ok_or_else(|| {
+            Error::msg(format!(
+                "{loader} {game_version} is no longer one of this plan's options — \
+                 resolve it again"
+            ))
+        })?;
+
+    let result = crate::server::from_plan::from_plan(
+        &state.http,
+        &state.paths,
+        &plan,
+        target,
+        name,
+        cf_key,
+        &progress,
+    )
+    .await;
+
+    state.clear_cancel(progress.id());
+    match result {
+        Ok(report) => {
+            progress.finish().await;
+            Ok(report)
+        }
+        Err(e) => {
+            progress.fail(&e.to_string()).await;
+            Err(e)
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn list_server_logs(
     state: State<'_, AppState>,

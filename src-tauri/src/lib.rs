@@ -115,6 +115,7 @@ pub fn run() {
             commands::install_server_content,
             commands::remove_server_content,
             commands::set_server_content_enabled,
+            commands::create_server_from_plan,
             commands::list_server_logs,
             commands::read_server_log,
             commands::delete_server_log,
