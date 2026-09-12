@@ -128,7 +128,14 @@ export default function Browse({
   const [debounced, setDebounced] = useState("");
   const [kind, setKind] = useState<ProjectKind>("mod");
   const [sort, setSort] = useState<SortBy>("relevance");
-  const [sources, setSources] = useState<Provider[]>(["modrinth", "curseforge"]);
+  // SpigotMC is selected from the start so it comes back on its own when the
+  // Plugins tab is opened, the way CurseForge does once a key is added. It is
+  // filtered out of every other tab below.
+  const [sources, setSources] = useState<Provider[]>([
+    "modrinth",
+    "curseforge",
+    "spiget",
+  ]);
   const [categories, setCategories] = useState<string[]>([]);
   const [available, setAvailable] = useState<string[]>([]);
   /** Last instance installed into, used to preselect the picker. */
@@ -190,8 +197,11 @@ export default function Browse({
     const availableSources: Provider[] = hasCurseforgeKey
       ? ["modrinth", "curseforge"]
       : ["modrinth"];
+    // SpigotMC indexes plugins and nothing else, so it is offered only where
+    // plugins are what you are looking for — asking it for mods finds nothing.
+    if (kind === "plugin") availableSources.push("spiget");
     return sources.filter((s) => availableSources.includes(s));
-  }, [sources, hasCurseforgeKey]);
+  }, [sources, hasCurseforgeKey, kind]);
 
   const contentKeys = useCallback(async (instanceId: string) => {
     const lists = await Promise.all(
@@ -837,6 +847,24 @@ export default function Browse({
                   Add it
                 </button>
               </p>
+            )}
+            {kind === "plugin" && (
+              <>
+                <label className={styles.check}>
+                  <input
+                    type="checkbox"
+                    checked={providers.includes("spiget")}
+                    onChange={() => toggleSource("spiget")}
+                  />
+                  <span className="badge badge-spiget">SpigotMC</span>
+                </label>
+                {/* Said here rather than discovered on a failed install. */}
+                <p className={styles.filterNote}>
+                  Lists each plugin&apos;s current file only, with no per-version
+                  compatibility. Some are hosted elsewhere or sold — those open
+                  their page instead of installing.
+                </p>
+              </>
             )}
           </section>
 

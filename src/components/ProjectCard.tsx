@@ -11,7 +11,12 @@ import {
 } from "lucide-react";
 
 import { launchInstance } from "../lib/actions";
-import { compactNumber, relativeTime, titleCase } from "../lib/format";
+import {
+  compactNumber,
+  providerLabel,
+  relativeTime,
+  titleCase,
+} from "../lib/format";
 import type { Instance, ProgressEvent, Project } from "../lib/types";
 
 import styles from "./ProjectCard.module.css";
@@ -85,7 +90,7 @@ export default function ProjectCard({
             <span className={styles.author}>by {project.author}</span>
           )}
           <span className={clsx("badge", `badge-${project.provider}`)}>
-            {project.provider === "modrinth" ? "Modrinth" : "CurseForge"}
+            {providerLabel(project.provider)}
           </span>
           {project.alsoOn.map((ref) => (
             <span
@@ -93,7 +98,7 @@ export default function ProjectCard({
               className={clsx("badge", `badge-${ref.provider}`)}
               title="Also available here"
             >
-              {ref.provider === "modrinth" ? "Modrinth" : "CurseForge"}
+              {providerLabel(ref.provider)}
             </span>
           ))}
           {fabricAlso ? (

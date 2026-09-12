@@ -18,7 +18,13 @@ import { renderProviderBody } from "../lib/richtext";
 import { useBackHandler } from "../lib/useBackHandler";
 import { launchInstance } from "../lib/actions";
 import { useStore } from "../lib/store";
-import { compactNumber, fileSize, relativeTime, titleCase } from "../lib/format";
+import {
+  compactNumber,
+  fileSize,
+  providerLabel,
+  relativeTime,
+  titleCase,
+} from "../lib/format";
 import type { Instance, Project, ProjectVersion, Provider } from "../lib/types";
 
 import styles from "./ProjectPanel.module.css";
@@ -152,7 +158,7 @@ export default function ProjectPanel({
                 )}
                 onClick={() => setSource(s)}
               >
-                {s.provider === "modrinth" ? "Modrinth" : "CurseForge"}
+                {providerLabel(s.provider)}
               </button>
             ))}
           </div>
