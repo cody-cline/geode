@@ -13,6 +13,7 @@ import {
 import InstallTargetModal from "../components/InstallTargetModal";
 import PlanSourceTabs from "../components/PlanSourceTabs";
 import type { PlanSource } from "../components/PlanSourceTabs";
+import ServerTargetModal from "../components/ServerTargetModal";
 import InstanceIcon from "../components/InstanceIcon";
 import ProjectCard from "../components/ProjectCard";
 import ProjectPanel from "../components/ProjectPanel";
@@ -34,6 +35,7 @@ import styles from "./Browse.module.css";
 
 const KINDS: { id: ProjectKind; label: string }[] = [
   { id: "mod", label: "Mods" },
+  { id: "plugin", label: "Plugins" },
   { id: "modpack", label: "Modpacks" },
   { id: "resourcepack", label: "Resource Packs" },
   { id: "shader", label: "Shaders" },
@@ -149,6 +151,8 @@ export default function Browse({
     project: Project;
     versionId?: string;
   } | null>(null);
+  /** A plugin found in the global view, waiting to be told which server. */
+  const [askServer, setAskServer] = useState<Project | null>(null);
   const [installing, setInstalling] = useState<string | null>(null);
 
   const progressMap = useStore((s) => s.progress);
@@ -283,6 +287,13 @@ export default function Browse({
     }
     if (server) {
       server.onInstall(project);
+      return;
+    }
+    // Keyed on what is being browsed, not on the project's own type: Modrinth
+    // returns plenty of multi-platform plugins typed as mods, and asking the
+    // project would misroute exactly those.
+    if (kind === "plugin") {
+      setAskServer(project);
       return;
     }
     // A pack already carries its own name, version and loader, so there is
@@ -628,7 +639,9 @@ export default function Browse({
           ? // The folder decides: a plugin search for plugins/, mods for mods/.
             KINDS.filter((k) => k.id === server.kind)
           : lockedInstance
-            ? KINDS.filter((k) => k.id !== "modpack")
+            ? // An instance has no plugins folder, and a pack is not something
+              // you add to one.
+              KINDS.filter((k) => k.id !== "modpack" && k.id !== "plugin")
             : KINDS,
     [lockedInstance, plan, server],
   );
@@ -975,6 +988,38 @@ export default function Browse({
           directInstall={Boolean(lockedInstance)}
           planMode={Boolean(plan)}
           added={isInstalled(selected)}
+        />
+      )}
+
+      {askServer && (
+        <ServerTargetModal
+          project={askServer}
+          busy={installing !== null}
+          onClose={() => setAskServer(null)}
+          onPick={(target) => {
+            const project = askServer;
+            setAskServer(null);
+            setInstalling(project.id);
+            void api
+              .installServerContent(
+                target.id,
+                project.provider,
+                project.id,
+                "plugin",
+              )
+              .then((report) => {
+                toast({
+                  kind: "success",
+                  title: `Added ${project.name} to ${target.name}`,
+                  body:
+                    report.skipped.length > 0
+                      ? report.skipped.join("; ")
+                      : "Restart the server to load it.",
+                });
+              })
+              .catch((e) => reportError(`Could not install ${project.name}`, e))
+              .finally(() => setInstalling(null));
+          }}
         />
       )}
 
