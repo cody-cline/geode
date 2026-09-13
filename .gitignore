@@ -9,6 +9,9 @@ src-tauri/target
 # Tauri regenerates these from tauri.conf.json and capabilities/ on every build.
 src-tauri/gen/schemas
 
+# `wrangler dev` keeps its local Durable Object state here.
+rendezvous/.wrangler
+
 # Local secrets / dev scratch
 .env
 .env.local

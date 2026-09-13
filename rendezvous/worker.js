@@ -30,21 +30,16 @@
  * once before transferring megabytes — not worth optimising for.
  *
  * DEPLOY
- *   npm create cloudflare@latest -- geode-rendezvous
- *   # replace src/index.js with this file, then in wrangler.toml:
- *   #
- *   #   [[durable_objects.bindings]]
- *   #   name = "SHARES"
- *   #   class_name = "ShareRegistry"
- *   #
- *   #   [[migrations]]
- *   #   tag = "v1"
- *   #   new_sqlite_classes = ["ShareRegistry"]
- *   #
+ *   cd rendezvous
+ *   npx wrangler login     # once, in a browser
  *   npx wrangler deploy
  *
- * Then put the resulting URL into Geode's settings. Nothing else is required
- * and there is no account for Geode to hold.
+ * `wrangler.toml` beside this file carries the binding and the migration, so
+ * there is nothing to scaffold and nothing to paste. Put the resulting URL into
+ * Geode's settings; there is no account for Geode itself to hold.
+ *
+ * To work on it, `npx wrangler dev` runs the whole thing locally — Durable
+ * Object, alarms and all — with no account at all.
  */
 
 /** A key is 16 characters of Crockford Base32 and nothing else. */
@@ -67,20 +62,36 @@ const MAX_TTL = 60 * 60 * 24 * 30;
  */
 const DEFAULT_TTL = 60 * 60 * 24 * 7;
 
+// A desktop app is not a browser origin, but the landing page below is.
+const CORS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET,PUT,DELETE,OPTIONS",
+  "access-control-allow-headers": "content-type,authorization",
+};
+
 const json = (body, status = 200) =>
   new Response(JSON.stringify(body), {
     status,
-    headers: {
-      "content-type": "application/json",
-      // A desktop app is not a browser origin, but the landing page below is.
-      "access-control-allow-origin": "*",
-      "access-control-allow-methods": "GET,PUT,DELETE,OPTIONS",
-      "access-control-allow-headers": "content-type,authorization",
-      "cache-control": "no-store",
-    },
+    headers: { ...CORS, "content-type": "application/json", "cache-control": "no-store" },
   });
 
+/**
+ * A preflight answer, which must carry no body at all.
+ *
+ * 204 is one of the statuses the Fetch spec forbids a body on, and constructing
+ * such a Response throws rather than ignoring it — so this cannot go through
+ * `json()`. The landing page is a real browser origin, so this path is reached.
+ */
+const preflight = () => new Response(null, { status: 204, headers: CORS });
+
 const str = (value, max) => (typeof value === "string" ? value.slice(0, max) : "");
+
+/** The bearer token on a request, or "" — never null, so comparisons are safe. */
+const bearer = (request) =>
+  (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
+
+/** A share that exists and has not passed its expiry. */
+const live = (share) => !!share && share.expires * 1000 > Date.now();
 
 /**
  * One share.
@@ -96,19 +107,39 @@ export class ShareRegistry {
   }
 
   async fetch(request) {
+    // Drain the body first, whatever we intend to answer.
+    //
+    // Responding while bytes are still unread leaves the connection
+    // mis-framed, and it is the *next* request on that connection that then
+    // fails — so a rejected share breaks an unrelated one, which is about the
+    // most confusing failure available. Read once, up front, then decide.
+    const text = request.body ? await request.text() : "";
+
     if (request.method === "GET") {
-      const share = this.ctx.storage.kv.get("share");
       // Belt and braces. The alarm should have cleared an expired share
       // already, but a read arriving in that gap must not resolve.
-      if (!share || share.expires * 1000 <= Date.now()) {
-        return json({ error: "no such share" }, 404);
-      }
+      const share = this.ctx.storage.kv.get("share");
+      if (!live(share)) return json({ error: "no such share" }, 404);
       const { revoke, ...visible } = share;
       return json(visible);
     }
 
     if (request.method === "PUT") {
-      const text = await request.text();
+      // Replacing a live share belongs to whoever created it.
+      //
+      // Without this, holding the code is enough to overwrite the pointer, and
+      // on a server share the admin hands that code to every player — so any
+      // one of them could repoint it at their own machine and serve their own
+      // jars to everybody else under the admin's name. Creating a share stays
+      // open (nothing is there to protect yet); replacing one does not.
+      const existing = this.ctx.storage.kv.get("share");
+      if (live(existing) && existing.revoke !== bearer(request)) {
+        return json(
+          { error: "this share already exists — send its revocation token to replace it" },
+          403,
+        );
+      }
+
       if (text.length > MAX_BODY) {
         return json({ error: "too large — this stores pointers, not files" }, 413);
       }
@@ -132,7 +163,11 @@ export class ShareRegistry {
       // The creator gets a token back so they can revoke early. Held here
       // rather than derived from the code, so an admin can hand the code to
       // fifty people and still keep the off switch themselves.
-      const revoke = crypto.randomUUID();
+      //
+      // Kept across a replacement rather than rotated: a server that moves
+      // address re-PUTs its ticket, and rotating here would invalidate the
+      // token the admin has already stored for the share they still own.
+      const revoke = live(existing) ? existing.revoke : crypto.randomUUID();
 
       this.ctx.storage.kv.put("share", {
         v: 1,
@@ -154,13 +189,9 @@ export class ShareRegistry {
     }
 
     if (request.method === "DELETE") {
-      const token = (request.headers.get("authorization") || "").replace(
-        /^Bearer\s+/i,
-        "",
-      );
       const share = this.ctx.storage.kv.get("share");
-      if (!share) return json({ error: "no such share" }, 404);
-      if (share.revoke !== token) {
+      if (!live(share)) return json({ error: "no such share" }, 404);
+      if (share.revoke !== bearer(request)) {
         return json({ error: "wrong revocation token" }, 403);
       }
       await this.ctx.storage.deleteAll();
@@ -180,7 +211,7 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    if (request.method === "OPTIONS") return json({}, 204);
+    if (request.method === "OPTIONS") return preflight();
 
     // A landing page so a code can be sent as a link. The code travels in the
     // fragment, which browsers never send to a server — so this page can show
