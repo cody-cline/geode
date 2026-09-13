@@ -93,7 +93,9 @@ async fn notes_for(paths: &Paths, instance: &Instance) -> Vec<FileNote> {
         out.push(FileNote {
             path: rel.to_string_lossy().replace('\\', "/"),
             side,
-            server_only: false,
+            server_only: record.sharing.server_only,
+            source: None,
+            manual: false,
         });
     }
     out

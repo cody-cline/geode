@@ -90,6 +90,22 @@ pub struct Profile {
     pub server_kind: Option<String>,
 }
 
+/// Where a file came from, so a recipient can fetch it rather than be sent it.
+///
+/// This is the whole point of the format. A jar that exists on a provider is
+/// carried as a reference and resolved by the recipient through their own
+/// credentials — which keeps packs small, keeps mods current, and keeps Geode
+/// out of redistributing other people's work. `.mrpack`'s own index can only
+/// express Modrinth this way, because Modrinth's validator accepts no other
+/// download host; CurseForge references therefore live here instead.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceRef {
+    pub provider: String,
+    pub project_id: String,
+    pub version_id: String,
+}
+
 /// Something worth saying about one file in the index.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -106,6 +122,18 @@ pub struct FileNote {
     /// them and match the server exactly, or drop them and save the space.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub server_only: bool,
+    /// Where to get it, when it is not something the index can point at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceRef>,
+    /// The recipient has to fetch this one themselves.
+    ///
+    /// Set when a project's author has turned off third-party downloads. That
+    /// is a decision Geode respects rather than works around, so the file is
+    /// named in the pack and not included in it — an import that says "two of
+    /// these sixteen need fetching, here they are" is a better outcome than a
+    /// pack that quietly redistributes them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub manual: bool,
 }
 
 impl Manifest {
@@ -145,6 +173,8 @@ mod tests {
                 path: "mods/sodium.jar".into(),
                 side: Some(crate::instance::jar::Side::Client),
                 server_only: false,
+                source: None,
+                manual: false,
             }],
         }
     }
@@ -167,6 +197,31 @@ mod tests {
         }
         // And a file with nothing to say about it carries no flag either.
         assert!(!json.contains("serverOnly"));
+        assert!(!json.contains("manual"));
+        assert!(!json.contains("source"));
+    }
+
+    /// A file whose author disabled third-party downloads is named, never
+    /// carried. The recipient gets a list to act on rather than a pack that
+    /// redistributed it for them.
+    #[test]
+    fn a_file_that_cannot_be_redistributed_is_referenced_not_embedded() {
+        let note = FileNote {
+            path: "mods/private.jar".into(),
+            side: None,
+            server_only: false,
+            source: Some(SourceRef {
+                provider: "curseforge".into(),
+                project_id: "12345".into(),
+                version_id: "67890".into(),
+            }),
+            manual: true,
+        };
+        let json = serde_json::to_string(&note).unwrap();
+        assert!(json.contains("\"manual\":true"));
+        assert!(json.contains("curseforge"));
+        let back: FileNote = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, note);
     }
 
     /// A path on the exporter's machine is meaningless on anyone else's, and a

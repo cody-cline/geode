@@ -610,10 +610,23 @@ async fn record_mrpack_provenance(
 
 /// Write the instance out as a `.mrpack`.
 ///
-/// Content installed from Modrinth becomes an index entry (a URL, not a copy),
-/// which is what keeps packs small and redistributable. Everything else —
-/// configs, hand-dropped jars, CurseForge files we may not redistribute — goes
-/// into `overrides/`.
+/// Content installed from Modrinth becomes an index entry — a URL and a pair of
+/// hashes, not a copy — which is what keeps a pack small and keeps its mods
+/// current. Everything else goes into `overrides/` as bytes.
+///
+/// **That second half is a known problem, and it is why sharing a pack is not
+/// the same act as exporting one.** `overrides/` currently receives CurseForge
+/// jars, whose terms do not permit redistributing them, alongside configs the
+/// author wrote themselves. Handing somebody that file directly is one thing;
+/// uploading it to a URL anybody can fetch is another, and the second is what
+/// a share code would do.
+///
+/// The manifest in [`crate::share::manifest`] carries the fix: a `SourceRef`
+/// per file, so a recipient resolves a CurseForge mod through their own key
+/// rather than being sent the jar, and a `manual` flag for projects whose
+/// authors have turned third-party downloads off. Wiring the exporter to
+/// prefer a reference over a copy is the remaining work, and no upload path
+/// should exist until it is done.
 /// Extra entries to place in the zip beside the index.
 ///
 /// This is how a `.geodepack` is written: the same `.mrpack` exactly, plus a
