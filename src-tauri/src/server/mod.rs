@@ -635,6 +635,7 @@ mod tests {
             icon_url: None,
             dependency: false,
             sharing: Default::default(),
+            origin: Default::default(),
             requires: None,
         }
     }

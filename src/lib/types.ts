@@ -102,6 +102,12 @@ export interface ContentItem {
   slug?: string;
   dependency: boolean;
   fromDisk: boolean;
+  /**
+   * Who put this here. A server's own mods can be turned off but not deleted —
+   * sharing runs one way, so removing one would only leave the next sync to
+   * bring it back. Absent means it is yours.
+   */
+  origin?: "user" | "server";
   /** File names of installed mods this one needs. */
   requires: string[];
   /** File names of installed mods that need this one. */

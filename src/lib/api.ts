@@ -439,4 +439,6 @@ export const api = {
     invoke<Instance>("import_modpack", { path, name: name ?? null }),
   exportModpack: (id: string, dest: string, includeSaves: boolean) =>
     invoke<string>("export_modpack", { id, dest, includeSaves }),
+  exportGeodepack: (id: string, dest: string, includeSaves: boolean) =>
+    invoke<string>("export_geodepack", { id, dest, includeSaves }),
 };

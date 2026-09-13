@@ -290,6 +290,229 @@ pub fn apply(manifest: &Manifest, instance: &mut Instance) {
     // that could point at a directory on somebody else's machine.
 }
 
+/// Apply the Geode half of a pack to the instance the mrpack half just built.
+///
+/// `Ok(vec![])` means everything the pack named is now on disk. Anything in the
+/// returned list is a file the manifest pointed at that the recipient has to
+/// fetch themselves — which is the design working rather than a shortfall: the
+/// pack said where each mod lives instead of carrying somebody else's jar, and
+/// a named list is more actionable than an instance that is quietly incomplete.
+///
+/// A plain `.mrpack` has no Geode half, so this does nothing and says so.
+pub async fn apply_pack(
+    client: &reqwest::Client,
+    paths: &Paths,
+    instance: &mut Instance,
+    archive: &Path,
+    curseforge_key: Option<&str>,
+    progress: &Progress,
+) -> Result<Vec<String>> {
+    let probe = archive.to_path_buf();
+    let manifest = tokio::task::spawn_blocking(move || read_manifest(&probe))
+        .await
+        .map_err(|e| Error::msg(format!("reading the pack's manifest panicked: {e}")))??;
+    let Some(manifest) = manifest else {
+        return Ok(Vec::new());
+    };
+
+    apply(&manifest, instance);
+    extract_media(paths, instance, archive, &manifest).await?;
+
+    let missing =
+        resolve_references(client, paths, instance, &manifest, curseforge_key, progress).await?;
+
+    // Everything that arrived with a server's pack is the server's, however it
+    // arrived — through the index, through a reference, or as an override. A
+    // player may turn any of it off; the list itself is not theirs to edit.
+    if manifest.kind == Kind::Server {
+        for record in &mut instance.content {
+            record.origin = instance::content::Origin::Server;
+        }
+    }
+
+    Ok(missing)
+}
+
+/// Copy the pack's artwork out of `geode/` and point the instance at it.
+///
+/// Overrides are extracted by path prefix and `geode/` matches none of them, so
+/// without this the artwork is not merely unused — it never lands on disk.
+async fn extract_media(
+    paths: &Paths,
+    instance: &mut Instance,
+    archive: &Path,
+    manifest: &Manifest,
+) -> Result<()> {
+    let wanted: Vec<(String, bool)> = [(manifest.icon.as_ref(), true), (manifest.banner.as_ref(), false)]
+        .into_iter()
+        .filter_map(|(entry, is_icon)| entry.map(|e| (e.clone(), is_icon)))
+        .collect();
+    if wanted.is_empty() {
+        return Ok(());
+    }
+
+    let media = paths.instance_media(&instance.id);
+    tokio::fs::create_dir_all(&media).await?;
+
+    let archive = archive.to_path_buf();
+    let media_dir = media.clone();
+    let written = tokio::task::spawn_blocking(move || -> Result<Vec<(String, bool)>> {
+        let file = std::fs::File::open(&archive)?;
+        let mut zip = zip::ZipArchive::new(file)?;
+        let mut out = Vec::new();
+        for (entry, is_icon) in wanted {
+            // Only ever from inside `geode/`, and only ever a bare file name on
+            // the way out, so a crafted entry cannot write outside the folder.
+            if !entry.starts_with("geode/media/") {
+                continue;
+            }
+            let Some(name) = Path::new(&entry).file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let Ok(mut source) = zip.by_name(&entry) else {
+                continue;
+            };
+            let mut dest = std::fs::File::create(media_dir.join(name))?;
+            std::io::copy(&mut source, &mut dest)?;
+            out.push((name.to_string(), is_icon));
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| Error::msg(format!("extracting pack artwork panicked: {e}")))??;
+
+    for (name, is_icon) in written {
+        if is_icon {
+            instance.icon = Some(name);
+        } else {
+            instance.banner = Some(name);
+        }
+    }
+    Ok(())
+}
+
+/// Fetch everything the manifest pointed at rather than carried.
+///
+/// Each reference is resolved live through the recipient's own credentials, so
+/// an author who has since turned third-party downloads off is respected rather
+/// than worked around — which is the whole reason these are ids and not URLs.
+async fn resolve_references(
+    client: &reqwest::Client,
+    paths: &Paths,
+    instance: &mut Instance,
+    manifest: &Manifest,
+    curseforge_key: Option<&str>,
+    progress: &Progress,
+) -> Result<Vec<String>> {
+    let refs: Vec<(&FileNote, &SourceRef)> = manifest
+        .files
+        .iter()
+        .filter_map(|note| note.source.as_ref().map(|source| (note, source)))
+        .collect();
+    if refs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let key = curseforge_key.filter(|k| !k.trim().is_empty());
+    let game_dir = paths.game_dir(&instance.id);
+    let mut downloads = Vec::new();
+    let mut records = Vec::new();
+    let mut missing = Vec::new();
+
+    progress.stage("Resolving pack references", refs.len() as u64).await;
+
+    for (note, source) in refs {
+        progress.check_cancelled()?;
+        progress.advance(1, &note.path).await;
+
+        let rel = Path::new(&note.path);
+        if !crate::paths::is_safe_relative(rel) {
+            continue;
+        }
+        let Some(kind) = kind_for(rel) else {
+            missing.push(format!("{} (unrecognised folder)", note.path));
+            continue;
+        };
+
+        // Only CurseForge is ever written as a reference today — Modrinth goes
+        // in the index, and nothing else is installed by id.
+        if source.provider != "curseforge" {
+            missing.push(format!("{} (from {}, which Geode cannot fetch by id)", note.path, source.provider));
+            continue;
+        }
+        let Some(key) = key else {
+            missing.push(format!("{} (needs your CurseForge API key)", note.path));
+            continue;
+        };
+        let (Ok(project), Ok(file_id)) = (
+            source.project_id.parse::<u32>(),
+            source.version_id.parse::<u32>(),
+        ) else {
+            missing.push(format!("{} (unreadable CurseForge ids)", note.path));
+            continue;
+        };
+
+        let version = match crate::providers::curseforge::file(client, project, file_id, key).await {
+            Ok(v) => v,
+            Err(e) => {
+                missing.push(format!("{} ({e})", note.path));
+                continue;
+            }
+        };
+        let Some(file) = version.primary_file().filter(|_| version.blocked_reason.is_none()) else {
+            // The author turned third-party downloads off. That is a decision
+            // to respect and report, not to route around.
+            missing.push(format!("{} — {} (the author disabled third-party downloads)", note.path, version.name));
+            continue;
+        };
+
+        downloads.push(
+            crate::net::Download::new(file.url.clone(), game_dir.join(rel))
+                .sha1(file.sha1.clone())
+                .size(file.size)
+                .label(note.path.clone()),
+        );
+        records.push(instance::content::ContentRecord {
+            file_name: rel
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| note.path.clone()),
+            kind,
+            provider: "curseforge".into(),
+            project_id: version.project_id.clone(),
+            version_id: version.id.clone(),
+            name: version.name.clone(),
+            version_number: version.version_number.clone(),
+            slug: None,
+            icon_url: None,
+            dependency: false,
+            sharing: Default::default(),
+            origin: Default::default(),
+            requires: None,
+        });
+    }
+
+    progress.stage("Downloading referenced content", downloads.len() as u64).await;
+    crate::net::fetch_all(client, downloads, progress, 8).await?;
+    instance.content.extend(records);
+
+    Ok(missing)
+}
+
+/// Which content folder a manifest path names, if any.
+fn kind_for(rel: &Path) -> Option<instance::content::ContentKind> {
+    let folder = rel.parent()?.file_name()?.to_str()?;
+    [
+        instance::content::ContentKind::Mod,
+        instance::content::ContentKind::ResourcePack,
+        instance::content::ContentKind::ShaderPack,
+        instance::content::ContentKind::DataPack,
+        instance::content::ContentKind::Plugin,
+    ]
+    .into_iter()
+    .find(|k| k.folder() == folder)
+}
+
 /// `My Pack 1.2` becomes `My Pack 1.2.geodepack`.
 pub fn file_name(stem: &str) -> String {
     let cleaned: String = stem
@@ -444,6 +667,7 @@ mod tests {
             icon_url: None,
             dependency: false,
             sharing: Default::default(),
+            origin: Default::default(),
             requires: None,
         }
     }
@@ -677,6 +901,215 @@ mod tests {
             "{:?}",
             entries(&dest)
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // The round trip
+    // -----------------------------------------------------------------------
+
+    /// The whole point of the format: what goes out comes back. Before this,
+    /// Geode could write a `.geodepack` and then silently drop its own name,
+    /// notes, memory and artwork on the way back in.
+    #[tokio::test]
+    async fn a_pack_carries_the_instance_back_to_another_machine() {
+        let (paths, mut inst) =
+            fixture("round", &[("mods", "create.jar"), ("config", "x.toml")]).await;
+        inst.name = "My Pack".into();
+        inst.notes = "read me".into();
+        inst.overrides.memory_mb = Some(6144);
+        inst.content = vec![record("curseforge", "create.jar", ContentKind::Mod)];
+
+        // Artwork lives beside the instance rather than in the game directory.
+        let media = paths.instance_media(&inst.id);
+        tokio::fs::create_dir_all(&media).await.unwrap();
+        tokio::fs::write(media.join("icon.png"), b"PNG").await.unwrap();
+        inst.icon = Some("icon.png".into());
+
+        let dest = paths.root.join("round.geodepack");
+        export(&paths, &inst, dest.clone(), false, &Progress::silent("t"))
+            .await
+            .unwrap();
+
+        // A fresh instance, standing in for somebody else's machine.
+        let mut arrived = instance();
+        arrived.id = "arrived".into();
+        let missing = apply_pack(
+            &reqwest::Client::new(),
+            &paths,
+            &mut arrived,
+            &dest,
+            None,
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(arrived.name, "My Pack");
+        assert_eq!(arrived.notes, "read me");
+        assert_eq!(arrived.overrides.memory_mb, Some(6144));
+        assert_eq!(arrived.icon.as_deref(), Some("icon.png"));
+        assert!(
+            paths.instance_media("arrived").join("icon.png").is_file(),
+            "the artwork never landed on disk"
+        );
+
+        // The CurseForge mod was named rather than carried, so with no key
+        // configured the recipient gets a list to act on — not an instance
+        // that is quietly one mod short.
+        assert_eq!(missing.len(), 1, "{missing:?}");
+        assert!(missing[0].contains("create.jar"), "{missing:?}");
+        assert!(missing[0].contains("CurseForge API key"), "{missing:?}");
+    }
+
+    /// Everything that arrives with a server's pack belongs to the server,
+    /// however it arrived. A player may turn any of it off; the list is not
+    /// theirs to edit, because sharing runs one way.
+    #[tokio::test]
+    async fn a_server_pack_marks_everything_it_brought_as_the_servers() {
+        let (paths, mut inst) = fixture("srv", &[("mods", "anticheat.jar")]).await;
+
+        let manifest = Manifest {
+            geode_format: FORMAT,
+            kind: Kind::Server,
+            profile: Profile { name: "Survival".into(), ..Default::default() },
+            icon: None,
+            banner: None,
+            source: None,
+            files: Vec::new(),
+        };
+        let dest = paths.root.join("server.geodepack");
+        write_geode_only_pack(&dest, &manifest);
+
+        // As if the mrpack half had just installed these.
+        inst.content = vec![
+            record("modrinth", "anticheat.jar", ContentKind::Mod),
+            record("modrinth", "sodium.jar", ContentKind::Mod),
+        ];
+
+        apply_pack(
+            &reqwest::Client::new(),
+            &paths,
+            &mut inst,
+            &dest,
+            None,
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(inst.name, "Survival");
+        assert!(
+            inst.content
+                .iter()
+                .all(|r| r.origin == crate::instance::content::Origin::Server),
+            "a server pack left something marked as the player's own"
+        );
+    }
+
+    /// A pack from a person, not a server, leaves the recipient in charge of
+    /// their own mods — they can delete any of them.
+    #[tokio::test]
+    async fn a_personal_pack_leaves_its_content_the_recipients_own() {
+        let (paths, mut inst) = fixture("pers", &[("mods", "sodium.jar")]).await;
+
+        let manifest = Manifest {
+            geode_format: FORMAT,
+            kind: Kind::Instance,
+            profile: Profile { name: "Mine".into(), ..Default::default() },
+            icon: None,
+            banner: None,
+            source: None,
+            files: Vec::new(),
+        };
+        let dest = paths.root.join("personal.geodepack");
+        write_geode_only_pack(&dest, &manifest);
+
+        inst.content = vec![record("modrinth", "sodium.jar", ContentKind::Mod)];
+        apply_pack(
+            &reqwest::Client::new(),
+            &paths,
+            &mut inst,
+            &dest,
+            None,
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            inst.content
+                .iter()
+                .all(|r| r.origin == crate::instance::content::Origin::User),
+            "a personal pack must not lock the recipient out of their own mods"
+        );
+    }
+
+    /// Both halves together, in the order the app runs them: the mrpack reader
+    /// first, then the Geode half. This is what proves `geode/` entries do not
+    /// confuse the override extractor, that nothing Geode adds leaks into the
+    /// game directory, and that a config the author wrote actually arrives.
+    #[tokio::test]
+    async fn a_pack_imports_through_the_same_path_the_app_uses() {
+        let (paths, mut inst) = fixture(
+            "full",
+            &[("mods", "homemade.jar"), ("config", "author.toml")],
+        )
+        .await;
+        inst.name = "Full Round".into();
+        inst.overrides.java_args = Some("-XX:+UseG1GC".into());
+        inst.content = vec![record("", "homemade.jar", ContentKind::Mod)];
+
+        let dest = paths.root.join("full.geodepack");
+        export(&paths, &inst, dest.clone(), false, &Progress::silent("t"))
+            .await
+            .unwrap();
+
+        let mut arrived = instance();
+        arrived.id = "full-arrived".into();
+        let client = reqwest::Client::new();
+
+        crate::instance::modpack::import_into(
+            &client,
+            &paths,
+            &mut arrived,
+            &dest,
+            None,
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+        let missing = apply_pack(&client, &paths, &mut arrived, &dest, None, &Progress::silent("t"))
+            .await
+            .unwrap();
+
+        assert!(missing.is_empty(), "nothing here needed fetching: {missing:?}");
+        assert_eq!(arrived.name, "Full Round");
+        assert_eq!(arrived.overrides.java_args.as_deref(), Some("-XX:+UseG1GC"));
+
+        let game = paths.game_dir("full-arrived");
+        assert!(
+            game.join("config").join("author.toml").is_file(),
+            "the author's own config did not arrive"
+        );
+        assert!(
+            game.join("mods").join("homemade.jar").is_file(),
+            "the jar with no link to give did not arrive"
+        );
+        assert!(
+            !game.join("geode").exists(),
+            "the Geode half was unpacked into the game directory"
+        );
+    }
+
+    /// A pack with only the Geode half, for exercising import on its own.
+    fn write_geode_only_pack(dest: &Path, manifest: &Manifest) {
+        use std::io::Write;
+        let file = std::fs::File::create(dest).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        zip.start_file(Manifest::PATH, options).unwrap();
+        zip.write_all(&serde_json::to_vec_pretty(manifest).unwrap()).unwrap();
+        zip.finish().unwrap();
     }
 
     #[test]

@@ -66,6 +66,33 @@ pub struct Sharing {
     pub excluded: bool,
 }
 
+/// Who put a file here.
+///
+/// A client that has joined a server's pack holds two kinds of thing at once:
+/// the server's mods, which are the server's to decide on, and its own, which
+/// are nobody else's business. Keeping them in one list with a tag — rather
+/// than two lists — is what lets a player add a minimap to a server pack
+/// without being able to delete the server's anti-cheat.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Origin {
+    /// Installed here, by whoever uses this machine.
+    #[default]
+    User,
+    /// Arrived with a server's shared pack.
+    ///
+    /// Can be turned off — deciding a mod is not for you is a local choice —
+    /// but not deleted. The list belongs to the server, and sharing runs one
+    /// way, so removing an entry would leave the next sync to put it back.
+    Server,
+}
+
+impl Origin {
+    pub fn is_default(&self) -> bool {
+        *self == Self::User
+    }
+}
+
 impl Sharing {
     pub fn is_default(&self) -> bool {
         *self == Self::default()
@@ -104,6 +131,9 @@ pub struct ContentRecord {
     /// "share it, and a player needs it", which is true of most things.
     #[serde(default, skip_serializing_if = "Sharing::is_default")]
     pub sharing: Sharing,
+    /// Whether this arrived with a server's pack or was installed here.
+    #[serde(default, skip_serializing_if = "Origin::is_default")]
+    pub origin: Origin,
     /// Project ids this version requires, from the same provider.
     ///
     /// `None` means nobody has looked yet — records written before this was
@@ -138,6 +168,11 @@ pub struct ContentItem {
     pub dependency: bool,
     /// Read from the jar itself when we have no provenance record.
     pub from_disk: bool,
+    /// Where this came from. A server's own mods can be turned off here but
+    /// not deleted, and the UI has to say so rather than offer a button that
+    /// fails.
+    #[serde(default, skip_serializing_if = "Origin::is_default")]
+    pub origin: Origin,
     /// File names of installed mods this one needs.
     #[serde(default)]
     pub requires: Vec<String>,
@@ -261,6 +296,7 @@ pub async fn list_in(
                 slug: r.slug.clone(),
                 dependency: r.dependency,
                 from_disk: false,
+                origin: r.origin,
                 ..Default::default()
             },
             None => ContentItem {
@@ -444,10 +480,24 @@ pub async fn remove_in(
     kind: ContentKind,
     file: &str,
 ) -> Result<()> {
+    let (base, _) = strip_disabled(file);
+
+    // A server's mods are not the player's to delete. Turning one off is fine —
+    // deciding a mod is not for you is a local choice, and the file stays where
+    // the next sync expects it — but removing the entry would only leave the
+    // server to put it back, because sharing runs one way.
+    if records
+        .iter()
+        .any(|r| r.file_name == base && r.kind == kind && r.origin == Origin::Server)
+    {
+        return Err(Error::msg(format!(
+            "{base} came from the server's pack, so it cannot be removed here. \
+             Turn it off instead if you do not want it."
+        )));
+    }
+
     let path = resolve_in(dir, file)?;
     tokio::fs::remove_file(&path).await?;
-
-    let (base, _) = strip_disabled(file);
     records.retain(|r| !(r.file_name == base && r.kind == kind));
     Ok(())
 }
@@ -474,6 +524,64 @@ pub async fn remove(
 
 #[cfg(test)]
 mod tests {
+
+    /// A record written before origins existed is the player's own. Reading it
+    /// back as the server's would lock somebody out of deleting their own mods.
+    #[test]
+    fn an_older_record_belongs_to_the_user() {
+        let json = r#"{"fileName":"jei.jar","kind":"mod","provider":"modrinth",
+            "projectId":"p","versionId":"v","name":"JEI","versionNumber":"1.0"}"#;
+        let record: ContentRecord = serde_json::from_str(json).unwrap();
+        assert_eq!(record.origin, Origin::User);
+    }
+
+    /// The rule the server share rests on: a player may turn the server's mods
+    /// off, but the list is the server's. Deleting one would only leave the
+    /// next sync to put it back, so it is refused where it is attempted rather
+    /// than silently undone later.
+    #[tokio::test]
+    async fn a_server_mod_can_be_turned_off_but_not_removed() {
+        let dir = std::env::temp_dir().join(format!("geode-origin-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("anticheat.jar"), b"x").await.unwrap();
+        tokio::fs::write(dir.join("minimap.jar"), b"x").await.unwrap();
+
+        let mut records = vec![
+            ContentRecord {
+                origin: Origin::Server,
+                ..record("anticheat.jar", ContentKind::Mod, "AC", &[])
+            },
+            ContentRecord {
+                origin: Origin::User,
+                ..record("minimap.jar", ContentKind::Mod, "MM", &[])
+            },
+        ];
+
+        let err = remove_in(&dir, &mut records, ContentKind::Mod, "anticheat.jar")
+            .await
+            .expect_err("the server's mod must not be removable");
+        assert!(err.to_string().contains("cannot be removed"), "{err}");
+        assert!(dir.join("anticheat.jar").is_file(), "the file was deleted anyway");
+        assert_eq!(records.len(), 2, "the record was dropped anyway");
+
+        // Turning it off is still allowed, and is the offered alternative.
+        let renamed = set_enabled_in(&dir, "anticheat.jar", false).await.unwrap();
+        assert_eq!(renamed, "anticheat.jar.disabled");
+
+        // Even disabled, it is still the server's.
+        let err = remove_in(&dir, &mut records, ContentKind::Mod, "anticheat.jar.disabled")
+            .await
+            .expect_err("disabling must not become a way around the rule");
+        assert!(err.to_string().contains("cannot be removed"), "{err}");
+
+        // The player's own mod is theirs to delete.
+        remove_in(&dir, &mut records, ContentKind::Mod, "minimap.jar")
+            .await
+            .unwrap();
+        assert!(!dir.join("minimap.jar").exists());
+        assert_eq!(records.len(), 1);
+    }
 
     /// A record written before sharing existed must read back as "share it,
     /// and a player needs it" — the safe default — rather than as excluded.
@@ -502,6 +610,7 @@ mod tests {
             icon_url: None,
             dependency: false,
             sharing: Sharing::default(),
+            origin: Default::default(),
             requires: None,
         };
         let json = serde_json::to_string(&record).unwrap();
@@ -509,6 +618,7 @@ mod tests {
 
         let excluded = ContentRecord {
             sharing: Sharing { server_only: false, excluded: true },
+            origin: Default::default(),
             ..record
         };
         let json = serde_json::to_string(&excluded).unwrap();
@@ -550,6 +660,7 @@ mod tests {
             icon_url: None,
             dependency: false,
             sharing: Default::default(),
+            origin: Default::default(),
             requires: Some(requires.iter().map(|s| s.to_string()).collect()),
         }
     }
@@ -702,6 +813,7 @@ mod tests {
             icon_url: None,
             dependency: false,
             sharing: Default::default(),
+            origin: Default::default(),
             requires: Some(vec!["BBB".into()]),
         }];
         link(&mut items, &[None, None], &records);
@@ -825,6 +937,7 @@ mod tests {
             icon_url: None,
             dependency: false,
             sharing: Default::default(),
+            origin: Default::default(),
             requires: Some(vec!["BBB".into()]),
         }];
         link(&mut items, &[None, None], &records);

@@ -339,6 +339,14 @@ export default function ContentTab({
                         untracked
                       </span>
                     )}
+                    {item.origin === "server" && (
+                      <span
+                        className="badge"
+                        title="From the server's pack. You can turn it off, but the server decides what is installed."
+                      >
+                        server
+                      </span>
+                    )}
                     {item.provider && (
                       <span className={clsx("badge", `badge-${item.provider}`)}>
                         {providerShort(item.provider)}
@@ -368,10 +376,18 @@ export default function ContentTab({
                   </button>
                 )}
 
+                {/* The server's own mods stay. Offering a button that always
+                    fails is worse than not offering one, so the row explains
+                    itself instead — turning it off is right there. */}
                 <button
                   className="btn btn-ghost btn-icon btn-sm"
                   onClick={() => remove(item)}
-                  title="Delete"
+                  disabled={item.origin === "server"}
+                  title={
+                    item.origin === "server"
+                      ? "From the server's pack — turn it off instead"
+                      : "Delete"
+                  }
                   aria-label={`Delete ${item.name}`}
                 >
                   <Trash2 size={14} />

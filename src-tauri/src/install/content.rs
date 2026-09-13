@@ -113,6 +113,7 @@ pub async fn install_into(
         icon_url,
         dependency: as_dependency,
         sharing: Default::default(),
+        origin: Default::default(),
         requires: Some(required_ids(version)),
     });
 
@@ -658,6 +659,7 @@ pub async fn link_untracked_in(
             icon_url: project.and_then(|p| p.icon_url.clone()),
             dependency: false,
             sharing: Default::default(),
+            origin: Default::default(),
             // A hash lookup gives provenance, not a dependency list.
             requires: None,
         });

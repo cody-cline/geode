@@ -38,7 +38,9 @@ is more actionable than a silently incomplete instance would be.
 | Referencing rather than copying | `src-tauri/src/share/pack.rs` (`source_for`) | Done, tested |
 | Per-file sharing marks | `src-tauri/src/instance/content.rs` (`Sharing`) | Data model only — `excluded` is read nowhere and no UI sets either mark |
 | Sidedness from the jar | `src-tauri/src/instance/jar.rs` (`Side`) | Done, verified against real jars |
-| Rendezvous Worker (server shares only) | `rendezvous/worker.js` | Written as a Durable Object, **not deployed or tested** |
+| Geode pack round trip | `src-tauri/src/share/pack.rs` (`export`, `apply_pack`) | Done, tested end to end |
+| Server vs user mods | `src-tauri/src/instance/content.rs` (`Origin`) | Done, tested — server mods can be disabled, not removed |
+| Rendezvous Worker (server shares only) | `rendezvous/worker.js` | Create-and-read only; **verified locally, not deployed** |
 | Container image | `container/` | Written, **not built** |
 | Event decoupling | `src-tauri/src/events.rs` | Done — the server half no longer needs a window |
 
@@ -110,10 +112,8 @@ readers — Prism imports any URL it is handed. We still don't, because a URL
 baked into a pack keeps working after an author turns third-party downloads
 off, while an id resolved at import time sees that decision.
 
-What remains is the other half: import has to read `geode/manifest.json`,
-resolve those references through the recipient's own key, and present what it
-could not fetch as a list to act on. Until it does, Geode cannot read back the
-packs it writes — see item 5.
+The other half — import reading `geode/manifest.json` and resolving those
+references through the recipient's own key — is item 5, and is now done too.
 
 ### 2. Where the bytes go — settled by removing the question
 
@@ -188,36 +188,40 @@ Panel owns the model, so using it means writing a Panel. Crafty is standalone
 but its model has no slot for `ServerKind`, `LaunchKind::ArgFile`, or the probe
 agent, which is most of what Geode knows.
 
-### 5. The `.geodepack` is written by nothing and read by nothing
+### 5. The `.geodepack` round trip — **done**
 
-This is the gap that matters most now, and it was not visible until someone
-went looking: **the format is unreachable from both ends.**
+It used to be unreachable from both ends: the app only ever wrote a plain
+`.mrpack`, and import dropped `geode/` at the override prefix filter, so a pack
+handed back to Geode lost its name, notes, memory, artwork and every per-file
+note. Both ends are now wired:
 
-- `export_modpack` (the only registered export command) passes no extras, so
-  the shipping app writes a plain `.mrpack` and never a `.geodepack`.
-  `share::pack::export` — the function that would — has no callers.
-- `import_into` probes for `modrinth.index.json` and CurseForge's root
-  `manifest.json` only. A `geode/` entry matches no override root, so it is not
-  merely ignored, it is never extracted. `read_manifest`, `apply` and
-  `Manifest::note` have no production callers at all.
+- `export_geodepack` is a real command, and the export dialog offers both
+  formats. The extension chosen decides which, because the two genuinely differ
+  in what they can express.
+- `share::pack::apply_pack` runs after the mrpack half on import: it applies the
+  profile, extracts `geode/media/` (which the override pass cannot reach), and
+  resolves each `SourceRef` through the recipient's own CurseForge key.
+- Anything it cannot fetch is returned and surfaced as a list to act on, in the
+  same shape as the existing CurseForge error. A partially imported pack is
+  still saved, because a named gap beats a directory the launcher disowns.
 
-So a `.geodepack` handed to today's Geode imports as a plain `.mrpack` and
-silently drops the name, group, notes, memory, Java args, window size, artwork
-and every per-file note. After item 1, it would also drop every referenced mod.
+### 6. Server mods versus the player's own — **done**
 
-The exporter work above is correct and tested, but it stays inert until:
+Sharing runs one way, so a client holds two kinds of thing at once and needs to
+be able to tell them apart. `ContentRecord::origin` tags each entry, and
+importing a pack whose `kind` is `server` marks everything it brought — index
+entries, references and overrides alike — as the server's.
 
-- a command and a UI entry that call `share::pack::export`;
-- `import_into` reading the Geode half, applying the profile, extracting
-  `geode/media/`, and resolving each `SourceRef` through the user's own key;
-- a refusal, before anything is written, when a pack carries non-Modrinth
-  references and no key is configured — matching the existing CurseForge error
-  rather than inventing a second one;
-- `notes_for`'s `server_only`, which is currently dropped for every record
-  whose jar declares no side. Harmless while nothing reads notes; wrong the
-  moment something does.
+A player can install their own mods and delete their own mods. A server's mod
+can be **turned off but not removed**: the file stays where the next sync
+expects it, and the list stays the server's. The guard lives in `remove_in`
+rather than the UI, so disabling a mod and then deleting it is not a way
+around; the button is also disabled, because offering one that always fails is
+worse than not offering it.
 
----
+Still open here: `server_only` is dropped by `notes_for` for any record whose
+jar declares no side, and the "keep or drop the server-only mods" choice on
+import needs the server transport (item 3) before it means anything.
 
 ## What needs you
 

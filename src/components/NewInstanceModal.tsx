@@ -127,7 +127,7 @@ export default function NewInstanceModal({ onClose }: { onClose: () => void }) {
   async function importPack() {
     const picked = await openDialog({
       multiple: false,
-      filters: [{ name: "Modpack", extensions: ["mrpack", "zip"] }],
+      filters: [{ name: "Modpack", extensions: ["geodepack", "mrpack", "zip"] }],
     });
     if (typeof picked !== "string") return;
 

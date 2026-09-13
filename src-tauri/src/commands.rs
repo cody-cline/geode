@@ -12,6 +12,7 @@ use crate::instance::{self, Instance};
 use crate::meta::Loader;
 use crate::net::Progress;
 use crate::providers::{self, Project, Provider, SearchQuery, SearchResults, Version};
+use crate::share;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -2697,21 +2698,71 @@ pub async fn import_modpack(
     )
     .await;
 
+    // The Geode half, if the file has one: launcher settings, artwork, and the
+    // mods the pack named rather than carried. A plain `.mrpack` has none and
+    // this does nothing.
+    let missing = match result {
+        Ok(()) => {
+            share::pack::apply_pack(
+                &state.http,
+                &state.paths,
+                &mut inst,
+                &archive,
+                config.effective_curseforge_key().as_deref(),
+                &progress,
+            )
+            .await
+        }
+        Err(e) => Err(e),
+    };
+
     state.clear_cancel(progress.id());
     // Save either way: a partially imported pack is more useful than a
     // directory the launcher refuses to acknowledge.
     inst.save(&state.paths).await?;
 
-    match result {
-        Ok(()) => {
+    match missing {
+        Ok(missing) if missing.is_empty() => {
             progress.finish().await;
             Ok(view(inst, &state))
+        }
+        // Named, not carried — so the import ends with a list to act on rather
+        // than an instance that is quietly short of mods.
+        Ok(missing) => {
+            let detail = format!(
+                "{} file(s) in this pack have to be fetched by hand: {}",
+                missing.len(),
+                missing.join(", ")
+            );
+            progress.fail(&detail).await;
+            Err(Error::msg(detail))
         }
         Err(e) => {
             progress.fail(&e.to_string()).await;
             Err(e)
         }
     }
+}
+
+/// Write an instance out as a `.geodepack`.
+///
+/// The same `.mrpack` other launchers read, plus the Geode half: settings,
+/// artwork, and a reference for every mod that came from a provider instead of
+/// the jar itself.
+#[tauri::command]
+pub async fn export_geodepack(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    dest: String,
+    include_saves: bool,
+) -> Result<String> {
+    let inst = instance::load(&state.paths, &id).await?;
+    let progress = Progress::new(crate::desktop::sink(app), format!("export:{id}"));
+    let dest = PathBuf::from(dest);
+
+    share::pack::export(&state.paths, &inst, dest.clone(), include_saves, &progress).await?;
+    Ok(dest.to_string_lossy().to_string())
 }
 
 #[tauri::command]

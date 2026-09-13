@@ -115,17 +115,35 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
 
   async function exportPack() {
     const dest = await saveDialog({
-      defaultPath: `${instance.id}.mrpack`,
-      filters: [{ name: "Modrinth pack", extensions: ["mrpack"] }],
+      defaultPath: `${instance.name}.geodepack`,
+      filters: [
+        { name: "Geode pack", extensions: ["geodepack"] },
+        { name: "Modrinth pack", extensions: ["mrpack"] },
+      ],
     });
     if (!dest) return;
+
+    // The extension the user chose decides the format, because the two differ
+    // in what they can say. A .geodepack names a CurseForge mod and lets the
+    // recipient fetch it; a .mrpack has nowhere to record that, so it has to
+    // carry the jar itself.
+    const plain = dest.toLowerCase().endsWith(".mrpack");
     try {
-      await api.exportModpack(instance.id, dest, false);
-      toast({
-        kind: "success",
-        title: "Exported",
-        body: "Modrinth content is linked; everything else is bundled as overrides.",
-      });
+      if (plain) {
+        await api.exportModpack(instance.id, dest, false);
+        toast({
+          kind: "success",
+          title: "Exported as .mrpack",
+          body: "Modrinth content is linked; everything else is bundled in, jars included.",
+        });
+      } else {
+        await api.exportGeodepack(instance.id, dest, false);
+        toast({
+          kind: "success",
+          title: "Exported as .geodepack",
+          body: "Your settings and artwork travel with it, and mods are linked rather than copied.",
+        });
+      }
     } catch (e) {
       reportError("Export failed", e);
     }
@@ -438,7 +456,7 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
             </button>
             <button className="btn" onClick={exportPack}>
               <PackageOpen size={14} />
-              Export as .mrpack
+              Export pack
             </button>
             <div style={{ flex: 1 }} />
             <button

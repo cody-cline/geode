@@ -179,6 +179,7 @@ pub fn run() {
             commands::preview_modpack,
             commands::import_modpack,
             commands::export_modpack,
+            commands::export_geodepack,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Geode");
