@@ -20,6 +20,20 @@
  * way to work back to a code — and a pointer alone is useless without one,
  * because the host end checks the code too.
  *
+ * IF 1,000 SHARES A DAY EVER BECOMES THE CEILING
+ * Do not buffer writes in memory and flush them on a schedule. A Worker has no
+ * durable memory to buffer into: it runs as many short-lived isolates across
+ * many locations, with no shared state, and any of them can be evicted at any
+ * moment — so a share created between flushes would resolve on one isolate,
+ * not another, and vanish entirely if that one went away.
+ *
+ * Getting state means a Durable Object, and once you have one the buffering is
+ * pointless: a Durable Object with SQLite storage allows 100,000 row writes a
+ * day on the same free plan, against KV's 1,000. Swap the storage rather than
+ * batching around it. The cost is that KV expires entries by itself whereas
+ * SQLite would need an alarm to purge them, and that a Durable Object lives in
+ * one location while KV is read from everywhere.
+ *
  * DEPLOY
  *   npm create cloudflare@latest -- geode-rendezvous
  *   # replace src/index.js with this file, then in wrangler.toml:
@@ -45,7 +59,12 @@ const MAX_BODY = 4096;
  */
 const MIN_TTL = 60;
 const MAX_TTL = 60 * 60 * 24 * 30;
-const DEFAULT_TTL = 60 * 60 * 24;
+/**
+ * A week. Long enough that a player who was away for the weekend can still
+ * join, and it costs nothing: an entry's lifetime does not consume writes, and
+ * the 1 GB of KV is millions of entries at a few hundred bytes each.
+ */
+const DEFAULT_TTL = 60 * 60 * 24 * 7;
 
 const json = (body, status = 200) =>
   new Response(JSON.stringify(body), {
