@@ -6,6 +6,8 @@
 //! dropped into the folder by hand. Provider data is only a fallback for jars
 //! that declare nothing we can read.
 
+use serde::{Deserialize, Serialize};
+
 use std::collections::HashMap;
 use std::io::{Cursor, Read, Seek};
 use std::path::{Path, PathBuf};
@@ -27,6 +29,20 @@ const PLATFORM_IDS: &[&str] = &[
     "mcp",
 ];
 
+/// Which side of the game a jar belongs on.
+///
+/// Only ever what the jar *declared*. There is no `Unknown` variant because
+/// the absence of a declaration is not a third kind of sidedness — it is the
+/// jar not saying, which is [`JarMeta::side`] being `None`. Guessing here would
+/// mean a server silently missing a mod, or shipping one that does nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Side {
+    Client,
+    Server,
+    Both,
+}
+
 /// A jar's own account of what it is and what it needs.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct JarMeta {
@@ -47,6 +63,15 @@ pub struct JarMeta {
     /// fabric-resource-loader-v0 does not stop Fabric API being what actually
     /// answers for it — and that relationship is the point of the graph.
     pub requires: Vec<String>,
+    /// Which side it declared itself for, if it declared one at all.
+    ///
+    /// `None` is the common case on NeoForge, which has no field for this —
+    /// not on the mod, not on the file. The `side` key that does appear in a
+    /// NeoForge manifest belongs to a `[[dependencies.*]]` entry and describes
+    /// the dependency, so reading it as the mod's own side gets the answer
+    /// backwards: Create marks its *flywheel* dependency CLIENT while Create
+    /// itself runs on both.
+    pub side: Option<Side>,
 }
 
 /// A read, stamped with the size and mtime it was valid for.
@@ -401,6 +426,9 @@ fn from_plugin_yml(text: &str) -> Option<JarMeta> {
         primary,
         bundled: Vec::new(),
         requires,
+        // A Bukkit plugin only ever runs on a server. Nothing declares this
+        // because nothing needs to.
+        side: Some(Side::Server),
     })
 }
 
@@ -468,6 +496,8 @@ fn from_paper_plugin(text: &str) -> Option<JarMeta> {
         primary: vec![plugin_id(&name)],
         bundled: Vec::new(),
         requires,
+        // A Paper plugin only ever runs on a server.
+        side: Some(Side::Server),
     })
 }
 
@@ -476,7 +506,30 @@ fn from_paper_plugin(text: &str) -> Option<JarMeta> {
 /// Fabric writes `depends` as an object of id to version range; Quilt writes an
 /// array, whose entries may be bare ids or objects that can mark themselves
 /// optional. Both shapes appear in the wild, sometimes in the same folder.
+/// Fabric's `environment`, and Quilt's `minecraft.environment`.
+///
+/// Read from the document root in both cases — Quilt's key sits *outside*
+/// `quilt_loader`, which is the object the rest of this function rebases onto.
+/// The vocabularies differ too: Quilt spells the server value
+/// `dedicated_server`, and `server` is not valid Quilt any more than
+/// `dedicated_server` is valid Fabric. Both default to both-sides when absent.
+fn declared_environment(value: &serde_json::Value) -> Option<Side> {
+    let text = value
+        .get("environment")
+        .or_else(|| value.get("minecraft").and_then(|m| m.get("environment")))
+        .and_then(|v| v.as_str())?;
+    match text.to_ascii_lowercase().as_str() {
+        "client" => Some(Side::Client),
+        "server" | "dedicated_server" => Some(Side::Server),
+        "" | "*" => Some(Side::Both),
+        // An unrecognised value is the jar saying something this does not
+        // understand, which is not the same as the jar saying nothing.
+        _ => None,
+    }
+}
+
 fn from_fabric(value: &serde_json::Value) -> JarMeta {
+    let side = declared_environment(value);
     let root = value.get("quilt_loader").unwrap_or(value);
     let named = root.get("metadata").unwrap_or(root);
 
@@ -515,6 +568,7 @@ fn from_fabric(value: &serde_json::Value) -> JarMeta {
         primary,
         bundled: Vec::new(),
         requires,
+        side,
     }
 }
 
@@ -534,6 +588,15 @@ fn entry_id(value: &serde_json::Value) -> Option<String> {
 fn from_mods_toml(text: &str) -> Option<JarMeta> {
     let root: toml::Table = text.parse().ok()?;
     let mods = root.get("mods")?.as_array()?;
+
+    // Forge added a file-level `clientSideOnly` in 1.20.4. NeoForge never
+    // adopted it and has nothing equivalent, so a NeoForge jar leaves this
+    // `None` and the answer is honestly "it did not say".
+    let side = match root.get("clientSideOnly").and_then(|v| v.as_bool()) {
+        Some(true) => Some(Side::Client),
+        Some(false) => Some(Side::Both),
+        None => None,
+    };
 
     let primary: Vec<String> = mods
         .iter()
@@ -578,6 +641,7 @@ fn from_mods_toml(text: &str) -> Option<JarMeta> {
         primary,
         bundled: Vec::new(),
         requires,
+        side,
     })
 }
 
@@ -589,6 +653,91 @@ mod tests {
         let mut meta = from_fabric(&serde_json::from_str(json).unwrap());
         normalise(&mut meta);
         meta
+    }
+
+    // -----------------------------------------------------------------
+    // Which side a jar is for, where the jar says so
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn fabric_declares_its_environment_at_the_root() {
+        assert_eq!(
+            parse_fabric(r#"{"id":"sodium","environment":"client"}"#).side,
+            Some(Side::Client)
+        );
+        assert_eq!(
+            parse_fabric(r#"{"id":"carpet","environment":"server"}"#).side,
+            Some(Side::Server)
+        );
+        assert_eq!(
+            parse_fabric(r#"{"id":"jei","environment":"*"}"#).side,
+            Some(Side::Both)
+        );
+        // Absent means both sides, which is the spec's default — but it is the
+        // jar not saying, and this reports exactly that.
+        assert_eq!(parse_fabric(r#"{"id":"jei"}"#).side, None);
+    }
+
+    /// Quilt puts the key somewhere else and spells the server value
+    /// differently. Reading it with Fabric's rules gets both wrong.
+    #[test]
+    fn quilt_declares_its_environment_outside_quilt_loader() {
+        let meta = parse_fabric(
+            r#"{"quilt_loader":{"id":"mymod","version":"1.0"},
+                "minecraft":{"environment":"dedicated_server"}}"#,
+        );
+        assert_eq!(meta.side, Some(Side::Server));
+        assert_eq!(meta.primary, vec!["mymod"], "the id still comes from quilt_loader");
+
+        let client = parse_fabric(
+            r#"{"quilt_loader":{"id":"m"},"minecraft":{"environment":"client"}}"#,
+        );
+        assert_eq!(client.side, Some(Side::Client));
+    }
+
+    #[test]
+    fn forge_declares_client_only_at_the_file_level() {
+        let meta = from_mods_toml(
+            r#"
+            modLoader = "javafml"
+            clientSideOnly = true
+            [[mods]]
+            modId = "sodiumextras"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(meta.side, Some(Side::Client));
+    }
+
+    /// The trap. A NeoForge manifest has no side of its own, but it does have
+    /// a `side` on each dependency — and reading that as the mod's own side
+    /// inverts the answer, since Create marks its *flywheel* dependency CLIENT
+    /// while Create itself runs on both.
+    #[test]
+    fn a_dependencys_side_is_never_read_as_the_mods_own() {
+        let meta = from_mods_toml(
+            r#"
+            modLoader = "javafml"
+            [[mods]]
+            modId = "create"
+            [[dependencies.create]]
+            modId = "flywheel"
+            type = "required"
+            side = "CLIENT"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            meta.side, None,
+            "NeoForge declares no side; the dependency's is not the mod's"
+        );
+        assert_eq!(meta.requires, vec!["flywheel"]);
+    }
+
+    #[test]
+    fn a_bukkit_plugin_is_a_server_thing_without_having_to_say_so() {
+        let meta = from_plugin_yml("name: Vault\nversion: 1.7\n").unwrap();
+        assert_eq!(meta.side, Some(Side::Server));
     }
 
     #[test]

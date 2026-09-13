@@ -251,3 +251,63 @@ mod tests {
         assert!(resolve(&dir, "2026-09-12-1.log.gz").is_ok());
     }
 }
+
+#[cfg(test)]
+mod disk_tests {
+    use super::*;
+    use std::io::Write;
+
+    /// A real folder of logs, because the parsing and the gzip path are the
+    /// parts most likely to be wrong and neither shows up in a pure test.
+    #[tokio::test]
+    async fn a_real_folder_is_listed_newest_first_and_archives_decompress() {
+        let dir = std::env::temp_dir().join(format!("geode-logs-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        tokio::fs::write(dir.join("latest.log"), "current run\n")
+            .await
+            .unwrap();
+
+        // The rotated one is gzipped, exactly as the server leaves it.
+        let mut encoder =
+            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(b"an older run\n").unwrap();
+        let gz = encoder.finish().unwrap();
+        tokio::fs::write(dir.join("2026-09-12-1.log.gz"), gz)
+            .await
+            .unwrap();
+
+        // Something that is not a log at all, which must be ignored.
+        tokio::fs::write(dir.join("notes.txt"), "ignore me").await.unwrap();
+
+        let found = list(&dir).await.unwrap();
+        assert_eq!(found.len(), 2, "the .txt should not be listed: {found:?}");
+        assert!(found[0].current, "the live log comes first");
+        assert_eq!(found[0].name, "latest.log");
+        assert_eq!(found[1].name, "2026-09-12-1.log.gz");
+
+        assert_eq!(read(&dir, "latest.log").await.unwrap(), "current run\n");
+        assert_eq!(
+            read(&dir, "2026-09-12-1.log.gz").await.unwrap(),
+            "an older run\n",
+            "a rotated log has to come back decompressed"
+        );
+
+        // The live log is never deletable, whatever is asked.
+        assert!(delete(&dir, "latest.log").await.is_err());
+        assert!(delete(&dir, "2026-09-12-1.log.gz").await.is_ok());
+        assert_eq!(list(&dir).await.unwrap().len(), 1);
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// A folder that does not exist yet is not an error — an instance that has
+    /// never been launched simply has no logs.
+    #[tokio::test]
+    async fn a_missing_folder_lists_nothing() {
+        let dir = std::env::temp_dir().join("geode-logs-definitely-absent");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        assert!(list(&dir).await.unwrap().is_empty());
+    }
+}

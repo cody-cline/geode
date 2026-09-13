@@ -59,6 +59,24 @@ pub struct MrEnv {
     pub server: String,
 }
 
+/// Turn a jar's declared side into the pack index's `env` pair.
+///
+/// A jar that did not say is treated as both-sides, which is what every
+/// launcher assumes anyway — the alternative is marking it unsupported
+/// somewhere and having it silently not install.
+fn env_for(side: Option<crate::instance::jar::Side>) -> MrEnv {
+    use crate::instance::jar::Side;
+    let (client, server) = match side {
+        Some(Side::Client) => ("required", "unsupported"),
+        Some(Side::Server) => ("unsupported", "required"),
+        Some(Side::Both) | None => ("required", "required"),
+    };
+    MrEnv {
+        client: client.into(),
+        server: server.into(),
+    }
+}
+
 /// Read the loader and game version out of a pack's `dependencies` map.
 fn loader_from_dependencies(deps: &HashMap<String, String>) -> (String, Loader, String) {
     let mc = deps.get("minecraft").cloned().unwrap_or_default();
@@ -648,11 +666,32 @@ pub async fn export_mrpack(
         let Ok(sha1) = crate::net::sha1_file(&full).await else {
             continue;
         };
+        // Both hashes, because the readers disagree about which is optional.
+        // Modrinth refuses an upload without sha512, and Prism reads it with
+        // `requireString` and no fallback — so a pack carrying only sha1 is
+        // one no other launcher will open.
+        let Ok(sha512) = crate::net::sha512_file(&full).await else {
+            continue;
+        };
+
+        // What the jar itself says about where it belongs, so a pack installed
+        // on a server does not drag a renderer along with it.
+        let probe = full.clone();
+        let side = tokio::task::spawn_blocking(move || crate::instance::jar::read(&probe))
+            .await
+            .ok()
+            .flatten()
+            .and_then(|meta| meta.side);
 
         index.files.push(MrFile {
             path: rel.to_string_lossy().replace('\\', "/"),
-            hashes: [("sha1".to_string(), sha1)].into_iter().collect(),
-            env: None,
+            hashes: [("sha1".to_string(), sha1), ("sha512".to_string(), sha512)]
+                .into_iter()
+                .collect(),
+            // Always both sides, never omitted. Prism reads the client value
+            // with a default of "unsupported", so a file that leaves it out
+            // is a file Prism silently declines to install.
+            env: Some(env_for(side)),
             downloads: vec![format!(
                 "https://cdn.modrinth.com/data/{}/versions/{}/{}",
                 record.project_id,
@@ -727,6 +766,30 @@ pub async fn export_mrpack(
 
 #[cfg(test)]
 mod tests {
+
+    /// A pack index has to say where each file belongs, and say it for both
+    /// sides — Prism defaults a missing client value to "unsupported", so a
+    /// half-filled `env` is a file that silently does not install.
+    #[test]
+    fn a_files_env_follows_what_the_jar_declared() {
+        use crate::instance::jar::Side;
+
+        let client = env_for(Some(Side::Client));
+        assert_eq!(client.client, "required");
+        assert_eq!(client.server, "unsupported");
+
+        let server = env_for(Some(Side::Server));
+        assert_eq!(server.client, "unsupported");
+        assert_eq!(server.server, "required");
+
+        // Both-sides and "the jar did not say" are treated the same, because
+        // the alternative is marking something unsupported on a guess.
+        for undeclared in [Some(Side::Both), None] {
+            let env = env_for(undeclared);
+            assert_eq!(env.client, "required");
+            assert_eq!(env.server, "required");
+        }
+    }
     use super::*;
 
     #[test]

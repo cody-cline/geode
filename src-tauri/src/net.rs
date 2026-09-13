@@ -214,6 +214,15 @@ pub async fn sha1_file(path: &Path) -> Result<String> {
     Ok(hex::encode(h.finalize()))
 }
 
+/// Modrinth's pack index requires this one specifically, and the launchers
+/// that read a `.mrpack` require it without a fallback.
+pub async fn sha512_file(path: &Path) -> Result<String> {
+    let bytes = tokio::fs::read(path).await?;
+    let mut h = sha2::Sha512::new();
+    h.update(&bytes);
+    Ok(hex::encode(h.finalize()))
+}
+
 pub async fn sha256_file(path: &Path) -> Result<String> {
     let bytes = tokio::fs::read(path).await?;
     let mut h = Sha256::new();
