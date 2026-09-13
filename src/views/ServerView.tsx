@@ -1173,6 +1173,26 @@ function SettingsTab({ server }: { server: Server }) {
             }
           />
         </div>
+        {/* The one place Geode runs its own code inside the server process, so
+            it says so plainly and can be switched off. */}
+        <label className={styles.settingToggle}>
+          <input
+            type="checkbox"
+            checked={draft.readCommands}
+            onChange={(e) =>
+              setDraft({ ...draft, readCommands: e.target.checked })
+            }
+          />
+          <span>
+            <strong>Read this server&apos;s commands</strong>
+            <span className={styles.settingWhy}>
+              Adds a small Geode component to the server&apos;s startup so the
+              console can complete commands that mods and plugins added. Turn it
+              off and the console falls back to no suggestions. Takes effect
+              next start.
+            </span>
+          </span>
+        </label>
       </section>
 
       <section className={styles.section}>

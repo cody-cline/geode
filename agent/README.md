@@ -82,3 +82,42 @@ mod and a plugin that register commands — plus a fault matrix covering a missi
 hook jar, an unwritable output path, and missing, empty and junk arguments.
 `cargo test --test live_server -- --ignored the_probe_reads` runs the end-to-end
 check against a real server.
+
+## Untested on Windows and macOS
+
+The probe has only been run on Linux. Nothing about it is obviously
+platform-specific — it is a JVM agent, and the Rust side only writes a file and
+adds a command-line flag — but these are the places it would break first, worth
+walking through on Windows someday.
+
+**Paths.** The agent's argument is `=<tree path>` and it splits that on commas,
+so a data directory containing a comma is declined outright (`agent_arg` in
+`src-tauri/src/server/probe.rs`). Windows makes the awkward cases more likely:
+
+- A username with a space — `C:\Users\Jane Doe\AppData\...`. Should be fine,
+  since the flag is one argv entry and no shell is involved, but it has never
+  been tried.
+- A path containing `=`, which would be read as the end of the agent argument.
+  Currently not checked for. Probably worth declining the same way a comma is.
+- The 260-character path limit, if somebody's data directory is already deep.
+
+**The temp hook jar.** `hookOnBootstrap` extracts the hook to a temp file and
+hands it to `appendToBootstrapClassLoaderSearch`, which keeps it open for the
+life of the JVM. Windows will not delete an open file, so `deleteOnExit` is the
+only cleanup — and a hard-killed server leaves the file behind in `%TEMP%`.
+Check whether these accumulate over many restarts, and consider writing it
+somewhere Geode owns and reuses instead of a fresh temp file each start.
+
+**Replacing the tree file.** `write` uses `ATOMIC_MOVE` with `REPLACE_EXISTING`
+and falls back to a plain move. On Windows a move onto a file another process
+has open can fail outright, and Geode does read this file — check that a read
+landing exactly as the agent rewrites does not produce an error either side.
+
+**Antivirus.** A jar passed as `-javaagent` that appears in a user's data
+directory is the shape of thing Defender takes an interest in. Worth confirming
+the write to `%APPDATA%`-side `tools\geode-probe.jar` is not blocked or
+quarantined, and that the flag is not stripped.
+
+**Line endings.** Nothing here parses console text any more, so CRLF should not
+matter — but the tree file is written as UTF-8 with no BOM, and the Rust side
+reads it with `serde_json`, so confirm nothing inserts one.

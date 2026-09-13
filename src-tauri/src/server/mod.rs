@@ -219,6 +219,13 @@ pub struct ServerSettings {
     /// Keep this many backups, deleting the oldest as new ones are taken.
     /// `None` keeps every backup ever made.
     pub keep_backups: Option<u32>,
+    /// Let the command probe ride along on this server's JVM.
+    ///
+    /// On by default, because without it the console cannot know what commands
+    /// a mod or plugin registered. Off is offered because this is the one place
+    /// Geode puts its own code inside somebody else's server process, and
+    /// "don't" is a reasonable thing to want to be able to say.
+    pub read_commands: bool,
 }
 
 impl Default for ServerSettings {
@@ -230,6 +237,7 @@ impl Default for ServerSettings {
             auto_restart: false,
             keep_logs: Some(20),
             keep_backups: Some(10),
+            read_commands: true,
         }
     }
 }

@@ -148,6 +148,14 @@ export interface ServerSettings {
   keepLogs: number | null;
   /** How many backups to keep. `null` keeps every one ever taken. */
   keepBackups: number | null;
+  /**
+   * Whether the command probe rides along on this server's JVM.
+   *
+   * On by default. Off means the console has no idea what commands a mod or
+   * plugin registered, which is the price of Geode putting nothing of its own
+   * inside the server process.
+   */
+  readCommands: boolean;
 }
 
 /**

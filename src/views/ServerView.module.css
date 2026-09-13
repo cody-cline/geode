@@ -723,3 +723,32 @@
   color: var(--text-faint);
   font-size: 11px;
 }
+
+/* A setting that needs a sentence of explanation rather than just a label. */
+.settingToggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin-top: 16px;
+  cursor: pointer;
+}
+
+.settingToggle input {
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+
+.settingToggle > span {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.settingWhy {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  line-height: 1.5;
+  max-width: 62ch;
+}

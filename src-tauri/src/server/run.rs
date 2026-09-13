@@ -240,8 +240,13 @@ pub async fn start(
     }
 
     // Best effort by design: `None` starts the server exactly as it would have
-    // started before this existed.
-    let agent = super::probe::agent_arg(paths, &server.id).await;
+    // started before this existed — whether that is because the user turned it
+    // off or because the agent could not be made ready.
+    let agent = if server.settings.read_commands {
+        super::probe::agent_arg(paths, &server.id).await
+    } else {
+        None
+    };
 
     let mut child = tokio::process::Command::new(&java)
         .args(build_args(server, agent.as_deref()))
@@ -375,6 +380,50 @@ mod tests {
         let args = build_args(&server(ServerKind::Velocity), None);
         assert!(!args.contains(&"nogui".to_string()));
         assert_eq!(args.last().unwrap(), "server.jar");
+    }
+
+    /// The ordering that stops a Forge server starting if it is wrong.
+    ///
+    /// An argument file names the main class, so the JVM stops reading its own
+    /// options at `@file`. A `-javaagent:` after that is handed to the game
+    /// instead, which rejects it — verified by breaking a real NeoForge server
+    /// exactly that way.
+    #[test]
+    fn the_agent_goes_before_an_argument_file_not_after_it() {
+        let mut s = server(ServerKind::NeoForge);
+        s.launch = LaunchKind::ArgFile("libraries/neoforge/unix_args.txt".into());
+        let args = build_args(&s, Some("-javaagent:/x/probe.jar=/y/tree.json"));
+
+        let agent = args
+            .iter()
+            .position(|a| a.starts_with("-javaagent:"))
+            .expect("the agent should be on the command line");
+        let argfile = args
+            .iter()
+            .position(|a| a.starts_with('@'))
+            .expect("an argfile launch should name one");
+        assert!(
+            agent < argfile,
+            "the agent must precede the argument file: {args:?}"
+        );
+    }
+
+    #[test]
+    fn a_jar_launch_takes_the_agent_before_the_jar_too() {
+        let args = build_args(&server(ServerKind::Paper), Some("-javaagent:/x/probe.jar"));
+        let agent = args.iter().position(|a| a.starts_with("-javaagent:")).unwrap();
+        let jar = args.iter().position(|a| a == "-jar").unwrap();
+        assert!(agent < jar, "{args:?}");
+    }
+
+    /// Turning the setting off has to leave the command line as it was.
+    #[test]
+    fn no_agent_means_no_trace_of_one() {
+        let args = build_args(&server(ServerKind::Paper), None);
+        assert!(
+            !args.iter().any(|a| a.contains("javaagent")),
+            "{args:?}"
+        );
     }
 
     #[test]
