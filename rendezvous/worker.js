@@ -17,13 +17,30 @@
  * work back to a code — and a pointer alone is useless without one, because the
  * host end checks the code too.
  *
+ * CREATE AND READ, AND NOTHING ELSE
+ * A share is written once and never changed. A code stands for one real server
+ * for as long as that server is played on, so there is no update to make: the
+ * only things worth changing are the ticket, and a ticket that could be
+ * repointed is exactly the hijack this service must not allow. A second PUT to
+ * a live key is refused rather than merged.
+ *
+ * Immutability is affordable only because the ticket is a **stable identity**,
+ * not an address. An iroh node id is a persisted keypair, so it survives a
+ * restart, a new IP and a move between networks. If the sharing end ever
+ * generates a fresh key per run, this design breaks and every restart would
+ * strand its own share — so that key must be written to disk with the server.
+ *
+ * There is no delete. An admin who wants to stop sharing stops answering on
+ * the ticket; a pointer to a server that will not talk to you is inert, and it
+ * ages out on its own.
+ *
  * WHY A DURABLE OBJECT RATHER THAN KV
  * One share is one Durable Object, addressed by its key. On the same free plan
  * a SQLite-backed Durable Object allows 100,000 row writes and 5 million row
  * reads a day, against Workers KV's 1,000 writes and 100,000 reads — and writes
- * are the limit that binds, because every share created is exactly one. The
- * object also expires itself with an alarm set to the second, which is tidier
- * than a TTL, and gives revocation somewhere to live.
+ * are the limit that binds. The object also expires itself with an alarm set to
+ * the second, which is tidier than a TTL and is what makes "thirty days after
+ * the last person joined" expressible at all.
  *
  * The trade is that a Durable Object is instantiated in one location while KV
  * is read from everywhere. That costs one round trip, on a single lookup, made
@@ -49,24 +66,30 @@ const KEY = /^[0-9ABCDEFGHJKMNPQRSTVWXYZ]{16}$/;
 const MAX_BODY = 4096;
 
 /**
- * Clamp the lifetime. A share that dies inside a minute is of no use to
- * anybody, and a month is past the point where anyone remembers sharing it.
+ * How long a share outlives the last person who used it.
+ *
+ * Not a lifetime: every read pushes it out again, so a server people still
+ * play on keeps its code indefinitely, and one nobody has joined in a month
+ * stops existing. That is the behaviour a share code needs — it stands for a
+ * real server, and servers are not a weekend arrangement.
  */
-const MIN_TTL = 60;
-const MAX_TTL = 60 * 60 * 24 * 30;
+const IDLE_TTL = 60 * 60 * 24 * 30;
 
 /**
- * A week. Long enough that somebody away for the weekend can still join, and
- * it costs nothing — a lifetime consumes no writes, and a few hundred bytes
- * against 5 GB is millions of entries.
+ * Don't rewrite an expiry that is already nearly full.
+ *
+ * Extending on literally every read would turn each read into a write, and
+ * writes are the budget that binds — a server with a hundred players joining
+ * after a restart would spend a hundred of them to record the same fact. With
+ * this, a share costs at most one write a day however often it is read.
  */
-const DEFAULT_TTL = 60 * 60 * 24 * 7;
+const TOUCH_AFTER = 60 * 60 * 24;
 
 // A desktop app is not a browser origin, but the landing page below is.
 const CORS = {
   "access-control-allow-origin": "*",
-  "access-control-allow-methods": "GET,PUT,DELETE,OPTIONS",
-  "access-control-allow-headers": "content-type,authorization",
+  "access-control-allow-methods": "GET,PUT,OPTIONS",
+  "access-control-allow-headers": "content-type",
 };
 
 const json = (body, status = 200) =>
@@ -86,10 +109,6 @@ const preflight = () => new Response(null, { status: 204, headers: CORS });
 
 const str = (value, max) => (typeof value === "string" ? value.slice(0, max) : "");
 
-/** The bearer token on a request, or "" — never null, so comparisons are safe. */
-const bearer = (request) =>
-  (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
-
 /** A share that exists and has not passed its expiry. */
 const live = (share) => !!share && share.expires * 1000 > Date.now();
 
@@ -98,8 +117,8 @@ const live = (share) => !!share && share.expires * 1000 > Date.now();
  *
  * Per key rather than one object holding every share, so nothing serialises
  * behind a single global instance and each share is created near whoever
- * created it. There is no listing across shares and no need for one — an admin
- * keeps their own revocation token.
+ * created it. There is no listing across shares and no way to enumerate them:
+ * a key is 80 bits and the only way to reach one is to have been given it.
  */
 export class ShareRegistry {
   constructor(ctx) {
@@ -120,24 +139,25 @@ export class ShareRegistry {
       // already, but a read arriving in that gap must not resolve.
       const share = this.ctx.storage.kv.get("share");
       if (!live(share)) return json({ error: "no such share" }, 404);
-      const { revoke, ...visible } = share;
-      return json(visible);
+
+      // Somebody joining is what keeps a share alive. Debounced, so a busy
+      // server does not spend a write per player to say the same thing.
+      const expires = Math.floor(Date.now() / 1000) + IDLE_TTL;
+      if (expires - share.expires < TOUCH_AFTER) return json(share);
+
+      const touched = { ...share, expires };
+      this.ctx.storage.kv.put("share", touched);
+      await this.ctx.storage.setAlarm(expires * 1000);
+      return json(touched);
     }
 
     if (request.method === "PUT") {
-      // Replacing a live share belongs to whoever created it.
-      //
-      // Without this, holding the code is enough to overwrite the pointer, and
-      // on a server share the admin hands that code to every player — so any
-      // one of them could repoint it at their own machine and serve their own
-      // jars to everybody else under the admin's name. Creating a share stays
-      // open (nothing is there to protect yet); replacing one does not.
-      const existing = this.ctx.storage.kv.get("share");
-      if (live(existing) && existing.revoke !== bearer(request)) {
-        return json(
-          { error: "this share already exists — send its revocation token to replace it" },
-          403,
-        );
+      // A share is created once. There is no token that would let even its
+      // author repoint it, because a ticket that can be repointed is the
+      // hijack this service exists to prevent: the admin hands the code to
+      // every player, so anything a holder can do, every player can do.
+      if (live(this.ctx.storage.kv.get("share"))) {
+        return json({ error: "this code is already in use" }, 409);
       }
 
       if (text.length > MAX_BODY) {
@@ -154,20 +174,10 @@ export class ShareRegistry {
         return json({ error: "a share needs a ticket" }, 400);
       }
 
-      const ttl = Math.min(
-        MAX_TTL,
-        Math.max(MIN_TTL, Number(body.ttlSeconds) || DEFAULT_TTL),
-      );
-      const expires = Math.floor(Date.now() / 1000) + ttl;
-
-      // The creator gets a token back so they can revoke early. Held here
-      // rather than derived from the code, so an admin can hand the code to
-      // fifty people and still keep the off switch themselves.
-      //
-      // Kept across a replacement rather than rotated: a server that moves
-      // address re-PUTs its ticket, and rotating here would invalidate the
-      // token the admin has already stored for the share they still own.
-      const revoke = live(existing) ? existing.revoke : crypto.randomUUID();
+      // The lifetime is not the caller's to choose. It is one rule — thirty
+      // days after the last person joined — and a client that could ask for
+      // less would only be able to strand its own players.
+      const expires = Math.floor(Date.now() / 1000) + IDLE_TTL;
 
       this.ctx.storage.kv.put("share", {
         v: 1,
@@ -177,25 +187,13 @@ export class ShareRegistry {
         loader: str(body.loader, 32),
         bytes: Number(body.bytes) || 0,
         files: Number(body.files) || 0,
-        revoke,
         expires,
       });
 
-      // Clears itself at the second it expires. No cron, nothing to sweep, and
-      // nothing left behind if Geode never calls DELETE.
+      // Clears itself at the second it expires. No cron and nothing to sweep.
       await this.ctx.storage.setAlarm(expires * 1000);
 
-      return json({ ok: true, revoke, expiresIn: ttl });
-    }
-
-    if (request.method === "DELETE") {
-      const share = this.ctx.storage.kv.get("share");
-      if (!live(share)) return json({ error: "no such share" }, 404);
-      if (share.revoke !== bearer(request)) {
-        return json({ error: "wrong revocation token" }, 403);
-      }
-      await this.ctx.storage.deleteAll();
-      return json({ ok: true });
+      return json({ ok: true, expiresIn: IDLE_TTL });
     }
 
     return json({ error: "method not allowed" }, 405);
