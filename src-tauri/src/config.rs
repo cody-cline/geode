@@ -24,9 +24,7 @@ fn default_theme() -> String {
 }
 
 fn default_accent() -> String {
-    // Torchlight, and deliberately not the mint green every dark UI defaults
-    // to. Overridable in settings; this is only where a fresh install starts.
-    "#d2a24c".into()
+    "#4ade80".into()
 }
 
 /// A CurseForge key compiled in via `GEODE_CURSEFORGE_KEY`, if there was one.

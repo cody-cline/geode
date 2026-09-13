@@ -2,45 +2,33 @@
    Design tokens
    --------------------------------------------------------------------------- */
 
-/* The greys are warm and very nearly neutral — around 30° hue at three or four
-   per cent saturation — rather than the blue-slate a dark UI defaults to. The
-   difference is small per swatch and considerable across a screen: slate reads
-   cold and generic, and this reads like a room with a light on in it, which
-   suits an app about Minecraft.
-
-   Everything else follows from keeping colour scarce. There is one accent, the
-   three status hues are kept far enough apart in hue to tell apart at badge
-   size, and nothing else in the interface is coloured at all. */
 :root {
   /* Accent is user-configurable; --accent is overwritten at runtime. */
-  --accent: #d2a24c;
-  --accent-ink: #1a1206;
+  --accent: #4ade80;
+  --accent-ink: #04140a;
 
-  --bg: #0d0c0b;
-  --surface: #151412;
-  --surface-2: #1c1b18;
-  --surface-3: #24221e;
-  --border: #2b2925;
-  --border-strong: #3d3a34;
+  --bg: #0b0f14;
+  --surface: #11171f;
+  --surface-2: #161d27;
+  --surface-3: #1c2531;
+  --border: #212b38;
+  --border-strong: #2e3a4a;
 
-  --text: #ece9e4;
-  --text-dim: #a39d94;
-  --text-faint: #726c63;
+  --text: #e6edf3;
+  --text-dim: #99a6b5;
+  --text-faint: #667484;
 
-  --danger: #e0625a;
-  --warn: #e6c15c;
-  --info: #8aa6c4;
+  --danger: #f87171;
+  --warn: #fbbf24;
+  --info: #60a5fa;
 
-  /* Slightly sharper than the usual 6/10/16. A smaller radius reads as
-     precision; the large one is kept generous for artwork, which wants it. */
-  --radius-sm: 4px;
-  --radius: 8px;
-  --radius-lg: 14px;
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 16px;
 
-  /* Warm-black shadows. Pure black over warm greys greys them out. */
-  --shadow-sm: 0 1px 2px rgb(10 8 6 / 0.5);
-  --shadow: 0 8px 24px -10px rgb(10 8 6 / 0.7);
-  --shadow-lg: 0 24px 60px -14px rgb(10 8 6 / 0.8);
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.4);
+  --shadow: 0 8px 24px -8px rgb(0 0 0 / 0.6);
+  --shadow-lg: 0 24px 60px -12px rgb(0 0 0 / 0.7);
 
   --sidebar-w: 244px;
   --header-h: 56px;
@@ -50,27 +38,22 @@
   color-scheme: dark;
 }
 
-/* The same warmth the other way up: paper rather than screen-white. */
 :root[data-theme="light"] {
-  --bg: #f6f4f0;
+  --bg: #f5f7fa;
   --surface: #ffffff;
-  --surface-2: #f1eee8;
-  --surface-3: #e6e2da;
-  --border: #ded9d0;
-  --border-strong: #c2bbaf;
+  --surface-2: #f0f3f7;
+  --surface-3: #e6ebf1;
+  --border: #dde3ea;
+  --border-strong: #c4ceda;
 
-  --text: #1a1815;
-  --text-dim: #5d574e;
-  --text-faint: #8b8479;
+  --text: #131a22;
+  --text-dim: #5a6772;
+  --text-faint: #86929e;
 
-  --danger: #c4463d;
-  --warn: #a9802a;
-  --info: #4a6d94;
-
-  --accent-ink: #1a1206;
-  --shadow-sm: 0 1px 2px rgb(40 32 22 / 0.07);
-  --shadow: 0 8px 24px -10px rgb(40 32 22 / 0.18);
-  --shadow-lg: 0 24px 60px -14px rgb(40 32 22 / 0.24);
+  --accent-ink: #04140a;
+  --shadow-sm: 0 1px 2px rgb(16 24 40 / 0.06);
+  --shadow: 0 8px 24px -8px rgb(16 24 40 / 0.16);
+  --shadow-lg: 0 24px 60px -12px rgb(16 24 40 / 0.22);
 
   color-scheme: light;
 }

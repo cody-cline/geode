@@ -34,23 +34,15 @@ const TABS = [
 
 type TabId = (typeof TABS)[number]["id"];
 
-/**
- * Muted rather than bright, and named after materials rather than hues.
- *
- * The stock choice here is the full-saturation spectrum every framework ships
- * with, which fights a warm grey interface and makes whichever one you pick
- * look like a default. These are dialled back far enough to sit on the
- * surfaces without shouting, and far enough apart in hue to be a real choice.
- */
 const ACCENTS = [
-  "#d2a24c",
-  "#c96f43",
-  "#8fa65a",
-  "#5f9ea0",
-  "#6f8fbf",
-  "#9b7cb8",
-  "#c76a8a",
-  "#a8a29a",
+  "#4ade80",
+  "#38bdf8",
+  "#a78bfa",
+  "#f472b6",
+  "#fb923c",
+  "#facc15",
+  "#f87171",
+  "#2dd4bf",
 ];
 
 export default function Settings() {
