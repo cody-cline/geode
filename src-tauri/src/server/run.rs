@@ -11,7 +11,7 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use crate::events::{self, EventSink};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
@@ -205,7 +205,7 @@ pub fn build_args(server: &Server, agent: Option<&str>) -> Vec<String> {
 /// Start the server. Returns once the process exists; the caller learns how it
 /// ended from the `geode://server-exit` event.
 pub async fn start(
-    app: &AppHandle,
+    sink: &EventSink,
     paths: &Paths,
     server: &Server,
     java: PathBuf,
@@ -279,13 +279,13 @@ pub async fn start(
         (child.stderr.take().map(Pipe::Err), "err"),
     ] {
         let Some(pipe) = pipe else { continue };
-        let app = app.clone();
+        let sink = sink.clone();
         let id = server.id.clone();
         let stream = stream.to_string();
         tokio::spawn(async move {
             match pipe {
-                Pipe::Out(out) => emit_lines(app, id, stream, BufReader::new(out)).await,
-                Pipe::Err(err) => emit_lines(app, id, stream, BufReader::new(err)).await,
+                Pipe::Out(out) => emit_lines(sink, id, stream, BufReader::new(out)).await,
+                Pipe::Err(err) => emit_lines(sink, id, stream, BufReader::new(err)).await,
             }
         });
     }
@@ -300,7 +300,7 @@ pub async fn start(
         },
     );
 
-    let app_for_wait = app.clone();
+    let sink_for_wait = sink.clone();
     let id = server.id.clone();
     tokio::spawn(async move {
         let status = tokio::select! {
@@ -317,9 +317,10 @@ pub async fn start(
             Err(_) => (None, false),
         };
 
-        let _ = app_for_wait.emit(
+        events::emit(
+            &Some(sink_for_wait.clone()),
             "geode://server-exit",
-            ServerExit {
+            &ServerExit {
                 server_id: id,
                 code,
                 success,
@@ -338,15 +339,16 @@ enum Pipe {
     Err(tokio::process::ChildStderr),
 }
 
-async fn emit_lines<R>(app: AppHandle, id: String, stream: String, reader: BufReader<R>)
+async fn emit_lines<R>(sink: EventSink, id: String, stream: String, reader: BufReader<R>)
 where
     R: tokio::io::AsyncRead + Unpin,
 {
     let mut lines = reader.lines();
     while let Ok(Some(line)) = lines.next_line().await {
-        let _ = app.emit(
+        events::emit(
+            &Some(sink.clone()),
             "geode://server-log",
-            ServerLine {
+            &ServerLine {
                 server_id: id.clone(),
                 line,
                 stream: stream.clone(),

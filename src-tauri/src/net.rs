@@ -7,7 +7,6 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use serde::Serialize;
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
-use tauri::{AppHandle, Emitter};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
@@ -49,11 +48,13 @@ pub struct ProgressEvent {
 /// A throttled progress channel tied to one long-running job (an install, an
 /// import, a Java download). The frontend keys off `id`.
 ///
-/// The app handle is optional so the install pipeline can run headlessly —
-/// from a test or a CLI — without a window attached.
+/// The sink is optional so the install pipeline can run headlessly — from a
+/// test, a CLI, or the container daemon — without a window attached. It is a
+/// trait rather than an `AppHandle` for the same reason: none of this logic
+/// has anything to do with windows.
 #[derive(Clone)]
 pub struct Progress {
-    app: Option<AppHandle>,
+    sink: Option<crate::events::EventSink>,
     id: String,
     stage: Arc<Mutex<String>>,
     current: Arc<AtomicU64>,
@@ -63,8 +64,8 @@ pub struct Progress {
 }
 
 impl Progress {
-    pub fn new(app: AppHandle, id: impl Into<String>) -> Self {
-        Self::with_sink(Some(app), id)
+    pub fn new(sink: crate::events::EventSink, id: impl Into<String>) -> Self {
+        Self::with_sink(Some(sink), id)
     }
 
     /// A progress handle that reports nowhere. For headless callers.
@@ -72,9 +73,9 @@ impl Progress {
         Self::with_sink(None, id)
     }
 
-    fn with_sink(app: Option<AppHandle>, id: impl Into<String>) -> Self {
+    fn with_sink(sink: Option<crate::events::EventSink>, id: impl Into<String>) -> Self {
         Self {
-            app,
+            sink,
             id: id.into(),
             stage: Arc::new(Mutex::new(String::new())),
             current: Arc::new(AtomicU64::new(0)),
@@ -136,9 +137,9 @@ impl Progress {
     }
 
     async fn emit(&self, detail: String, done: bool, error: Option<String>) {
-        let Some(app) = &self.app else {
+        if self.sink.is_none() {
             return;
-        };
+        }
         let ev = ProgressEvent {
             id: self.id.clone(),
             stage: self.stage.lock().await.clone(),
@@ -148,7 +149,7 @@ impl Progress {
             done,
             error,
         };
-        let _ = app.emit("geode://progress", ev);
+        crate::events::emit(&self.sink, "geode://progress", &ev);
     }
 }
 

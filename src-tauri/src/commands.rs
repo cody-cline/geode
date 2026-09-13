@@ -627,7 +627,7 @@ pub async fn install_content(
         })?,
     };
 
-    let progress = Progress::new(app, format!("install:{id}:{project_id}"));
+    let progress = Progress::new(crate::desktop::sink(app), format!("install:{id}:{project_id}"));
     state.register_cancel(progress.id(), progress.cancel_flag());
 
     // The runtime goes in first: a Fabric jar in a (Neo)Forge mods folder does
@@ -733,7 +733,7 @@ pub async fn install_modpack(
         .primary_file()
         .ok_or_else(|| Error::msg(format!("{} has no downloadable file", project.name)))?;
 
-    let progress = Progress::new(app, format!("pack:{}", project.id));
+    let progress = Progress::new(crate::desktop::sink(app), format!("pack:{}", project.id));
     state.register_cancel(progress.id(), progress.cancel_flag());
 
     let archive = state.paths.cache().join("packs").join(&file.filename);
@@ -822,7 +822,7 @@ pub async fn link_untracked_content(
     id: String,
 ) -> Result<crate::install::content::LinkReport> {
     let mut inst = instance::load(&state.paths, &id).await?;
-    let progress = Progress::new(app, format!("link:{id}"));
+    let progress = Progress::new(crate::desktop::sink(app), format!("link:{id}"));
     state.register_cancel(progress.id(), progress.cancel_flag());
 
     let result = crate::install::content::link_untracked(
@@ -855,7 +855,7 @@ pub async fn check_content_updates(
 ) -> Result<Vec<crate::install::content::UpdateCandidate>> {
     let config = state.config().await;
     let inst = instance::load(&state.paths, &id).await?;
-    let progress = Progress::new(app, format!("updates:{id}"));
+    let progress = Progress::new(crate::desktop::sink(app), format!("updates:{id}"));
     state.register_cancel(progress.id(), progress.cancel_flag());
 
     let result = crate::install::content::check_updates(
@@ -1018,7 +1018,7 @@ pub async fn resolve_plan(
 ) -> Result<crate::plan::resolve::Resolution> {
     let plan = crate::plan::load(&state.paths, &id).await?;
     let config = state.config().await;
-    let progress = Progress::new(app, format!("plan:{id}"));
+    let progress = Progress::new(crate::desktop::sink(app), format!("plan:{id}"));
     state.register_cancel(progress.id(), progress.cancel_flag());
 
     // Being unable to read Connector's matrix costs us the Connector option,
@@ -1063,7 +1063,7 @@ pub async fn build_plan(
     let cf_key = config.effective_curseforge_key();
     let cf_key = cf_key.as_deref();
 
-    let progress = Progress::new(app, format!("plan-build:{id}"));
+    let progress = Progress::new(crate::desktop::sink(app), format!("plan-build:{id}"));
     state.register_cancel(progress.id(), progress.cancel_flag());
 
     // Re-resolve rather than trusting a target round-tripped through the
@@ -1127,7 +1127,7 @@ pub async fn pack_contents(
 ) -> Result<Vec<crate::plan::PlanMod>> {
     let provider = Provider::parse(&provider).ok_or_else(|| Error::msg("unknown provider"))?;
     let config = state.config().await;
-    let progress = Progress::new(app, format!("pack-read:{project_id}"));
+    let progress = Progress::new(crate::desktop::sink(app), format!("pack-read:{project_id}"));
     state.register_cancel(progress.id(), progress.cancel_flag());
 
     let result = crate::plan::pack::contents(
@@ -1288,7 +1288,7 @@ pub async fn create_server_from_modpack(
     let cf_key = config.effective_curseforge_key();
     let cf_key = cf_key.as_deref();
 
-    let progress = Progress::new(app, format!("pack-server:{project_id}"));
+    let progress = Progress::new(crate::desktop::sink(app), format!("pack-server:{project_id}"));
     state.register_cancel(progress.id(), progress.cancel_flag());
 
     let result = async {
@@ -1549,7 +1549,7 @@ pub async fn install_git(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<crate::server::git::GitStatus> {
-    let progress = Progress::new(app, "git".to_string());
+    let progress = Progress::new(crate::desktop::sink(app), "git".to_string());
     state.register_cancel(progress.id(), progress.cancel_flag());
     let result = crate::server::git::install(&state.http, &state.paths, &progress).await;
     state.clear_cancel(progress.id());
@@ -1604,7 +1604,7 @@ pub async fn create_server(
     let kind = parse_server_kind(&kind)?;
     let mut server = crate::server::create(&state.paths, name, kind, version).await?;
 
-    let progress = Progress::new(app, format!("server:{}", server.id));
+    let progress = Progress::new(crate::desktop::sink(app), format!("server:{}", server.id));
     state.register_cancel(progress.id(), progress.cancel_flag());
     let result =
         crate::server::install::install_jar(&state.http, &state.paths, &mut server, &progress).await;
@@ -1722,7 +1722,7 @@ pub async fn add_cardboard(
         return Err(Error::msg("Cardboard is already installed here"));
     }
 
-    let progress = Progress::new(app, format!("server:{}", server.id));
+    let progress = Progress::new(crate::desktop::sink(app), format!("server:{}", server.id));
     progress.stage("Finding Cardboard", 1).await;
 
     let slug = crate::server::CARDBOARD_SLUG;
@@ -1786,7 +1786,7 @@ pub async fn start_server(
         let _ = crate::server::logs::prune(&state.paths, &id, keep as usize).await;
     }
 
-    let progress = Progress::new(app.clone(), format!("server:{id}"));
+    let progress = Progress::new(crate::desktop::sink(app.clone()), format!("server:{id}"));
     let java = match server.settings.java_path.clone() {
         Some(path) => PathBuf::from(path),
         None => match server.java_major {
@@ -1806,7 +1806,7 @@ pub async fn start_server(
     };
 
     let pid = crate::server::run::start(
-        &app,
+        &crate::desktop::sink(app.clone()),
         &state.paths,
         &server,
         java,
@@ -1928,7 +1928,7 @@ pub async fn check_server_content_updates(
 ) -> Result<Vec<crate::install::content::UpdateCandidate>> {
     let config = state.config().await;
     let server = crate::server::load(&state.paths, &id).await?;
-    let progress = Progress::new(app, format!("updates:{id}"));
+    let progress = Progress::new(crate::desktop::sink(app), format!("updates:{id}"));
     state.register_cancel(progress.id(), progress.cancel_flag());
 
     let result = crate::install::content::check_updates(
@@ -1973,7 +1973,7 @@ pub async fn link_untracked_server_content(
     id: String,
 ) -> Result<crate::install::content::LinkReport> {
     let mut server = crate::server::load(&state.paths, &id).await?;
-    let progress = Progress::new(app, format!("link:{id}"));
+    let progress = Progress::new(crate::desktop::sink(app), format!("link:{id}"));
     state.register_cancel(progress.id(), progress.cancel_flag());
 
     // Only the folders this server actually has. Looking in the others would
@@ -2124,7 +2124,7 @@ pub async fn install_server_content(
         ))
     })?;
 
-    let progress = Progress::new(app, format!("server-content:{id}:{project_id}"));
+    let progress = Progress::new(crate::desktop::sink(app), format!("server-content:{id}:{project_id}"));
     let dir = crate::server::content_dir(&state.paths, &id, kind).await;
 
     // The same walk an instance gets, from the same code: a mod that needs
@@ -2182,7 +2182,7 @@ pub async fn create_server_from_plan(
     let cf_key = config.effective_curseforge_key();
     let cf_key = cf_key.as_deref();
 
-    let progress = Progress::new(app, format!("plan-server:{id}"));
+    let progress = Progress::new(crate::desktop::sink(app), format!("plan-server:{id}"));
     state.register_cancel(progress.id(), progress.cancel_flag());
 
     let matrix = state.connector.get(&state.http).await.unwrap_or_default();
@@ -2273,7 +2273,7 @@ pub async fn create_server_backup(
     id: String,
 ) -> Result<crate::server::backup::BackupInfo> {
     let server = crate::server::load(&state.paths, &id).await?;
-    let progress = Progress::new(app, format!("server-backup:{id}"));
+    let progress = Progress::new(crate::desktop::sink(app), format!("server-backup:{id}"));
 
     let result = crate::server::backup::create(&state.paths, &id, &progress).await;
     match result {
@@ -2497,7 +2497,7 @@ pub async fn install_java(
     state: State<'_, AppState>,
     major: u32,
 ) -> Result<crate::java::JavaInstall> {
-    let progress = Progress::new(app, format!("java:{major}"));
+    let progress = Progress::new(crate::desktop::sink(app), format!("java:{major}"));
     let result = crate::java::provision(&state.http, &state.paths, major, &progress).await;
     match &result {
         Ok(_) => progress.finish().await,
@@ -2530,7 +2530,7 @@ pub async fn launch_instance(
 
     let config = state.config().await;
     let mut inst = instance::load(&state.paths, &id).await?;
-    let progress = Progress::new(app.clone(), format!("launch:{id}"));
+    let progress = Progress::new(crate::desktop::sink(app.clone()), format!("launch:{id}"));
     state.register_cancel(progress.id(), progress.cancel_flag());
 
     // Resolve the account first: a sign-in problem should surface before we
@@ -2603,7 +2603,7 @@ pub async fn prepare_instance(
 ) -> Result<()> {
     let config = state.config().await;
     let inst = instance::load(&state.paths, &id).await?;
-    let progress = Progress::new(app, format!("launch:{id}"));
+    let progress = Progress::new(crate::desktop::sink(app), format!("launch:{id}"));
     state.register_cancel(progress.id(), progress.cancel_flag());
 
     let java_override = inst
@@ -2684,7 +2684,7 @@ pub async fn import_modpack(
     )
     .await?;
 
-    let progress = Progress::new(app, format!("import:{}", inst.id));
+    let progress = Progress::new(crate::desktop::sink(app), format!("import:{}", inst.id));
     state.register_cancel(progress.id(), progress.cancel_flag());
 
     let result = instance::modpack::import_into(
@@ -2723,7 +2723,7 @@ pub async fn export_modpack(
     include_saves: bool,
 ) -> Result<String> {
     let inst = instance::load(&state.paths, &id).await?;
-    let progress = Progress::new(app, format!("export:{id}"));
+    let progress = Progress::new(crate::desktop::sink(app), format!("export:{id}"));
     let dest = PathBuf::from(dest);
 
     instance::modpack::export_mrpack(&state.paths, &inst, dest.clone(), include_saves, Vec::new(), &progress)

@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use crate::events::{self, EventSink};
 
 use crate::net::Progress;
 use crate::paths::Paths;
@@ -64,10 +64,11 @@ pub fn is_due(schedule: &Schedule, now: i64) -> bool {
 
 /// Say something in the server's own console, so scheduled work is visible
 /// where the user is already looking rather than only in a log.
-fn announce(app: &AppHandle, server_id: &str, line: String) {
-    let _ = app.emit(
+fn announce(sink: &EventSink, server_id: &str, line: String) {
+    events::emit(
+        &Some(sink.clone()),
         "geode://server-log",
-        ServerLine {
+        &ServerLine {
             server_id: server_id.to_string(),
             line: format!("[Geode] {line}"),
             stream: "out".into(),
@@ -76,7 +77,7 @@ fn announce(app: &AppHandle, server_id: &str, line: String) {
 }
 
 async fn run_backup(
-    app: &AppHandle,
+    sink: &EventSink,
     paths: &Paths,
     servers: &ServerRegistry,
     server: &super::Server,
@@ -93,7 +94,7 @@ async fn run_backup(
     match super::backup::create(paths, &server.id, &progress).await {
         Ok(info) => {
             announce(
-                app,
+                sink,
                 &server.id,
                 format!("scheduled backup taken: {}", info.name),
             );
@@ -101,12 +102,12 @@ async fn run_backup(
                 let _ = super::backup::prune(paths, &server.id, keep as usize).await;
             }
         }
-        Err(e) => announce(app, &server.id, format!("scheduled backup failed: {e}")),
+        Err(e) => announce(sink, &server.id, format!("scheduled backup failed: {e}")),
     }
 }
 
 /// Run everything that is due, once.
-pub async fn run_due(app: &AppHandle, paths: &Paths, servers: &ServerRegistry, now: i64) {
+pub async fn run_due(sink: &EventSink, paths: &Paths, servers: &ServerRegistry, now: i64) {
     let Ok(all) = super::list(paths).await else {
         return;
     };
@@ -131,10 +132,10 @@ pub async fn run_due(app: &AppHandle, paths: &Paths, servers: &ServerRegistry, n
 
         for schedule in due {
             match &schedule.action {
-                ScheduleAction::Backup => run_backup(app, paths, servers, &current).await,
+                ScheduleAction::Backup => run_backup(sink, paths, servers, &current).await,
                 ScheduleAction::Command(command) => {
                     if servers.send(&current.id, command) {
-                        announce(app, &current.id, format!("scheduled: {command}"));
+                        announce(sink, &current.id, format!("scheduled: {command}"));
                     }
                     // A command for a stopped server is skipped rather than
                     // queued: it would arrive at a console nobody is at, and
@@ -151,12 +152,12 @@ pub async fn run_due(app: &AppHandle, paths: &Paths, servers: &ServerRegistry, n
 }
 
 /// Start the ticker for the life of the app.
-pub fn spawn(app: AppHandle, paths: Paths, servers: ServerRegistry) {
-    tauri::async_runtime::spawn(async move {
+pub fn spawn(sink: EventSink, paths: Paths, servers: ServerRegistry) {
+    tokio::spawn(async move {
         let mut ticker = tokio::time::interval(TICK);
         loop {
             ticker.tick().await;
-            run_due(&app, &paths, &servers, chrono::Utc::now().timestamp()).await;
+            run_due(&sink, &paths, &servers, chrono::Utc::now().timestamp()).await;
         }
     });
 }

@@ -3,7 +3,9 @@ pub mod commands;
 pub mod config;
 pub mod connector;
 pub mod diagnostics;
+pub mod desktop;
 pub mod error;
+pub mod events;
 pub mod install;
 pub mod instance;
 pub mod java;
@@ -55,7 +57,11 @@ pub fn run() {
             // every pass.
             let servers = state.servers.clone();
             app.manage(state);
-            crate::server::schedule::spawn(app.handle().clone(), paths, servers);
+            crate::server::schedule::spawn(
+                crate::desktop::sink(app.handle().clone()),
+                paths,
+                servers,
+            );
             Ok(())
         })
         .on_window_event(|window, event| {
