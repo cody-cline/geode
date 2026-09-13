@@ -7,7 +7,7 @@
 //! content that may be plugins, mods, or both at once.
 //!
 //! The "both at once" case is not an edge: Mohist, Arclight and Banner exist
-//! precisely to load Bukkit plugins alongside Forge mods, and a manager that
+//! precisely to load Bukkit plugins alongside Forge or Fabric mods, and a manager that
 //! assumes one or the other cannot describe them.
 
 pub mod backup;
@@ -167,9 +167,9 @@ impl ServerKind {
     /// for; their plugin side is searched separately as Bukkit.
     pub fn mod_loader(self) -> Option<&'static str> {
         Some(match self {
-            ServerKind::Fabric => "fabric",
+            ServerKind::Fabric | ServerKind::Banner => "fabric",
             ServerKind::Quilt => "quilt",
-            ServerKind::NeoForge | ServerKind::Banner => "neoforge",
+            ServerKind::NeoForge => "neoforge",
             ServerKind::Forge | ServerKind::Mohist | ServerKind::Arclight => "forge",
             _ => return None,
         })

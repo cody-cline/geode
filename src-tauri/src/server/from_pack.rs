@@ -165,10 +165,12 @@ mod tests {
     }
 
     #[test]
-    fn a_neoforge_pack_offers_banner_alongside_neoforge() {
-        let kinds = kinds_for("neoforge");
-        assert_eq!(kinds.first(), Some(&ServerKind::NeoForge));
+    fn a_fabric_pack_offers_banner_alongside_fabric() {
+        let kinds = kinds_for("fabric");
+        assert_eq!(kinds.first(), Some(&ServerKind::Fabric));
+        // Banner is built on Fabric; MohistMC's NeoForge hybrid is Youer.
         assert!(kinds.contains(&ServerKind::Banner));
+        assert!(!kinds_for("neoforge").contains(&ServerKind::Banner));
     }
 
     #[test]
