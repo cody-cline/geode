@@ -179,10 +179,13 @@ public final class Probe {
             public MethodVisitor visitMethod(int access, String name, String descriptor,
                                              String signature, String[] exceptions) {
                 MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
-                boolean instanceRegister = "register".equals(name)
+                // `register` catches a server building its command set. `getRoot`
+                // catches one that never calls register at all: Velocity creates a
+                // dispatcher, takes its root, and adds nodes to that directly.
+                boolean interesting = ("register".equals(name) || "getRoot".equals(name))
                         && (access & Opcodes.ACC_STATIC) == 0
                         && (access & Opcodes.ACC_ABSTRACT) == 0;
-                if (mv == null || !instanceRegister) {
+                if (mv == null || !interesting) {
                     return mv;
                 }
                 hit[0] = true;
@@ -212,9 +215,11 @@ public final class Probe {
      */
     private static final class Dumper implements Runnable {
         public void run() {
-            String last = null;
-            int lastRootChildren = -1;
+            String written = null;
+            int writtenNodes = -1;
+            int lastShape = -1;
             long started = System.currentTimeMillis();
+
             for (int tick = 0; tick < 400; tick++) {
                 long age = System.currentTimeMillis() - started;
                 if (age > 900_000L) { // fifteen minutes, then give up
@@ -229,34 +234,52 @@ public final class Probe {
                 } catch (InterruptedException e) {
                     return;
                 }
+
                 try {
-                    Object dispatcher = bootstrapDispatcher();
-                    if (dispatcher == null) {
+                    List<Object> roots = roots();
+                    if (roots.isEmpty()) {
                         continue;
                     }
-                    Object root = call(dispatcher, "getRoot");
-                    if (root == null) {
-                        continue;
-                    }
-                    int children = childrenOf(root).size();
-                    // The cheap change detector, so the full walk is rare. The
-                    // fixed ticks catch a plugin that adds a subcommand to a
-                    // command that already existed, which leaves the count alone.
-                    // The cheap change detector, so the full walk is rare. The
+                    // A cheap change detector, so the full walk is rare. The
                     // early forced walks catch a plugin adding a subcommand to
-                    // a command that already existed, which leaves the count
+                    // a command that already existed, which leaves the counts
                     // alone but changes the tree.
-                    boolean worthWalking = children != lastRootChildren
+                    int shape = 0;
+                    for (Object root : roots) {
+                        shape = shape * 31 + childrenOf(root).size();
+                    }
+                    boolean worthWalking = shape != lastShape
                             || tick == 2 || tick == 20 || tick == 60 || tick == 90;
                     if (!worthWalking) {
                         continue;
                     }
-                    lastRootChildren = children;
+                    lastShape = shape;
 
-                    String json = render(root);
-                    if (json != null && !json.equals(last)) {
-                        if (write(json)) {
-                            last = json;
+                    // Whichever dispatcher holds more. On a Bukkit server the
+                    // fuller one is the second, built after plugins enabled;
+                    // taking the larger also means a library that keeps a small
+                    // private dispatcher of its own can never win.
+                    String best = null;
+                    int bestNodes = -1;
+                    for (Object root : roots) {
+                        Map<Object, List<String>> paths = pathsFrom(root);
+                        if (paths.size() <= bestNodes) {
+                            continue;
+                        }
+                        String json = render(root, paths);
+                        if (json != null) {
+                            best = json;
+                            bestNodes = paths.size();
+                        }
+                    }
+
+                    // Never replace a fuller tree with a thinner one: a reload
+                    // rebuilding the dispatcher would otherwise be caught
+                    // half-populated and lose commands that do still exist.
+                    if (best != null && bestNodes >= writtenNodes && !best.equals(written)) {
+                        if (write(best)) {
+                            written = best;
+                            writtenNodes = bestNodes;
                         }
                     }
                 } catch (Throwable t) {
@@ -268,12 +291,36 @@ public final class Probe {
         }
     }
 
-    private static Object bootstrapDispatcher() throws Exception {
+    /** The root of every dispatcher the hook has seen, newest first. */
+    private static List<Object> roots() throws Exception {
         // Reflection rather than a direct reference: the Hook the woven code
         // writes to is the bootstrap one, and a direct reference here would
-        // compile against whichever copy this class loader sees.
+        // bind to whichever copy this class loader sees.
         Class<?> hook = Class.forName("geode.probe.Hook", false, null);
-        return hook.getField("dispatcher").get(null);
+        Object latest = hook.getField("latest").get(null);
+        Object first = hook.getField("first").get(null);
+
+        List<Object> out = new ArrayList<Object>(2);
+        for (Object dispatcher : new Object[] {latest, first}) {
+            if (dispatcher == null) {
+                continue;
+            }
+            Object root = call(dispatcher, "getRoot");
+            if (root == null) {
+                continue;
+            }
+            boolean already = false;
+            for (Object seen : out) {
+                if (seen == root) {
+                    already = true;
+                    break;
+                }
+            }
+            if (!already) {
+                out.add(root);
+            }
+        }
+        return out;
     }
 
     // ---------------------------------------------------------------------
@@ -353,8 +400,7 @@ public final class Probe {
         return paths;
     }
 
-    private static String render(Object root) {
-        Map<Object, List<String>> paths = pathsFrom(root);
+    private static String render(Object root, Map<Object, List<String>> paths) {
         StringBuilder sb = new StringBuilder(1 << 16);
         int[] budget = {MAX_NODES};
         sb.append('{');
