@@ -2,44 +2,45 @@
  * The share-code lookup service.
  *
  * This is the only thing Geode asks you to deploy, and it deliberately does
- * almost nothing: it maps a key to a small JSON pointer saying where a pack can
- * be fetched from, and it forgets that mapping on a timer. It never sees a
- * share code, never sees a pack, and never stores a file. Bandwidth for the
- * actual bytes is between the two machines involved, not yours.
+ * almost nothing: it maps a key to a small JSON pointer saying where a server's
+ * pack can be fetched from, and it forgets that mapping on a timer. It never
+ * sees a share code, never sees a pack, and never stores a file. Bandwidth for
+ * the actual bytes is between the two machines involved, not yours.
  *
- * What is stored per share is a few hundred bytes, against a 1 GB KV allowance
- * — so storage is never what runs out. On Cloudflare's free tier the binding
- * limit is KV writes at 1,000/day, which is 1,000 new shares; reads are
- * 100,000/day, which is 100,000 people joining. If writes do run out, existing
- * shares keep resolving, because reads have their own far larger budget.
+ * Used for **server** shares only. A personal pack is a `.geodepack` file you
+ * hand over directly, so it needs no lookup and no code.
  *
  * WHY IT NEVER SEES A CODE
  * Geode derives `key = base32(SHA-256("geode-share-v1" || code))[0..16]` on the
  * sharing machine and sends only that. The code itself stays between the people
- * swapping it. So a dump of this KV namespace yields keys and pointers and no
- * way to work back to a code — and a pointer alone is useless without one,
- * because the host end checks the code too.
+ * swapping it. So a dump of this storage yields keys and pointers and no way to
+ * work back to a code — and a pointer alone is useless without one, because the
+ * host end checks the code too.
  *
- * IF 1,000 SHARES A DAY EVER BECOMES THE CEILING
- * Do not buffer writes in memory and flush them on a schedule. A Worker has no
- * durable memory to buffer into: it runs as many short-lived isolates across
- * many locations, with no shared state, and any of them can be evicted at any
- * moment — so a share created between flushes would resolve on one isolate,
- * not another, and vanish entirely if that one went away.
+ * WHY A DURABLE OBJECT RATHER THAN KV
+ * One share is one Durable Object, addressed by its key. On the same free plan
+ * a SQLite-backed Durable Object allows 100,000 row writes and 5 million row
+ * reads a day, against Workers KV's 1,000 writes and 100,000 reads — and writes
+ * are the limit that binds, because every share created is exactly one. The
+ * object also expires itself with an alarm set to the second, which is tidier
+ * than a TTL, and gives revocation somewhere to live.
  *
- * Getting state means a Durable Object, and once you have one the buffering is
- * pointless: a Durable Object with SQLite storage allows 100,000 row writes a
- * day on the same free plan, against KV's 1,000. Swap the storage rather than
- * batching around it. The cost is that KV expires entries by itself whereas
- * SQLite would need an alarm to purge them, and that a Durable Object lives in
- * one location while KV is read from everywhere.
+ * The trade is that a Durable Object is instantiated in one location while KV
+ * is read from everywhere. That costs one round trip, on a single lookup, made
+ * once before transferring megabytes — not worth optimising for.
  *
  * DEPLOY
  *   npm create cloudflare@latest -- geode-rendezvous
  *   # replace src/index.js with this file, then in wrangler.toml:
- *   #   [[kv_namespaces]]
- *   #   binding = "SHARES"
- *   #   id = "<from: wrangler kv namespace create SHARES>"
+ *   #
+ *   #   [[durable_objects.bindings]]
+ *   #   name = "SHARES"
+ *   #   class_name = "ShareRegistry"
+ *   #
+ *   #   [[migrations]]
+ *   #   tag = "v1"
+ *   #   new_sqlite_classes = ["ShareRegistry"]
+ *   #
  *   npx wrangler deploy
  *
  * Then put the resulting URL into Geode's settings. Nothing else is required
@@ -53,16 +54,16 @@ const KEY = /^[0-9ABCDEFGHJKMNPQRSTVWXYZ]{16}$/;
 const MAX_BODY = 4096;
 
 /**
- * Clamp the lifetime. Cloudflare's own floor for an expiring key is 30s; this
- * sits above it because a share that dies in half a minute is of no use to
- * anybody, not because the platform demands it.
+ * Clamp the lifetime. A share that dies inside a minute is of no use to
+ * anybody, and a month is past the point where anyone remembers sharing it.
  */
 const MIN_TTL = 60;
 const MAX_TTL = 60 * 60 * 24 * 30;
+
 /**
- * A week. Long enough that a player who was away for the weekend can still
- * join, and it costs nothing: an entry's lifetime does not consume writes, and
- * the 1 GB of KV is millions of entries at a few hundred bytes each.
+ * A week. Long enough that somebody away for the weekend can still join, and
+ * it costs nothing — a lifetime consumes no writes, and a few hundred bytes
+ * against 5 GB is millions of entries.
  */
 const DEFAULT_TTL = 60 * 60 * 24 * 7;
 
@@ -78,6 +79,102 @@ const json = (body, status = 200) =>
       "cache-control": "no-store",
     },
   });
+
+const str = (value, max) => (typeof value === "string" ? value.slice(0, max) : "");
+
+/**
+ * One share.
+ *
+ * Per key rather than one object holding every share, so nothing serialises
+ * behind a single global instance and each share is created near whoever
+ * created it. There is no listing across shares and no need for one — an admin
+ * keeps their own revocation token.
+ */
+export class ShareRegistry {
+  constructor(ctx) {
+    this.ctx = ctx;
+  }
+
+  async fetch(request) {
+    if (request.method === "GET") {
+      const share = this.ctx.storage.kv.get("share");
+      // Belt and braces. The alarm should have cleared an expired share
+      // already, but a read arriving in that gap must not resolve.
+      if (!share || share.expires * 1000 <= Date.now()) {
+        return json({ error: "no such share" }, 404);
+      }
+      const { revoke, ...visible } = share;
+      return json(visible);
+    }
+
+    if (request.method === "PUT") {
+      const text = await request.text();
+      if (text.length > MAX_BODY) {
+        return json({ error: "too large — this stores pointers, not files" }, 413);
+      }
+
+      let body;
+      try {
+        body = JSON.parse(text);
+      } catch {
+        return json({ error: "body must be JSON" }, 400);
+      }
+      if (!body || typeof body.ticket !== "string" || !body.ticket) {
+        return json({ error: "a share needs a ticket" }, 400);
+      }
+
+      const ttl = Math.min(
+        MAX_TTL,
+        Math.max(MIN_TTL, Number(body.ttlSeconds) || DEFAULT_TTL),
+      );
+      const expires = Math.floor(Date.now() / 1000) + ttl;
+
+      // The creator gets a token back so they can revoke early. Held here
+      // rather than derived from the code, so an admin can hand the code to
+      // fifty people and still keep the off switch themselves.
+      const revoke = crypto.randomUUID();
+
+      this.ctx.storage.kv.put("share", {
+        v: 1,
+        ticket: body.ticket,
+        name: str(body.name, 120),
+        mcVersion: str(body.mcVersion, 32),
+        loader: str(body.loader, 32),
+        bytes: Number(body.bytes) || 0,
+        files: Number(body.files) || 0,
+        revoke,
+        expires,
+      });
+
+      // Clears itself at the second it expires. No cron, nothing to sweep, and
+      // nothing left behind if Geode never calls DELETE.
+      await this.ctx.storage.setAlarm(expires * 1000);
+
+      return json({ ok: true, revoke, expiresIn: ttl });
+    }
+
+    if (request.method === "DELETE") {
+      const token = (request.headers.get("authorization") || "").replace(
+        /^Bearer\s+/i,
+        "",
+      );
+      const share = this.ctx.storage.kv.get("share");
+      if (!share) return json({ error: "no such share" }, 404);
+      if (share.revoke !== token) {
+        return json({ error: "wrong revocation token" }, 403);
+      }
+      await this.ctx.storage.deleteAll();
+      return json({ ok: true });
+    }
+
+    return json({ error: "method not allowed" }, 405);
+  }
+
+  /** Its own expiry. */
+  async alarm() {
+    await this.ctx.storage.deleteAll();
+  }
+}
 
 export default {
   async fetch(request, env) {
@@ -98,83 +195,22 @@ export default {
     if (!match) return json({ error: "not found" }, 404);
 
     const key = match[1].toUpperCase();
+    // Validated before an object is addressed, so a malformed key cannot cause
+    // one to be created. An expired share and a key that never existed both
+    // answer 404 from the object itself, so neither can be probed for.
     if (!KEY.test(key)) return json({ error: "malformed key" }, 400);
 
-    if (request.method === "GET") {
-      const found = await env.SHARES.get(key);
-      // An expired share and a share that never existed are the same answer.
-      // Telling them apart would let somebody probe for keys that once worked.
-      if (!found) return json({ error: "no such share" }, 404);
-      return json(JSON.parse(found));
-    }
-
-    if (request.method === "PUT") {
-      const text = await request.text();
-      if (text.length > MAX_BODY) {
-        return json({ error: "too large — this stores pointers, not files" }, 413);
-      }
-
-      let body;
-      try {
-        body = JSON.parse(text);
-      } catch {
-        return json({ error: "body must be JSON" }, 400);
-      }
-      if (!body || typeof body.ticket !== "string" || !body.ticket) {
-        return json({ error: "a share needs a ticket" }, 400);
-      }
-
-      // The creator gets a token back so they can revoke early. It is stored
-      // alongside rather than derived, so revoking needs the token and not the
-      // code — an admin can hand a code out and still retain the off switch.
-      const revoke = crypto.randomUUID();
-      const ttl = Math.min(
-        MAX_TTL,
-        Math.max(MIN_TTL, Number(body.ttlSeconds) || DEFAULT_TTL),
-      );
-
-      await env.SHARES.put(
-        key,
-        JSON.stringify({
-          v: 1,
-          ticket: body.ticket,
-          name: typeof body.name === "string" ? body.name.slice(0, 120) : "",
-          mcVersion: typeof body.mcVersion === "string" ? body.mcVersion.slice(0, 32) : "",
-          loader: typeof body.loader === "string" ? body.loader.slice(0, 32) : "",
-          bytes: Number(body.bytes) || 0,
-          files: Number(body.files) || 0,
-          revoke,
-          expires: Math.floor(Date.now() / 1000) + ttl,
-        }),
-        // Cloudflare deletes it. There is no cleanup job to run and nothing
-        // accumulates if Geode never calls DELETE.
-        { expirationTtl: ttl },
-      );
-
-      return json({ ok: true, revoke, expiresIn: ttl });
-    }
-
-    if (request.method === "DELETE") {
-      const token = (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
-      const found = await env.SHARES.get(key);
-      if (!found) return json({ error: "no such share" }, 404);
-      if (JSON.parse(found).revoke !== token) {
-        return json({ error: "wrong revocation token" }, 403);
-      }
-      await env.SHARES.delete(key);
-      return json({ ok: true });
-    }
-
-    return json({ error: "method not allowed" }, 405);
+    const id = env.SHARES.idFromName(key);
+    return env.SHARES.get(id).fetch(request);
   },
 };
 
 /**
  * The landing page.
  *
- * Its only job is to show the code and offer to hand it to Geode. It does the
- * hashing in the browser so that the code stays in the fragment and never
- * reaches the server — which is the same promise the desktop app makes.
+ * Its only job is to show the code so somebody can copy it into Geode. The code
+ * stays in the fragment and never reaches the server — the same promise the
+ * desktop app makes.
  */
 const LANDING = `<!doctype html>
 <meta charset="utf-8">
@@ -183,14 +219,13 @@ const LANDING = `<!doctype html>
 <style>
   :root { color-scheme: dark }
   body { margin:0; min-height:100vh; display:grid; place-items:center;
-         background:#0d0c0b; color:#ece9e4;
+         background:#0b0f14; color:#e6edf3;
          font:15px/1.6 system-ui,-apple-system,Segoe UI,sans-serif }
   main { text-align:center; padding:32px; max-width:34rem }
-  code { display:inline-block; margin:18px 0; padding:12px 18px; border-radius:8px;
-         background:#1c1b18; box-shadow:0 0 0 1px #2b2925;
+  code { display:inline-block; margin:18px 0; padding:12px 18px; border-radius:10px;
+         background:#161d27; box-shadow:0 0 0 1px #212b38;
          font:600 20px ui-monospace,SF Mono,Menlo,monospace; letter-spacing:.06em }
-  p { color:#a39d94 }
-  a { color:#d2a24c }
+  p { color:#99a6b5 }
 </style>
 <main>
   <h1>Open this pack in Geode</h1>

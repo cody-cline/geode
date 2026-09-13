@@ -37,7 +37,7 @@ is more actionable than a silently incomplete instance would be.
 | Share codes (server shares only) | `src-tauri/src/share/code.rs` | Done, tested |
 | Per-file sharing marks | `src-tauri/src/instance/content.rs` (`Sharing`) | Done, tested |
 | Sidedness from the jar | `src-tauri/src/instance/jar.rs` (`Side`) | Done, verified against real jars |
-| Rendezvous Worker (server shares only) | `rendezvous/worker.js` | Written, **not deployed** |
+| Rendezvous Worker (server shares only) | `rendezvous/worker.js` | Written as a Durable Object, **not deployed or tested** |
 | Container image | `container/` | Written, **not built** |
 | Event decoupling | `src-tauri/src/events.rs` | Done — the server half no longer needs a window |
 
