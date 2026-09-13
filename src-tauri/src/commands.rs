@@ -2726,7 +2726,17 @@ pub async fn export_modpack(
     let progress = Progress::new(crate::desktop::sink(app), format!("export:{id}"));
     let dest = PathBuf::from(dest);
 
-    instance::modpack::export_mrpack(&state.paths, &inst, dest.clone(), include_saves, Vec::new(), &progress)
-        .await?;
+    // Nothing is carried by reference: a plain `.mrpack` has nowhere to record
+    // one, so leaving a file out would lose the mod with nothing to say so.
+    instance::modpack::export_mrpack(
+        &state.paths,
+        &inst,
+        dest.clone(),
+        include_saves,
+        Vec::new(),
+        &Default::default(),
+        &progress,
+    )
+    .await?;
     Ok(dest.to_string_lossy().to_string())
 }

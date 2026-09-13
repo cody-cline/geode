@@ -35,7 +35,8 @@ is more actionable than a silently incomplete instance would be.
 | `.geodepack` format | `src-tauri/src/share/manifest.rs` | Done, tested |
 | Export/import of the Geode half | `src-tauri/src/share/pack.rs` | Done, tested |
 | Share codes (server shares only) | `src-tauri/src/share/code.rs` | Done, tested |
-| Per-file sharing marks | `src-tauri/src/instance/content.rs` (`Sharing`) | Done, tested |
+| Referencing rather than copying | `src-tauri/src/share/pack.rs` (`source_for`) | Done, tested |
+| Per-file sharing marks | `src-tauri/src/instance/content.rs` (`Sharing`) | Data model only — `excluded` is read nowhere and no UI sets either mark |
 | Sidedness from the jar | `src-tauri/src/instance/jar.rs` (`Side`) | Done, verified against real jars |
 | Rendezvous Worker (server shares only) | `rendezvous/worker.js` | Written as a Durable Object, **not deployed or tested** |
 | Container image | `container/` | Written, **not built** |
@@ -62,29 +63,57 @@ Naming: `.geode` was taken by the Geometry Dash mod SDK, which is also a zip.
 
 ## Remaining work
 
-### 1. Teach the exporter to reference rather than copy
+### 1. Teach the exporter to reference rather than copy — **done**
 
-**Still the first thing to do**, though for a different reason than before. It
-is no longer blocking an upload path, because there is no upload path — it
-matters because a server pushes its content to every player who joins, and
-because a `.geodepack` will end up posted publicly whatever it was meant for.
+A `.geodepack` now classifies every file three ways:
 
-`export_mrpack` currently writes CurseForge jars into `overrides/` as bytes —
-its own doc comment used to describe them as files "we may not redistribute",
-which is now corrected to say plainly that this is a known problem.
+- A record from Modrinth → an index entry, as before.
+- A record from any other provider, with ids, whose file is **actually on
+  disk** → a `SourceRef` in `geode/manifest.json`, and the bytes are left out.
+- Anything else → `overrides/`, exactly as before. That includes configs,
+  scripts, and jars with no provenance, which is the one case the format's own
+  rule names as having no link to give.
 
-The manifest already has the fields. What is missing is the exporter using them:
+Three things fell out of review that are worth keeping written down, because
+each would have shipped a pack that lied about itself:
 
-- CurseForge, distribution allowed → write a `SourceRef`, embed nothing.
-- CurseForge, distribution **not** allowed → write a `SourceRef` with
-  `manual: true`, embed nothing. Geode already shows a "Manual download only"
-  badge for these in the project panel; the share flow should reuse it.
-- Unknown-provenance jar → embed only after a per-file confirmation. Never
-  silently, and never in a one-click share.
-- Configs and scripts → embed freely. That is what `overrides/` is for.
+- **Records key on the enabled name; disk carries `.disabled`.** Comparing the
+  two directly misses every disabled file, and misses it in the bad direction —
+  the jar lands in `overrides/` while the manifest says it was left out.
+- **A record is provenance, not proof.** Deleting a file outside the launcher
+  leaves its record forever, so a reference built from records alone promises
+  a mod the sharer does not have. Note emission is gated on the file existing.
+- **The skip set is derived from the manifest**, not computed a second time, so
+  a file is omitted from `overrides/` if and only if the manifest says where to
+  get it. There is a test asserting exactly that, per file.
 
-Import then resolves references through the recipient's own CurseForge key and
-presents the manual list as something to act on.
+Deliberately **not** done, and each for a reason:
+
+- `manual` is still never written. Whether a CurseForge author allows
+  third-party distribution is a live fact the recipient's own resolution
+  already establishes, and a flag written at export is stale the moment the
+  author changes their mind.
+- `Sharing::excluded` is still read nowhere. Nothing can set it — no command,
+  no UI, no field on the type the frontend sees — so honouring it would be a
+  consumer for a producer that does not exist.
+- Unprovenanced jars are **not** dropped. The design note used to call for
+  dropping them behind a per-file confirmation; with no confirmation UI that
+  becomes "drop silently", which loses the author's own mod and tells the
+  recipient nothing.
+
+A plain `.mrpack` is unchanged and keeps embedding everything, because it has
+nowhere to record a reference.
+
+**Worth knowing:** the index *could* carry a CurseForge URL. The four-host
+allowlist in Modrinth's format is enforced by their upload validator, not by
+readers — Prism imports any URL it is handed. We still don't, because a URL
+baked into a pack keeps working after an author turns third-party downloads
+off, while an id resolved at import time sees that decision.
+
+What remains is the other half: import has to read `geode/manifest.json`,
+resolve those references through the recipient's own key, and present what it
+could not fetch as a list to act on. Until it does, Geode cannot read back the
+packs it writes — see item 5.
 
 ### 2. Where the bytes go — settled by removing the question
 
@@ -159,21 +188,56 @@ Panel owns the model, so using it means writing a Panel. Crafty is standalone
 but its model has no slot for `ServerKind`, `LaunchKind::ArgFile`, or the probe
 agent, which is most of what Geode knows.
 
+### 5. The `.geodepack` is written by nothing and read by nothing
+
+This is the gap that matters most now, and it was not visible until someone
+went looking: **the format is unreachable from both ends.**
+
+- `export_modpack` (the only registered export command) passes no extras, so
+  the shipping app writes a plain `.mrpack` and never a `.geodepack`.
+  `share::pack::export` — the function that would — has no callers.
+- `import_into` probes for `modrinth.index.json` and CurseForge's root
+  `manifest.json` only. A `geode/` entry matches no override root, so it is not
+  merely ignored, it is never extracted. `read_manifest`, `apply` and
+  `Manifest::note` have no production callers at all.
+
+So a `.geodepack` handed to today's Geode imports as a plain `.mrpack` and
+silently drops the name, group, notes, memory, Java args, window size, artwork
+and every per-file note. After item 1, it would also drop every referenced mod.
+
+The exporter work above is correct and tested, but it stays inert until:
+
+- a command and a UI entry that call `share::pack::export`;
+- `import_into` reading the Geode half, applying the profile, extracting
+  `geode/media/`, and resolving each `SourceRef` through the user's own key;
+- a refusal, before anything is written, when a pack carries non-Modrinth
+  references and no key is configured — matching the existing CurseForge error
+  rather than inventing a second one;
+- `notes_for`'s `server_only`, which is currently dropped for every record
+  whose jar declares no side. Harmless while nothing reads notes; wrong the
+  moment something does.
+
 ---
 
 ## What needs you
 
 Nothing below is required for anything already committed.
 
-1. **Deploy the Worker** (10 minutes, free, no card):
+1. **Deploy the Worker** (a few minutes, free, no card). `rendezvous/` is a
+   wrangler project as it stands — nothing to scaffold, nothing to paste:
    ```bash
-   npm create cloudflare@latest -- geode-rendezvous
-   # replace src/index.js with rendezvous/worker.js
-   npx wrangler kv namespace create SHARES     # put the id in wrangler.toml
-   npx wrangler deploy
+   cd rendezvous && npx wrangler login && npx wrangler deploy
    ```
-   Then put the URL in Geode's settings. Geode holds no Cloudflare credential —
-   the Worker is write-once-read-many by anyone with a code, and stores no files.
+   Only the login needs you; it opens a browser and you approve it. Then put the
+   URL in Geode's settings. Geode holds no Cloudflare credential.
+
+   To work on it instead, `npx wrangler dev` runs the whole thing locally —
+   Durable Object, alarms and all — with no account at all. That is how the
+   three bugs in it were found, so prefer it to reading the file.
+
+   **There is no hurry.** What the Worker stores is a `ticket` pointing at the
+   sharing machine, and the transport that produces one does not exist yet
+   (item 3). Deploying today gets a working endpoint with nothing to point at.
 
 2. **Nothing.** Personal packs are files; there is no storage to provision.
 

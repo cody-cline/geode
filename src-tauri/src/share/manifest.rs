@@ -95,9 +95,14 @@ pub struct Profile {
 /// This is the whole point of the format. A jar that exists on a provider is
 /// carried as a reference and resolved by the recipient through their own
 /// credentials — which keeps packs small, keeps mods current, and keeps Geode
-/// out of redistributing other people's work. `.mrpack`'s own index can only
-/// express Modrinth this way, because Modrinth's validator accepts no other
-/// download host; CurseForge references therefore live here instead.
+/// out of redistributing other people's work.
+///
+/// Non-Modrinth references live here rather than in the index, and not because
+/// the index forbids them: its four-host allowlist belongs to Modrinth's upload
+/// validator, and readers do not enforce it. They live here because the index
+/// can only hold a URL, and a URL baked into a pack goes on working after an
+/// author turns third-party downloads off. An id resolved at import time gets
+/// today's answer instead of the one that was true when somebody exported.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceRef {

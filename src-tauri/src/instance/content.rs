@@ -159,11 +159,11 @@ pub struct ContentItem {
     pub mod_ids: Vec<String>,
 }
 
-const DISABLED_SUFFIX: &str = ".disabled";
+pub(crate) const DISABLED_SUFFIX: &str = ".disabled";
 
 /// A disabled file is the same file with `.disabled` appended — the convention
 /// every other launcher uses, so toggling here is visible to them too.
-fn strip_disabled(name: &str) -> (&str, bool) {
+pub(crate) fn strip_disabled(name: &str) -> (&str, bool) {
     match name.strip_suffix(DISABLED_SUFFIX) {
         Some(base) => (base, false),
         None => (name, true),

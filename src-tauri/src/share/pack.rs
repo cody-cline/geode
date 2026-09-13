@@ -5,6 +5,7 @@
 //! is the mrpack reader plus a pass that applies what the index had nowhere to
 //! record. Neither half duplicates the other — see [`super::manifest`].
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
@@ -12,7 +13,7 @@ use crate::instance::{self, Instance};
 use crate::net::Progress;
 use crate::paths::Paths;
 
-use super::manifest::{FileNote, Kind, Manifest, Profile, EXTENSION, FORMAT};
+use super::manifest::{FileNote, Kind, Manifest, Profile, SourceRef, EXTENSION, FORMAT};
 
 /// Build the Geode half of a pack for an instance.
 pub async fn manifest_for(paths: &Paths, instance: &Instance) -> Manifest {
@@ -69,36 +70,93 @@ fn sanitise(file_name: &str, ext: &str) -> String {
     format!("{stem}.{ext}")
 }
 
-/// What each mod declared about itself, so an importer need not re-read jars.
+/// What each file declared about itself, and where a recipient can get it.
+///
+/// Two things earn a file a note. The **side** is what the jar said about where
+/// it belongs, carried across so an importer need not re-read every jar. The
+/// **source** is how a file the index cannot point at gets fetched anyway — by
+/// project and version id, resolved through the recipient's own credentials,
+/// rather than by us putting the jar in the zip.
 async fn notes_for(paths: &Paths, instance: &Instance) -> Vec<FileNote> {
     let game_dir = paths.game_dir(&instance.id);
     let mut out = Vec::new();
 
     for record in &instance.content {
         let rel = PathBuf::from(record.kind.folder()).join(&record.file_name);
-        let full = game_dir.join(&rel);
-        let probe = full.clone();
-        let side = tokio::task::spawn_blocking(move || instance::jar::read(&probe))
+
+        // A record is provenance, not proof. Deleting a file outside the
+        // launcher leaves its record behind forever — the module says as much,
+        // and nothing prunes it — so a reference written from the record alone
+        // would promise the recipient a mod the sharer does not actually have.
+        let Some(full) = on_disk(&game_dir, &rel).await else {
+            continue;
+        };
+
+        let side = tokio::task::spawn_blocking(move || instance::jar::read(&full))
             .await
             .ok()
             .flatten()
             .and_then(|meta| meta.side);
+        let source = source_for(record);
 
-        // Only files with something to say are recorded. A pack where every
-        // mod runs on both sides carries no notes at all, which is the
-        // difference between a manifest that annotates and one that repeats.
-        if side.is_none() {
+        // Only files with something to say are recorded. A pack whose mods all
+        // come from Modrinth and all run on both sides carries no notes at all,
+        // which is the difference between a manifest that annotates and one
+        // that repeats.
+        if side.is_none() && source.is_none() {
             continue;
         }
         out.push(FileNote {
             path: rel.to_string_lossy().replace('\\', "/"),
             side,
             server_only: record.sharing.server_only,
-            source: None,
+            source,
             manual: false,
         });
     }
     out
+}
+
+/// The file a record refers to, enabled or not.
+///
+/// Records are keyed by the enabled name, so a mod that has been turned off is
+/// `foo.jar` in the record and `foo.jar.disabled` on disk. Both count as having
+/// the file.
+async fn on_disk(game_dir: &Path, rel: &Path) -> Option<PathBuf> {
+    let enabled = game_dir.join(rel);
+    if tokio::fs::metadata(&enabled).await.is_ok() {
+        return Some(enabled);
+    }
+
+    let mut name = rel.file_name()?.to_os_string();
+    name.push(instance::content::DISABLED_SUFFIX);
+    let disabled = game_dir.join(rel.with_file_name(name));
+    tokio::fs::metadata(&disabled)
+        .await
+        .is_ok()
+        .then_some(disabled)
+}
+
+/// Where a recipient should fetch a file, when the index cannot say.
+///
+/// Modrinth content is deliberately absent: the index already carries it as a
+/// URL and a pair of hashes, and the rule this format rests on is that the same
+/// fact never lives in both halves. A record with no provider or no ids — a jar
+/// dragged in by hand — gets nothing, and so stays an embedded override, which
+/// is the one case where there is genuinely no link to give.
+fn source_for(record: &instance::content::ContentRecord) -> Option<SourceRef> {
+    if record.provider.is_empty()
+        || record.provider == "modrinth"
+        || record.project_id.is_empty()
+        || record.version_id.is_empty()
+    {
+        return None;
+    }
+    Some(SourceRef {
+        provider: record.provider.clone(),
+        project_id: record.project_id.clone(),
+        version_id: record.version_id.clone(),
+    })
 }
 
 /// Everything that goes in `geode/`, ready for the mrpack writer.
@@ -140,7 +198,32 @@ pub async fn export(
 ) -> Result<()> {
     let manifest = manifest_for(paths, instance).await;
     let extras = extras_for(paths, instance, &manifest).await?;
-    instance::modpack::export_mrpack(paths, instance, dest, include_saves, extras, progress).await
+
+    // Read off the manifest rather than worked out a second time. A file is
+    // left out of `overrides/` if and only if the manifest actually carries a
+    // reference for it, so the two halves cannot come to disagree about which
+    // files the recipient is expected to fetch — which is the same rule the
+    // format applies to download URLs, for the same reason.
+    let referenced: HashSet<PathBuf> = manifest
+        .files
+        .iter()
+        .filter(|note| note.source.is_some())
+        // Split on the separator the manifest uses rather than handing the
+        // string to `PathBuf`, so a path written on one platform still matches
+        // the walk's own on another.
+        .map(|note| note.path.split('/').collect::<PathBuf>())
+        .collect();
+
+    instance::modpack::export_mrpack(
+        paths,
+        instance,
+        dest,
+        include_saves,
+        extras,
+        &referenced,
+        progress,
+    )
+    .await
 }
 
 /// Read the Geode half out of a pack, if it has one.
@@ -340,6 +423,260 @@ mod tests {
         // decoder opens by name.
         assert_eq!(media_entry("banner-93ab.jpg"), "geode/media/banner.jpg");
         assert_eq!(media_entry("icon-12cd.png"), "geode/media/icon.png");
+    }
+
+    // -----------------------------------------------------------------------
+    // Referencing rather than copying
+    // -----------------------------------------------------------------------
+
+    use crate::instance::content::{ContentKind, ContentRecord};
+
+    fn record(provider: &str, file_name: &str, kind: ContentKind) -> ContentRecord {
+        ContentRecord {
+            file_name: file_name.into(),
+            kind,
+            provider: provider.into(),
+            project_id: if provider.is_empty() { String::new() } else { "proj-1".into() },
+            version_id: if provider.is_empty() { String::new() } else { "ver-1".into() },
+            name: file_name.into(),
+            version_number: "1.0".into(),
+            slug: None,
+            icon_url: None,
+            dependency: false,
+            sharing: Default::default(),
+            requires: None,
+        }
+    }
+
+    /// An instance on disk, with each named file actually written.
+    async fn fixture(tag: &str, files: &[(&str, &str)]) -> (Paths, Instance) {
+        let paths = Paths {
+            root: std::env::temp_dir().join(format!("geode-ref-{tag}-{}", std::process::id())),
+        };
+        let mut inst = instance();
+        inst.id = format!("inst-{tag}");
+        let game = paths.game_dir(&inst.id);
+        let _ = tokio::fs::remove_dir_all(&game).await;
+        for (dir, name) in files {
+            let d = game.join(dir);
+            tokio::fs::create_dir_all(&d).await.unwrap();
+            // Real zip bytes would let `jar::read` find a side; empty is fine
+            // here, because every assertion below is about paths, not sides.
+            tokio::fs::write(d.join(name), b"not really a jar").await.unwrap();
+        }
+        (paths, inst)
+    }
+
+    /// Everything inside an exported pack, by entry name.
+    fn entries(archive: &Path) -> Vec<String> {
+        let file = std::fs::File::open(archive).unwrap();
+        let mut zip = zip::ZipArchive::new(file).unwrap();
+        (0..zip.len())
+            .map(|i| zip.by_index(i).unwrap().name().to_string())
+            .collect()
+    }
+
+    /// The point of the whole format: a jar that came from somewhere is named,
+    /// not copied. Sending the bytes is what makes a shared pack an act of
+    /// redistribution rather than a description of one.
+    #[tokio::test]
+    async fn a_provider_backed_jar_is_referenced_instead_of_embedded() {
+        let (paths, mut inst) =
+            fixture("cf", &[("mods", "create.jar"), ("config", "create.toml")]).await;
+        inst.content = vec![record("curseforge", "create.jar", ContentKind::Mod)];
+
+        let manifest = manifest_for(&paths, &inst).await;
+        let note = manifest.note("mods/create.jar").expect("a note was written");
+        assert_eq!(
+            note.source,
+            Some(SourceRef {
+                provider: "curseforge".into(),
+                project_id: "proj-1".into(),
+                version_id: "ver-1".into(),
+            })
+        );
+
+        let dest = paths.root.join("out.geodepack");
+        export(&paths, &inst, dest.clone(), false, &Progress::silent("t")).await.unwrap();
+        let names = entries(&dest);
+
+        assert!(
+            !names.iter().any(|n| n.contains("create.jar")),
+            "the jar was embedded anyway: {names:?}"
+        );
+        // The config is the author's own work and has no link to give, so it
+        // still travels as bytes. That is what `overrides/` is for.
+        assert!(names.contains(&"overrides/config/create.toml".to_string()), "{names:?}");
+    }
+
+    /// The same jar, turned off.
+    ///
+    /// Records are keyed by the enabled name while disk carries `.disabled`, so
+    /// a naive path comparison misses every disabled file — and misses it in
+    /// the worst direction, writing the jar into `overrides/` while the
+    /// manifest says it was left out. Both halves wrong at once.
+    #[tokio::test]
+    async fn a_disabled_provider_backed_jar_is_not_embedded_either() {
+        let (paths, mut inst) = fixture("cfoff", &[("mods", "create.jar.disabled")]).await;
+        inst.content = vec![record("curseforge", "create.jar", ContentKind::Mod)];
+
+        let manifest = manifest_for(&paths, &inst).await;
+        assert!(
+            manifest.note("mods/create.jar").is_some_and(|n| n.source.is_some()),
+            "a disabled file still has a source: {:?}",
+            manifest.files
+        );
+
+        let dest = paths.root.join("off.geodepack");
+        export(&paths, &inst, dest.clone(), false, &Progress::silent("t")).await.unwrap();
+        let names = entries(&dest);
+        assert!(
+            !names.iter().any(|n| n.contains("create.jar")),
+            "the disabled jar was embedded: {names:?}"
+        );
+    }
+
+    /// A jar somebody dragged in has no link to give, so it is still carried.
+    ///
+    /// This is the case the format's own rule names, and the tempting mistake
+    /// is to drop it for symmetry — which would silently lose a mod the author
+    /// wrote themselves, with nothing anywhere saying where it went.
+    #[tokio::test]
+    async fn a_jar_with_no_provenance_is_still_embedded() {
+        let (paths, mut inst) = fixture(
+            "hand",
+            &[("mods", "homemade.jar"), ("mods", "no-record-at-all.jar")],
+        )
+        .await;
+        // Two ways a jar has no link to give: a record with nothing in it, and
+        // — the ordinary case — a file somebody dropped in, which Geode never
+        // writes a record for at all.
+        inst.content = vec![record("", "homemade.jar", ContentKind::Mod)];
+
+        let manifest = manifest_for(&paths, &inst).await;
+        for path in ["mods/homemade.jar", "mods/no-record-at-all.jar"] {
+            assert!(
+                manifest.note(path).is_none_or(|n| n.source.is_none()),
+                "{path} must not claim a source"
+            );
+        }
+
+        let dest = paths.root.join("hand.geodepack");
+        export(&paths, &inst, dest.clone(), false, &Progress::silent("t")).await.unwrap();
+        let names = entries(&dest);
+        for path in ["mods/homemade.jar", "mods/no-record-at-all.jar"] {
+            assert!(
+                names.contains(&format!("overrides/{path}")),
+                "{path} was dropped from the pack: {names:?}"
+            );
+        }
+    }
+
+    /// Disk is the source of truth; a record is only provenance. Deleting a
+    /// file outside the launcher leaves its record behind forever, and a
+    /// reference written from that record alone would promise the recipient a
+    /// mod the sharer does not have.
+    #[tokio::test]
+    async fn a_record_whose_file_is_gone_is_not_referenced() {
+        let (paths, mut inst) = fixture("stale", &[("mods", "present.jar")]).await;
+        inst.content = vec![
+            record("curseforge", "present.jar", ContentKind::Mod),
+            record("curseforge", "deleted-by-hand.jar", ContentKind::Mod),
+        ];
+
+        let manifest = manifest_for(&paths, &inst).await;
+        assert!(manifest.note("mods/present.jar").is_some());
+        assert!(
+            manifest.note("mods/deleted-by-hand.jar").is_none(),
+            "referenced a file that is not there: {:?}",
+            manifest.files
+        );
+    }
+
+    /// The index already says where a Modrinth file comes from. Saying it again
+    /// here is how the two halves come to disagree.
+    #[tokio::test]
+    async fn modrinth_content_is_never_given_a_source() {
+        let (paths, mut inst) = fixture("mr", &[("mods", "sodium.jar")]).await;
+        inst.content = vec![record("modrinth", "sodium.jar", ContentKind::Mod)];
+
+        let manifest = manifest_for(&paths, &inst).await;
+        assert!(manifest.files.iter().all(|n| n.source.is_none()), "{:?}", manifest.files);
+    }
+
+    /// The invariant that keeps a pack honest: a file is left out of
+    /// `overrides/` exactly when the manifest carries a reference for it. If
+    /// these two could drift, a pack would either redistribute a jar it claimed
+    /// not to, or omit one nothing tells the recipient how to get.
+    #[tokio::test]
+    async fn nothing_is_omitted_without_the_manifest_saying_where_to_get_it() {
+        let (paths, mut inst) = fixture(
+            "inv",
+            &[
+                ("mods", "from-cf.jar"),
+                ("mods", "from-mr.jar"),
+                ("mods", "homemade.jar"),
+                ("config", "settings.toml"),
+            ],
+        )
+        .await;
+        inst.content = vec![
+            record("curseforge", "from-cf.jar", ContentKind::Mod),
+            record("modrinth", "from-mr.jar", ContentKind::Mod),
+            record("", "homemade.jar", ContentKind::Mod),
+        ];
+
+        let manifest = manifest_for(&paths, &inst).await;
+        let dest = paths.root.join("inv.geodepack");
+        export(&paths, &inst, dest.clone(), false, &Progress::silent("t")).await.unwrap();
+        let names = entries(&dest);
+
+        for (dir, file) in [
+            ("mods", "from-cf.jar"),
+            ("mods", "from-mr.jar"),
+            ("mods", "homemade.jar"),
+            ("config", "settings.toml"),
+        ] {
+            let path = format!("{dir}/{file}");
+            let embedded = names.contains(&format!("overrides/{path}"));
+            let referenced = manifest.note(&path).is_some_and(|n| n.source.is_some());
+            // A Modrinth file is in neither: the index carries it. Everything
+            // else must be in exactly one of the two.
+            let indexed = path == "mods/from-mr.jar";
+            assert!(
+                embedded ^ referenced || indexed,
+                "{path}: embedded={embedded} referenced={referenced}"
+            );
+            assert!(!(embedded && referenced), "{path} is in the pack twice over");
+        }
+    }
+
+    /// A plain `.mrpack` has nowhere to record a reference, so it must keep
+    /// carrying the bytes — leaving a file out of one loses the mod with
+    /// nothing anywhere to say so.
+    #[tokio::test]
+    async fn a_plain_mrpack_still_embeds_what_it_cannot_reference() {
+        let (paths, mut inst) = fixture("plain", &[("mods", "create.jar")]).await;
+        inst.content = vec![record("curseforge", "create.jar", ContentKind::Mod)];
+
+        let dest = paths.root.join("plain.mrpack");
+        crate::instance::modpack::export_mrpack(
+            &paths,
+            &inst,
+            dest.clone(),
+            false,
+            Vec::new(),
+            &Default::default(),
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            entries(&dest).contains(&"overrides/mods/create.jar".to_string()),
+            "{:?}",
+            entries(&dest)
+        );
     }
 
     #[test]

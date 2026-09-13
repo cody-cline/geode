@@ -608,25 +608,25 @@ async fn record_mrpack_provenance(
 // Export
 // ---------------------------------------------------------------------------
 
-/// Write the instance out as a `.mrpack`.
+/// Whether the caller is carrying this file as a reference instead of bytes.
 ///
-/// Content installed from Modrinth becomes an index entry — a URL and a pair of
-/// hashes, not a copy — which is what keeps a pack small and keeps its mods
-/// current. Everything else goes into `overrides/` as bytes.
-///
-/// **That second half is a known problem, and it is why sharing a pack is not
-/// the same act as exporting one.** `overrides/` currently receives CurseForge
-/// jars, whose terms do not permit redistributing them, alongside configs the
-/// author wrote themselves. Handing somebody that file directly is one thing;
-/// uploading it to a URL anybody can fetch is another, and the second is what
-/// a share code would do.
-///
-/// The manifest in [`crate::share::manifest`] carries the fix: a `SourceRef`
-/// per file, so a recipient resolves a CurseForge mod through their own key
-/// rather than being sent the jar, and a `manual` flag for projects whose
-/// authors have turned third-party downloads off. Wiring the exporter to
-/// prefer a reference over a copy is the remaining work, and no upload path
-/// should exist until it is done.
+/// Matched on the enabled name, because that is how a content record is keyed:
+/// turning a mod off renames it to `foo.jar.disabled` on disk and leaves the
+/// record saying `foo.jar`. Comparing the two directly would miss every
+/// disabled file — and missing it here is the bad direction, since the file
+/// would be written into `overrides/` while the manifest claimed it had been
+/// left out, which is both halves wrong at once.
+fn carried_by_reference(referenced: &std::collections::HashSet<PathBuf>, rel: &Path) -> bool {
+    if referenced.is_empty() {
+        return false;
+    }
+    let Some(name) = rel.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let (base, _) = crate::instance::content::strip_disabled(name);
+    referenced.contains(&rel.with_file_name(base))
+}
+
 /// Extra entries to place in the zip beside the index.
 ///
 /// This is how a `.geodepack` is written: the same `.mrpack` exactly, plus a
@@ -635,12 +635,35 @@ async fn record_mrpack_provenance(
 /// Geode half can never drift from the half other launchers read.
 pub type Extras = Vec<(String, Vec<u8>)>;
 
+/// Write the instance out as a `.mrpack`.
+///
+/// Content installed from Modrinth becomes an index entry — a URL and a pair of
+/// hashes, not a copy — which is what keeps a pack small and keeps its mods
+/// current. Everything else goes into `overrides/` as bytes, except whatever
+/// the caller names in `referenced`.
+///
+/// `referenced` is how a `.geodepack` avoids shipping other people's jars: its
+/// `geode/manifest.json` records a `SourceRef` for each of those paths, so the
+/// recipient fetches them by id through their own credentials. Only a caller
+/// writing that manifest may pass anything here — a plain `.mrpack` has nowhere
+/// to record a reference, so leaving a file out of it would lose the mod with
+/// nothing anywhere to say so. The set is keyed the way the content records
+/// are, on the enabled file name, so a disabled file matches too.
+///
+/// It would be possible to put a CurseForge download URL straight into the
+/// index — the four-host allowlist in Modrinth's format is enforced by their
+/// *upload* validator, not by readers, and Prism imports any URL it is given.
+/// We do not, because a URL baked into a pack keeps working after an author
+/// turns third-party downloads off, while a reference resolved at import time
+/// sees that decision. The recipient's answer should be today's, not the one
+/// that was true when somebody else exported.
 pub async fn export_mrpack(
     paths: &Paths,
     instance: &Instance,
     dest: PathBuf,
     include_saves: bool,
     extras: Extras,
+    referenced: &std::collections::HashSet<PathBuf>,
     progress: &Progress,
 ) -> Result<()> {
     let game_dir = paths.game_dir(&instance.id);
@@ -675,8 +698,9 @@ pub async fn export_mrpack(
             .insert(key.into(), instance.loader_version.clone());
     }
 
-    // Only Modrinth files get indexed — CurseForge's terms do not permit
-    // redistributing their download URLs this way.
+    // Only Modrinth files get indexed. Anything else either travels as a
+    // reference in the Geode half, when the caller is writing one, or as bytes
+    // in `overrides/` — see this function's own notes for why not a URL.
     let mut indexed: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     for record in &instance.content {
         if record.provider != "modrinth" {
@@ -741,6 +765,7 @@ pub async fn export_mrpack(
     }
 
     let index_json = serde_json::to_vec_pretty(&index)?;
+    let referenced = referenced.clone();
     tokio::task::spawn_blocking(move || -> Result<()> {
         let file = std::fs::File::create(&dest)?;
         let mut zip = zip::ZipWriter::new(file);
@@ -773,7 +798,7 @@ pub async fn export_mrpack(
                     stack.push(path);
                     continue;
                 }
-                if indexed.contains(rel) {
+                if indexed.contains(rel) || carried_by_reference(&referenced, rel) {
                     continue;
                 }
                 let name = format!("overrides/{}", rel.to_string_lossy().replace('\\', "/"));
