@@ -11,12 +11,20 @@ reference — project, version, hashes — and fetched by the recipient through
 their own credentials. Files are embedded only when there is no link to give: a
 config the author wrote, or a jar with no provenance.
 
-This is not only a size optimisation, though a pack drops from hundreds of
-megabytes to single digits. It is what keeps the feature legal. Every file host
-worth using requires the uploader to warrant they have distribution rights, so
-a pack with somebody else's jar inside it puts *the user's* account in breach on
-top of the mod's licence. A share that says *"14 of 16 mods download
-automatically; 2 need fetching, here they are"* is the design working.
+This is not only a size optimisation, though it takes a pack from hundreds of
+megabytes to single digits. It is also what keeps the feature honest.
+
+Handing somebody a file directly is one thing. But a `.geodepack` posted in a
+Discord is distribution, and a server pushing its mod list to every player who
+joins is distribution that happens automatically, hundreds of times, without
+anyone thinking about it. A pack that carries references asks each recipient's
+Geode to fetch from the author's own source with the recipient's own
+credentials; a pack that carries jars is a copy of somebody's work, made by us,
+on their behalf, without asking.
+
+So an import that says *"14 of 16 mods download automatically; 2 need fetching,
+and here they are"* is not a shortfall. It is the design working, and the list
+is more actionable than a silently incomplete instance would be.
 
 ---
 
@@ -26,10 +34,10 @@ automatically; 2 need fetching, here they are"* is the design working.
 |---|---|---|
 | `.geodepack` format | `src-tauri/src/share/manifest.rs` | Done, tested |
 | Export/import of the Geode half | `src-tauri/src/share/pack.rs` | Done, tested |
-| Share codes | `src-tauri/src/share/code.rs` | Done, tested |
+| Share codes (server shares only) | `src-tauri/src/share/code.rs` | Done, tested |
 | Per-file sharing marks | `src-tauri/src/instance/content.rs` (`Sharing`) | Done, tested |
 | Sidedness from the jar | `src-tauri/src/instance/jar.rs` (`Side`) | Done, verified against real jars |
-| Rendezvous Worker | `rendezvous/worker.js` | Written, **not deployed** |
+| Rendezvous Worker (server shares only) | `rendezvous/worker.js` | Written, **not deployed** |
 | Container image | `container/` | Written, **not built** |
 | Event decoupling | `src-tauri/src/events.rs` | Done — the server half no longer needs a window |
 
@@ -56,7 +64,10 @@ Naming: `.geode` was taken by the Geometry Dash mod SDK, which is also a zip.
 
 ### 1. Teach the exporter to reference rather than copy
 
-**This is the blocker for any upload path, and should be done first.**
+**Still the first thing to do**, though for a different reason than before. It
+is no longer blocking an upload path, because there is no upload path — it
+matters because a server pushes its content to every player who joins, and
+because a `.geodepack` will end up posted publicly whatever it was meant for.
 
 `export_mrpack` currently writes CurseForge jars into `overrides/` as bytes —
 its own doc comment used to describe them as files "we may not redistribute",
@@ -75,85 +86,37 @@ The manifest already has the fields. What is missing is the exporter using them:
 Import then resolves references through the recipient's own CurseForge key and
 presents the manual list as something to act on.
 
-### 2. Where the bytes go
+### 2. Where the bytes go — settled by removing the question
 
-Research conclusion, and it is a firm one: **there is no free, anonymous,
-no-account host that handles this size and is clearly within its own terms.**
+**Personal packs are a file, and nothing more.** Export a `.geodepack`, hand it
+over however you already hand people files. Geode uploads nothing and hosts
+nothing. There is no share code for a personal pack and no upload backend to
+build.
 
-- `transfer.sh` — public instance refuses connections; maintainer says self-host
-- `0x0.st` — uploads disabled, "almost nothing but AI botnet spam", no ETA
-- `litterbox` — HTTP 500 across repeated attempts
-- `catbox` — 200 MB cap, and its terms bar "supply our Services to anyone else";
-  separately blocked for Comcast, Verizon, Spectrum and several countries
-- `tmpfiles.org` — the cleanest terms of any of them, and only **100 MiB**
-- Discord — 20 MiB, and credentials "may not be embedded in open source projects"
-- Modrinth — every share would sit in a human moderation queue; also an abuse
-  of a service whose rules require rights to distribute
+This was arrived at the hard way, and the findings are worth keeping so nobody
+re-opens it:
 
-So: **bring your own storage**, which matches how Geode already handles the
-CurseForge key.
+- **No free no-account host works.** Of eleven probed, five were already dead
+  (`transfer.sh`, `0x0.st`, `bashupload`, `oshi.at`, `litterbox`). Of the
+  survivors, `onlyfiles` and `tmpfiles` — the same operator — serve files only
+  through an HTML page whose real download link is regenerated per page view
+  and signed with a five-minute expiry, which is deliberate hotlink prevention;
+  `uguu` serves clean direct URLs but rejects archives outright (`.zip`,
+  `.jar`, `.geodepack` all return 415); `catbox` bans `.jar`, bars "supply our
+  Services to anyone else", and is DNS-blocked by Comcast, Spectrum, Rogers and
+  Verizon.
+- **No free tier is meaningfully bigger than 10 GB.** Storj's advertised 150 GB
+  is *"25GB free storage for 30 days"* then a $5/month minimum; Scaleway's
+  "75 GB" is free *egress*, with storage paid and the trial worth about 1 GB
+  for a month; Tebi no longer resolves. R2 and B2 both sit at 10 GB permanent.
+- **So any durable hosting means an account per sharer.** And asking somebody to
+  provision a bucket so Geode can hand them back a file they could have sent
+  themselves is a worse product than giving them the file.
 
-First, a reframing that decides the rest: once the exporter references instead
-of embedding, a typical pack is **single-digit megabytes**, not hundreds. It is
-a manifest of URLs plus the author's own configs. Most of the size problem that
-drove this search evaporates.
-
-**Two backends, in this order:**
-
-1. **S3 presigned URLs, against Cloudflare R2.** Decided. One implementation
-   also covers B2, Filebase, Wasabi and self-hosted MinIO, so this is a config
-   change later rather than a rewrite.
-
-   R2 wins on the only axis that matters here, which is egress rather than
-   storage — both give 10 GB free storage and a pack uses almost none of it.
-   Cloudflare: *"Egressing directly from R2 … does not incur data transfer
-   (egress) charges and is free"*, unconditionally, plus 10M Class B operations
-   a month. Backblaze gives *"free egress up to 3x their average monthly
-   storage"* — which, on a few megabytes stored, is a few megabytes of
-   downloads before it runs out.
-
-   Implementation notes that are easy to get wrong:
-   - Sign against `<ACCOUNT_ID>.r2.cloudflarestorage.com`. **Not `r2.dev`**,
-     which Cloudflare's own docs call *"rate-limited and should only be used
-     for development purposes"*.
-   - Presigned lifetime is 1 second to 7 days. That is the ceiling on a share;
-     longer means re-signing.
-   - Keep the bucket private. The presigned URL is the entire access mechanism.
-   - Cloudflare's terms bar signing up on behalf of third parties, which is why
-     this is the user's own bucket and Geode ships no credentials.
-
-2. **tmpfiles.org, as the no-setup path.** At single-digit megabytes its 100 MiB
-   cap stops mattering, and it is the one service whose terms actively invite
-   this: *"intended for legitimate sharing such as documents, backups, or
-   collaboration"*, with only *commercial* automation barred. No account at all.
-   Gate it on size and never make it a silent default.
-
-**GitHub Releases was considered and dropped.** It is genuinely sanctioned for
-large binaries and is the only non-Modrinth host Modrinth's own `.mrpack`
-validator whitelists — but a Release does not expire and the repo must be
-public, so it is a permanent world-readable artifact. That is a different
-feature from sending somebody a pack. Worth revisiting only if a "publish this
-pack permanently" feature is ever wanted.
-
-Suggested shape, matching the existing `providers::` dispatch-enum pattern
-rather than introducing a trait for two variants:
-
-```rust
-pub enum Destination {
-    /// Any S3-compatible endpoint the user owns. R2 is the documented one.
-    S3 { endpoint, region, bucket, access_key, secret_key },
-    /// No account, small packs only.
-    Tmpfiles,
-}
-
-pub struct Share {
-    pub url: String,
-    pub expires: Option<OffsetDateTime>,  // None where the host cannot expire
-    pub sha512: String,                   // verified before anything is opened
-}
-```
-
-Credentials belong in `Config` beside `curseforge_key`. Geode ships none.
+If this is ever revisited, the two paths that actually work are a user-supplied
+S3 bucket (R2: 10 GB, egress free, presigned URLs valid 1 second to 7 days,
+revocable by deleting the object) and peer-to-peer from the sharing machine.
+The second is what the server path already does.
 
 ### 3. Server-to-client sharing
 
@@ -212,10 +175,7 @@ Nothing below is required for anything already committed.
    Then put the URL in Geode's settings. Geode holds no Cloudflare credential —
    the Worker is write-once-read-many by anyone with a code, and stores no files.
 
-2. **Create the R2 bucket.** Decided. A Cloudflare account, one private bucket,
-   and an S3 API token with object read/write on it. Whether the free tier wants
-   a card on file is **unconfirmed** — it is widely reported and Cloudflare's own
-   pricing docs do not say either way, so expect to be asked.
+2. **Nothing.** Personal packs are files; there is no storage to provision.
 
 3. **Decide the NeoForge sidedness presentation.** NeoForge declares nothing —
    not on the mod, not on the file — so Geode reports "not declared" rather than

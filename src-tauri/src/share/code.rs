@@ -1,5 +1,9 @@
 //! Share codes: short enough to read aloud, useless to a guesser.
 //!
+//! Used for **server** shares. A personal pack is a file you hand over
+//! directly, so it needs no code; a server hands its setup to players who are
+//! not standing next to it, and they need something to type.
+//!
 //! A code is what somebody types or pastes into Geode to fetch a pack. It has
 //! to survive being read out over voice chat, retyped from a phone screen, and
 //! copied out of a Discord message that helpfully capitalised it — so the
