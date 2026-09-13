@@ -72,7 +72,7 @@ pub struct Instance {
 /// showing it. An instance built from a pack should look like that pack, not
 /// like a generic folder that once had files copied into it — so the artwork
 /// and blurb are stored rather than re-fetched, and survive being offline.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PackSource {
     pub name: String,

@@ -15,6 +15,7 @@ pub mod paths;
 pub mod plan;
 pub mod providers;
 pub mod server;
+pub mod share;
 pub mod state;
 
 use tauri::Manager;

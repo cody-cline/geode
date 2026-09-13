@@ -2726,7 +2726,7 @@ pub async fn export_modpack(
     let progress = Progress::new(app, format!("export:{id}"));
     let dest = PathBuf::from(dest);
 
-    instance::modpack::export_mrpack(&state.paths, &inst, dest.clone(), include_saves, &progress)
+    instance::modpack::export_mrpack(&state.paths, &inst, dest.clone(), include_saves, Vec::new(), &progress)
         .await?;
     Ok(dest.to_string_lossy().to_string())
 }

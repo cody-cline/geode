@@ -612,11 +612,20 @@ async fn record_mrpack_provenance(
 /// which is what keeps packs small and redistributable. Everything else —
 /// configs, hand-dropped jars, CurseForge files we may not redistribute — goes
 /// into `overrides/`.
+/// Extra entries to place in the zip beside the index.
+///
+/// This is how a `.geodepack` is written: the same `.mrpack` exactly, plus a
+/// `geode/` directory. Keeping it as an argument rather than a second writer
+/// means there is only one place that knows how to lay a pack out, and the
+/// Geode half can never drift from the half other launchers read.
+pub type Extras = Vec<(String, Vec<u8>)>;
+
 pub async fn export_mrpack(
     paths: &Paths,
     instance: &Instance,
     dest: PathBuf,
     include_saves: bool,
+    extras: Extras,
     progress: &Progress,
 ) -> Result<()> {
     let game_dir = paths.game_dir(&instance.id);
@@ -725,6 +734,11 @@ pub async fn export_mrpack(
 
         zip.start_file("modrinth.index.json", options)?;
         zip.write_all(&index_json)?;
+
+        for (name, bytes) in &extras {
+            zip.start_file(name.clone(), options)?;
+            zip.write_all(bytes)?;
+        }
 
         let mut stack = vec![game_dir.clone()];
         while let Some(dir) = stack.pop() {
