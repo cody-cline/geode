@@ -56,6 +56,14 @@ public final class Hook {
      */
     public static volatile Object forge;
 
+    /**
+     * A BungeeCord plugin manager, on a proxy that has no Brigadier at all.
+     *
+     * BungeeCord and its forks never build a command dispatcher — they keep
+     * their own registry, reachable by its own unobfuscated API.
+     */
+    public static volatile Object bungee;
+
     private Hook() {}
 
     /** Woven in at the top of {@code CommandDispatcher.register} and {@code getRoot}. */
@@ -81,6 +89,13 @@ public final class Hook {
     public static void seenForge(Object handler) {
         if (forge != handler) {
             forge = handler;
+        }
+    }
+
+    /** Woven in at the top of {@code PluginManager.registerCommand}. */
+    public static void seenBungee(Object manager) {
+        if (bungee != manager) {
+            bungee = manager;
         }
     }
 }

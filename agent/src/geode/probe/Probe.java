@@ -69,6 +69,12 @@ public final class Probe {
     private static final String FORGE_HANDLER = "net/minecraft/command/CommandHandler";
 
     /**
+     * BungeeCord, and so Waterfall, which is a proxy and has no Brigadier
+     * anywhere — it keeps its own registry behind its own unobfuscated API.
+     */
+    private static final String BUNGEE_MANAGER = "net/md_5/bungee/api/plugin/PluginManager";
+
+    /**
      * Forge renames members but not classes, so the pre-1.13 registration
      * method cannot be found by name — it is {@code func_71560_a} at runtime.
      * Its signature is unique on the class in every version from 1.7.10 to
@@ -184,6 +190,8 @@ public final class Probe {
                     target = "seenBukkit";
                 } else if (FORGE_HANDLER.equals(name)) {
                     target = "seenForge";
+                } else if (BUNGEE_MANAGER.equals(name)) {
+                    target = "seenBungee";
                 } else {
                     return null;
                 }
@@ -222,6 +230,8 @@ public final class Probe {
                 if ("seenForge".equals(target)) {
                     // By descriptor, because Forge renames the method itself.
                     interesting = FORGE_REGISTER.equals(descriptor);
+                } else if ("seenBungee".equals(target)) {
+                    interesting = "registerCommand".equals(name);
                 } else if ("seenBukkit".equals(target)) {
                     // Both overloads; the two-argument one delegates to the
                     // three-argument one, so catching either is enough and
@@ -477,6 +487,11 @@ public final class Probe {
         } catch (Throwable t) {
             moan("could not read the Forge command handler", t);
         }
+        try {
+            bungeeNames(names);
+        } catch (Throwable t) {
+            moan("could not read the BungeeCord plugin manager", t);
+        }
         if (names.isEmpty()) {
             return null;
         }
@@ -569,6 +584,32 @@ public final class Probe {
         for (Object key : new ArrayList<Object>(((Map<?, ?>) map).keySet())) {
             if (key != null) {
                 into.add(String.valueOf(key).toLowerCase());
+            }
+        }
+    }
+
+    /**
+     * Names from a BungeeCord or Waterfall proxy.
+     *
+     * `getCommands` hands back the registry's entries, and each entry's key is
+     * the name the proxy answers to — so the command objects never have to be
+     * inspected at all.
+     */
+    private static void bungeeNames(java.util.Set<String> into) {
+        Object manager = readHook("bungee");
+        if (manager == null) {
+            return;
+        }
+        Object entries = call(manager, "getCommands");
+        if (!(entries instanceof Collection)) {
+            return;
+        }
+        for (Object entry : new ArrayList<Object>((Collection<?>) entries)) {
+            if (entry instanceof Map.Entry) {
+                Object key = ((Map.Entry<?, ?>) entry).getKey();
+                if (key != null) {
+                    into.add(String.valueOf(key).toLowerCase());
+                }
             }
         }
     }

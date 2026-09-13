@@ -37,11 +37,18 @@ the plugins into that. So the first and the most recent are both kept and the
 reader takes whichever holds more, which also means a library keeping a small
 private dispatcher of its own can never win.
 
+Weaving `getRoot` as well turns out to matter in three separate ways, only the
+first of which it was added for: Velocity never calls `register`; Spigot
+re-attaches vanilla nodes to the second dispatcher with `getRoot().addChild()`,
+so on a plugin-free server `register` never fires on it; and Arclight subclasses
+`CommandDispatcher` and overrides `register` without calling `super`, so the
+woven body never runs there at all.
+
 ## Before Brigadier
 
-Brigadier arrived in Minecraft 1.13. Older servers have no dispatcher at all, so
-two more hooks cover them — consulted only when no dispatcher is found, so a
-modern server's behaviour is untouched:
+Brigadier arrived in Minecraft 1.13, and proxies in the BungeeCord line never
+adopted it at all. Three more hooks cover those — consulted only when no
+dispatcher is found, so a modern server's behaviour is untouched:
 
 - **Bukkit**, via `org.bukkit.command.SimpleCommandMap.register`. Bukkit API has
   never been obfuscated at any version. Note `getCommands()` lives on
@@ -52,6 +59,12 @@ modern server's behaviour is untouched:
   `func_71560_a` rather than `registerCommand` — it is matched by descriptor
   instead, `(Lnet/minecraft/command/ICommand;)Lnet/minecraft/command/ICommand;`,
   which is unique on that class from 1.7.10 through 1.12.2. No mapping table.
+
+- **BungeeCord**, and so Waterfall, via
+  `net.md_5.bungee.api.plugin.PluginManager.registerCommand`. A proxy of that
+  lineage builds no dispatcher — it keeps its own registry, and `getCommands()`
+  returns entries whose key is the command name, so the command objects never
+  have to be inspected.
 
 What comes back is a flat list of names: nothing older than 1.13 recorded any
 argument structure, so there is none to report. A pre-1.13 **vanilla** server
@@ -125,11 +138,12 @@ plugin that registers commands, and checked for a clean exit and no crash report
 | Arclight | 1.20.1 | 1553 | `/afk` |
 | Banner | 1.21.1 | 1563 | `/afk` |
 | Velocity | — | 9 | `/server`, `/glist` |
+| Waterfall | 1.21 | 14 | `/server`, `/alert`, `/find` |
 | Paper (legacy) | 1.8.8 | 617 | EssentialsX 2.0.1's `/afk` |
 | Forge (legacy) | 1.12.2 | 237 | WorldEdit's `/worldedit` |
 
-**Waterfall and BungeeCord are not supported**: they have their own command
-system and no Brigadier anywhere, so there is nothing to read.
+The only thing left unsupported is a pre-1.13 **vanilla** server — no Forge, no
+Bukkit, no proxy — whose classes are raw obfuscated names.
 
 Plus a fault matrix covering a missing hook jar, an unwritable output path, and
 missing, empty and junk arguments — every one of which leaves the server
