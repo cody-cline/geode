@@ -1,0 +1,59 @@
+# A Geode server host.
+#
+#   docker compose up -d
+#
+# Then, in Geode: Servers › Add a host, and give it this machine's address and
+# the token below. The container keeps running whether or not Geode is open.
+
+services:
+  geode-host:
+    build:
+      context: ..
+      dockerfile: container/Dockerfile
+    image: geode/host
+    restart: unless-stopped
+
+    environment:
+      # REQUIRED. Generate one and keep it secret — it is the only thing
+      # standing between the internet and your worlds:
+      #   openssl rand -hex 32
+      GEODE_TOKEN: "${GEODE_TOKEN:?set GEODE_TOKEN in a .env file next to this}"
+
+      # How much of the host a server may use. Left unset, a runaway modpack
+      # will take the machine down with it.
+      GEODE_MAX_HEAP_MB: "${GEODE_MAX_HEAP_MB:-8192}"
+
+    ports:
+      # The management API. Do NOT publish this to the internet without TLS in
+      # front of it — a reverse proxy, or a tunnel. On a home network, leave it
+      # bound to the LAN.
+      - "127.0.0.1:8765:8765"
+
+      # Minecraft itself. Add a line per server you actually want reachable;
+      # the container does not guess, because publishing a port is a decision
+      # about your network rather than about Geode.
+      - "25565:25565"
+
+    volumes:
+      # Worlds, backups, downloaded JDKs. Everything you would be upset to
+      # lose is in here, and nothing outside it matters.
+      - geode-data:/data
+
+    # A modded server will happily use everything it is given. These are the
+    # limits for the container as a whole, not per server.
+    deploy:
+      resources:
+        limits:
+          memory: 10G
+
+    healthcheck:
+      # The API answering is the only useful definition of healthy: a server
+      # can legitimately be stopped, so process count proves nothing.
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8765/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+volumes:
+  geode-data:
