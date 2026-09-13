@@ -82,12 +82,13 @@ pub fn tree_file(paths: &Paths, id: &str) -> PathBuf {
 pub async fn agent_arg(paths: &Paths, id: &str) -> Option<String> {
     let jar = ensure(paths).await?;
     let tree = tree_file(paths, id);
-    // The agent splits its argument on commas, so a path containing one would
-    // be read as two. Rather than invent an escape, decline — this only
-    // happens to a data directory somebody deliberately named with a comma.
+    // `-javaagent:<jar>=<args>` and the agent splits its own argument on
+    // commas, so a path containing either character would be read as something
+    // else entirely. Rather than invent an escape nobody would ever exercise,
+    // decline and start the server without a probe.
     let jar = jar.to_str()?;
     let tree = tree.to_str()?;
-    if jar.contains(',') || tree.contains(',') {
+    if [jar, tree].iter().any(|p| p.contains(',') || p.contains('=')) {
         return None;
     }
     Some(format!("-javaagent:{jar}={tree}"))
@@ -259,6 +260,37 @@ mod tests {
         assert_eq!(tokio::fs::read(&jar).await.unwrap(), AGENT);
 
         let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    /// A data directory whose name would corrupt the flag gets no probe rather
+    /// than a mangled one.
+    ///
+    /// `-javaagent:<jar>=<args>` is delimited by `=`, and the agent splits its
+    /// own argument on `,` — so either character in a path silently truncates
+    /// what the agent is told, and it would write its tree somewhere else or
+    /// nowhere.
+    #[tokio::test]
+    async fn a_path_that_would_break_the_flag_is_declined() {
+        for awkward in ["comma,dir", "equals=dir"] {
+            let paths = Paths {
+                root: std::env::temp_dir()
+                    .join(format!("geode-probe-{awkward}-{}", std::process::id())),
+            };
+            assert_eq!(
+                agent_arg(&paths, "server").await,
+                None,
+                "a path containing the delimiter should be refused: {awkward}"
+            );
+            let _ = tokio::fs::remove_dir_all(&paths.root).await;
+        }
+
+        // The ordinary case still works, so the check is not simply refusing
+        // everything.
+        let fine = Paths {
+            root: std::env::temp_dir().join(format!("geode-probe-plain-{}", std::process::id())),
+        };
+        assert!(agent_arg(&fine, "server").await.is_some());
+        let _ = tokio::fs::remove_dir_all(&fine.root).await;
     }
 
     fn parse(json: &str) -> Vec<CommandNode> {

@@ -97,8 +97,8 @@ so a data directory containing a comma is declined outright (`agent_arg` in
 - A username with a space — `C:\Users\Jane Doe\AppData\...`. Should be fine,
   since the flag is one argv entry and no shell is involved, but it has never
   been tried.
-- A path containing `=`, which would be read as the end of the agent argument.
-  Currently not checked for. Probably worth declining the same way a comma is.
+- A path containing `=` is declined for the same reason a comma is, since `=`
+  delimits the agent argument itself.
 - The 260-character path limit, if somebody's data directory is already deep.
 
 **The temp hook jar.** `hookOnBootstrap` extracts the hook to a temp file and
