@@ -7,9 +7,11 @@
  * share code, never sees a pack, and never stores a file. Bandwidth for the
  * actual bytes is between the two machines involved, not yours.
  *
- * What is stored per share is a few hundred bytes. On Cloudflare's free tier
- * the limits that matter are KV writes (1,000/day) and reads (100,000/day),
- * which is one write per share created and one read per person joining.
+ * What is stored per share is a few hundred bytes, against a 1 GB KV allowance
+ * — so storage is never what runs out. On Cloudflare's free tier the binding
+ * limit is KV writes at 1,000/day, which is 1,000 new shares; reads are
+ * 100,000/day, which is 100,000 people joining. If writes do run out, existing
+ * shares keep resolving, because reads have their own far larger budget.
  *
  * WHY IT NEVER SEES A CODE
  * Geode derives `key = base32(SHA-256("geode-share-v1" || code))[0..16]` on the
@@ -36,7 +38,11 @@ const KEY = /^[0-9ABCDEFGHJKMNPQRSTVWXYZ]{16}$/;
 /** Refuse anything larger outright: this is a pointer store, not a file host. */
 const MAX_BODY = 4096;
 
-/** Clamp the lifetime. Cloudflare's own floor for an expiring key is 60s. */
+/**
+ * Clamp the lifetime. Cloudflare's own floor for an expiring key is 30s; this
+ * sits above it because a share that dies in half a minute is of no use to
+ * anybody, not because the platform demands it.
+ */
 const MIN_TTL = 60;
 const MAX_TTL = 60 * 60 * 24 * 30;
 const DEFAULT_TTL = 60 * 60 * 24;
