@@ -11,5 +11,6 @@
 //! redistributing other people's work. Files are only embedded when there is no
 //! link to give: a hand-dropped jar, or a config the author wrote themselves.
 
+pub mod code;
 pub mod manifest;
 pub mod pack;

@@ -444,6 +444,7 @@ pub async fn import_into(
                     slug: None,
                     icon_url: None,
                     dependency: !entry.required,
+                    sharing: Default::default(),
                     // Pack manifests carry no dependency graph; the jars do.
                     requires: None,
                 });
@@ -597,6 +598,7 @@ async fn record_mrpack_provenance(
             slug: project.map(|p| p.slug.clone()),
             icon_url: project.and_then(|p| p.icon_url.clone()),
             dependency: false,
+            sharing: Default::default(),
             requires: None,
         });
     }

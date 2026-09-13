@@ -49,6 +49,34 @@ impl ContentKind {
     }
 }
 
+/// What a server does with one installed file when it shares its setup.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Sharing {
+    /// The server needs it; a player does not.
+    ///
+    /// Still shared, because a client that wants to match the server exactly
+    /// should be able to — but offered as something to drop on import. A
+    /// performance mod or an anti-cheat is the usual case.
+    pub server_only: bool,
+    /// Never leaves this machine, whatever anybody asks.
+    ///
+    /// For the admin's own tooling, anything with a licence that forbids
+    /// passing it on, and anything with a secret in its config.
+    pub excluded: bool,
+}
+
+impl Sharing {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Whether this file goes to a client at all.
+    pub fn shareable(&self) -> bool {
+        !self.excluded
+    }
+}
+
 /// Provenance for one installed file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -69,6 +97,13 @@ pub struct ContentRecord {
     /// offered for cleanup when the parent goes away.
     #[serde(default)]
     pub dependency: bool,
+    /// How this file is treated when a server shares its setup with players.
+    ///
+    /// A server keeps one list, not two — a mod is installed or it is not —
+    /// and these say what happens to each entry on the way out. Defaults mean
+    /// "share it, and a player needs it", which is true of most things.
+    #[serde(default, skip_serializing_if = "Sharing::is_default")]
+    pub sharing: Sharing,
     /// Project ids this version requires, from the same provider.
     ///
     /// `None` means nobody has looked yet — records written before this was
@@ -439,6 +474,46 @@ pub async fn remove(
 
 #[cfg(test)]
 mod tests {
+
+    /// A record written before sharing existed must read back as "share it,
+    /// and a player needs it" — the safe default — rather than as excluded.
+    #[test]
+    fn an_older_record_defaults_to_being_shareable() {
+        let json = r#"{"fileName":"jei.jar","kind":"mod","provider":"modrinth",
+            "projectId":"p","versionId":"v","name":"JEI","versionNumber":"1.0"}"#;
+        let record: ContentRecord = serde_json::from_str(json).unwrap();
+        assert!(record.sharing.shareable());
+        assert!(!record.sharing.server_only);
+    }
+
+    /// The default is not written out, so adding this field does not rewrite
+    /// every existing server.json with noise.
+    #[test]
+    fn the_default_is_not_written_to_disk() {
+        let record = ContentRecord {
+            file_name: "jei.jar".into(),
+            kind: ContentKind::Mod,
+            provider: "modrinth".into(),
+            project_id: "p".into(),
+            version_id: "v".into(),
+            name: "JEI".into(),
+            version_number: "1.0".into(),
+            slug: None,
+            icon_url: None,
+            dependency: false,
+            sharing: Sharing::default(),
+            requires: None,
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(!json.contains("sharing"), "{json}");
+
+        let excluded = ContentRecord {
+            sharing: Sharing { server_only: false, excluded: true },
+            ..record
+        };
+        let json = serde_json::to_string(&excluded).unwrap();
+        assert!(json.contains("excluded"), "an actual choice is written: {json}");
+    }
     use super::*;
     use crate::instance::jar::JarMeta;
 
@@ -474,6 +549,7 @@ mod tests {
             slug: None,
             icon_url: None,
             dependency: false,
+            sharing: Default::default(),
             requires: Some(requires.iter().map(|s| s.to_string()).collect()),
         }
     }
@@ -625,6 +701,7 @@ mod tests {
             slug: None,
             icon_url: None,
             dependency: false,
+            sharing: Default::default(),
             requires: Some(vec!["BBB".into()]),
         }];
         link(&mut items, &[None, None], &records);
@@ -747,6 +824,7 @@ mod tests {
             slug: None,
             icon_url: None,
             dependency: false,
+            sharing: Default::default(),
             requires: Some(vec!["BBB".into()]),
         }];
         link(&mut items, &[None, None], &records);

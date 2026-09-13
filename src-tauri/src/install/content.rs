@@ -112,6 +112,7 @@ pub async fn install_into(
         slug,
         icon_url,
         dependency: as_dependency,
+        sharing: Default::default(),
         requires: Some(required_ids(version)),
     });
 
@@ -656,6 +657,7 @@ pub async fn link_untracked_in(
             slug: project.map(|p| p.slug.clone()),
             icon_url: project.and_then(|p| p.icon_url.clone()),
             dependency: false,
+            sharing: Default::default(),
             // A hash lookup gives provenance, not a dependency list.
             requires: None,
         });

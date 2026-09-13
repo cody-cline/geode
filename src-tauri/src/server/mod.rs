@@ -634,6 +634,7 @@ mod tests {
             slug: Some(slug.into()),
             icon_url: None,
             dependency: false,
+            sharing: Default::default(),
             requires: None,
         }
     }
