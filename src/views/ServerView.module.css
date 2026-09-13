@@ -715,3 +715,11 @@
   flex-shrink: 0;
   margin-left: 8px;
 }
+
+/* The argument a command wants next. Named, not offered — dimmer than the
+   word it follows, because it is a description rather than a choice. */
+.suggestArgs {
+  margin-left: 6px;
+  color: var(--text-faint);
+  font-size: 11px;
+}

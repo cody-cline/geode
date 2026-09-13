@@ -20,7 +20,6 @@ import {
   Package,
   Play,
   Plus,
-  Sparkles,
   Square,
   Trash2,
 } from "lucide-react";
@@ -35,16 +34,16 @@ import type { ServerFolder } from "./server/ContentTab";
 import Properties from "./server/Properties";
 import { api } from "../lib/api";
 import {
-  harvest,
   parseLine,
   pieces,
   suggest,
-  VANILLA_COMMANDS,
+  complete as completeWith,
 } from "../lib/serverConsole";
 import { fileSize, hashHue, relativeTime } from "../lib/format";
 import { useStore } from "../lib/store";
 import type {
   BackupInfo,
+  CommandNode,
   ContentKind,
   LogFile,
   Schedule,
@@ -126,13 +125,11 @@ export default function ServerView({ id }: { id: string }) {
   const [history, setHistory] = useState<string[]>([]);
   const [historyAt, setHistoryAt] = useState<number | null>(null);
   /**
-   * Commands the server has mentioned, on top of the vanilla set. Mods and
-   * plugins register into the same dispatcher and look exactly like built-in
-   * commands, so the only way to know about them is to notice the server
-   * naming them — which it does when you run `help`.
+   * The server's own command tree, written by the probe that rides along on its
+   * JVM. Vanilla, mods and plugins alike, with their subcommands — there is no
+   * guessing left to do, so there is no guessing here.
    */
-  const [learned, setLearned] = useState<string[]>([]);
-  const harvested = useRef(0);
+  const [commands, setCommands] = useState<CommandNode[]>([]);
 
   // Which folder is being added to, and what is already in it — so browsing
   // can mark the rows that are.
@@ -209,40 +206,25 @@ export default function ServerView({ id }: { id: string }) {
 
   const shown = useMemo(() => lines ?? [], [lines]);
 
-  // Only the lines that have arrived since last time. Re-reading the whole
-  // buffer on every line would mean thousands of matches per line of output.
+  // Re-read when the server starts, because the probe writes the tree during
+  // startup: a mod added since last time appears without anyone asking.
   useEffect(() => {
-    if (shown.length < harvested.current) harvested.current = 0;
-    if (shown.length === harvested.current) return;
-    const fresh = harvest(shown.slice(harvested.current));
-    harvested.current = shown.length;
-    if (fresh.length > 0) {
-      setLearned((was) => [...new Set([...was, ...fresh])]);
-    }
-  }, [shown]);
-
-  // Plugins declare their commands in plugin.yml, so those are known from the
-  // jars without the server ever running. Mods register theirs in code, which
-  // is why `help` is still offered below.
-  useEffect(() => {
-    if (!server?.takesPlugins) return;
     let cancelled = false;
-    api
-      .serverPluginCommands(id)
-      .then((found) => {
-        if (cancelled || found.length === 0) return;
-        setLearned((was) => [...new Set([...was, ...found])]);
-      })
-      .catch(() => {});
+    const load = () =>
+      api
+        .serverCommands(id)
+        .then((tree) => !cancelled && tree.length > 0 && setCommands(tree))
+        .catch(() => {});
+    void load();
+    // Once more shortly after starting, for the gap between the console
+    // accepting input and the probe having finished its first pass.
+    const again = server?.running ? setTimeout(load, 4000) : undefined;
     return () => {
       cancelled = true;
+      if (again) clearTimeout(again);
     };
-  }, [id, server?.takesPlugins]);
+  }, [id, server?.running]);
 
-  const commands = useMemo(
-    () => [...new Set([...VANILLA_COMMANDS, ...learned])].sort(),
-    [learned],
-  );
   const matches = useMemo(() => suggest(command, commands), [command, commands]);
 
   if (!server) {
@@ -349,10 +331,12 @@ export default function ServerView({ id }: { id: string }) {
   /** Complete to as much as every candidate agrees on, the way a shell does. */
   function complete() {
     if (matches.length === 0) return;
-    const slash = command.startsWith("/") ? "/" : "";
-    const shared = commonPrefix(matches);
-    const typed = command.replace(/^\//, "");
-    setCommand(slash + (shared.length > typed.length ? shared : matches[0]));
+    const names = matches.map((m) => m.name);
+    const shared = commonPrefix(names);
+    const last = command.split(/\s+/).pop() ?? "";
+    // A shell completes as far as every candidate agrees and then stops; only
+    // when that adds nothing does it commit to the first.
+    setCommand(completeWith(command, shared.length > last.length ? shared : names[0]));
   }
 
   /** Up and down walk previous commands, as a terminal does. */
@@ -598,15 +582,20 @@ export default function ServerView({ id }: { id: string }) {
               covers the thing you are reading while you type. */}
           {matches.length > 0 && !viewing && server.running && (
             <div className={styles.suggestions}>
-              {matches.map((name) => (
+              {matches.map((match) => (
                 <button
-                  key={name}
+                  key={match.name}
                   className={styles.suggestion}
-                  onClick={() =>
-                    setCommand((command.startsWith("/") ? "/" : "") + name + " ")
-                  }
+                  onClick={() => setCommand(completeWith(command, match.name))}
                 >
-                  {name}
+                  {match.name}
+                  {/* What the server wants next, named but not offered — an
+                      argument is a description, not a word to pick. */}
+                  {match.args.length > 0 && (
+                    <span className={styles.suggestArgs}>
+                      {match.args.map((a) => `<${a}>`).join(" ")}
+                    </span>
+                  )}
                 </button>
               ))}
               <span className={styles.suggestHint}>Tab to complete</span>
@@ -630,20 +619,6 @@ export default function ServerView({ id }: { id: string }) {
               onKeyDown={onKey}
               spellCheck={false}
             />
-            {/* A mod's commands exist only in its code, so the only way to
-                learn them is to ask the server. That prints its whole command
-                list into the console, which is worth doing on purpose and not
-                worth doing behind the user's back. */}
-            {server.running && !viewing && (
-              <button
-                className={clsx("btn", "btn-sm", styles.learn)}
-                onClick={() => void api.sendServerCommand(id, "help")}
-                title="Runs `help`, and reads the commands out of its reply — including any a mod or plugin added"
-              >
-                <Sparkles size={13} />
-                Learn commands
-              </button>
-            )}
           </div>
         </div>
       ) : active === "content" ? (

@@ -113,7 +113,7 @@ async fn a_modern_forge_server_launches_from_an_argument_file() {
 
     // The command line built from it has to name that file, or the server is
     // launched with nothing to load.
-    let args = run::build_args(&server);
+    let args = run::build_args(&server, None);
     assert!(
         args.iter().any(|a| a == &format!("@{file}")),
         "the launch arguments never reference the argument file: {args:?}"

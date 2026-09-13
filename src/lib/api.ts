@@ -31,6 +31,7 @@ import type {
   Schedule,
   Server,
   ServerBuildReport,
+  CommandNode,
   GitStatus,
   ServerKindInfo,
   ServerProperty,
@@ -269,13 +270,12 @@ export const api = {
   // Servers
   serverKinds: () => invoke<ServerKindInfo[]>("server_kinds"),
   /**
-   * Commands the server's installed plugins declare, read from their jars.
+   * Every command this server has, as the server itself reported them.
    *
-   * Plugins only: a mod's commands live in its code, and the console asks a
-   * running server for those instead.
+   * Covers vanilla, mods and plugins alike. Empty until the server has run
+   * once, since nothing outside a running server knows a mod's commands.
    */
-  serverPluginCommands: (id: string) =>
-    invoke<string[]>("server_plugin_commands", { id }),
+  serverCommands: (id: string) => invoke<CommandNode[]>("server_commands", { id }),
   /** Whether compiling Spigot is possible here, and what would make it so. */
   gitStatus: () => invoke<GitStatus>("git_status"),
   /** Only ever after the user has read `plan` and said yes. */

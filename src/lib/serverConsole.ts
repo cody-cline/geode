@@ -1,4 +1,4 @@
-import type { ServerLine } from "./types";
+import type { CommandNode, ServerLine } from "./types";
 
 /**
  * Reading a server's console output.
@@ -103,62 +103,56 @@ export function pieces(message: string): Piece[] {
   return out;
 }
 
-/**
- * Commands a vanilla dedicated server accepts, as a starting point.
- *
- * Not the whole truth and not meant to be: mods and plugins register into the
- * same dispatcher and are indistinguishable from these, so anything the server
- * itself reports is folded in on top by `harvest`. The leading slash is
- * optional at a server console, so these are stored without one.
- */
-export const VANILLA_COMMANDS = [
-  "advancement", "attribute", "ban", "ban-ip", "banlist", "bossbar", "clear",
-  "clone", "damage", "data", "datapack", "debug", "defaultgamemode", "deop",
-  "difficulty", "effect", "enchant", "execute", "experience", "fill",
-  "fillbiome", "forceload", "function", "gamemode", "gamerule", "give", "help",
-  "item", "jfr", "kick", "kill", "list", "locate", "loot", "me", "msg", "op",
-  "pardon", "pardon-ip", "particle", "perf", "place", "playsound", "random",
-  "recipe", "reload", "return", "ride", "rotate", "save-all", "save-off",
-  "save-on", "say", "schedule", "scoreboard", "seed", "setblock", "setidletimeout",
-  "setworldspawn", "spawnpoint", "spectate", "spreadplayers", "stop",
-  "stopsound", "summon", "tag", "team", "teammsg", "teleport", "tell",
-  "tellraw", "tick", "time", "title", "tp", "transfer", "trigger", "version",
-  "waypoint", "weather", "whitelist", "worldborder", "xp",
-];
-
-/**
- * Commands the server itself has mentioned.
- *
- * Two shapes, because the two families answer `help` completely differently.
- * Vanilla — and so Forge, NeoForge and Fabric, which all keep vanilla's help —
- * prints one usage line per command: `/give <targets> <item>`. Paper and Spigot
- * replace it with Bukkit's index: `/give: Gives an item to a player`.
- *
- * This is how a *mod's* commands become known, since a mod registers them in
- * code and nothing in its jar says so. A plugin is the easier case and does not
- * depend on this: Bukkit makes it declare its commands in `plugin.yml`, which
- * Geode reads off the jar with the server stopped.
- *
- * Nothing is ever sent to get this. Running `help` dumps ninety-odd lines into
- * the console the user is reading, so it happens when they ask for it — by
- * running it themselves, or with the console's own button.
- */
-export function harvest(lines: ServerLine[]): string[] {
-  const found = new Set<string>();
-  for (const entry of lines) {
-    const { message } = parseLine(entry);
-    const match = /^\/([a-z0-9_-]+)(?::| |$)/i.exec(message.trim());
-    if (match) found.add(match[1].toLowerCase());
-  }
-  return [...found];
+/** One completion offered for the word being typed. */
+export interface Suggestion {
+  name: string;
+  /** Argument names that follow it, shown as a hint rather than completed. */
+  args: string[];
 }
 
-/** Commands matching what has been typed so far, best first. */
-export function suggest(input: string, known: string[]): string[] {
-  const typed = input.replace(/^\//, "").toLowerCase();
-  // Only the first word is a command; after a space the argument is theirs.
-  if (!typed || typed.includes(" ")) return [];
-  const starts = known.filter((c) => c.startsWith(typed) && c !== typed);
-  const contains = known.filter((c) => !c.startsWith(typed) && c.includes(typed));
-  return [...starts.sort(), ...contains.sort()].slice(0, 8);
+/** Split console input into whole words plus the word still being typed. */
+function tokenise(input: string): { done: string[]; partial: string } {
+  const text = input.replace(/^\//, "");
+  const parts = text.split(/\s+/);
+  // A trailing space means the last word is finished and the next one is open.
+  const partial = /\s$/.test(text) ? "" : (parts.pop() ?? "");
+  return { done: parts.filter((p) => p.length > 0), partial };
+}
+
+/**
+ * What could come next, given what has been typed.
+ *
+ * The tree is the server's own, so this completes a mod's subcommands exactly
+ * as it completes vanilla's — and stops at arguments, because `<player>`
+ * describes what to type rather than being something to type. Those are
+ * returned alongside as a hint.
+ */
+export function suggest(input: string, tree: CommandNode[]): Suggestion[] {
+  const { done, partial } = tokenise(input);
+
+  let level = tree;
+  for (const word of done) {
+    const node = level.find((n) => n.name === word);
+    // An unknown word means we are past anything the tree can speak to —
+    // inside an argument, most likely.
+    if (!node) return [];
+    level = node.children;
+  }
+
+  const typed = partial.toLowerCase();
+  const starts = level.filter((n) => n.name.toLowerCase().startsWith(typed) && n.name !== partial);
+  const contains = level.filter(
+    (n) => !n.name.toLowerCase().startsWith(typed) && n.name.toLowerCase().includes(typed),
+  );
+  const by = (a: CommandNode, b: CommandNode) => a.name.localeCompare(b.name);
+  return [...starts.sort(by), ...contains.sort(by)]
+    .slice(0, 8)
+    .map((n) => ({ name: n.name, args: n.args }));
+}
+
+/** Replace the word being typed with `name`, leaving the rest alone. */
+export function complete(input: string, name: string): string {
+  const slash = input.startsWith("/") ? "/" : "";
+  const { done } = tokenise(input);
+  return slash + [...done, name].join(" ") + " ";
 }

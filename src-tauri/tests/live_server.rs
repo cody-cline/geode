@@ -395,3 +395,132 @@ async fn the_portable_git_geode_would_fetch_contains_what_buildtools_needs() {
 
     let _ = tokio::fs::remove_dir_all(&paths.root).await;
 }
+
+/// The probe, against a real server, end to end.
+///
+/// This is the regression guard for the whole feature. It downloads Mojang's
+/// current server, starts it under the agent Geode ships, and checks three
+/// things that matter separately: that the server is entirely unbothered, that
+/// a tree was written, and that the tree is the real one rather than something
+/// shaped like it.
+///
+/// The agent was developed against four server kinds — vanilla, Fabric,
+/// NeoForge and Paper, the last two carrying a mod and a plugin that register
+/// commands — but only vanilla can be fetched and run from a single test
+/// without an installer step, so vanilla is what is guarded here.
+#[tokio::test]
+#[ignore = "hits the network, downloads ~60 MB and runs a server"]
+async fn the_probe_reads_a_real_servers_commands_without_disturbing_it() {
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt;
+
+    let client = net::client();
+    let paths = geode_lib::paths::Paths {
+        root: std::env::temp_dir().join(format!("geode-probe-live-{}", std::process::id())),
+    };
+    let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    paths.ensure_all().await.expect("scratch dirs");
+
+    let versions = meta::versions(&client, ServerKind::Vanilla)
+        .await
+        .expect("versions");
+    let source = meta::resolve(&client, ServerKind::Vanilla, &versions[0])
+        .await
+        .expect("resolve");
+    let jar_meta = jar_of(&source);
+
+    let run = paths.server_run("probe-live");
+    tokio::fs::create_dir_all(&run).await.expect("run dir");
+    let jar = run.join(&jar_meta.file_name);
+    geode_lib::net::fetch_one(
+        &client,
+        &geode_lib::net::Download::new(jar_meta.url.clone(), jar.clone()),
+    )
+    .await
+    .expect("download the server");
+
+    // A flat world on a free port, so this is quick and cannot collide with
+    // anything the developer happens to be running.
+    tokio::fs::write(run.join("eula.txt"), "eula=true\n")
+        .await
+        .expect("eula");
+    tokio::fs::write(
+        run.join("server.properties"),
+        "server-port=25666\nserver-ip=127.0.0.1\nonline-mode=false\n\
+         level-type=minecraft\\:flat\nview-distance=4\nsimulation-distance=4\n",
+    )
+    .await
+    .expect("properties");
+
+    let agent = geode_lib::server::probe::agent_arg(&paths, "probe-live")
+        .await
+        .expect("the shipped agent should be usable");
+
+    let mut child = tokio::process::Command::new("java")
+        .arg("-Xmx1G")
+        .arg(&agent)
+        .arg("-jar")
+        .arg(&jar_meta.file_name)
+        .arg("nogui")
+        .current_dir(&run)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start the server");
+
+    // Long enough to boot a flat world and for the probe's first pass.
+    tokio::time::sleep(std::time::Duration::from_secs(25)).await;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(b"stop\n").await;
+    }
+    let finished = tokio::time::timeout(
+        std::time::Duration::from_secs(90),
+        child.wait_with_output(),
+    )
+    .await
+    .expect("the server should stop on its own")
+    .expect("wait");
+
+    let log = String::from_utf8_lossy(&finished.stdout);
+    assert!(
+        finished.status.success(),
+        "the probe must not cost the server its exit status: {}\n{}",
+        finished.status,
+        log.lines().rev().take(15).collect::<Vec<_>>().join("\n")
+    );
+    assert!(
+        log.contains("Done ("),
+        "the server should have finished starting"
+    );
+    assert!(
+        !run.join("crash-reports").is_dir(),
+        "the server crashed with the probe attached"
+    );
+
+    let tree = geode_lib::server::probe::read(&paths, "probe-live").await;
+    assert!(
+        tree.len() > 50,
+        "a vanilla server has ninety-odd commands, not {}",
+        tree.len()
+    );
+    // Not merely a list of names: the shape is what makes this better than
+    // scraping `help`.
+    let gamemode = tree
+        .iter()
+        .find(|c| c.name == "gamemode")
+        .expect("every server has /gamemode");
+    assert_eq!(
+        gamemode.args,
+        vec!["gamemode"],
+        "the argument the command takes should be named"
+    );
+    let execute = tree.iter().find(|c| c.name == "execute").expect("/execute");
+    assert!(
+        execute.children.iter().any(|c| c.name == "as"),
+        "subcommands should come through: /execute as ..."
+    );
+    println!("{} commands read from a live vanilla server", tree.len());
+
+    let _ = tokio::fs::remove_dir_all(&paths.root).await;
+}

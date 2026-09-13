@@ -160,7 +160,7 @@ impl ServerRegistry {
 ///
 /// Split out so it can be tested without starting a JVM, which is the only
 /// part of this file a unit test can reach.
-pub fn build_args(server: &Server) -> Vec<String> {
+pub fn build_args(server: &Server, agent: Option<&str>) -> Vec<String> {
     let mut args = Vec::new();
     let memory = server.settings.memory_mb.max(512);
     args.push(format!("-Xmx{memory}M"));
@@ -173,6 +173,14 @@ pub fn build_args(server: &Server) -> Vec<String> {
                 .filter(|s| !s.is_empty())
                 .map(str::to_string),
         );
+    }
+
+    // Before the launch kind, and that is not cosmetic: an argument file names
+    // the main class, so the JVM stops reading its own options there. A
+    // `-javaagent:` after `@argfile` is handed to the game as a program
+    // argument, which it rejects, and the server does not start.
+    if let Some(agent) = agent {
+        args.push(agent.to_string());
     }
 
     match &server.launch {
@@ -231,8 +239,12 @@ pub async fn start(
         )));
     }
 
+    // Best effort by design: `None` starts the server exactly as it would have
+    // started before this existed.
+    let agent = super::probe::agent_arg(paths, &server.id).await;
+
     let mut child = tokio::process::Command::new(&java)
-        .args(build_args(server))
+        .args(build_args(server, agent.as_deref()))
         .current_dir(&run)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -350,7 +362,7 @@ mod tests {
 
     #[test]
     fn a_normal_server_is_launched_without_its_gui() {
-        let args = build_args(&server(ServerKind::Paper));
+        let args = build_args(&server(ServerKind::Paper), None);
         // The tail is the whole point: `-jar <jar> nogui`, in that order.
         assert_eq!(args[args.len() - 3], "-jar");
         assert_eq!(args[args.len() - 2], "server.jar");
@@ -360,7 +372,7 @@ mod tests {
     #[test]
     fn a_proxy_has_no_gui_to_suppress() {
         // Velocity rejects the argument rather than ignoring it.
-        let args = build_args(&server(ServerKind::Velocity));
+        let args = build_args(&server(ServerKind::Velocity), None);
         assert!(!args.contains(&"nogui".to_string()));
         assert_eq!(args.last().unwrap(), "server.jar");
     }
@@ -369,7 +381,7 @@ mod tests {
     fn memory_becomes_both_bounds() {
         let mut s = server(ServerKind::Paper);
         s.settings.memory_mb = 8192;
-        let args = build_args(&s);
+        let args = build_args(&s, None);
         assert!(args.contains(&"-Xmx8192M".to_string()));
         assert!(args.contains(&"-Xms4096M".to_string()));
     }
@@ -378,7 +390,7 @@ mod tests {
     fn a_tiny_heap_is_raised_to_something_that_starts() {
         let mut s = server(ServerKind::Paper);
         s.settings.memory_mb = 64;
-        let args = build_args(&s);
+        let args = build_args(&s, None);
         assert!(args.contains(&"-Xmx512M".to_string()));
         assert!(args.contains(&"-Xms512M".to_string()));
     }
@@ -387,7 +399,7 @@ mod tests {
     fn extra_java_args_land_before_the_jar() {
         let mut s = server(ServerKind::Paper);
         s.settings.java_args = Some("-XX:+UseG1GC -Dfoo=bar".into());
-        let args = build_args(&s);
+        let args = build_args(&s, None);
         let jar_at = args.iter().position(|a| a == "-jar").unwrap();
         let flag_at = args.iter().position(|a| a == "-XX:+UseG1GC").unwrap();
         assert!(flag_at < jar_at);

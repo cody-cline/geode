@@ -256,6 +256,20 @@ export interface GitStatus {
   manual: string;
 }
 
+/**
+ * One command a server has, and what may follow it.
+ *
+ * Read from the server itself rather than guessed at, so a mod's commands and
+ * their subcommands appear exactly as vanilla's do.
+ */
+export interface CommandNode {
+  name: string;
+  /** Fixed words that may come next. */
+  children: CommandNode[];
+  /** Argument names that may come next — shown, never completed. */
+  args: string[];
+}
+
 /** One choice in the "what kind of server" picker. */
 export interface ServerKindInfo {
   id: string;
