@@ -53,6 +53,30 @@ public final class Probe {
 
     private static final String DISPATCHER = "com/mojang/brigadier/CommandDispatcher";
 
+    /**
+     * Where commands live on a server too old for Brigadier, which arrived in
+     * Minecraft 1.13.
+     *
+     * Both are reachable by name for the same reason Brigadier is: Bukkit's
+     * command map is Bukkit API and was never obfuscated, and Forge
+     * deobfuscates Minecraft's class names at runtime, so a Forge server's
+     * command handler answers to its real name even on 1.7.10. A pre-1.13
+     * *vanilla* server has neither and would need a per-version obfuscation
+     * table, which is exactly the sort of thing this design exists to avoid —
+     * so it is left unsupported rather than guessed at.
+     */
+    private static final String BUKKIT_MAP = "org/bukkit/command/SimpleCommandMap";
+    private static final String FORGE_HANDLER = "net/minecraft/command/CommandHandler";
+
+    /**
+     * Forge renames members but not classes, so the pre-1.13 registration
+     * method cannot be found by name — it is {@code func_71560_a} at runtime.
+     * Its signature is unique on the class in every version from 1.7.10 to
+     * 1.12.2, so the descriptor identifies it with no mapping table at all.
+     */
+    private static final String FORGE_REGISTER =
+            "(Lnet/minecraft/command/ICommand;)Lnet/minecraft/command/ICommand;";
+
     /** Deep enough for any real command; shallow enough to never blow the stack. */
     private static final int MAX_DEPTH = 64;
     /** A stop on pathological trees. EssentialsX plus vanilla is a few thousand. */
@@ -150,10 +174,20 @@ public final class Probe {
         public byte[] transform(ClassLoader loader, String name, Class<?> beingRedefined,
                                 ProtectionDomain domain, byte[] bytes) {
             try {
-                if (!DISPATCHER.equals(name) || bytes == null) {
+                if (bytes == null || name == null) {
                     return null;
                 }
-                byte[] woven = weave(bytes);
+                String target;
+                if (DISPATCHER.equals(name)) {
+                    target = "seen";
+                } else if (BUKKIT_MAP.equals(name)) {
+                    target = "seenBukkit";
+                } else if (FORGE_HANDLER.equals(name)) {
+                    target = "seenForge";
+                } else {
+                    return null;
+                }
+                byte[] woven = weave(bytes, target);
                 // Returning null means "leave it exactly as it was", which is
                 // the right answer whenever we are not certain we improved it.
                 return woven;
@@ -164,7 +198,7 @@ public final class Probe {
         }
     }
 
-    private static byte[] weave(byte[] bytes) {
+    private static byte[] weave(byte[] bytes, final String target) {
         ClassReader reader = new ClassReader(bytes);
         // COMPUTE_MAXS only, deliberately. The injected sequence has no
         // branches, so ASM shifts the existing stack map frames itself and no
@@ -179,13 +213,27 @@ public final class Probe {
             public MethodVisitor visitMethod(int access, String name, String descriptor,
                                              String signature, String[] exceptions) {
                 MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
-                // `register` catches a server building its command set. `getRoot`
-                // catches one that never calls register at all: Velocity creates a
-                // dispatcher, takes its root, and adds nodes to that directly.
-                boolean interesting = ("register".equals(name) || "getRoot".equals(name))
-                        && (access & Opcodes.ACC_STATIC) == 0
+                boolean usable = (access & Opcodes.ACC_STATIC) == 0
                         && (access & Opcodes.ACC_ABSTRACT) == 0;
-                if (mv == null || !interesting) {
+                if (mv == null || !usable) {
+                    return mv;
+                }
+                boolean interesting;
+                if ("seenForge".equals(target)) {
+                    // By descriptor, because Forge renames the method itself.
+                    interesting = FORGE_REGISTER.equals(descriptor);
+                } else if ("seenBukkit".equals(target)) {
+                    // Both overloads; the two-argument one delegates to the
+                    // three-argument one, so catching either is enough and
+                    // catching both costs only a redundant field write.
+                    interesting = "register".equals(name);
+                } else {
+                    // `register` catches a server building its command set.
+                    // `getRoot` catches one that never calls register at all:
+                    // Velocity takes the dispatcher's root and adds to it.
+                    interesting = "register".equals(name) || "getRoot".equals(name);
+                }
+                if (!interesting) {
                     return mv;
                 }
                 hit[0] = true;
@@ -195,7 +243,7 @@ public final class Probe {
                         super.visitCode();
                         super.visitVarInsn(Opcodes.ALOAD, 0);
                         super.visitMethodInsn(Opcodes.INVOKESTATIC, "geode/probe/Hook",
-                                "seen", "(Ljava/lang/Object;)V", false);
+                                target, "(Ljava/lang/Object;)V", false);
                     }
                 };
             }
@@ -238,6 +286,16 @@ public final class Probe {
                 try {
                     List<Object> roots = roots();
                     if (roots.isEmpty()) {
+                        // No Brigadier at all, so this is a server older than
+                        // 1.13. Its commands are a flat list of names rather
+                        // than a tree — there is no argument structure to be
+                        // had, because nothing recorded any.
+                        String legacy = legacyTree();
+                        if (legacy != null && !legacy.equals(written)) {
+                            if (write(legacy)) {
+                                written = legacy;
+                            }
+                        }
                         continue;
                     }
                     // A cheap change detector, so the full walk is rare. The
@@ -398,6 +456,130 @@ public final class Probe {
             }
         }
         return paths;
+    }
+
+    /**
+     * The command names a pre-1.13 server knows, as the same JSON a modern one
+     * produces — just without any structure beneath each name.
+     *
+     * Only consulted when there is no Brigadier dispatcher to read, so this
+     * cannot affect a modern server, where the tree is strictly better.
+     */
+    private static String legacyTree() {
+        java.util.TreeSet<String> names = new java.util.TreeSet<String>();
+        try {
+            bukkitNames(names);
+        } catch (Throwable t) {
+            moan("could not read the Bukkit command map", t);
+        }
+        try {
+            forgeNames(names);
+        } catch (Throwable t) {
+            moan("could not read the Forge command handler", t);
+        }
+        if (names.isEmpty()) {
+            return null;
+        }
+
+        StringBuilder sb = new StringBuilder(1 << 12);
+        sb.append("{\"_probe\":{\"format\":").append(FORMAT)
+          .append(",\"nodes\":").append(names.size())
+          .append(",\"legacy\":true}");
+        sb.append(",\"type\":\"root\",\"children\":{");
+        boolean first = true;
+        for (String name : names) {
+            if (!first) {
+                sb.append(',');
+            }
+            first = false;
+            quote(sb, name);
+            sb.append(":{\"type\":\"literal\"}");
+        }
+        sb.append("}}");
+        return sb.toString();
+    }
+
+    /**
+     * Names from Bukkit's command map, which holds plugin and vanilla commands
+     * alike on an old CraftBukkit server.
+     *
+     * `getCommands` and `getName` are Bukkit API and unobfuscated, so both are
+     * called by name.
+     */
+    private static void bukkitNames(java.util.Set<String> into) {
+        Object map = readHook("bukkit");
+        if (map == null) {
+            return;
+        }
+        Object commands = call(map, "getCommands");
+        if (!(commands instanceof Collection)) {
+            return;
+        }
+        for (Object command : new ArrayList<Object>((Collection<?>) commands)) {
+            Object name = call(command, "getName");
+            if (name != null) {
+                into.add(String.valueOf(name).toLowerCase());
+            }
+            Object aliases = call(command, "getAliases");
+            if (aliases instanceof Collection) {
+                for (Object alias : new ArrayList<Object>((Collection<?>) aliases)) {
+                    if (alias != null) {
+                        into.add(String.valueOf(alias).toLowerCase());
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Names from a pre-1.13 Forge command handler.
+     *
+     * Its accessor is renamed by Forge — `func_71555_a` rather than
+     * `getCommands` — so it is found by shape instead: exactly one method that
+     * takes nothing and returns a Map. The map is keyed by command name and
+     * already contains every alias, which is what a console accepts, so
+     * nothing has to be read off the command objects themselves.
+     */
+    private static void forgeNames(java.util.Set<String> into) throws Exception {
+        Object handler = readHook("forge");
+        if (handler == null) {
+            return;
+        }
+        java.lang.reflect.Method found = null;
+        for (java.lang.reflect.Method m : handler.getClass().getMethods()) {
+            if (m.getParameterTypes().length == 0 && m.getReturnType() == Map.class) {
+                if (found != null) {
+                    // More than one candidate means the shape is not what this
+                    // was written against. Guessing which is which on somebody
+                    // else's server is not worth a command list.
+                    moan("more than one no-argument Map accessor; not guessing", null);
+                    return;
+                }
+                found = m;
+            }
+        }
+        if (found == null) {
+            return;
+        }
+        found.setAccessible(true);
+        Object map = found.invoke(handler);
+        if (!(map instanceof Map)) {
+            return;
+        }
+        for (Object key : new ArrayList<Object>(((Map<?, ?>) map).keySet())) {
+            if (key != null) {
+                into.add(String.valueOf(key).toLowerCase());
+            }
+        }
+    }
+
+    private static Object readHook(String field) {
+        try {
+            Class<?> hook = Class.forName("geode.probe.Hook", false, null);
+            return hook.getField(field).get(null);
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     private static String render(Object root, Map<Object, List<String>> paths) {

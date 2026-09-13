@@ -26,7 +26,38 @@ Paper, Forge, Fabric and Velocity alike. No per-version mapping table is needed
 to find the tree, and Brigadier's own public API walks it.
 
 The agent prepends one call to `CommandDispatcher.register` — `Hook.seen(this)`
-— then a daemon thread walks the tree and writes it as JSON.
+— and another to `getRoot`, then a daemon thread walks the tree and writes it as
+JSON. Both, because Velocity never calls `register`: it takes the dispatcher's
+root and adds nodes to that directly.
+
+There is usually more than one dispatcher. CraftBukkit's `syncCommands()` does
+not add plugin commands to the one the server booted with — it builds a second
+dispatcher after plugins enable, copies the vanilla nodes across, and registers
+the plugins into that. So the first and the most recent are both kept and the
+reader takes whichever holds more, which also means a library keeping a small
+private dispatcher of its own can never win.
+
+## Before Brigadier
+
+Brigadier arrived in Minecraft 1.13. Older servers have no dispatcher at all, so
+two more hooks cover them — consulted only when no dispatcher is found, so a
+modern server's behaviour is untouched:
+
+- **Bukkit**, via `org.bukkit.command.SimpleCommandMap.register`. Bukkit API has
+  never been obfuscated at any version. Note `getCommands()` lives on
+  `SimpleCommandMap` and *not* on the `CommandMap` interface, which is why the
+  implementation class is the hook.
+- **Forge**, via `net.minecraft.command.CommandHandler`. Forge deobfuscates
+  Minecraft's *class* names at runtime but renames members, so registration is
+  `func_71560_a` rather than `registerCommand` — it is matched by descriptor
+  instead, `(Lnet/minecraft/command/ICommand;)Lnet/minecraft/command/ICommand;`,
+  which is unique on that class from 1.7.10 through 1.12.2. No mapping table.
+
+What comes back is a flat list of names: nothing older than 1.13 recorded any
+argument structure, so there is none to report. A pre-1.13 **vanilla** server
+(no Forge, no Bukkit) is not supported — its classes are raw obfuscated names
+and would need a per-version table, which is the sort of thing this whole design
+exists to avoid.
 
 ## Safety
 
@@ -77,9 +108,33 @@ Java is a poor trade. Re-run it when anything here changes and commit the jar
 alongside. Needs a JDK, `curl` and `python3`; ASM is fetched from Maven Central
 at the version its metadata currently calls the release.
 
-Verified against vanilla, Fabric, NeoForge and Paper — the last two carrying a
-mod and a plugin that register commands — plus a fault matrix covering a missing
-hook jar, an unwritable output path, and missing, empty and junk arguments.
+## Verified against
+
+Every server kind Geode installs, each booted under the agent with a mod or
+plugin that registers commands, and checked for a clean exit and no crash report:
+
+| Kind | Version | Commands | Proof |
+|---|---|---|---|
+| Vanilla | 26.2 | 90 | `gamemode` |
+| Fabric | 26.2 | 91 | spark's `/spark` |
+| Quilt | 1.21 | 99 | 17 mod commands |
+| NeoForge | 26.2 | 93 | spark's `/spark` |
+| Paper | 26.1.2 | 1573 | EssentialsX's `/afk` |
+| Spigot | 1.21.1 | 1533 | EssentialsX's `/afk` |
+| Mohist | 1.20.1 | 1571 | `/afk` and `/spark` |
+| Arclight | 1.20.1 | 1553 | `/afk` |
+| Banner | 1.21.1 | 1563 | `/afk` |
+| Velocity | — | 9 | `/server`, `/glist` |
+| Paper (legacy) | 1.8.8 | 617 | EssentialsX 2.0.1's `/afk` |
+| Forge (legacy) | 1.12.2 | 237 | WorldEdit's `/worldedit` |
+
+**Waterfall and BungeeCord are not supported**: they have their own command
+system and no Brigadier anywhere, so there is nothing to read.
+
+Plus a fault matrix covering a missing hook jar, an unwritable output path, and
+missing, empty and junk arguments — every one of which leaves the server
+starting, running a command and stopping normally.
+
 `cargo test --test live_server -- --ignored the_probe_reads` runs the end-to-end
 check against a real server.
 

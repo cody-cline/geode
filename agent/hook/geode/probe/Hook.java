@@ -39,6 +39,23 @@ public final class Hook {
     /** The most recent one, which on a Bukkit server is the one that matters. */
     public static volatile Object latest;
 
+    /**
+     * A Bukkit command map, on a server old enough to have no Brigadier at all.
+     *
+     * Brigadier arrived in Minecraft 1.13. Before that a Bukkit server kept its
+     * commands in {@code SimpleCommandMap}, which is Bukkit API and so has
+     * never been obfuscated at any version.
+     */
+    public static volatile Object bukkit;
+
+    /**
+     * A pre-1.13 Forge command handler.
+     *
+     * Forge deobfuscates Minecraft's class names at runtime, so this one is
+     * reachable by name where vanilla's would not be.
+     */
+    public static volatile Object forge;
+
     private Hook() {}
 
     /** Woven in at the top of {@code CommandDispatcher.register} and {@code getRoot}. */
@@ -50,6 +67,20 @@ public final class Hook {
         // volatile read that changes nothing — cheaper than writing every time.
         if (latest != candidate) {
             latest = candidate;
+        }
+    }
+
+    /** Woven in at the top of {@code SimpleCommandMap.register}. */
+    public static void seenBukkit(Object map) {
+        if (bukkit != map) {
+            bukkit = map;
+        }
+    }
+
+    /** Woven in at the top of {@code CommandHandler.registerCommand}. */
+    public static void seenForge(Object handler) {
+        if (forge != handler) {
+            forge = handler;
         }
     }
 }

@@ -328,6 +328,28 @@ mod tests {
         assert_eq!(roots[0].args, vec!["gamemode"]);
     }
 
+    /// A server older than Brigadier reports names and nothing else.
+    ///
+    /// Minecraft 1.13 introduced the command tree; before it, a server knew
+    /// only a flat list of names, so that is what the probe sends back. It
+    /// still completes the first word, which is the part anyone types.
+    #[test]
+    fn a_pre_brigadier_server_returns_names_with_no_structure() {
+        let roots = parse(
+            r#"{"_probe":{"format":1,"nodes":3,"legacy":true},"type":"root","children":{
+                 "afk":{"type":"literal"},
+                 "gamemode":{"type":"literal"},
+                 "worldedit":{"type":"literal"}}}"#,
+        );
+        assert_eq!(
+            roots.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(),
+            vec!["afk", "gamemode", "worldedit"]
+        );
+        // No argument structure exists to report, and claiming otherwise would
+        // be inventing it.
+        assert!(roots.iter().all(|n| n.children.is_empty() && n.args.is_empty()));
+    }
+
     #[test]
     fn a_plugins_namespaced_twin_is_dropped() {
         let roots = parse(
