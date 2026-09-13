@@ -93,26 +93,57 @@ no-account host that handles this size and is clearly within its own terms.**
 So: **bring your own storage**, which matches how Geode already handles the
 CurseForge key.
 
-**Two backends to build**, in this order:
+First, a reframing that decides the rest: once the exporter references instead
+of embedding, a typical pack is **single-digit megabytes**, not hundreds. It is
+a manifest of URLs plus the author's own configs. Most of the size problem that
+drove this search evaporates.
 
-1. **GitHub Releases.** Explicitly sanctioned — *"We don't limit the total size
-   of the binary files in the release or the bandwidth used to deliver them"* —
-   2 GB per file on a free account, anonymous download, no card. And it is the
-   only non-Modrinth host Modrinth's own `.mrpack` validator whitelists, which
-   makes it uniquely compatible with the format we already write. The catch to
-   state in the UI: the repo must be public, so the pack is world-readable.
-2. **S3 presigned URLs.** One implementation covers R2, B2, Filebase, Wasabi and
-   MinIO. Private by default, and expiry is built into the URL rather than
-   bolted on (R2: 1 second to 7 days). Note R2 appears to want a card on file
-   even for the free tier — say so rather than promising otherwise.
+**Two backends, in this order:**
+
+1. **S3 presigned URLs, against Cloudflare R2.** Decided. One implementation
+   also covers B2, Filebase, Wasabi and self-hosted MinIO, so this is a config
+   change later rather than a rewrite.
+
+   R2 wins on the only axis that matters here, which is egress rather than
+   storage — both give 10 GB free storage and a pack uses almost none of it.
+   Cloudflare: *"Egressing directly from R2 … does not incur data transfer
+   (egress) charges and is free"*, unconditionally, plus 10M Class B operations
+   a month. Backblaze gives *"free egress up to 3x their average monthly
+   storage"* — which, on a few megabytes stored, is a few megabytes of
+   downloads before it runs out.
+
+   Implementation notes that are easy to get wrong:
+   - Sign against `<ACCOUNT_ID>.r2.cloudflarestorage.com`. **Not `r2.dev`**,
+     which Cloudflare's own docs call *"rate-limited and should only be used
+     for development purposes"*.
+   - Presigned lifetime is 1 second to 7 days. That is the ceiling on a share;
+     longer means re-signing.
+   - Keep the bucket private. The presigned URL is the entire access mechanism.
+   - Cloudflare's terms bar signing up on behalf of third parties, which is why
+     this is the user's own bucket and Geode ships no credentials.
+
+2. **tmpfiles.org, as the no-setup path.** At single-digit megabytes its 100 MiB
+   cap stops mattering, and it is the one service whose terms actively invite
+   this: *"intended for legitimate sharing such as documents, backups, or
+   collaboration"*, with only *commercial* automation barred. No account at all.
+   Gate it on size and never make it a silent default.
+
+**GitHub Releases was considered and dropped.** It is genuinely sanctioned for
+large binaries and is the only non-Modrinth host Modrinth's own `.mrpack`
+validator whitelists — but a Release does not expire and the repo must be
+public, so it is a permanent world-readable artifact. That is a different
+feature from sending somebody a pack. Worth revisiting only if a "publish this
+pack permanently" feature is ever wanted.
 
 Suggested shape, matching the existing `providers::` dispatch-enum pattern
 rather than introducing a trait for two variants:
 
 ```rust
 pub enum Destination {
+    /// Any S3-compatible endpoint the user owns. R2 is the documented one.
     S3 { endpoint, region, bucket, access_key, secret_key },
-    GitHub { token, owner, repo },
+    /// No account, small packs only.
+    Tmpfiles,
 }
 
 pub struct Share {
@@ -181,9 +212,10 @@ Nothing below is required for anything already committed.
    Then put the URL in Geode's settings. Geode holds no Cloudflare credential —
    the Worker is write-once-read-many by anyone with a code, and stores no files.
 
-2. **Decide the first upload backend.** GitHub Releases needs only a fine-grained
-   PAT with `contents: write` on one repo you own. R2 needs an account and
-   probably a card.
+2. **Create the R2 bucket.** Decided. A Cloudflare account, one private bucket,
+   and an S3 API token with object read/write on it. Whether the free tier wants
+   a card on file is **unconfirmed** — it is widely reported and Cloudflare's own
+   pricing docs do not say either way, so expect to be asked.
 
 3. **Decide the NeoForge sidedness presentation.** NeoForge declares nothing —
    not on the mod, not on the file — so Geode reports "not declared" rather than
