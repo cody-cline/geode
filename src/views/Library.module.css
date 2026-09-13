@@ -74,27 +74,38 @@
   gap: 12px;
 }
 
+/* The outline is a ring rather than a border, and that is load-bearing:
+   `overflow: hidden` clips to the padding box, so with a real border the
+   artwork stops one pixel short of the card's edge and draws a seam along the
+   top and sides. A ring sits outside the box entirely, letting the art run
+   fully to the rounded corners with nothing between it and the edge. */
 .card {
   display: flex;
   flex-direction: column;
   border-radius: var(--radius);
-  border: 1px solid var(--border);
   background: var(--surface);
+  box-shadow: 0 0 0 1px var(--border);
   overflow: hidden;
   transition:
-    border-color 0.14s var(--ease),
-    transform 0.14s var(--ease),
-    box-shadow 0.14s var(--ease);
+    box-shadow 0.14s var(--ease),
+    transform 0.14s var(--ease);
 }
 
 .card:hover {
-  border-color: var(--border-strong);
   transform: translateY(-2px);
-  box-shadow: var(--shadow);
+  box-shadow:
+    0 0 0 1px var(--border-strong),
+    var(--shadow);
 }
 
 .cardRunning {
-  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 50%, transparent);
+}
+
+.cardRunning:hover {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 60%, transparent),
+    var(--shadow);
 }
 
 /* The artwork is the card's subject, not a garnish: full-bleed, tall enough
