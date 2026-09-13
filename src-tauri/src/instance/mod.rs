@@ -1,5 +1,6 @@
 pub mod content;
 pub mod jar;
+pub mod logs;
 pub mod modpack;
 
 use serde::{Deserialize, Serialize};

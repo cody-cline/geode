@@ -2,6 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import { ArrowDownToLine, Copy, Search, Terminal, Trash2 } from "lucide-react";
 
+import LogFilesPanel from "../../components/LogFilesPanel";
+import type { LogSource } from "../../components/LogFilesPanel";
+import { api } from "../../lib/api";
 import { useStore } from "../../lib/store";
 import type { LogEntry } from "../../lib/types";
 
@@ -15,6 +18,9 @@ export default function LogsTab({ instanceId }: { instanceId: string }) {
   const clearLogs = useStore((s) => s.clearLogs);
   const toast = useStore((s) => s.toast);
 
+  // The console is this run; the files are every run, including the one that
+  // crashed while nobody was looking.
+  const [view, setView] = useState<"console" | "files">("console");
   const [level, setLevel] = useState<Level>("ALL");
   const [filter, setFilter] = useState("");
   const [follow, setFollow] = useState(true);
@@ -54,8 +60,37 @@ export default function LogsTab({ instanceId }: { instanceId: string }) {
     toast({ kind: "success", title: `Copied ${entries.length} lines` });
   }
 
+  const source: LogSource = useMemo(
+    () => ({
+      list: () => api.listInstanceLogs(instanceId),
+      read: (name) => api.readInstanceLog(instanceId, name),
+      remove: (name) => api.deleteInstanceLog(instanceId, name),
+      report: (name) => api.instanceReport(instanceId, name),
+    }),
+    [instanceId],
+  );
+
   return (
     <div className={styles.wrap}>
+      <div className={styles.views}>
+        <button
+          className={clsx(styles.viewTab, view === "console" && styles.viewActive)}
+          onClick={() => setView("console")}
+        >
+          Console
+        </button>
+        <button
+          className={clsx(styles.viewTab, view === "files" && styles.viewActive)}
+          onClick={() => setView("files")}
+        >
+          Log files
+        </button>
+      </div>
+
+      {view === "files" ? (
+        <LogFilesPanel source={source} />
+      ) : (
+      <>
       <div className={styles.toolbar}>
         <div className={styles.levels}>
           {LEVELS.map((l) => (
@@ -126,6 +161,8 @@ export default function LogsTab({ instanceId }: { instanceId: string }) {
           ))
         )}
       </div>
+      </>
+      )}
     </div>
   );
 }

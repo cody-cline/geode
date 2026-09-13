@@ -25,6 +25,8 @@ import {
 } from "lucide-react";
 
 import ImageField from "../components/ImageField";
+import LogFilesPanel from "../components/LogFilesPanel";
+import type { LogSource } from "../components/LogFilesPanel";
 import InstanceIcon from "../components/InstanceIcon";
 import Modal from "../components/Modal";
 import Browse from "./Browse";
@@ -45,7 +47,6 @@ import type {
   BackupInfo,
   CommandNode,
   ContentKind,
-  LogFile,
   Schedule,
   Server,
   ServerLine,
@@ -56,6 +57,7 @@ import styles from "./ServerView.module.css";
 
 const TABS = [
   { id: "console", label: "Console" },
+  { id: "logs", label: "Logs" },
   { id: "content", label: "Content" },
   // The same dependency field an instance draws. A server's mods folder is a
   // mods folder, and it keeps the same provenance records.
@@ -136,38 +138,15 @@ export default function ServerView({ id }: { id: string }) {
   const [adding, setAdding] = useState<ServerFolder | null>(null);
   const [present, setPresent] = useState<Set<string>>(new Set());
 
-  // Which log the console is showing. Null is the live one; anything else is
-  // an archive, read once and shown read-only.
-  const [archives, setArchives] = useState<LogFile[]>([]);
-  const [viewing, setViewing] = useState<string | null>(null);
-  const [archiveText, setArchiveText] = useState<string | null>(null);
-
-  useEffect(() => {
-    api
-      .listServerLogs(id)
-      .then((found) => setArchives(found.filter((l) => !l.current)))
-      .catch(() => setArchives([]));
-  }, [id, lines]);
-
-  useEffect(() => {
-    if (!viewing) {
-      setArchiveText(null);
-      return;
-    }
-    let cancelled = false;
-    setArchiveText(null);
-    api
-      .readServerLog(id, viewing)
-      .then((text) => !cancelled && setArchiveText(text))
-      .catch((e) => {
-        if (cancelled) return;
-        reportError("Could not read that log", e);
-        setViewing(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [viewing, id, reportError]);
+  const logSource: LogSource = useMemo(
+    () => ({
+      list: () => api.listServerLogs(id),
+      read: (name) => api.readServerLog(id, name),
+      remove: (name) => api.deleteServerLog(id, name),
+      report: (name) => api.serverReport(id, name),
+    }),
+    [id],
+  );
 
   useEffect(() => {
     if (!adding) return;
@@ -529,24 +508,7 @@ export default function ServerView({ id }: { id: string }) {
           </button>
         ))}
         <div style={{ flex: 1 }} />
-        {active === "console" && archives.length > 0 && (
-          // Old logs live with the console rather than in a tab of their own:
-          // it is the same thing, just earlier.
-          <select
-            className={clsx("select", styles.logPicker)}
-            value={viewing ?? ""}
-            onChange={(e) => setViewing(e.target.value || null)}
-            aria-label="Which log to show"
-          >
-            <option value="">Live console</option>
-            {archives.map((log) => (
-              <option key={log.name} value={log.name}>
-                {log.name} · {fileSize(log.size)}
-              </option>
-            ))}
-          </select>
-        )}
-        {active === "console" && !viewing && shown.length > 0 && (
+        {active === "console" && shown.length > 0 && (
           <button className="btn btn-sm" onClick={() => clearServerLog(id)}>
             <Trash2 size={13} />
             Clear
@@ -566,13 +528,7 @@ export default function ServerView({ id }: { id: string }) {
                 el.scrollHeight - el.scrollTop - el.clientHeight < 40;
             }}
           >
-            {viewing ? (
-              archiveText === null ? (
-                <p className={styles.quiet}>Reading {viewing}…</p>
-              ) : (
-                <div className={styles.line}>{archiveText}</div>
-              )
-            ) : shown.length === 0 ? (
+            {shown.length === 0 ? (
               <p className={styles.quiet}>
                 {server.running
                   ? "Waiting for output…"
@@ -585,7 +541,7 @@ export default function ServerView({ id }: { id: string }) {
 
           {/* Sits above the prompt rather than over the output, so it never
               covers the thing you are reading while you type. */}
-          {matches.length > 0 && !viewing && server.running && (
+          {matches.length > 0 && server.running && (
             <div className={styles.suggestions}>
               {matches.map((match) => (
                 <button
@@ -613,19 +569,19 @@ export default function ServerView({ id }: { id: string }) {
               className={styles.input}
               value={command}
               placeholder={
-                viewing
-                  ? "Showing an old log — switch to the live console to type"
-                  : server.running
-                    ? "Type a command and press Enter"
-                    : "Server is not running"
+                server.running
+                  ? "Type a command and press Enter"
+                  : "Server is not running"
               }
-              disabled={!server.running || Boolean(viewing)}
+              disabled={!server.running}
               onChange={(e) => setCommand(e.target.value)}
               onKeyDown={onKey}
               spellCheck={false}
             />
           </div>
         </div>
+      ) : active === "logs" ? (
+        <LogFilesPanel source={logSource} />
       ) : active === "content" ? (
         <ServerContentTab server={server} onBrowse={setAdding} />
       ) : active === "graph" ? (

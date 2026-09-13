@@ -2,11 +2,13 @@ pub mod auth;
 pub mod commands;
 pub mod config;
 pub mod connector;
+pub mod diagnostics;
 pub mod error;
 pub mod install;
 pub mod instance;
 pub mod java;
 pub mod launch;
+pub mod logs;
 pub mod meta;
 pub mod net;
 pub mod paths;
@@ -134,6 +136,11 @@ pub fn run() {
             commands::server_kinds_for_pack,
             commands::create_server_from_modpack,
             commands::server_commands,
+            commands::list_instance_logs,
+            commands::read_instance_log,
+            commands::delete_instance_log,
+            commands::instance_report,
+            commands::server_report,
             commands::git_status,
             commands::install_git,
             commands::list_server_logs,

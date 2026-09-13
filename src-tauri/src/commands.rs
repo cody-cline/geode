@@ -1328,6 +1328,192 @@ pub async fn create_server_from_modpack(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Log files, and handing them to somebody who can read them
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn list_instance_logs(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<crate::logs::LogFile>> {
+    crate::instance::logs::list(&state.paths, &id).await
+}
+
+#[tauri::command]
+pub async fn read_instance_log(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+) -> Result<String> {
+    crate::instance::logs::read(&state.paths, &id, &name).await
+}
+
+#[tauri::command]
+pub async fn delete_instance_log(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+) -> Result<()> {
+    crate::instance::logs::delete(&state.paths, &id, &name).await
+}
+
+/// A report about an instance, ready to paste to someone who can diagnose it.
+///
+/// `log_name` picks which log to include; without one it uses whatever the
+/// caller is looking at, passed in as `live`. The console holds only what was
+/// captured since the window opened, and the run that crashed is usually the
+/// one nobody was watching — so a named file is the more useful input.
+#[tauri::command]
+pub async fn instance_report(
+    state: State<'_, AppState>,
+    id: String,
+    log_name: Option<String>,
+    live: Option<String>,
+) -> Result<String> {
+    let inst = instance::load(&state.paths, &id).await?;
+
+    let mut facts = vec![("Minecraft".to_string(), inst.mc_version.clone())];
+    facts.push((
+        "Loader".to_string(),
+        if inst.loader == crate::meta::Loader::Vanilla {
+            "Vanilla".to_string()
+        } else {
+            format!("{} {}", inst.loader.as_str(), inst.loader_version)
+        },
+    ));
+    if let Some(pack) = &inst.pack {
+        facts.push(("From pack".to_string(), format!("{} {}", pack.name, pack.version)));
+    }
+    if let Some(mb) = inst.overrides.memory_mb {
+        facts.push(("Memory".to_string(), format!("{mb} MB")));
+    }
+    if let Some(args) = &inst.overrides.java_args {
+        facts.push(("Java arguments".to_string(), args.clone()));
+    }
+
+    let mods = instance::content::list(
+        &state.paths,
+        &inst,
+        crate::instance::content::ContentKind::Mod,
+        &state.jars,
+    )
+    .await
+    .unwrap_or_default();
+
+    let subject = crate::diagnostics::Subject {
+        kind: "instance",
+        name: inst.name.clone(),
+        facts,
+        content: mods
+            .iter()
+            .map(|m| describe_content(&m.name, &m.version, m.enabled))
+            .collect(),
+        crash_dir: Some(crate::instance::logs::crash_dir(&state.paths, &id)),
+    };
+
+    let log = pick_log(
+        crate::instance::logs::path(&state.paths, &id, log_name.as_deref().unwrap_or("latest.log")),
+        live,
+    )
+    .await;
+    Ok(crate::diagnostics::report(&subject, &log).await)
+}
+
+/// The same, for a server.
+#[tauri::command]
+pub async fn server_report(
+    state: State<'_, AppState>,
+    id: String,
+    log_name: Option<String>,
+    live: Option<String>,
+) -> Result<String> {
+    let server = crate::server::load(&state.paths, &id).await?;
+
+    let mut facts = vec![
+        ("Minecraft".to_string(), server.mc_version.clone()),
+        (
+            "Software".to_string(),
+            format!("{} {}", server.kind.display_name(), server.build),
+        ),
+        ("Memory".to_string(), format!("{} MB", server.settings.memory_mb)),
+    ];
+    if let Some(major) = server.java_major {
+        facts.push(("Java".to_string(), major.to_string()));
+    }
+    if let Some(args) = &server.settings.java_args {
+        facts.push(("Java arguments".to_string(), args.clone()));
+    }
+
+    // A hybrid runs both, and which one a broken thing came from is exactly
+    // what a reader needs to know.
+    let mut content = Vec::new();
+    for kind in [ContentKind::Mod, ContentKind::Plugin] {
+        if (kind == ContentKind::Mod && !server.takes_mods())
+            || (kind == ContentKind::Plugin && !server.takes_plugins())
+        {
+            continue;
+        }
+        let dir = crate::server::content_dir(&state.paths, &id, kind).await;
+        let items = crate::instance::content::list_in(&dir, &server.content, kind, &state.jars)
+            .await
+            .unwrap_or_default();
+        for item in items {
+            let label = describe_content(&item.name, &item.version, item.enabled);
+            content.push(match kind {
+                ContentKind::Plugin => format!("{label} (plugin)"),
+                _ => label,
+            });
+        }
+    }
+
+    let subject = crate::diagnostics::Subject {
+        kind: "server",
+        name: server.name.clone(),
+        facts,
+        content,
+        crash_dir: Some(crate::server::logs::crash_dir(&state.paths, &id)),
+    };
+
+    let log = pick_log(
+        crate::server::logs::path(&state.paths, &id, log_name.as_deref().unwrap_or("latest.log")),
+        live,
+    )
+    .await;
+    Ok(crate::diagnostics::report(&subject, &log).await)
+}
+
+/// A disabled mod is still worth listing — "I disabled it and it still breaks"
+/// is information, and a reader cannot infer it from a name.
+fn describe_content(name: &str, version: &str, enabled: bool) -> String {
+    let base = if version.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name} {version}")
+    };
+    if enabled {
+        base
+    } else {
+        format!("{base} [disabled]")
+    }
+}
+
+/// Prefer the log file, fall back to whatever the console had.
+///
+/// The file is the better source — it covers the whole run — but a server that
+/// died before writing one, or an instance launched from elsewhere, leaves only
+/// what was captured live.
+async fn pick_log(path: Result<std::path::PathBuf>, live: Option<String>) -> String {
+    if let Ok(path) = path {
+        if let Ok(text) = crate::diagnostics::tail_of(&path).await {
+            if !text.trim().is_empty() {
+                return text;
+            }
+        }
+    }
+    live.unwrap_or_default()
+}
+
 /// Every command this server has, as the server itself reported them.
 ///
 /// Written by the probe that rides along on the server's own JVM, so it covers

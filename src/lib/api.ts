@@ -276,6 +276,31 @@ export const api = {
    * once, since nothing outside a running server knows a mod's commands.
    */
   serverCommands: (id: string) => invoke<CommandNode[]>("server_commands", { id }),
+  // Log files. An instance's and a server's are the same files in different
+  // folders, so the two sets of bindings are deliberately identical in shape.
+  listInstanceLogs: (id: string) => invoke<LogFile[]>("list_instance_logs", { id }),
+  readInstanceLog: (id: string, name: string) =>
+    invoke<string>("read_instance_log", { id, name }),
+  deleteInstanceLog: (id: string, name: string) =>
+    invoke<void>("delete_instance_log", { id, name }),
+  /**
+   * A pasteable report: what is installed, the crash report if there is one,
+   * and the log — with a prompt on top asking for the cause rather than a
+   * guess. `live` is the console's own text, used only when no log file has
+   * anything in it.
+   */
+  instanceReport: (id: string, logName?: string, live?: string) =>
+    invoke<string>("instance_report", {
+      id,
+      logName: logName ?? null,
+      live: live ?? null,
+    }),
+  serverReport: (id: string, logName?: string, live?: string) =>
+    invoke<string>("server_report", {
+      id,
+      logName: logName ?? null,
+      live: live ?? null,
+    }),
   /** Whether compiling Spigot is possible here, and what would make it so. */
   gitStatus: () => invoke<GitStatus>("git_status"),
   /** Only ever after the user has read `plan` and said yes. */
