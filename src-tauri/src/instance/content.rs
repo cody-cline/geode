@@ -282,6 +282,27 @@ pub async fn list_in(
         };
 
         let mut item = match record {
+            // A record that knows only whose a file is — a server's override
+            // jar — has no name or version of its own to offer, so it reads
+            // like any untracked file, and keeps the one thing it does know.
+            Some(r) if r.provider.is_empty() => ContentItem {
+                file_name: file_name.clone(),
+                kind,
+                name: meta
+                    .as_ref()
+                    .and_then(|m| m.name.clone())
+                    .unwrap_or_else(|| base_name.to_string()),
+                version: meta
+                    .as_ref()
+                    .and_then(|m| m.version.clone())
+                    .unwrap_or_default(),
+                enabled,
+                size,
+                dependency: false,
+                from_disk: false,
+                origin: r.origin,
+                ..Default::default()
+            },
             Some(r) => ContentItem {
                 file_name: file_name.clone(),
                 kind,
@@ -499,6 +520,73 @@ pub async fn remove_in(
     let path = resolve_in(dir, file)?;
     tokio::fs::remove_file(&path).await?;
     records.retain(|r| !(r.file_name == base && r.kind == kind));
+    Ok(())
+}
+
+/// Mark everything in an instance as having arrived with a server's pack.
+///
+/// Tagging records alone is not enough, and was the first version's mistake: a
+/// jar with no provenance travels as an override, lands with no record at all,
+/// and so could never be tagged — which left exactly the mods a server most
+/// needs to keep, the ones with no public download, as the only ones a player
+/// could delete. So every content file on disk gets a record here, and a file
+/// that had none gets one that says nothing except whose it is.
+///
+/// Meant for a freshly imported instance, where everything present came from
+/// the pack. Safe to run on a failed import too, and should be: a server pack
+/// that stopped halfway is still the server's.
+pub async fn claim_for_server(paths: &Paths, instance: &mut super::Instance) -> Result<()> {
+    for record in &mut instance.content {
+        record.origin = Origin::Server;
+    }
+
+    for kind in [
+        ContentKind::Mod,
+        ContentKind::ResourcePack,
+        ContentKind::ShaderPack,
+        ContentKind::DataPack,
+    ] {
+        let dir = content_dir(paths, &instance.id, kind);
+        let mut entries = match tokio::fs::read_dir(&dir).await {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        };
+        while let Some(entry) = entries.next_entry().await? {
+            if !entry.file_type().await?.is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !is_content_file(&name, kind) {
+                continue;
+            }
+            let (base, _) = strip_disabled(&name);
+            if instance
+                .content
+                .iter()
+                .any(|r| r.file_name == base && r.kind == kind)
+            {
+                continue;
+            }
+            instance.content.push(ContentRecord {
+                file_name: base.to_string(),
+                kind,
+                // Nothing is known about where it came from, and nothing is
+                // pretended: no provider means no update check and no source.
+                provider: String::new(),
+                project_id: String::new(),
+                version_id: String::new(),
+                name: base.to_string(),
+                version_number: String::new(),
+                slug: None,
+                icon_url: None,
+                dependency: false,
+                sharing: Default::default(),
+                origin: Origin::Server,
+                requires: None,
+            });
+        }
+    }
     Ok(())
 }
 

@@ -2688,7 +2688,9 @@ pub async fn import_modpack(
     let progress = Progress::new(crate::desktop::sink(app), format!("import:{}", inst.id));
     state.register_cancel(progress.id(), progress.cancel_flag());
 
-    let result = instance::modpack::import_into(
+    // Both halves: the mrpack reader, then the Geode half if the file has one —
+    // settings, artwork, and the mods the pack named rather than carried.
+    let missing = share::pack::import(
         &state.http,
         &state.paths,
         &mut inst,
@@ -2697,24 +2699,6 @@ pub async fn import_modpack(
         &progress,
     )
     .await;
-
-    // The Geode half, if the file has one: launcher settings, artwork, and the
-    // mods the pack named rather than carried. A plain `.mrpack` has none and
-    // this does nothing.
-    let missing = match result {
-        Ok(()) => {
-            share::pack::apply_pack(
-                &state.http,
-                &state.paths,
-                &mut inst,
-                &archive,
-                config.effective_curseforge_key().as_deref(),
-                &progress,
-            )
-            .await
-        }
-        Err(e) => Err(e),
-    };
 
     state.clear_cancel(progress.id());
     // Save either way: a partially imported pack is more useful than a

@@ -19,6 +19,17 @@ function numberOrNull(value: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+/**
+ * A name made safe to suggest as a file name. Instance names are free text —
+ * and a pack's manifest can set one — so "ATM10 / hardcore" would otherwise be
+ * read by the dialog as a folder that does not exist. Same rules as the
+ * backend's own `share::pack::file_name`.
+ */
+function safeFileStem(name: string): string {
+  const cleaned = name.replace(/[/\\:*?"<>|]/g, "-").trim();
+  return cleaned || "pack";
+}
+
 function textOrNull(value: string): string | null {
   const trimmed = value.trim();
   return trimmed === "" ? null : trimmed;
@@ -113,23 +124,27 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
     }
   }
 
-  async function exportPack() {
-    const dest = await saveDialog({
-      defaultPath: `${instance.name}.geodepack`,
+  // The format is picked by which button was pressed, never read back off the
+  // file name: the save dialog does not report which filter was chosen, and on
+  // Linux it does not add the extension either, so "ForPrism" typed under the
+  // Modrinth filter would come back with no extension at all. The two formats
+  // differ in what they can say — a .geodepack names a CurseForge mod and lets
+  // the recipient fetch it, a .mrpack has nowhere to record that and has to
+  // carry the jar — so guessing wrong silently changes what the pack contains.
+  async function exportPack(format: "geodepack" | "mrpack") {
+    const chosen = await saveDialog({
+      defaultPath: `${safeFileStem(instance.name)}.${format}`,
       filters: [
-        { name: "Geode pack", extensions: ["geodepack"] },
-        { name: "Modrinth pack", extensions: ["mrpack"] },
+        format === "geodepack"
+          ? { name: "Geode pack", extensions: ["geodepack"] }
+          : { name: "Modrinth pack", extensions: ["mrpack"] },
       ],
     });
-    if (!dest) return;
+    if (!chosen) return;
+    const dest = chosen.toLowerCase().endsWith(`.${format}`) ? chosen : `${chosen}.${format}`;
 
-    // The extension the user chose decides the format, because the two differ
-    // in what they can say. A .geodepack names a CurseForge mod and lets the
-    // recipient fetch it; a .mrpack has nowhere to record that, so it has to
-    // carry the jar itself.
-    const plain = dest.toLowerCase().endsWith(".mrpack");
     try {
-      if (plain) {
+      if (format === "mrpack") {
         await api.exportModpack(instance.id, dest, false);
         toast({
           kind: "success",
@@ -454,9 +469,21 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
               {duplicating ? <Loader2 size={14} className="spin" /> : <Copy size={14} />}
               Duplicate
             </button>
-            <button className="btn" onClick={exportPack}>
+            <button
+              className="btn"
+              onClick={() => exportPack("geodepack")}
+              title="Settings and artwork included; mods are linked rather than copied"
+            >
               <PackageOpen size={14} />
-              Export pack
+              Export .geodepack
+            </button>
+            <button
+              className="btn"
+              onClick={() => exportPack("mrpack")}
+              title="For Prism, the Modrinth app and other launchers; jars are bundled in"
+            >
+              <PackageOpen size={14} />
+              Export .mrpack
             </button>
             <div style={{ flex: 1 }} />
             <button

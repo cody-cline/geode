@@ -68,6 +68,23 @@ pub async fn install_into(
         .primary_file()
         .ok_or_else(|| Error::msg(format!("{display_name} has no downloadable file")))?;
 
+    // Installing over a server's mod replaces it — a new version, or a second
+    // copy under the same name — and the version a server's mod runs at is the
+    // server's to choose. A player on a different build of a mod both sides
+    // load cannot join, and sharing runs one way, so the next sync would only
+    // put the server's back. Refused before anything is downloaded or deleted.
+    if let Some(owned) = records.iter().find(|r| {
+        r.origin == crate::instance::content::Origin::Server
+            && r.kind == kind
+            && (r.file_name == file.filename
+                || (r.provider == version.provider.as_str() && r.project_id == version.project_id))
+    }) {
+        return Err(Error::msg(format!(
+            "{} came from the server's pack, so the server decides which version it runs",
+            owned.name
+        )));
+    }
+
     tokio::fs::create_dir_all(dir).await?;
 
     // Remove the previous file for this project before writing the new one.
@@ -374,7 +391,13 @@ pub async fn check_updates(
     curseforge_key: Option<&str>,
     progress: &Progress,
 ) -> Result<Vec<UpdateCandidate>> {
-    let tracked: Vec<ContentRecord> = records.to_vec();
+    // A server's mods update when the server's do, never from here — offering
+    // one would only lead to a refusal, or "Update all" stopping at it.
+    let tracked: Vec<ContentRecord> = records
+        .iter()
+        .filter(|r| r.origin != crate::instance::content::Origin::Server)
+        .cloned()
+        .collect();
     progress
         .stage("Checking for updates", tracked.len() as u64)
         .await;
@@ -466,6 +489,111 @@ mod tests {
             dependencies: vec![],
             blocked_reason: None,
         }
+    }
+
+    fn server_record(file_name: &str, project_id: &str) -> ContentRecord {
+        ContentRecord {
+            file_name: file_name.into(),
+            kind: ContentKind::Mod,
+            provider: "modrinth".into(),
+            project_id: project_id.into(),
+            version_id: "old".into(),
+            name: "Server Anticheat".into(),
+            version_number: "1.0".into(),
+            slug: None,
+            icon_url: None,
+            dependency: false,
+            sharing: Default::default(),
+            origin: crate::instance::content::Origin::Server,
+            requires: None,
+        }
+    }
+
+    /// Updating a server's mod was a way around the rule that it cannot be
+    /// removed: the update deleted the server's file — even a disabled copy —
+    /// and wrote the new record as the player's own, one click from deletable.
+    /// It is refused before anything is downloaded or deleted.
+    #[tokio::test]
+    async fn a_server_mod_cannot_be_replaced_by_an_install_or_update() {
+        let dir = std::env::temp_dir().join(format!("geode-srv-update-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("anticheat-1.0.jar.disabled"), b"x").await.unwrap();
+
+        // A newer version of the same project: an update.
+        let mut update = version("2.0", "release", true);
+        update.project_id = "AC".into();
+        let mut records = vec![server_record("anticheat-1.0.jar", "AC")];
+
+        let err = install_into(
+            &reqwest::Client::new(),
+            &dir,
+            &mut records,
+            &update,
+            ContentKind::Mod,
+            "Server Anticheat",
+            None,
+            None,
+            false,
+        )
+        .await
+        .expect_err("an update must not replace the server's mod");
+        assert!(err.to_string().contains("server decides"), "{err}");
+        assert!(dir.join("anticheat-1.0.jar.disabled").is_file(), "the server's file was deleted");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].origin, crate::instance::content::Origin::Server);
+
+        // A different project that happens to ship the same file name would
+        // overwrite it in place, which is the same replacement by another road.
+        let mut clash = version("x", "release", true);
+        clash.project_id = "SOMETHING-ELSE".into();
+        clash.files[0].filename = "anticheat-1.0.jar".into();
+        install_into(
+            &reqwest::Client::new(),
+            &dir,
+            &mut records,
+            &clash,
+            ContentKind::Mod,
+            "Imposter",
+            None,
+            None,
+            false,
+        )
+        .await
+        .expect_err("a same-named file must not overwrite the server's");
+    }
+
+    /// Not offered either. "Update all" would otherwise stop at the first
+    /// server mod it reached.
+    ///
+    /// Asserted on what the check sets out to look at, not on its result: a
+    /// lookup that fails is skipped rather than reported, so "found nothing"
+    /// would pass whether or not the server's mod had been excluded.
+    #[tokio::test]
+    async fn a_server_mod_is_never_offered_as_an_update() {
+        let recorder = std::sync::Arc::new(crate::events::Recorder::default());
+        let progress = Progress::new(recorder.clone(), "t");
+        let records = vec![server_record("anticheat-1.0.jar", "AC")];
+
+        let found = check_updates(
+            &reqwest::Client::new(),
+            &records,
+            "1.21.1",
+            Some("fabric"),
+            None,
+            &progress,
+        )
+        .await
+        .unwrap();
+        assert!(found.is_empty(), "{found:?}");
+
+        let planned = recorder
+            .events()
+            .into_iter()
+            .find(|(_, e)| e["stage"] == "Checking for updates")
+            .map(|(_, e)| e["total"].as_u64())
+            .expect("the check reports how much it will look at");
+        assert_eq!(planned, Some(0), "the server's mod was queued for an update check");
     }
 
     #[test]

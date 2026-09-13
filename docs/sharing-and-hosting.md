@@ -208,20 +208,50 @@ note. Both ends are now wired:
 ### 6. Server mods versus the player's own — **done**
 
 Sharing runs one way, so a client holds two kinds of thing at once and needs to
-be able to tell them apart. `ContentRecord::origin` tags each entry, and
-importing a pack whose `kind` is `server` marks everything it brought — index
-entries, references and overrides alike — as the server's.
+be able to tell them apart. `ContentRecord::origin` tags each entry. A player
+installs and deletes their own mods freely; a server's mod can be **turned off
+but not removed, and not replaced** — no update, and no install over it under
+the same name — because the server decides both whether it is there and which
+version it runs. A player on a different build of a mod both sides load cannot
+join, and the next sync would only put the server's back.
 
-A player can install their own mods and delete their own mods. A server's mod
-can be **turned off but not removed**: the file stays where the next sync
-expects it, and the list stays the server's. The guard lives in `remove_in`
-rather than the UI, so disabling a mod and then deleting it is not a way
-around; the button is also disabled, because offering one that always fails is
-worse than not offering it.
+**The first version of this was wrong, and claimed here to be done.** It tagged
+records, but a jar with no public download travels as an override and lands
+with no record at all — so the mods a server most needs to keep, its private
+ones, were the only ones a player could delete. It also left two roads around
+the rule: updating a server mod deleted the server's file and rewrote the
+record as the player's own, and a cancelled import saved everything untagged.
+An adversarial review found all three, and the first by running it.
 
-Still open here: `server_only` is dropped by `notes_for` for any record whose
-jar declares no side, and the "keep or drop the server-only mods" choice on
-import needs the server transport (item 3) before it means anything.
+What holds now, each pinned by a test that fails without its fix:
+
+- `claim_for_server` gives every content file on disk a record — one that says
+  nothing except whose it is, when nothing else is known — rather than tagging
+  only the records that happen to exist.
+- `share::pack::import` is the one sequence the command and the tests both run,
+  and it claims a server pack's files on **every** exit, including an error or a
+  cancel, because the caller saves a partial import rather than discarding it.
+- `install_into` refuses to replace a server's mod before downloading or
+  deleting anything, and `check_updates` never queues one.
+- The removal guard is in `remove_in`, so disabling then deleting is not a way
+  around it; the UI's button is disabled too.
+
+Also fixed in the same pass: artwork is written under Geode's own name and only
+in the formats and size the app's own picker accepts (a pack-chosen name like
+`C:evil.png` joins as a drive-relative path on Windows); a referenced mod the
+sharer had turned off now arrives turned off; a download failing partway keeps
+the records of the ones that arrived, since a CurseForge jar cannot be
+re-identified by hash later; an unsafe reference path is reported rather than
+skipped; and export takes its format from the button pressed, never from a
+file name the Linux save dialog may not have given an extension.
+
+**Not covered by an offline test:** keeping records after a partial download
+failure, and the disabled state being honoured at download time. Both need a
+live CurseForge response to exercise; the note side of the second is tested.
+
+Still open: `server_only` is dropped by `notes_for` for any record whose jar
+declares no side, and the "keep or drop the server-only mods" choice on import
+needs the server transport (item 3) before it means anything.
 
 ## What needs you
 

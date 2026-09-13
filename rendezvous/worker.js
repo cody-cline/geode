@@ -113,6 +113,42 @@ const str = (value, max) => (typeof value === "string" ? value.slice(0, max) : "
 const live = (share) => !!share && share.expires * 1000 > Date.now();
 
 /**
+ * A request body as text, or null once it passes `max` bytes.
+ *
+ * A declared length over the limit is refused without reading anything. A
+ * chunked body declares nothing, so it is counted as it arrives and the stream
+ * is cancelled the moment it passes the limit — which discards the rest
+ * without buffering it, and still leaves the connection correctly framed.
+ */
+async function readCapped(request, max) {
+  if (!request.body) return "";
+  if (Number(request.headers.get("content-length")) > max) {
+    await request.body.cancel();
+    return null;
+  }
+  const reader = request.body.getReader();
+  const chunks = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(size);
+  let at = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+/**
  * One share.
  *
  * Per key rather than one object holding every share, so nothing serialises
@@ -126,12 +162,8 @@ export class ShareRegistry {
   }
 
   async fetch(request) {
-    // Drain the body first, whatever we intend to answer.
-    //
-    // Responding while bytes are still unread leaves the connection
-    // mis-framed, and it is the *next* request on that connection that then
-    // fails — so a rejected share breaks an unrelated one, which is about the
-    // most confusing failure available. Read once, up front, then decide.
+    // Already read and bounded by the entry point below, which is the only way
+    // to reach this object — a Durable Object has no public address of its own.
     const text = request.body ? await request.text() : "";
 
     if (request.method === "GET") {
@@ -158,10 +190,6 @@ export class ShareRegistry {
       // every player, so anything a holder can do, every player can do.
       if (live(this.ctx.storage.kv.get("share"))) {
         return json({ error: "this code is already in use" }, 409);
-      }
-
-      if (text.length > MAX_BODY) {
-        return json({ error: "too large — this stores pointers, not files" }, 413);
       }
 
       let body;
@@ -209,6 +237,22 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
+    // Deal with the body before anything else, and never by reading all of it.
+    //
+    // It has to be dealt with: answering while bytes are still unread leaves
+    // the connection mis-framed, and it is the *next* request on it that fails
+    // — so a rejected share breaks an unrelated one. That includes the early
+    // answers here, a malformed key or a 404. And it must not simply be read:
+    // checking size only afterwards means a 90 MB body is paid for in full,
+    // near twice that as a string, in an isolate capped at 128 MB, which dies
+    // before it can refuse. It has to be done here rather than in the object,
+    // too: forwarding the raw stream and letting the object refuse leaves this
+    // side still pumping bytes into a response that has already been sent.
+    const text = await readCapped(request, MAX_BODY);
+    if (text === null) {
+      return json({ error: "too large — this stores pointers, not files" }, 413);
+    }
+
     if (request.method === "OPTIONS") return preflight();
 
     // A landing page so a code can be sent as a link. The code travels in the
@@ -229,8 +273,16 @@ export default {
     // answer 404 from the object itself, so neither can be probed for.
     if (!KEY.test(key)) return json({ error: "malformed key" }, 400);
 
+    // Forward a request carrying the bounded text rather than the original
+    // stream. Only a PUT has a body worth passing on, and a GET may not have
+    // one at all.
+    const forwarded = new Request(request.url, {
+      method: request.method,
+      headers: { "content-type": "application/json" },
+      body: request.method === "PUT" ? text : undefined,
+    });
     const id = env.SHARES.idFromName(key);
-    return env.SHARES.get(id).fetch(request);
+    return env.SHARES.get(id).fetch(forwarded);
   },
 };
 

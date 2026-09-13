@@ -88,7 +88,7 @@ async fn notes_for(paths: &Paths, instance: &Instance) -> Vec<FileNote> {
         // launcher leaves its record behind forever — the module says as much,
         // and nothing prunes it — so a reference written from the record alone
         // would promise the recipient a mod the sharer does not actually have.
-        let Some(full) = on_disk(&game_dir, &rel).await else {
+        let Some((full, disabled)) = on_disk(&game_dir, &rel).await else {
             continue;
         };
 
@@ -110,6 +110,10 @@ async fn notes_for(paths: &Paths, instance: &Instance) -> Vec<FileNote> {
             path: rel.to_string_lossy().replace('\\', "/"),
             side,
             server_only: record.sharing.server_only,
+            // Only a reference needs telling. A file carried as bytes keeps its
+            // `.disabled` name on the way through, and a note written for its
+            // side alone would be saying it twice.
+            disabled: disabled && source.is_some(),
             source,
             manual: false,
         });
@@ -117,24 +121,29 @@ async fn notes_for(paths: &Paths, instance: &Instance) -> Vec<FileNote> {
     out
 }
 
-/// The file a record refers to, enabled or not.
+/// The file a record refers to, and whether it is turned off.
 ///
 /// Records are keyed by the enabled name, so a mod that has been turned off is
 /// `foo.jar` in the record and `foo.jar.disabled` on disk. Both count as having
 /// the file.
-async fn on_disk(game_dir: &Path, rel: &Path) -> Option<PathBuf> {
+async fn on_disk(game_dir: &Path, rel: &Path) -> Option<(PathBuf, bool)> {
     let enabled = game_dir.join(rel);
     if tokio::fs::metadata(&enabled).await.is_ok() {
-        return Some(enabled);
+        return Some((enabled, false));
     }
 
-    let mut name = rel.file_name()?.to_os_string();
-    name.push(instance::content::DISABLED_SUFFIX);
-    let disabled = game_dir.join(rel.with_file_name(name));
+    let disabled = game_dir.join(disabled_name(rel)?);
     tokio::fs::metadata(&disabled)
         .await
         .is_ok()
-        .then_some(disabled)
+        .then_some((disabled, true))
+}
+
+/// `mods/foo.jar` → `mods/foo.jar.disabled`.
+fn disabled_name(rel: &Path) -> Option<PathBuf> {
+    let mut name = rel.file_name()?.to_os_string();
+    name.push(instance::content::DISABLED_SUFFIX);
+    Some(rel.with_file_name(name))
 }
 
 /// Where a recipient should fetch a file, when the index cannot say.
@@ -290,7 +299,11 @@ pub fn apply(manifest: &Manifest, instance: &mut Instance) {
     // that could point at a directory on somebody else's machine.
 }
 
-/// Apply the Geode half of a pack to the instance the mrpack half just built.
+/// Import a pack into a freshly created instance — both halves, in order.
+///
+/// The mrpack half runs first and builds a working instance any launcher would
+/// recognise; the Geode half then applies what `.mrpack` has nowhere to put.
+/// This is the one sequence the app runs, so it is also the one the tests run.
 ///
 /// `Ok(vec![])` means everything the pack named is now on disk. Anything in the
 /// returned list is a file the manifest pointed at that the recipient has to
@@ -298,8 +311,11 @@ pub fn apply(manifest: &Manifest, instance: &mut Instance) {
 /// pack said where each mod lives instead of carrying somebody else's jar, and
 /// a named list is more actionable than an instance that is quietly incomplete.
 ///
-/// A plain `.mrpack` has no Geode half, so this does nothing and says so.
-pub async fn apply_pack(
+/// On any exit, including an error or a cancel, whatever landed from a server's
+/// pack has already been claimed for the server. The caller saves a partial
+/// import rather than discarding it, so the ownership has to be right before
+/// the failure is reported, not only on success.
+pub async fn import(
     client: &reqwest::Client,
     paths: &Paths,
     instance: &mut Instance,
@@ -311,26 +327,40 @@ pub async fn apply_pack(
     let manifest = tokio::task::spawn_blocking(move || read_manifest(&probe))
         .await
         .map_err(|e| Error::msg(format!("reading the pack's manifest panicked: {e}")))??;
-    let Some(manifest) = manifest else {
-        return Ok(Vec::new());
-    };
 
-    apply(&manifest, instance);
-    extract_media(paths, instance, archive, &manifest).await?;
-
-    let missing =
-        resolve_references(client, paths, instance, &manifest, curseforge_key, progress).await?;
-
-    // Everything that arrived with a server's pack is the server's, however it
-    // arrived — through the index, through a reference, or as an override. A
-    // player may turn any of it off; the list itself is not theirs to edit.
-    if manifest.kind == Kind::Server {
-        for record in &mut instance.content {
-            record.origin = instance::content::Origin::Server;
+    let outcome = async {
+        instance::modpack::import_into(client, paths, instance, archive, curseforge_key, progress)
+            .await?;
+        match &manifest {
+            Some(manifest) => {
+                apply_pack(client, paths, instance, archive, manifest, curseforge_key, progress)
+                    .await
+            }
+            // A plain `.mrpack` has no Geode half.
+            None => Ok(Vec::new()),
         }
     }
+    .await;
 
-    Ok(missing)
+    if manifest.as_ref().is_some_and(|m| m.kind == Kind::Server) {
+        instance::content::claim_for_server(paths, instance).await?;
+    }
+    outcome
+}
+
+/// Apply the Geode half to the instance the mrpack half just built.
+async fn apply_pack(
+    client: &reqwest::Client,
+    paths: &Paths,
+    instance: &mut Instance,
+    archive: &Path,
+    manifest: &Manifest,
+    curseforge_key: Option<&str>,
+    progress: &Progress,
+) -> Result<Vec<String>> {
+    apply(manifest, instance);
+    extract_media(paths, instance, archive, manifest).await?;
+    resolve_references(client, paths, instance, manifest, curseforge_key, progress).await
 }
 
 /// Copy the pack's artwork out of `geode/` and point the instance at it.
@@ -357,24 +387,41 @@ async fn extract_media(
     let archive = archive.to_path_buf();
     let media_dir = media.clone();
     let written = tokio::task::spawn_blocking(move || -> Result<Vec<(String, bool)>> {
+        use std::io::Read;
         let file = std::fs::File::open(&archive)?;
         let mut zip = zip::ZipArchive::new(file)?;
         let mut out = Vec::new();
         for (entry, is_icon) in wanted {
-            // Only ever from inside `geode/`, and only ever a bare file name on
-            // the way out, so a crafted entry cannot write outside the folder.
-            if !entry.starts_with("geode/media/") {
-                continue;
-            }
-            let Some(name) = Path::new(&entry).file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
             let Ok(mut source) = zip.by_name(&entry) else {
                 continue;
             };
-            let mut dest = std::fs::File::create(media_dir.join(name))?;
-            std::io::copy(&mut source, &mut dest)?;
-            out.push((name.to_string(), is_icon));
+            // The name on disk is ours, never the pack's. Taking the entry's
+            // file name looks safe and is not: on Windows `C:evil.dll` is a
+            // single component that `join` treats as a drive-relative path and
+            // writes wherever the process happens to be running. Only the
+            // extension is taken, and only one the app would accept from its
+            // own image picker.
+            let Some(ext) = Path::new(&entry)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase())
+                .filter(|e| matches!(e.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif"))
+            else {
+                continue;
+            };
+            let name = format!("{}.{ext}", if is_icon { "icon" } else { "banner" });
+
+            // The same ceiling as a picture chosen by hand, and enforced on the
+            // bytes rather than the header, which a crafted zip can understate.
+            const MAX_BYTES: u64 = 8 * 1024 * 1024;
+            let mut dest = std::fs::File::create(media_dir.join(&name))?;
+            let copied = std::io::copy(&mut (&mut source).take(MAX_BYTES + 1), &mut dest)?;
+            if copied > MAX_BYTES {
+                drop(dest);
+                let _ = std::fs::remove_file(media_dir.join(&name));
+                continue;
+            }
+            out.push((name, is_icon));
         }
         Ok(out)
     })
@@ -427,6 +474,10 @@ async fn resolve_references(
 
         let rel = Path::new(&note.path);
         if !crate::paths::is_safe_relative(rel) {
+            // Refused, and said so. An empty list has to mean everything the
+            // pack named arrived — and a pack naming `../../` is exactly the
+            // one somebody most needs to hear about.
+            missing.push(format!("{} (not a safe path, so it was not fetched)", note.path));
             continue;
         }
         let Some(kind) = kind_for(rel) else {
@@ -466,13 +517,23 @@ async fn resolve_references(
             continue;
         };
 
+        // Arrives in whichever state the sharer had it. The record stays on the
+        // enabled name either way, which is how every record is keyed.
+        let dest = if note.disabled {
+            match disabled_name(rel) {
+                Some(off) => game_dir.join(off),
+                None => game_dir.join(rel),
+            }
+        } else {
+            game_dir.join(rel)
+        };
         downloads.push(
-            crate::net::Download::new(file.url.clone(), game_dir.join(rel))
+            crate::net::Download::new(file.url.clone(), dest.clone())
                 .sha1(file.sha1.clone())
                 .size(file.size)
                 .label(note.path.clone()),
         );
-        records.push(instance::content::ContentRecord {
+        records.push((dest, instance::content::ContentRecord {
             file_name: rel
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
@@ -489,12 +550,21 @@ async fn resolve_references(
             sharing: Default::default(),
             origin: Default::default(),
             requires: None,
-        });
+        }));
     }
 
     progress.stage("Downloading referenced content", downloads.len() as u64).await;
-    crate::net::fetch_all(client, downloads, progress, 8).await?;
-    instance.content.extend(records);
+    let fetched = crate::net::fetch_all(client, downloads, progress, 8).await;
+
+    // Record what arrived even if something else did not. A download writes to
+    // a `.part` file and renames only on success, so a destination that exists
+    // is one that completed. Dropping every record because one of five failed
+    // would leave four working jars as untracked files — and a CurseForge jar
+    // cannot be re-identified by hash later, so they would stay that way.
+    instance
+        .content
+        .extend(records.into_iter().filter(|(dest, _)| dest.is_file()).map(|(_, r)| r));
+    fetched?;
 
     Ok(missing)
 }
@@ -907,6 +977,8 @@ mod tests {
     // The round trip
     // -----------------------------------------------------------------------
 
+    use crate::instance::content::Origin;
+
     /// The whole point of the format: what goes out comes back. Before this,
     /// Geode could write a `.geodepack` and then silently drop its own name,
     /// notes, memory and artwork on the way back in.
@@ -931,18 +1003,8 @@ mod tests {
             .unwrap();
 
         // A fresh instance, standing in for somebody else's machine.
-        let mut arrived = instance();
-        arrived.id = "arrived".into();
-        let missing = apply_pack(
-            &reqwest::Client::new(),
-            &paths,
-            &mut arrived,
-            &dest,
-            None,
-            &Progress::silent("t"),
-        )
-        .await
-        .unwrap();
+        let mut arrived = fresh("arrived");
+        let missing = import_offline(&paths, &mut arrived, &dest).await.unwrap();
 
         assert_eq!(arrived.name, "My Pack");
         assert_eq!(arrived.notes, "read me");
@@ -961,93 +1023,10 @@ mod tests {
         assert!(missing[0].contains("CurseForge API key"), "{missing:?}");
     }
 
-    /// Everything that arrives with a server's pack belongs to the server,
-    /// however it arrived. A player may turn any of it off; the list is not
-    /// theirs to edit, because sharing runs one way.
-    #[tokio::test]
-    async fn a_server_pack_marks_everything_it_brought_as_the_servers() {
-        let (paths, mut inst) = fixture("srv", &[("mods", "anticheat.jar")]).await;
-
-        let manifest = Manifest {
-            geode_format: FORMAT,
-            kind: Kind::Server,
-            profile: Profile { name: "Survival".into(), ..Default::default() },
-            icon: None,
-            banner: None,
-            source: None,
-            files: Vec::new(),
-        };
-        let dest = paths.root.join("server.geodepack");
-        write_geode_only_pack(&dest, &manifest);
-
-        // As if the mrpack half had just installed these.
-        inst.content = vec![
-            record("modrinth", "anticheat.jar", ContentKind::Mod),
-            record("modrinth", "sodium.jar", ContentKind::Mod),
-        ];
-
-        apply_pack(
-            &reqwest::Client::new(),
-            &paths,
-            &mut inst,
-            &dest,
-            None,
-            &Progress::silent("t"),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(inst.name, "Survival");
-        assert!(
-            inst.content
-                .iter()
-                .all(|r| r.origin == crate::instance::content::Origin::Server),
-            "a server pack left something marked as the player's own"
-        );
-    }
-
-    /// A pack from a person, not a server, leaves the recipient in charge of
-    /// their own mods — they can delete any of them.
-    #[tokio::test]
-    async fn a_personal_pack_leaves_its_content_the_recipients_own() {
-        let (paths, mut inst) = fixture("pers", &[("mods", "sodium.jar")]).await;
-
-        let manifest = Manifest {
-            geode_format: FORMAT,
-            kind: Kind::Instance,
-            profile: Profile { name: "Mine".into(), ..Default::default() },
-            icon: None,
-            banner: None,
-            source: None,
-            files: Vec::new(),
-        };
-        let dest = paths.root.join("personal.geodepack");
-        write_geode_only_pack(&dest, &manifest);
-
-        inst.content = vec![record("modrinth", "sodium.jar", ContentKind::Mod)];
-        apply_pack(
-            &reqwest::Client::new(),
-            &paths,
-            &mut inst,
-            &dest,
-            None,
-            &Progress::silent("t"),
-        )
-        .await
-        .unwrap();
-
-        assert!(
-            inst.content
-                .iter()
-                .all(|r| r.origin == crate::instance::content::Origin::User),
-            "a personal pack must not lock the recipient out of their own mods"
-        );
-    }
-
-    /// Both halves together, in the order the app runs them: the mrpack reader
-    /// first, then the Geode half. This is what proves `geode/` entries do not
-    /// confuse the override extractor, that nothing Geode adds leaks into the
-    /// game directory, and that a config the author wrote actually arrives.
+    /// Both halves together, in the order the app runs them. This is what
+    /// proves `geode/` entries do not confuse the override extractor, that
+    /// nothing Geode adds leaks into the game directory, and that a config the
+    /// author wrote actually arrives.
     #[tokio::test]
     async fn a_pack_imports_through_the_same_path_the_app_uses() {
         let (paths, mut inst) = fixture(
@@ -1064,51 +1043,318 @@ mod tests {
             .await
             .unwrap();
 
-        let mut arrived = instance();
-        arrived.id = "full-arrived".into();
-        let client = reqwest::Client::new();
-
-        crate::instance::modpack::import_into(
-            &client,
-            &paths,
-            &mut arrived,
-            &dest,
-            None,
-            &Progress::silent("t"),
-        )
-        .await
-        .unwrap();
-        let missing = apply_pack(&client, &paths, &mut arrived, &dest, None, &Progress::silent("t"))
-            .await
-            .unwrap();
+        let mut arrived = fresh("full-arrived");
+        let missing = import_offline(&paths, &mut arrived, &dest).await.unwrap();
 
         assert!(missing.is_empty(), "nothing here needed fetching: {missing:?}");
         assert_eq!(arrived.name, "Full Round");
         assert_eq!(arrived.overrides.java_args.as_deref(), Some("-XX:+UseG1GC"));
 
         let game = paths.game_dir("full-arrived");
-        assert!(
-            game.join("config").join("author.toml").is_file(),
-            "the author's own config did not arrive"
-        );
-        assert!(
-            game.join("mods").join("homemade.jar").is_file(),
-            "the jar with no link to give did not arrive"
-        );
-        assert!(
-            !game.join("geode").exists(),
-            "the Geode half was unpacked into the game directory"
-        );
+        assert!(game.join("config").join("author.toml").is_file(), "the author's config did not arrive");
+        assert!(game.join("mods").join("homemade.jar").is_file(), "the jar with no link did not arrive");
+        assert!(!game.join("geode").exists(), "the Geode half was unpacked into the game directory");
     }
 
-    /// A pack with only the Geode half, for exercising import on its own.
-    fn write_geode_only_pack(dest: &Path, manifest: &Manifest) {
-        use std::io::Write;
-        let file = std::fs::File::create(dest).unwrap();
-        let mut zip = zip::ZipWriter::new(file);
+    /// The bug the first version shipped. A jar with no public download travels
+    /// as an override and lands with no record — so tagging records alone left
+    /// exactly the mods a server most needs to keep, its private ones, as the
+    /// only ones a player could delete.
+    #[tokio::test]
+    async fn a_server_pack_owns_even_the_jars_that_arrive_with_no_record() {
+        let (paths, mut inst) = fixture("srv", &[("mods", "private-anticheat.jar")]).await;
+        inst.content = vec![record("", "private-anticheat.jar", ContentKind::Mod)];
+
+        let dest = paths.root.join("server.geodepack");
+        export(&paths, &inst, dest.clone(), false, &Progress::silent("t"))
+            .await
+            .unwrap();
+        rewrite_pack(&dest, |m| m.kind = Kind::Server, &[]);
+
+        let mut arrived = fresh("srv-arrived");
+        import_offline(&paths, &mut arrived, &dest).await.unwrap();
+
+        let owned = arrived
+            .content
+            .iter()
+            .find(|r| r.file_name == "private-anticheat.jar")
+            .expect("the override-carried jar was given no record");
+        assert_eq!(owned.origin, Origin::Server);
+
+        let mods = paths.game_dir("srv-arrived").join("mods");
+        let err = crate::instance::content::remove_in(
+            &mods,
+            &mut arrived.content,
+            ContentKind::Mod,
+            "private-anticheat.jar",
+        )
+        .await
+        .expect_err("a server's private jar must not be deletable");
+        assert!(err.to_string().contains("cannot be removed"), "{err}");
+        assert!(mods.join("private-anticheat.jar").is_file());
+    }
+
+    /// A server pack that stops halfway is still the server's. The caller saves
+    /// a partial import rather than throwing it away, so ownership has to be
+    /// settled before the failure is reported — not only when all went well.
+    #[tokio::test]
+    async fn a_cancelled_server_import_still_belongs_to_the_server() {
+        let paths = Paths {
+            root: std::env::temp_dir().join(format!("geode-cancel-{}", std::process::id())),
+        };
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+        tokio::fs::create_dir_all(&paths.root).await.unwrap();
+
+        // One index file already present on the recipient's disk, so the
+        // download step completes without the network and then notices the
+        // cancel — deterministic, and offline.
+        let mut arrived = fresh("cancel-arrived");
+        let mods = paths.game_dir("cancel-arrived").join("mods");
+        tokio::fs::create_dir_all(&mods).await.unwrap();
+        tokio::fs::write(mods.join("indexed.jar"), b"indexed").await.unwrap();
+        let sha1 = crate::net::sha1_file(&mods.join("indexed.jar")).await.unwrap();
+
+        let index = serde_json::json!({
+            "formatVersion": 1, "game": "minecraft", "versionId": "1", "name": "S",
+            "files": [{
+                "path": "mods/indexed.jar",
+                "hashes": { "sha1": sha1, "sha512": "unused" },
+                "env": { "client": "required", "server": "required" },
+                "downloads": ["http://127.0.0.1:9/never-fetched.jar"],
+                "fileSize": 7
+            }],
+            "dependencies": { "minecraft": "1.21.1" }
+        });
+        let manifest = Manifest {
+            geode_format: FORMAT,
+            kind: Kind::Server,
+            profile: Profile { name: "Survival".into(), ..Default::default() },
+            icon: None,
+            banner: None,
+            source: None,
+            files: Vec::new(),
+        };
+        let dest = paths.root.join("cancel.geodepack");
+        write_pack(&dest, &index, &manifest, &[("overrides/mods/private.jar", b"private")]);
+
+        let progress = Progress::silent("t");
+        progress.cancel_flag().store(true, std::sync::atomic::Ordering::Relaxed);
+        let result = import(&reqwest::Client::new(), &paths, &mut arrived, &dest, None, &progress).await;
+
+        assert!(result.is_err(), "the import was meant to be cancelled");
+        for file in ["indexed.jar", "private.jar"] {
+            let record = arrived
+                .content
+                .iter()
+                .find(|r| r.file_name == file)
+                .unwrap_or_else(|| panic!("{file} landed but was left unowned: {:?}", arrived.content));
+            assert_eq!(record.origin, Origin::Server, "{file}");
+        }
+    }
+
+    /// A pack from a person, not a server, leaves the recipient in charge of
+    /// their own mods — they can delete any of them.
+    #[tokio::test]
+    async fn a_personal_pack_leaves_its_content_the_recipients_own() {
+        let (paths, mut inst) = fixture("pers", &[("mods", "homemade.jar")]).await;
+        inst.content = vec![record("", "homemade.jar", ContentKind::Mod)];
+
+        let dest = paths.root.join("personal.geodepack");
+        export(&paths, &inst, dest.clone(), false, &Progress::silent("t"))
+            .await
+            .unwrap();
+
+        let mut arrived = fresh("pers-arrived");
+        import_offline(&paths, &mut arrived, &dest).await.unwrap();
+
+        assert!(
+            arrived.content.iter().all(|r| r.origin == Origin::User),
+            "a personal pack must not lock the recipient out of their own mods"
+        );
+        let mods = paths.game_dir("pers-arrived").join("mods");
+        crate::instance::content::remove_in(&mods, &mut arrived.content, ContentKind::Mod, "homemade.jar")
+            .await
+            .unwrap();
+    }
+
+    /// A reference is fetched fresh, so a mod the sharer turned off has to say
+    /// so or it arrives switched on — the one they turned off because it
+    /// crashed, now crashing for somebody else.
+    #[tokio::test]
+    async fn a_disabled_reference_carries_its_state() {
+        let (paths, mut inst) = fixture(
+            "offref",
+            &[("mods", "crashes.jar.disabled"), ("mods", "fine.jar")],
+        )
+        .await;
+        inst.content = vec![
+            record("curseforge", "crashes.jar", ContentKind::Mod),
+            record("curseforge", "fine.jar", ContentKind::Mod),
+        ];
+
+        let manifest = manifest_for(&paths, &inst).await;
+        assert!(manifest.note("mods/crashes.jar").is_some_and(|n| n.disabled), "{:?}", manifest.files);
+        assert!(manifest.note("mods/fine.jar").is_some_and(|n| !n.disabled), "{:?}", manifest.files);
+        assert_eq!(disabled_name(Path::new("mods/crashes.jar")), Some(PathBuf::from("mods/crashes.jar.disabled")));
+    }
+
+    /// The name artwork is written under is Geode's, never the pack's. On
+    /// Windows a name like `C:evil.png` joins as a drive-relative path and lands
+    /// outside the media folder entirely; this cannot reproduce that on Linux,
+    /// but it does pin that the pack's chosen name never reaches the disk.
+    #[tokio::test]
+    async fn a_pack_cannot_choose_where_its_artwork_is_written() {
+        let (paths, inst) = fixture("art", &[("config", "x.toml")]).await;
+        let dest = paths.root.join("art.geodepack");
+        export(&paths, &inst, dest.clone(), false, &Progress::silent("t"))
+            .await
+            .unwrap();
+        rewrite_pack(
+            &dest,
+            |m| {
+                m.icon = Some("geode/media/C:evil.png".into());
+                m.banner = Some("geode/media/payload.dll".into());
+            },
+            &[
+                ("geode/media/C:evil.png", b"PNG".to_vec()),
+                ("geode/media/payload.dll", b"MZ".to_vec()),
+            ],
+        );
+
+        let mut arrived = fresh("art-arrived");
+        import_offline(&paths, &mut arrived, &dest).await.unwrap();
+
+        assert_eq!(arrived.icon.as_deref(), Some("icon.png"));
+        assert_eq!(arrived.banner, None, "a non-image banner must be refused");
+        let names: Vec<String> = std::fs::read_dir(paths.instance_media("art-arrived"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["icon.png".to_string()], "{names:?}");
+    }
+
+    /// An "icon" is not a way to fill somebody's disk. Held to the same eight
+    /// megabytes as a picture chosen by hand.
+    #[tokio::test]
+    async fn oversized_artwork_is_refused() {
+        let (paths, inst) = fixture("big", &[("config", "x.toml")]).await;
+        let dest = paths.root.join("big.geodepack");
+        export(&paths, &inst, dest.clone(), false, &Progress::silent("t"))
+            .await
+            .unwrap();
+        rewrite_pack(
+            &dest,
+            |m| m.icon = Some("geode/media/icon.png".into()),
+            &[("geode/media/icon.png", vec![0u8; 9 * 1024 * 1024])],
+        );
+
+        let mut arrived = fresh("big-arrived");
+        import_offline(&paths, &mut arrived, &dest).await.unwrap();
+        assert_eq!(arrived.icon, None);
+        assert!(!paths.instance_media("big-arrived").join("icon.png").exists());
+    }
+
+    /// Refusing a path is not enough on its own; the refusal has to be said.
+    /// An empty list means everything the pack named arrived, and a pack that
+    /// names `../../` is exactly the one somebody most needs to hear about.
+    #[tokio::test]
+    async fn an_unsafe_reference_is_reported_rather_than_skipped() {
+        let (paths, inst) = fixture("unsafe", &[("config", "x.toml")]).await;
+        let dest = paths.root.join("unsafe.geodepack");
+        export(&paths, &inst, dest.clone(), false, &Progress::silent("t"))
+            .await
+            .unwrap();
+        rewrite_pack(
+            &dest,
+            |m| {
+                m.files.push(FileNote {
+                    path: "../../mods/escape.jar".into(),
+                    side: None,
+                    server_only: false,
+                    source: Some(SourceRef {
+                        provider: "curseforge".into(),
+                        project_id: "1".into(),
+                        version_id: "2".into(),
+                    }),
+                    disabled: false,
+                    manual: false,
+                })
+            },
+            &[],
+        );
+
+        let mut arrived = fresh("unsafe-arrived");
+        let missing = import_offline(&paths, &mut arrived, &dest).await.unwrap();
+        assert!(missing.iter().any(|m| m.contains("not a safe path")), "{missing:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Helpers for building and bending packs
+    // -----------------------------------------------------------------------
+
+    fn fresh(id: &str) -> Instance {
+        let mut i = instance();
+        i.id = id.into();
+        i
+    }
+
+    /// The app's own import sequence, with no key and a client that is never
+    /// used — none of these fixtures download anything.
+    async fn import_offline(paths: &Paths, inst: &mut Instance, archive: &Path) -> Result<Vec<String>> {
+        import(&reqwest::Client::new(), paths, inst, archive, None, &Progress::silent("t")).await
+    }
+
+    /// Rewrite an exported pack in place: edit its manifest, add entries.
+    ///
+    /// For building packs Geode would never write itself — a server pack, a
+    /// hostile one — out of one it did, so the rest stays realistic.
+    fn rewrite_pack(archive: &Path, edit: impl FnOnce(&mut Manifest), extra: &[(&str, Vec<u8>)]) {
+        use std::io::{Read, Write};
+        let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
+        {
+            let mut zip = zip::ZipArchive::new(std::fs::File::open(archive).unwrap()).unwrap();
+            for i in 0..zip.len() {
+                let mut e = zip.by_index(i).unwrap();
+                let mut bytes = Vec::new();
+                e.read_to_end(&mut bytes).unwrap();
+                entries.push((e.name().to_string(), bytes));
+            }
+        }
+        let mut manifest: Manifest = entries
+            .iter()
+            .find(|(n, _)| n == Manifest::PATH)
+            .map(|(_, b)| serde_json::from_slice(b).unwrap())
+            .expect("an exported pack has a manifest");
+        edit(&mut manifest);
+
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(archive).unwrap());
         let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        for (name, bytes) in entries.iter().filter(|(n, _)| n != Manifest::PATH) {
+            zip.start_file(name.as_str(), options).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        zip.start_file(Manifest::PATH, options).unwrap();
+        zip.write_all(&serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+        for (name, bytes) in extra {
+            zip.start_file(*name, options).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    /// A pack built from parts, for the cases no export produces.
+    fn write_pack(dest: &Path, index: &serde_json::Value, manifest: &Manifest, extra: &[(&str, &[u8])]) {
+        use std::io::Write;
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(dest).unwrap());
+        let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        zip.start_file("modrinth.index.json", options).unwrap();
+        zip.write_all(&serde_json::to_vec(index).unwrap()).unwrap();
         zip.start_file(Manifest::PATH, options).unwrap();
         zip.write_all(&serde_json::to_vec_pretty(manifest).unwrap()).unwrap();
+        for (name, bytes) in extra {
+            zip.start_file(*name, options).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
         zip.finish().unwrap();
     }
 

@@ -130,6 +130,15 @@ pub struct FileNote {
     /// Where to get it, when it is not something the index can point at.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<SourceRef>,
+    /// The sharer had this turned off.
+    ///
+    /// A file carried as bytes keeps its `.disabled` name on its own, but a
+    /// reference is fetched fresh, so without this a mod somebody switched off
+    /// because it crashed would arrive switched on and crash for the recipient
+    /// too. Kept apart from `path`, which stays on the enabled name so the
+    /// reference and the exporter's skip set go on matching.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
     /// The recipient has to fetch this one themselves.
     ///
     /// Set when a project's author has turned off third-party downloads. That
@@ -180,6 +189,7 @@ mod tests {
                 server_only: false,
                 source: None,
                 manual: false,
+                disabled: false,
             }],
         }
     }
@@ -203,6 +213,7 @@ mod tests {
         // And a file with nothing to say about it carries no flag either.
         assert!(!json.contains("serverOnly"));
         assert!(!json.contains("manual"));
+        assert!(!json.contains("disabled"));
         assert!(!json.contains("source"));
     }
 
@@ -221,6 +232,7 @@ mod tests {
                 version_id: "67890".into(),
             }),
             manual: true,
+            disabled: false,
         };
         let json = serde_json::to_string(&note).unwrap();
         assert!(json.contains("\"manual\":true"));
