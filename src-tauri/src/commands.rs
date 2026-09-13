@@ -1173,6 +1173,11 @@ pub struct ServerView {
     /// Whether it hosts a world of its own. A proxy does not, so it has no
     /// place to put datapacks and no level to configure.
     pub has_world: bool,
+    /// The loader its mods are built for — "forge" for a Mohist server, not
+    /// "mohist". Sent rather than derived in the UI so the hybrids stay right
+    /// in one place: this is what a search has to be narrowed to, and getting
+    /// it wrong is how a Forge server ends up being offered Fabric mods.
+    pub mod_loader: Option<String>,
     /// Absolute paths to the uploaded images, resolved the same way an
     /// instance's are.
     pub icon_path: Option<String>,
@@ -1191,6 +1196,7 @@ fn server_view(server: crate::server::Server, state: &AppState) -> ServerView {
         installed: server.is_installed(),
         kind_name: server.kind.display_name().to_string(),
         has_world: !server.kind.is_proxy(),
+        mod_loader: server.kind.mod_loader().map(str::to_string),
         // Moved last, so the capabilities above can still read it.
         server,
     }
@@ -1881,8 +1887,21 @@ pub async fn install_server_content(
         _ => Vec::new(),
     };
 
+    // Falling back to "any loader" is right for a plugin and wrong for a mod.
+    // Plugins are routinely published with no loader tag at all — most of
+    // SpigotMC predates the idea — so insisting on one would refuse files that
+    // work. A mod always declares its loader, so an untagged match is not a
+    // lenient reading of the metadata, it is a Fabric jar being put into a
+    // Forge server, where it will not load and will not say why.
+    let allow_any_loader = kind != ContentKind::Mod;
+    let attempts: Vec<Option<&str>> = loaders
+        .iter()
+        .map(|l| Some(*l))
+        .chain(allow_any_loader.then_some(None))
+        .collect();
+
     let mut chosen: Option<Version> = None;
-    for loader in loaders.iter().map(|l| Some(*l)).chain(std::iter::once(None)) {
+    for loader in attempts {
         let versions = providers::versions(
             &state.http,
             provider,

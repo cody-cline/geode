@@ -99,6 +99,16 @@ export interface ServerBrowse {
    * than the loader, so every server that hosts one takes them.
    */
   kind: "plugin" | "mod" | "datapack";
+  /** The Minecraft version the server runs, so results are scoped to it. */
+  mcVersion: string;
+  /**
+   * The loader its mods are built for, from the backend rather than guessed
+   * at here — `null` when the folder is not loader-specific.
+   *
+   * Plugins deliberately have none: a Bukkit plugin runs on Paper, Spigot and
+   * Purpur alike, and narrowing to one of those hides the rest.
+   */
+  loader: string | null;
   onInstall: (project: Project) => void;
 }
 
@@ -518,14 +528,22 @@ export default function Browse({
   // fixed, so narrowing is helpful. Global browse shows everything unless the
   // user asks otherwise, because hiding a mod that would have worked is worse
   // than showing one that will not.
+  // A server scopes automatically for the same reason an instance does, and it
+  // needs its own branch: without one it fell through to global browse, where
+  // the filters it never shows are empty — so a Forge server was asking for
+  // every mod of every loader and every version, and being given them.
   const gameVersion = lockedInstance
     ? lockedInstance.mcVersion
-    : filterVersion || null;
+    : server
+      ? server.mcVersion
+      : filterVersion || null;
   const loader = lockedInstance
     ? lockedInstance.loader !== "vanilla"
       ? lockedInstance.loader
       : null
-    : filterLoader || null;
+    : server
+      ? server.loader
+      : filterLoader || null;
 
   // Whether Fabric mods can be offered for the current target. The answer
   // comes from the files Connector publishes, so it needs no local version

@@ -242,6 +242,11 @@ export interface Server {
    * datapacks.
    */
   hasWorld: boolean;
+  /**
+   * The loader its mods are built for — `forge` for a Mohist server, not
+   * `mohist`. `null` when it takes no mods at all.
+   */
+  modLoader?: string | null;
 }
 
 /**

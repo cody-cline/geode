@@ -245,6 +245,11 @@ export default function ServerView({ id }: { id: string }) {
           name: server.name,
           installed: present,
           kind: adding,
+          mcVersion: server.mcVersion,
+          // Only the mods folder is loader-specific. A Bukkit plugin runs on
+          // Paper, Spigot and Purpur alike, so narrowing plugins to one of
+          // those would hide most of them.
+          loader: adding === "mod" ? (server.modLoader ?? null) : null,
           onInstall: (project) => {
             void api
               .installServerContent(id, project.provider, project.id, adding)
