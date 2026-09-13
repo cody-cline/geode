@@ -151,19 +151,42 @@ pub async fn run_due(sink: &EventSink, paths: &Paths, servers: &ServerRegistry, 
     }
 }
 
-/// Start the ticker for the life of the app.
-pub fn spawn(sink: EventSink, paths: Paths, servers: ServerRegistry) {
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(TICK);
-        loop {
-            ticker.tick().await;
-            run_due(&sink, &paths, &servers, chrono::Utc::now().timestamp()).await;
-        }
-    });
+/// The ticker that runs scheduled work, for the life of the app.
+///
+/// Returns the loop rather than spawning it. Whoever owns a runtime decides how
+/// to run it — which is the point of this module not knowing whether it is
+/// inside a desktop app or a daemon, and also avoids the trap that `tokio::spawn`
+/// requires an active runtime context. Tauri's `setup` hook is not one, so
+/// spawning here panicked with "there is no reactor running".
+pub async fn ticker(sink: EventSink, paths: Paths, servers: ServerRegistry) {
+    let mut ticker = tokio::time::interval(TICK);
+    loop {
+        ticker.tick().await;
+        run_due(&sink, &paths, &servers, chrono::Utc::now().timestamp()).await;
+    }
 }
 
 #[cfg(test)]
 mod tests {
+
+    /// Creating the ticker does no work and needs no runtime.
+    ///
+    /// The real guard against the bug this replaced — `tokio::spawn` inside the
+    /// library, which panics with "there is no reactor running" when called
+    /// from Tauri's `setup` hook — is the signature: `lib.rs` spawns what this
+    /// returns, so a version that spawns for itself returns `()` and does not
+    /// compile. This pins the other half, that merely building it is inert.
+    #[test]
+    fn the_ticker_can_be_built_without_a_runtime() {
+        let sink: crate::events::EventSink =
+            std::sync::Arc::new(crate::events::Recorder::default());
+        let paths = Paths {
+            root: std::env::temp_dir().join("geode-ticker-test"),
+        };
+        // Never awaited: creating it is the whole assertion. If this function
+        // spawns rather than returns, this line panics.
+        let _loop = ticker(sink, paths, ServerRegistry::default());
+    }
     use super::*;
 
     fn every(minutes: u32, last_run: Option<i64>) -> Schedule {

@@ -57,11 +57,13 @@ pub fn run() {
             // every pass.
             let servers = state.servers.clone();
             app.manage(state);
-            crate::server::schedule::spawn(
+            // Tauri's own spawn, because `setup` runs before any Tokio
+            // runtime context exists and `tokio::spawn` would panic here.
+            tauri::async_runtime::spawn(crate::server::schedule::ticker(
                 crate::desktop::sink(app.handle().clone()),
                 paths,
                 servers,
-            );
+            ));
             Ok(())
         })
         .on_window_event(|window, event| {
