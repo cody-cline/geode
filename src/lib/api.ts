@@ -15,6 +15,11 @@ import type {
   Instance,
   InstanceOverrides,
   JavaInstall,
+  JoinInput,
+  JoinLink,
+  JoinOutcome,
+  JoinPreview,
+  PackInfo,
   KeyCheck,
   LinkReport,
   LogFile,
@@ -36,6 +41,9 @@ import type {
   ServerKindInfo,
   ServerProperty,
   ServerSettings,
+  ServerShareView,
+  ShareSettings,
+  ShareStatus,
   UpdateCandidate,
 } from "./types";
 
@@ -441,4 +449,29 @@ export const api = {
     invoke<string>("export_modpack", { id, dest, includeSaves }),
   exportGeodepack: (id: string, dest: string, includeSaves: boolean) =>
     invoke<string>("export_geodepack", { id, dest, includeSaves }),
+
+  // Sharing a server with players. Status changes also arrive as the
+  // `geode://share-status` event with a ShareStatus payload.
+  getShareStatus: () => invoke<ShareStatus>("get_share_status"),
+  setShareSettings: (settings: ShareSettings) =>
+    invoke<ShareStatus>("set_share_settings", { settings }),
+  getServerShare: (id: string) =>
+    invoke<ServerShareView | null>("get_server_share", { id }),
+  shareServer: (id: string) => invoke<ServerShareView>("share_server", { id }),
+  unshareServer: (id: string) => invoke<void>("unshare_server", { id }),
+  setServerShareConfig: (id: string, includeConfig: boolean) =>
+    invoke<ServerShareView>("set_server_share_config", { id, includeConfig }),
+  rotateServerShareCode: (id: string) =>
+    invoke<ServerShareView>("rotate_server_share_code", { id }),
+  setServerContentExcluded: (id: string, kind: string, file: string, excluded: boolean) =>
+    invoke<void>("set_server_content_excluded", { id, kind, file, excluded }),
+
+  // Joining a shared server. A geode:// link opened while Geode runs arrives
+  // as the `geode://join-link` event (payload: the link string); one that
+  // started Geode is waiting in takePendingJoin.
+  previewJoin: (input: JoinInput) => invoke<JoinPreview>("preview_join", { input }),
+  /** `info` is what the player approved; the import is refused if the downloaded pack describes something else. */
+  joinServer: (link: JoinLink, info: PackInfo, name?: string) =>
+    invoke<JoinOutcome>("join_server", { link, info, name: name ?? null }),
+  takePendingJoin: () => invoke<string | null>("take_pending_join"),
 };

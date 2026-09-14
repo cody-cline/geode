@@ -1,0 +1,154 @@
+/* The two ways in, as a segmented control rather than tabs: they are one form
+   asking for the same thing two ways, not two screens. */
+.modes {
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  align-self: flex-start;
+}
+
+.mode {
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 4px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-dim);
+  transition:
+    background 0.12s var(--ease),
+    color 0.12s var(--ease);
+}
+
+.mode:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.mode:disabled {
+  cursor: not-allowed;
+}
+
+.modeActive,
+.modeActive:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+
+.mono {
+  font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, monospace;
+  font-size: 12px;
+}
+
+.pair {
+  display: grid;
+  grid-template-columns: 3fr 2fr;
+  gap: 10px;
+}
+
+.pending {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  color: var(--text-faint);
+}
+
+.error {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--danger) 38%, var(--border));
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.error svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--danger);
+}
+
+/* What a finished import still needs, one line each. Selectable, because a
+   file name in here is what the player goes and searches for. */
+.problems {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 10px 12px 10px 30px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+/* Never squeezed: the dialog body scrolls instead. Clipping its own corners
+   would otherwise let a short window cut the last facts off unseen. */
+.pack {
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.packHead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 13px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+.packIcon {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  background: var(--surface-3);
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+
+.packName {
+  font-size: 14px;
+  font-weight: 600;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 7px 16px;
+  padding: 12px 13px;
+  font-size: 12.5px;
+}
+
+.facts dt {
+  color: var(--text-faint);
+}
+
+.facts dd {
+  margin: 0;
+  color: var(--text);
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}

@@ -12,6 +12,7 @@ import {
   KeyRound,
   Loader2,
   Palette,
+  Share2,
   Trash2,
   UserRound,
 } from "lucide-react";
@@ -19,8 +20,9 @@ import {
 import AccountsModal from "../components/AccountsModal";
 import { api } from "../lib/api";
 import { hashHue, initials } from "../lib/format";
+import { DEFAULT_SHARE_PORT, parsePort } from "../lib/share";
 import { useStore } from "../lib/store";
-import type { AppInfo, JavaInstall, KeyCheck } from "../lib/types";
+import type { AppInfo, JavaInstall, KeyCheck, ShareSettings } from "../lib/types";
 
 import styles from "./Settings.module.css";
 
@@ -29,6 +31,7 @@ const TABS = [
   { id: "java", label: "Java & Memory", icon: Coffee },
   { id: "accounts", label: "Accounts", icon: UserRound },
   { id: "sources", label: "Mod sources", icon: KeyRound },
+  { id: "sharing", label: "Server sharing", icon: Share2 },
   { id: "about", label: "About", icon: Info },
 ] as const;
 
@@ -93,6 +96,7 @@ export default function Settings() {
           {tab === "java" && <JavaSettings update={update} />}
           {tab === "accounts" && <AccountsSettings update={update} />}
           {tab === "sources" && <Sources />}
+          {tab === "sharing" && <SharingSettings />}
           {tab === "about" && <About />}
         </div>
       </div>
@@ -683,6 +687,188 @@ function Sources() {
           </p>
         </div>
       </section>
+    </div>
+  );
+}
+
+/**
+ * How players reach this machine for every server it shares.
+ *
+ * Saved together with one button rather than field by field: a save is applied
+ * to the listener and the router straight away, and doing that per keystroke
+ * while a port number is half typed would ask the router for ports nobody
+ * wants.
+ */
+function SharingSettings() {
+  const config = useStore((s) => s.config)!;
+  const loadConfig = useStore((s) => s.loadConfig);
+  const setShareStatus = useStore((s) => s.setShareStatus);
+  const toast = useStore((s) => s.toast);
+  const reportError = useStore((s) => s.reportError);
+
+  const saved = config.share;
+  const [port, setPort] = useState(String(saved.port));
+  const [mapping, setMapping] = useState(saved.mapping);
+  const [address, setAddress] = useState(saved.publicAddress ?? "");
+  const [saving, setSaving] = useState(false);
+
+  const parsedPort = parsePort(port);
+  const publicAddress = address.trim() || null;
+  const dirty =
+    parsedPort !== saved.port ||
+    mapping !== saved.mapping ||
+    publicAddress !== saved.publicAddress;
+
+  function reset(from: ShareSettings) {
+    setPort(String(from.port));
+    setMapping(from.mapping);
+    setAddress(from.publicAddress ?? "");
+  }
+
+  async function save() {
+    if (parsedPort === null) return;
+    setSaving(true);
+    try {
+      setShareStatus(
+        await api.setShareSettings({ port: parsedPort, mapping, publicAddress }),
+      );
+      await loadConfig();
+      // Show what was stored, which the backend may have tidied.
+      const stored = useStore.getState().config?.share;
+      if (stored) reset(stored);
+      toast({ kind: "success", title: "Sharing settings saved" });
+    } catch (e) {
+      reportError("Could not save sharing settings", e);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className={styles.form}>
+      <section className={styles.section}>
+        <h2 className={styles.sectionTitle}>Port</h2>
+        <div className={styles.field}>
+          <label className="label" htmlFor="share-port">
+            Port for shared packs
+          </label>
+          <input
+            id="share-port"
+            className="input"
+            style={{ width: 110 }}
+            inputMode="numeric"
+            value={port}
+            onChange={(e) => setPort(e.target.value)}
+          />
+          {parsedPort === null ? (
+            <p className={styles.checkBad}>
+              <AlertTriangle size={13} />
+              <span>A whole number from 1024 to 65535.</span>
+            </p>
+          ) : (
+            <p className="hint">
+              Every server you share is served on this one port. It goes in the
+              link; a player who types your address by hand has to type it too,
+              unless it is {DEFAULT_SHARE_PORT}. Changing it changes every shared
+              server&apos;s link and address.
+            </p>
+          )}
+        </div>
+      </section>
+
+      <section className={styles.section}>
+        <h2 className={styles.sectionTitle}>Router</h2>
+        <label className={styles.toggleRow}>
+          <input
+            type="radio"
+            name="share-mapping"
+            checked={mapping === "auto"}
+            onChange={() => setMapping("auto")}
+          />
+          <span>
+            <strong>Open the port automatically</strong>
+            <span className={styles.toggleHint}>
+              Geode asks your router over UPnP while a server is shared, keeps
+              asking so the opening does not lapse, and closes it when Geode
+              exits. The server page says whether the router opened it and
+              whether the address it reports is one players could reach; Geode
+              cannot test the connection from outside.
+            </span>
+          </span>
+        </label>
+        <label className={styles.toggleRow}>
+          <input
+            type="radio"
+            name="share-mapping"
+            checked={mapping === "manual"}
+            onChange={() => setMapping("manual")}
+          />
+          <span>
+            <strong>Set it up myself</strong>
+            <span className={styles.toggleHint}>
+              Geode changes nothing on the router. Forward TCP port{" "}
+              {parsedPort ?? saved.port} to this computer, or run a tunnel to
+              it. Geode still asks the router what its public address is, and
+              links use it when it really is a public one; when the router will
+              not say, set the public address below.
+            </span>
+          </span>
+        </label>
+      </section>
+
+      <section className={styles.section}>
+        <h2 className={styles.sectionTitle}>Public address</h2>
+        <div className={styles.field}>
+          <label className="label" htmlFor="share-address">
+            Address players connect to
+          </label>
+          <input
+            id="share-address"
+            className="input"
+            value={address}
+            placeholder="play.example.com, host.playit.gg:12345, https://pack.example.com"
+            spellCheck={false}
+            autoComplete="off"
+            onChange={(e) => setAddress(e.target.value)}
+          />
+          <p className="hint">
+            Leave it empty to use the address your router reports. Set it when
+            players reach you another way: a domain pointed at your router, or a
+            TCP tunnel&apos;s host and port, such as playit.gg gives you. Both
+            are still checked against this computer&apos;s certificate, and a
+            TCP tunnel only has to pass the connection through, so it is the
+            simpler of the tunnels to set up.
+          </p>
+          {/* Said up front, because a tunnel set up the usual way fails for
+              every player while nothing on this computer looks wrong: Geode
+              only speaks TLS, with a certificate no authority signed. */}
+          <p className="hint">
+            An https:// address is checked by its certificate authority instead,
+            and whatever serves it — a tunnel or a reverse proxy — has to pass
+            requests on to https://localhost:{parsedPort ?? saved.port}, not
+            http://, with its check of this computer&apos;s certificate turned
+            off, since that certificate is self-signed. With cloudflared, that
+            is --no-tls-verify. Set up any other way, players cannot connect,
+            and nothing here shows it.
+          </p>
+        </div>
+      </section>
+
+      <div className={styles.inlineRow}>
+        <button
+          className="btn btn-primary"
+          onClick={() => void save()}
+          disabled={!dirty || parsedPort === null || saving}
+        >
+          {saving && <Loader2 size={13} className="spin" />}
+          Save
+        </button>
+        {dirty && (
+          <button className="btn" onClick={() => reset(saved)} disabled={saving}>
+            Discard
+          </button>
+        )}
+      </div>
     </div>
   );
 }

@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 
+import JoinModal from "./components/JoinModal";
 import Sidebar from "./components/Sidebar";
 import ProgressDock from "./components/ProgressDock";
 import Toasts from "./components/Toasts";
@@ -18,6 +19,8 @@ import styles from "./App.module.css";
 export default function App() {
   const route = useStore((s) => s.route);
   const init = useStore((s) => s.init);
+  const join = useStore((s) => s.join);
+  const closeJoin = useStore((s) => s.closeJoin);
 
   useEffect(() => {
     void init();
@@ -64,6 +67,10 @@ export default function App() {
         )}
       </main>
       <ProgressDock />
+      {/* Here rather than in a view, because a link can arrive on any screen.
+          Keyed by request, so a different link replaces the dialog outright
+          instead of stacking a second one or inheriting the first's state. */}
+      {join && <JoinModal key={join.seq} request={join} onClose={closeJoin} />}
       <Toasts />
     </div>
   );

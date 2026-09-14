@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import clsx from "clsx";
-import { FileArchive, Loader2, Search } from "lucide-react";
+import { FileArchive, Loader2, Search, Users } from "lucide-react";
 
 import Modal from "./Modal";
 import { api } from "../lib/api";
@@ -18,6 +18,7 @@ export default function NewInstanceModal({ onClose }: { onClose: () => void }) {
   const toast = useStore((s) => s.toast);
   const reportError = useStore((s) => s.reportError);
   const config = useStore((s) => s.config);
+  const openJoin = useStore((s) => s.openJoin);
 
   const [name, setName] = useState("");
   const [nameTouched, setNameTouched] = useState(false);
@@ -178,6 +179,19 @@ export default function NewInstanceModal({ onClose }: { onClose: () => void }) {
           <button className="btn btn-ghost" onClick={importPack} disabled={creating}>
             <FileArchive size={15} />
             Import modpack
+          </button>
+          {/* A joined server becomes an instance like any other, so this is
+              where someone looking to add one would go looking. */}
+          <button
+            className="btn btn-ghost"
+            onClick={() => {
+              onClose();
+              openJoin();
+            }}
+            disabled={creating}
+          >
+            <Users size={15} />
+            Join a server
           </button>
           <div style={{ flex: 1 }} />
           <button className="btn" onClick={onClose}>

@@ -1,0 +1,64 @@
+.note {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.icon {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.detail {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+/* Only the edge and the icon take the tone. A whole panel in amber or red
+   shouts, and several of these can sit together. */
+.ok {
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+}
+
+.ok .icon {
+  color: var(--accent);
+}
+
+.info .icon {
+  color: var(--text-faint);
+}
+
+.warn {
+  border-color: color-mix(in srgb, var(--warn) 34%, var(--border));
+}
+
+.warn .icon {
+  color: var(--warn);
+}
+
+.bad {
+  border-color: color-mix(in srgb, var(--danger) 38%, var(--border));
+}
+
+.bad .icon {
+  color: var(--danger);
+}

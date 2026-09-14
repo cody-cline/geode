@@ -108,6 +108,8 @@ export interface ContentItem {
    * bring it back. Absent means it is yours.
    */
   origin?: "user" | "server";
+  /** Kept on the server when it shares its pack with players. */
+  excluded?: boolean;
   /** File names of installed mods this one needs. */
   requires: string[];
   /** File names of installed mods that need this one. */
@@ -536,6 +538,102 @@ export interface Config {
   hasCurseforgeKey: boolean;
   /** True when the key came from GEODE_CURSEFORGE_KEY at build time. */
   curseforgeKeyFromBuild: boolean;
+  /** How players reach this machine for shared servers' packs. */
+  share: ShareSettings;
+}
+
+// ---------------------------------------------------------------------------
+// Sharing a server with players
+// ---------------------------------------------------------------------------
+
+export interface ShareSettings {
+  /** The one port every shared server's pack is served on. */
+  port: number;
+  /** `auto` opens the port on the router over UPnP; `manual` leaves it alone. */
+  mapping: "auto" | "manual";
+  /** Used in links instead of the detected address: a domain, a tunnel's host:port, or an https:// URL. */
+  publicAddress: string | null;
+}
+
+export type PortMappingStatus =
+  | { state: "off" }
+  | { state: "searching" }
+  | {
+      state: "mapped";
+      externalIp: string;
+      port: number;
+      /** `public` should work; the others mean players cannot reach this machine despite the mapping. */
+      reachability: "public" | "cgnat" | "doubleNat" | "noIpv4";
+    }
+  | {
+      state: "failed";
+      /** `permanentOnly`: the router only grants forwards that never expire, which Geode will not create because a crash would leave the port open for good. */
+      reason: "noGateway" | "refused" | "portInUse" | "permanentOnly" | "other";
+      detail?: string;
+    };
+
+export interface ShareStatus {
+  /** Which router setup the admin chose. Not the same as `mapping.state`: a mapper that never started because nothing listens is `off` in either mode. */
+  mode: "auto" | "manual";
+  /** With manual router setup, the public address the router reported when asked (nothing is changed on the router), or null if it could not be learned. */
+  detected: { ip: string; reachability: "public" | "cgnat" | "doubleNat" | "noIpv4" } | null;
+  /** With manual router setup, true while the router is still being asked for the first time, so a null `detected` means nothing yet. */
+  asking: boolean;
+  /** True while the pack server is listening, which is while any server is shared. */
+  listening: boolean;
+  port: number;
+  /** Why it could not start listening, e.g. the port is already taken. */
+  listenError: string | null;
+  mapping: PortMappingStatus;
+  /** The address links use: the public address if one is set, else the router's external IP, else null. */
+  address: string | null;
+  /** The certificate fingerprint players' Geode pins, as hex. */
+  fingerprint: string;
+}
+
+export interface ServerShareView {
+  /** `GEODE-XXXXX-XXXXX`, for reading out or typing. */
+  code: string;
+  /** The `geode://join` link, or null while no address is known to put in it. */
+  link: string | null;
+  includeConfig: boolean;
+  /** Why this server cannot be shared, when it cannot (a proxy, an unsupported loader). */
+  unsupported: string | null;
+}
+
+/** What a server says it is sharing, shown before a player imports. */
+export interface PackInfo {
+  name: string;
+  mcVersion: string;
+  loader: string;
+  loaderVersion: string;
+  mods: number;
+  serverKind: string;
+}
+
+/** A parsed join link. Opaque to the UI: take it from a preview and pass it back to `joinServer`. */
+export interface JoinLink {
+  address: { kind: "direct"; host: string; port: number } | { kind: "https"; url: string };
+  code: string;
+  pin?: string;
+}
+
+export type JoinInput = { link: string } | { address: string; code: string };
+
+export interface JoinPreview {
+  info: PackInfo;
+  address: string;
+  /** `pinned`: matched the link. `domain`: checked by its certificate authority. `firstUse`: typed by hand, trusted now and pinned from here on. */
+  verified: "pinned" | "domain" | "firstUse";
+  link: JoinLink;
+  /** An instance already joined from this server with this code: offer to open it rather than make a second. */
+  existing: { id: string; name: string } | null;
+}
+
+/** A join that got as far as creating the instance. Anything that went wrong after that is a problem to show, not a failure to retry — retrying would make a second instance. */
+export interface JoinOutcome {
+  instance: Instance;
+  problems: string[];
 }
 
 export interface ConnectorSupport {

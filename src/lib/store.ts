@@ -2,6 +2,8 @@ import { create } from "zustand";
 import { listen } from "@tauri-apps/api/event";
 
 import { api, errorMessage } from "./api";
+import { nextJoin } from "./share";
+import type { JoinRequest } from "./share";
 import type {
   Account,
   Config,
@@ -12,6 +14,7 @@ import type {
   Server,
   ServerExit,
   ServerLine,
+  ShareStatus,
 } from "./types";
 
 export type Route =
@@ -94,10 +97,24 @@ interface State {
   dismissToast: (id: number) => void;
   reportError: (title: string, e: unknown) => void;
 
+  /**
+   * The pack server and the router, shared by every shared server — so kept
+   * here, where the one event that updates it has one subscriber.
+   */
+  shareStatus: ShareStatus | null;
+  loadShareStatus: () => Promise<void>;
+  setShareStatus: (status: ShareStatus) => void;
+
+  /** The join dialog, which the app root renders. At most one, ever. */
+  join: JoinRequest | null;
+  openJoin: (link?: string | null) => void;
+  closeJoin: () => void;
+
   init: () => Promise<void>;
 }
 
 let toastSeq = 0;
+let joinSeq = 0;
 
 /**
  * Whether the one-time setup has run.
@@ -204,6 +221,22 @@ export const useStore = create<State>((set, get) => ({
   reportError: (title, e) =>
     get().toast({ kind: "error", title, body: errorMessage(e) }),
 
+  shareStatus: null,
+  loadShareStatus: async () => {
+    set({ shareStatus: await api.getShareStatus() });
+  },
+  setShareStatus: (shareStatus) => set({ shareStatus }),
+
+  join: null,
+  openJoin: (link = null) => {
+    const current = get().join;
+    const join = nextJoin(current, link, joinSeq + 1);
+    if (join === current) return;
+    joinSeq = join.seq;
+    set({ join });
+  },
+  closeJoin: () => set({ join: null }),
+
   init: async () => {
     // React's StrictMode mounts, unmounts and mounts again in development, so
     // this runs twice. Every `listen` below is registered for the lifetime of
@@ -272,6 +305,28 @@ export const useStore = create<State>((set, get) => ({
             : `Exit code ${payload.code}. Check the console for the cause.`,
       });
     });
+
+    await listen<ShareStatus>("geode://share-status", ({ payload }) => {
+      set({ shareStatus: payload });
+    });
+
+    // A link opened while Geode runs arrives as an event; one that started
+    // Geode came before any window could hear it and is parked instead. Listen
+    // first and take second, so a link landing between the two is caught by
+    // one or the other — and if by both, `openJoin` sees the same link twice
+    // and opens one dialog.
+    await listen<string>("geode://join-link", ({ payload }) => {
+      get().openJoin(payload);
+      // Clear any parked copy too, so a reload of the window does not find
+      // this link waiting and offer the same join again.
+      api.takePendingJoin().catch(() => {});
+    });
+    try {
+      const pending = await api.takePendingJoin();
+      if (pending) get().openJoin(pending);
+    } catch (e) {
+      get().reportError("Could not read the link Geode was opened with", e);
+    }
 
     await listen<ExitEvent>("geode://exit", ({ payload }) => {
       get().refreshInstances();

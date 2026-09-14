@@ -34,6 +34,7 @@ import GraphTab from "./instance/GraphTab";
 import ServerContentTab from "./server/ContentTab";
 import type { ServerFolder } from "./server/ContentTab";
 import Properties from "./server/Properties";
+import ShareTab from "./server/ShareTab";
 import { api } from "../lib/api";
 import {
   parseLine,
@@ -65,6 +66,10 @@ const TABS = [
   // Backups on a timer and commands on a timer are the same idea — things the
   // server does without being asked — so they share a tab.
   { id: "backups", label: "Automation" },
+  // Its own tab, not a Settings section: whether players can reach the server
+  // is live state an admin comes back to check, and at the foot of a long
+  // settings page nobody would find it.
+  { id: "share", label: "Share" },
   { id: "settings", label: "Settings" },
 ] as const;
 
@@ -495,9 +500,11 @@ export default function ServerView({ id }: { id: string }) {
       <nav className={styles.tabs}>
         {TABS.filter(
           // A server that keeps neither mods nor plugins — a proxy, or plain
-          // vanilla — has nothing to draw a dependency field from.
+          // vanilla — has nothing to draw a dependency field from. A proxy has
+          // no world and no Minecraft version of its own, so no pack to share.
           (tab) =>
-            tab.id !== "graph" || server.takesMods || server.takesPlugins,
+            (tab.id !== "graph" || server.takesMods || server.takesPlugins) &&
+            (tab.id !== "share" || server.hasWorld),
         ).map((tab) => (
           <button
             key={tab.id}
@@ -597,6 +604,8 @@ export default function ServerView({ id }: { id: string }) {
         />
       ) : active === "backups" ? (
         <BackupsPane server={server} />
+      ) : active === "share" ? (
+        <ShareTab server={server} />
       ) : (
         <SettingsTab server={server} />
       )}
