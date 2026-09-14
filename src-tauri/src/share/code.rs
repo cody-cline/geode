@@ -10,15 +10,12 @@
 //! alphabet is Crockford's Base32, which drops `I`, `L`, `O` and `U`, treats
 //! `I`/`l` as `1` and `O` as `0`, and ignores case and hyphens.
 //!
-//! The code is generated here, on the machine sharing the pack, and never sent
-//! anywhere. What a lookup service sees is [`Code::key`] — the first 80 bits of
-//! `SHA-256("geode-share-v1" || code)` — so a dump of that service's storage
-//! reveals no codes, and knowing a key does not let anyone work backwards to
-//! one. The bytes of the pack never go near it either; it stores only where to
-//! find them.
+//! The code is generated on the machine sharing the pack and handed to players
+//! inside a `geode://join` link. It is both what picks one server out of the
+//! several a machine may share and the secret that lets a player download that
+//! server's pack, so it is compared in constant time wherever it is checked.
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 /// Crockford's alphabet: no I, L, O or U, so nothing reads as something else.
 const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -29,9 +26,6 @@ const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 /// eighteen years for an even chance — and short enough to say out loud.
 const LENGTH: usize = 10;
 
-/// Domain separation, so a hash from this scheme can never collide with a hash
-/// from another part of the app that happened to use SHA-256 too.
-const DOMAIN: &[u8] = b"geode-share-v1";
 
 /// What `GEODE` becomes once normalised — `O` is not in the alphabet and maps
 /// to zero. Written out rather than computed so the surprise is visible.
@@ -102,22 +96,18 @@ impl Code {
         &self.0
     }
 
-    /// What a lookup service is keyed by.
+    /// Whether `other` is this code, without leaking where they first differ.
     ///
-    /// Derived rather than the code itself, so the service never learns a code
-    /// and a leak of its storage grants nothing. Sixteen characters of Base32
-    /// is eighty bits, which is far beyond collision range for a service that
-    /// will hold a few hundred entries.
-    pub fn key(&self) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(DOMAIN);
-        hasher.update(self.0.as_bytes());
-        let digest = hasher.finalize();
-        digest
-            .iter()
-            .take(16)
-            .map(|b| ALPHABET[(*b % 32) as usize] as char)
-            .collect()
+    /// The code is a secret checked against whatever a stranger on the internet
+    /// sends, so the comparison must take the same time however much of a guess
+    /// was right.
+    pub fn matches(&self, other: &str) -> bool {
+        let Some(other) = Code::parse(other) else {
+            return false;
+        };
+        let (a, b) = (self.0.as_bytes(), other.0.as_bytes());
+        // Both are exactly LENGTH bytes once parsed, so only content can differ.
+        a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
     }
 }
 
@@ -176,20 +166,18 @@ mod tests {
         }
     }
 
-    /// The key must be stable — a code that resolved yesterday has to resolve
-    /// today — and must not be reversible to the code.
+    /// A code is checked against whatever a player's Geode sends, which is
+    /// the code as it was pasted or typed — so matching accepts every form
+    /// parsing does, and nothing a character away.
     #[test]
-    fn a_key_is_derived_stably_and_reveals_nothing() {
+    fn a_code_matches_itself_however_it_was_typed_and_nothing_else() {
         let code = Code::parse("GEODE-K3VB0-1NQ7Z").unwrap();
-        let key = code.key();
-        assert_eq!(key, code.key(), "the same code always gives the same key");
-        assert_eq!(key.len(), 16);
-        assert!(key.chars().all(|c| ALPHABET.contains(&(c as u8))));
-        // The code must not be recoverable by looking at the key.
-        assert!(!key.contains(code.raw()));
-
-        let other = Code::parse("GEODE-K3VB0-1NQ70").unwrap();
-        assert_ne!(code.key(), other.key(), "one character apart is a different key");
+        for typed in ["GEODE-K3VB0-1NQ7Z", "k3vb01nq7z", "K3VBO-INQ7Z", code.raw()] {
+            assert!(code.matches(typed), "{typed} should match");
+        }
+        for wrong in ["GEODE-K3VB0-1NQ70", "", "K3VB01NQ7", "not a code at all"] {
+            assert!(!code.matches(wrong), "{wrong:?} must not match");
+        }
     }
 
     /// Codes are what stands between a stranger and somebody's pack, so the

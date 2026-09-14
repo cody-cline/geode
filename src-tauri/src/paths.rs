@@ -33,6 +33,11 @@ impl Paths {
     pub fn config_file(&self) -> PathBuf {
         self.root.join("config.json")
     }
+    /// This machine's identity for sharing: the certificate players pin.
+    /// Losing it breaks every link already handed out, by design.
+    pub fn share_dir(&self) -> PathBuf {
+        self.root.join("share")
+    }
     pub fn accounts_file(&self) -> PathBuf {
         self.root.join("accounts.json")
     }

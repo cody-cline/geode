@@ -66,6 +66,47 @@ pub struct Config {
     pub concurrent_downloads: usize,
     /// Show snapshots and other non-release versions in the version picker.
     pub show_snapshots: bool,
+    /// How players reach this machine to fetch a shared server's pack.
+    pub share: ShareConfig,
+}
+
+/// How this machine serves shared servers' packs to players.
+///
+/// One port for every shared server: the secret in a link, not the port, picks
+/// which server's pack a request gets, so an admin with five servers opens one
+/// port, once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ShareConfig {
+    pub port: u16,
+    pub mapping: PortMapping,
+    /// Used in links instead of the address Geode detects: a domain, a tunnel's
+    /// `host:port`, or an `https://` URL in front of this machine.
+    pub public_address: Option<String>,
+}
+
+/// Whether Geode opens the pack port on the router itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PortMapping {
+    /// Ask the router over UPnP, renew the lease, and remove it on exit.
+    #[default]
+    Auto,
+    /// Leave the router alone; the admin forwards the port themselves.
+    Manual,
+}
+
+impl Default for ShareConfig {
+    fn default() -> Self {
+        Self {
+            // Beside Minecraft's own range rather than in it: admins running
+            // several servers count up from 25565, and this should not be the
+            // port one of them lands on.
+            port: 25590,
+            mapping: PortMapping::Auto,
+            public_address: None,
+        }
+    }
 }
 
 impl Default for Config {
@@ -84,6 +125,7 @@ impl Default for Config {
             hide_on_launch: false,
             concurrent_downloads: default_concurrency(),
             show_snapshots: false,
+            share: ShareConfig::default(),
         }
     }
 }

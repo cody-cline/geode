@@ -124,13 +124,13 @@ pub async fn run_due(sink: &EventSink, paths: &Paths, servers: &ServerRegistry, 
         }
 
         // Reloaded rather than reused: the listing may be a minute old by the
-        // time we get here, and saving a stale copy would undo an edit made
-        // while a backup was running.
-        let Ok(mut current) = super::load(paths, &server.id).await else {
+        // time we get here, and a backup should prune by the settings as they
+        // are now.
+        let Ok(current) = super::load(paths, &server.id).await else {
             continue;
         };
 
-        for schedule in due {
+        for schedule in &due {
             match &schedule.action {
                 ScheduleAction::Backup => run_backup(sink, paths, servers, &current).await,
                 ScheduleAction::Command(command) => {
@@ -142,13 +142,29 @@ pub async fn run_due(sink: &EventSink, paths: &Paths, servers: &ServerRegistry, 
                     // its moment has passed either way.
                 }
             }
-            if let Some(stored) = current.schedules.iter_mut().find(|s| s.id == schedule.id) {
-                stored.last_run = Some(now);
-            }
         }
 
-        let _ = current.save(paths).await;
+        stamp(paths, &current.id, &due, now).await;
     }
+}
+
+/// Record that these schedules ran, and change nothing else.
+///
+/// The server is read again here rather than `current` being saved, because
+/// `current` is as old as the backup was long. Saving it would undo whatever
+/// changed in those minutes — a mod held back from players, a setting, the
+/// schedules themselves.
+async fn stamp(paths: &Paths, id: &str, ran: &[Schedule], now: i64) {
+    // Gone while the work ran: saving would bring back a deleted server.
+    let Ok(mut fresh) = super::load(paths, id).await else {
+        return;
+    };
+    for schedule in ran {
+        if let Some(stored) = fresh.schedules.iter_mut().find(|s| s.id == schedule.id) {
+            stored.last_run = Some(now);
+        }
+    }
+    let _ = fresh.save(paths).await;
 }
 
 /// The ticker that runs scheduled work, for the life of the app.
@@ -243,5 +259,93 @@ mod tests {
 
         let backup = serde_json::to_string(&ScheduleAction::Backup).unwrap();
         assert!(backup.contains("backup"), "{backup}");
+    }
+
+    /// Open a pipe's write end once something is reading it, without blocking
+    /// forever if nothing ever does.
+    #[cfg(unix)]
+    async fn open_once_read(pipe: &std::path::Path) -> std::fs::File {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        for _ in 0..2000 {
+            // Refused with ENXIO while nobody has the pipe open to read.
+            if let Ok(file) = std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(pipe)
+            {
+                return file;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("the backup never opened {}", pipe.display());
+    }
+
+    /// A scheduled backup lasts as long as the world is big, and the ticker
+    /// used to save the copy of the server it loaded before starting one. That
+    /// undid whatever changed in between: a mod held back from players, a
+    /// note. A pipe in the run folder holds the backup at a known point, so the
+    /// change lands inside it every time.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_backup_saves_that_it_ran_and_nothing_else() {
+        use std::os::unix::ffi::OsStrExt;
+
+        use crate::instance::content::{set_excluded, ContentKind};
+        use crate::server::{Server, ServerKind};
+
+        let paths = Paths {
+            root: std::env::temp_dir().join(format!("geode-schedule-stale-{}", std::process::id())),
+        };
+        let _ = std::fs::remove_dir_all(&paths.root);
+
+        let mut server = Server::new("Nightly".into(), ServerKind::Fabric, "1.21.1".into());
+        server.schedules = vec![every(60, None)];
+        server.save(&paths).await.unwrap();
+
+        let run = paths.server_run(&server.id);
+        std::fs::create_dir_all(&run).unwrap();
+        let pipe = run.join("level.dat");
+        let name = std::ffi::CString::new(pipe.as_os_str().as_bytes()).unwrap();
+        // SAFETY: a valid, NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0, "no pipe was made");
+
+        let now = 1_000_000;
+        let job = tokio::spawn({
+            let paths = paths.clone();
+            async move {
+                let sink: EventSink = std::sync::Arc::new(crate::events::Recorder::default());
+                run_due(&sink, &paths, &ServerRegistry::default(), now).await;
+            }
+        });
+
+        // The backup is reading the world now, so the ticker loaded the server
+        // before this.
+        let writer = open_once_read(&pipe).await;
+        let mut admin = crate::server::load(&paths, &server.id).await.unwrap();
+        set_excluded(&mut admin.content, ContentKind::Mod, "private.jar", true);
+        admin.notes = "written during the backup".into();
+        admin.save(&paths).await.unwrap();
+        assert!(!job.is_finished(), "the backup finished before the change it should race");
+
+        // Closing the pipe lets the backup finish.
+        drop(writer);
+        job.await.unwrap();
+
+        let after = crate::server::load(&paths, &server.id).await.unwrap();
+        assert_eq!(after.schedules[0].last_run, Some(now), "the run was not recorded");
+        assert!(
+            after.content.iter().any(|r| r.file_name == "private.jar" && r.sharing.excluded),
+            "a mod held back during the backup is shared again: {:?}",
+            after.content
+        );
+        assert_eq!(after.notes, "written during the backup");
+        assert_eq!(
+            crate::server::backup::list(&paths, &server.id).await.unwrap().len(),
+            1,
+            "no backup was taken, so nothing was raced"
+        );
+
+        std::fs::remove_dir_all(&paths.root).unwrap();
     }
 }

@@ -1627,11 +1627,16 @@ pub async fn create_server(
 }
 
 #[tauri::command]
-pub async fn delete_server(state: State<'_, AppState>, id: String) -> Result<()> {
+pub async fn delete_server(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<()> {
     if state.servers.is_running(&id) {
         return Err(Error::msg("stop the server before deleting it"));
     }
-    crate::server::delete(&state.paths, &id).await
+    crate::server::delete(&state.paths, &id).await?;
+    // Its share went with its folder. If it was the last one shared, the pack
+    // server and the router's port go too, rather than staying open for a
+    // server that no longer exists.
+    reconcile_sharing(&app, &state).await;
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -1764,7 +1769,7 @@ pub async fn add_cardboard(
     // The folder a plugin gets dropped into should exist before anyone goes
     // looking for it.
     tokio::fs::create_dir_all(run.join(ContentKind::Plugin.folder())).await?;
-    server.save(&state.paths).await?;
+    server.save_keeping_sharing(&state.paths).await?;
     progress.finish().await;
 
     Ok(server_view(server, &state))
@@ -1816,7 +1821,7 @@ pub async fn start_server(
     .await?;
 
     server.last_started = Some(chrono::Utc::now().timestamp());
-    server.save(&state.paths).await?;
+    server.save_keeping_sharing(&state.paths).await?;
     Ok(pid)
 }
 
@@ -2007,7 +2012,7 @@ pub async fn link_untracked_server_content(
     state.clear_cancel(progress.id());
     match result {
         Ok(report) => {
-            server.save(&state.paths).await?;
+            server.save_keeping_sharing(&state.paths).await?;
             Ok(report)
         }
         Err(e) => {
@@ -2149,7 +2154,7 @@ pub async fn install_server_content(
 
     // Saved either way: a walk that failed part-way through still put files on
     // disk, and a record list that does not mention them is worse than none.
-    let _ = server.save(&state.paths).await;
+    let _ = server.save_keeping_sharing(&state.paths).await;
 
     match result {
         Ok(report) => {
@@ -2774,4 +2779,715 @@ pub async fn export_modpack(
     )
     .await?;
     Ok(dest.to_string_lossy().to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Sharing a server with players
+// ---------------------------------------------------------------------------
+
+/// A shared server as its admin sees it.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerShareView {
+    pub code: String,
+    pub link: Option<String>,
+    pub include_config: bool,
+    pub unsupported: Option<String>,
+}
+
+async fn share_view(
+    state: &AppState,
+    server: &crate::server::Server,
+    share: &crate::server::share::ServerShare,
+) -> ServerShareView {
+    let config = state.config().await;
+    let link = state
+        .share
+        .link_for(&state.paths, &config.share, share)
+        .await
+        .map(|link| link.to_url());
+    ServerShareView {
+        code: share.code.display(),
+        link,
+        include_config: share.include_config,
+        unsupported: share::pack::client_loader(server).err().map(|e| e.to_string()),
+    }
+}
+
+/// Start or stop the pack server to match what is shared now.
+async fn reconcile_sharing(app: &AppHandle, state: &AppState) {
+    state
+        .share
+        .reconcile(state, Some(crate::desktop::sink(app.clone())))
+        .await;
+}
+
+/// The share state of a server that must be shared for the command to mean
+/// anything.
+async fn shared(state: &AppState, id: &str) -> Result<crate::server::share::ServerShare> {
+    crate::server::share::load(&state.paths, id)
+        .await?
+        .ok_or_else(|| Error::msg("this server is not being shared"))
+}
+
+#[tauri::command]
+pub async fn get_share_status(state: State<'_, AppState>) -> Result<share::service::ShareStatus> {
+    let config = state.config().await;
+    Ok(state.share.status(&state.paths, &config.share).await)
+}
+
+#[tauri::command]
+pub async fn set_share_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    settings: crate::config::ShareConfig,
+) -> Result<share::service::ShareStatus> {
+    // Below 1024 needs privileges on most systems and some routers refuse to
+    // map it; refused here rather than failing somewhere less clear later.
+    if settings.port < 1024 {
+        return Err(Error::msg("pick a port from 1024 to 65535"));
+    }
+    let public_address = settings
+        .public_address
+        .as_deref()
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+        .map(str::to_string);
+    if let Some(address) = &public_address {
+        check_public_address(address, settings.port)?;
+    }
+
+    let mut config = state.config().await;
+    config.share = crate::config::ShareConfig {
+        public_address,
+        ..settings
+    };
+    config.save(&state.paths).await?;
+    state.set_config(config.clone()).await;
+
+    reconcile_sharing(&app, &state).await;
+    Ok(state.share.status(&state.paths, &config.share).await)
+}
+
+/// Refuse a public address that could only ever produce a link that does not
+/// work, while the admin is still looking at the setting.
+fn check_public_address(address: &str, port: u16) -> Result<()> {
+    let parsed = share::link::Address::parse(address, port)
+        .map_err(|e| Error::msg(format!("that public address cannot be used: {e}")))?;
+
+    // An address nobody else can connect to: every player would reach their
+    // own machine, or nothing.
+    if let share::link::Address::Direct { host, .. } = &parsed {
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            let unusable = ip.is_unspecified()
+                || ip.is_multicast()
+                || matches!(ip, std::net::IpAddr::V4(v4) if v4.is_broadcast());
+            if unusable {
+                return Err(Error::msg(format!(
+                    "{ip} is not an address players can connect to — use this machine's public address, or a domain or tunnel"
+                )));
+            }
+        }
+    }
+
+    // Built into a real link and read back, exactly as a player's Geode will:
+    // an address the parser accepts can still make a link too long to read.
+    let sample = share::link::Link {
+        pin: matches!(parsed, share::link::Address::Direct { .. }).then_some(share::link::Pin([0; 32])),
+        address: parsed,
+        code: share::code::Code::generate(),
+    };
+    share::link::Link::parse(&sample.to_url())
+        .map(|_| ())
+        .map_err(|e| Error::msg(format!("links made with that public address would not work: {e}")))
+}
+
+#[tauri::command]
+pub async fn get_server_share(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Option<ServerShareView>> {
+    let server = crate::server::load(&state.paths, &id).await?;
+    Ok(match crate::server::share::load(&state.paths, &id).await? {
+        Some(share) => Some(share_view(&state, &server, &share).await),
+        None => None,
+    })
+}
+
+#[tauri::command]
+pub async fn share_server(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<ServerShareView> {
+    let server = crate::server::load(&state.paths, &id).await?;
+    // Refused before a code exists rather than after: a share that can only
+    // ever answer "not supported" would hand players a link that goes nowhere.
+    share::pack::client_loader(&server)?;
+    let share = match crate::server::share::load(&state.paths, &id).await? {
+        Some(existing) => existing,
+        None => {
+            let fresh = crate::server::share::ServerShare {
+                code: share::code::Code::generate(),
+                include_config: false,
+            };
+            crate::server::share::save(&state.paths, &id, &fresh).await?;
+            fresh
+        }
+    };
+    reconcile_sharing(&app, &state).await;
+    Ok(share_view(&state, &server, &share).await)
+}
+
+#[tauri::command]
+pub async fn unshare_server(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<()> {
+    crate::server::share::clear(&state.paths, &id).await?;
+    reconcile_sharing(&app, &state).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_server_share_config(
+    state: State<'_, AppState>,
+    id: String,
+    include_config: bool,
+) -> Result<ServerShareView> {
+    let server = crate::server::load(&state.paths, &id).await?;
+    let mut share = shared(&state, &id).await?;
+    share.include_config = include_config;
+    crate::server::share::save(&state.paths, &id, &share).await?;
+    Ok(share_view(&state, &server, &share).await)
+}
+
+/// Replace a server's code. Everyone holding the old link is cut off at once:
+/// the pack server reads codes fresh on every request, and nothing but sharing
+/// ever writes the file the code lives in.
+#[tauri::command]
+pub async fn rotate_server_share_code(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<ServerShareView> {
+    let server = crate::server::load(&state.paths, &id).await?;
+    let mut share = shared(&state, &id).await?;
+    share.code = share::code::Code::generate();
+    crate::server::share::save(&state.paths, &id, &share).await?;
+    Ok(share_view(&state, &server, &share).await)
+}
+
+#[tauri::command]
+pub async fn set_server_content_excluded(
+    state: State<'_, AppState>,
+    id: String,
+    kind: String,
+    file: String,
+    excluded: bool,
+) -> Result<()> {
+    let kind = parse_kind(&kind)?;
+    let mut server = crate::server::load(&state.paths, &id).await?;
+    instance::content::set_excluded(&mut server.content, kind, &file, excluded);
+    server.save(&state.paths).await
+}
+
+// ---------------------------------------------------------------------------
+// Joining a shared server
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn preview_join(
+    state: State<'_, AppState>,
+    input: share::join::JoinInput,
+) -> Result<share::join::JoinPreview> {
+    preview_join_at(&state.paths, input).await
+}
+
+async fn preview_join_at(
+    paths: &crate::paths::Paths,
+    input: share::join::JoinInput,
+) -> Result<share::join::JoinPreview> {
+    let typed = matches!(input, share::join::JoinInput::Parts { .. });
+    // A typed address with no port means Geode's default sharing port — the
+    // admin's, which is not necessarily the one this player has configured.
+    let mut link = input.into_link(crate::config::ShareConfig::default().port)?;
+
+    // A typed address this player has joined before is held to the certificate
+    // it had then. That is what "trusted from now on" means; without it, every
+    // typed join would be a first use again, and whoever answered would win.
+    let remembered = if typed && link.pin.is_none() {
+        link.pin = share::join::remembered_pin(paths, &link.address).await;
+        link.pin.is_some()
+    } else {
+        false
+    };
+    let address = link.address.display();
+
+    let mut preview = share::join::preview(link).await.map_err(|e| {
+        // The generic message speaks of a link. Here there was none: the
+        // certificate was the one remembered from joining this address
+        // before, and a different one answered.
+        if remembered && e.to_string().contains("did not prove") {
+            Error::msg(format!(
+                "{address} did not prove it is the server you joined there before, so nothing was downloaded — if its admin replaced its certificate, ask them for a new link"
+            ))
+        } else {
+            e
+        }
+    })?;
+    preview.existing = share::join::existing_instance(paths, &preview.link)
+        .await
+        .map(|(id, name)| share::join::ExistingInstance { id, name });
+    Ok(preview)
+}
+
+/// A join that got as far as creating the instance.
+///
+/// Anything that goes wrong after that is a problem to show, not a failure:
+/// the instance exists either way, and reporting it as a failure would invite
+/// a retry that makes a second one.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JoinOutcome {
+    pub instance: InstanceView,
+    pub problems: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn join_server(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    link: share::link::Link,
+    info: share::host::PackInfo,
+    name: Option<String>,
+) -> Result<JoinOutcome> {
+    // Back from the webview, so checked again by the same strict parser as a
+    // link off the internet — and a direct address must by now carry the
+    // fingerprint the preview settled on.
+    let link = share::link::Link::parse(&link.to_url())?;
+
+    let run = uuid::Uuid::new_v4();
+    let archive = share::join::incoming_dir(&state.paths).join(format!("{run}.geodepack"));
+    let progress = Progress::new(crate::desktop::sink(app.clone()), format!("join:{run}"));
+    state.register_cancel(progress.id(), progress.cancel_flag());
+
+    let outcome = join_into_new_instance(&state, &link, &info, name, &archive, &progress).await;
+
+    state.clear_cancel(progress.id());
+    let _ = tokio::fs::remove_file(&archive).await;
+
+    match outcome {
+        Ok((inst, problems)) => {
+            if problems.is_empty() {
+                progress.finish().await;
+            } else {
+                progress.fail(&problems.join("; ")).await;
+            }
+            Ok(JoinOutcome {
+                instance: view(inst, &state),
+                problems,
+            })
+        }
+        Err(e) => {
+            progress.fail(&e.to_string()).await;
+            Err(e)
+        }
+    }
+}
+
+/// Download, check, create, import.
+///
+/// Errors before the instance exists are errors. Once it exists, what goes
+/// wrong is returned as problems beside it — and the instance is always saved,
+/// the same rule as any other pack.
+async fn join_into_new_instance(
+    state: &AppState,
+    link: &share::link::Link,
+    approved: &share::host::PackInfo,
+    name: Option<String>,
+    archive: &std::path::Path,
+    progress: &Progress,
+) -> Result<(Instance, Vec<String>)> {
+    share::join::download(link, archive, progress).await?;
+    install_joined(state, link, approved, name, archive, progress).await
+}
+
+/// Check a downloaded server pack against what the player approved, and
+/// install it as a new instance.
+async fn install_joined(
+    state: &AppState,
+    link: &share::link::Link,
+    approved: &share::host::PackInfo,
+    name: Option<String>,
+    archive: &std::path::Path,
+    progress: &Progress,
+) -> Result<(Instance, Vec<String>)> {
+    let described = instance::modpack::preview(archive.to_path_buf()).await?;
+    // What gets installed must be what the player said yes to.
+    share::join::check_matches(approved, &described)?;
+
+    // A joined pack must be a server's. A personal pack's manifest may set the
+    // player's memory and Java arguments; a server has no business doing that,
+    // and only a server manifest is refused those settings on import.
+    let probe = archive.to_path_buf();
+    let manifest = tokio::task::spawn_blocking(move || share::pack::read_manifest(&probe))
+        .await
+        .map_err(|e| Error::msg(format!("reading the pack's manifest panicked: {e}")))??;
+    if !manifest.is_some_and(|m| m.kind == share::manifest::Kind::Server) {
+        return Err(Error::msg(
+            "that address did not send a server's pack, so nothing was installed",
+        ));
+    }
+    // The import checks this too; checked here as well so a refusal leaves no
+    // empty instance behind.
+    share::pack::check_server_downloads(archive).await?;
+
+    let mut inst = instance::create(
+        &state.paths,
+        described.name.clone(),
+        described.mc_version,
+        described.loader,
+        described.loader_version,
+    )
+    .await?;
+    inst.joined = Some(link.clone());
+    inst.save(&state.paths).await?;
+
+    let config = state.config().await;
+    let imported = share::pack::import(
+        &state.http,
+        &state.paths,
+        &mut inst,
+        archive,
+        config.effective_curseforge_key().as_deref(),
+        progress,
+    )
+    .await;
+
+    // The pack's own name is applied by the import; a name the player chose
+    // goes on after, so it wins.
+    if let Some(chosen) = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()) {
+        inst.name = chosen;
+    }
+    inst.save(&state.paths).await?;
+
+    let problems = match imported {
+        Ok(missing) if missing.is_empty() => Vec::new(),
+        Ok(missing) => vec![format!(
+            "{} file(s) in this server's pack have to be fetched by hand: {}",
+            missing.len(),
+            missing.join(", ")
+        )],
+        Err(e) => vec![format!("the import stopped partway: {e}")],
+    };
+    Ok((inst, problems))
+}
+
+#[cfg(test)]
+mod tests {
+    //! The command-layer rules around sharing that no module owns on its own:
+    //! which public addresses are allowed, what a join may install, and holding
+    //! a typed address to the certificate it had before.
+
+    use super::*;
+    use crate::paths::Paths;
+    use crate::server::share::ServerShare;
+    use crate::server::{Server, ServerKind};
+    use crate::share::code::Code;
+    use crate::share::join::{JoinInput, Verified};
+    use crate::share::link::{Address, Link, Pin};
+    use std::io::{Read, Write};
+
+    struct Scratch(Paths);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0.root);
+        }
+    }
+    fn scratch(tag: &str) -> Scratch {
+        let root = std::env::temp_dir().join(format!("geode-cmd-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        Scratch(Paths { root })
+    }
+
+    fn fabric_jar(id: &str) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
+            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            zip.start_file("fabric.mod.json", options).unwrap();
+            write!(zip, r#"{{"schemaVersion":1,"id":"{id}","version":"1.0.0","environment":"*"}}"#).unwrap();
+            zip.finish().unwrap();
+        }
+        bytes
+    }
+
+    async fn shared_server(paths: &Paths) -> (Server, ServerShare) {
+        let mut server = Server::new("Survival".into(), ServerKind::Fabric, "1.21.1".into());
+        server.id = "survival".into();
+        server.build = "0.16.9".into();
+        server.save(paths).await.unwrap();
+        let mods = paths.server_run(&server.id).join("mods");
+        tokio::fs::create_dir_all(&mods).await.unwrap();
+        tokio::fs::write(mods.join("homemade.jar"), fabric_jar("homemade")).await.unwrap();
+        let share = ServerShare { code: Code::generate(), include_config: false };
+        crate::server::share::save(paths, &server.id, &share).await.unwrap();
+        (server, share)
+    }
+
+    /// Replace the pack's manifest kind, to make the pack a personal one.
+    fn make_personal(archive: &std::path::Path) {
+        rewrite_entry(archive, share::manifest::Manifest::PATH, |manifest| {
+            manifest["kind"] = "instance".into();
+        });
+    }
+
+    /// Edit one JSON entry of a pack in place.
+    fn rewrite_entry(
+        archive: &std::path::Path,
+        entry_name: &str,
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) {
+        let mut edit = Some(edit);
+        let mut entries = Vec::new();
+        {
+            let mut zip = zip::ZipArchive::new(std::fs::File::open(archive).unwrap()).unwrap();
+            for i in 0..zip.len() {
+                let mut entry = zip.by_index(i).unwrap();
+                let mut bytes = Vec::new();
+                entry.read_to_end(&mut bytes).unwrap();
+                entries.push((entry.name().to_string(), bytes));
+            }
+        }
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(archive).unwrap());
+        let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        for (name, mut bytes) in entries {
+            if name == entry_name {
+                let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                (edit.take().unwrap())(&mut value);
+                bytes = serde_json::to_vec(&value).unwrap();
+            }
+            zip.start_file(name, options).unwrap();
+            zip.write_all(&bytes).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    async fn instance_count(paths: &Paths) -> usize {
+        instance::list(paths).await.map(|l| l.len()).unwrap_or(0)
+    }
+
+    /// An address that parses can still be one no player can use. Those are
+    /// refused while the admin is looking at the setting, not discovered when
+    /// every player's lookup fails.
+    #[test]
+    fn a_public_address_that_can_only_make_broken_links_is_refused() {
+        for unusable in ["0.0.0.0", "[::]", "224.0.0.1", "255.255.255.255"] {
+            let err = check_public_address(unusable, 25590).expect_err(unusable);
+            assert!(err.to_string().contains("not an address players can connect to"), "{unusable}: {err}");
+        }
+        let overlong = format!("https://pack.example.com/{}", "a".repeat(2000));
+        let err = check_public_address(&overlong, 25590).expect_err("an overlong address");
+        assert!(err.to_string().contains("would not work"), "{err}");
+
+        // Now that the pack server listens on IPv6, an IPv6 address is fine.
+        for usable in ["203.0.113.7", "play.example.com", "host.playit.gg:12345", "https://pack.example.com", "[2001:db8::5]:25590"] {
+            check_public_address(usable, 25590).unwrap_or_else(|e| panic!("{usable}: {e}"));
+        }
+    }
+
+    /// What a join installs must be a server's pack, and the one the player
+    /// said yes to. Refused before an instance exists, so a refusal leaves
+    /// nothing behind to retry into a duplicate.
+    #[tokio::test]
+    async fn a_joined_pack_installs_only_if_it_is_the_servers_and_what_was_approved() {
+        let admin = scratch("install-admin");
+        let (server, share) = shared_server(&admin.0).await;
+        let archive = admin.0.root.join("pack.geodepack");
+        share::pack::export_server(&admin.0, &server, archive.clone(), &Progress::silent("t")).await.unwrap();
+        let approved = share::pack::server_pack_info(&admin.0, &server).await.unwrap();
+        let link = Link {
+            address: Address::Direct { host: "127.0.0.1".into(), port: 25590 },
+            code: share.code.clone(),
+            pin: Some(Pin([1; 32])),
+        };
+
+        let player = scratch("install-player");
+        let state = AppState::new(player.0.clone(), crate::config::Config::default());
+
+        // Not what was approved: refused, and nothing created.
+        let changed = share::host::PackInfo { loader: "forge".into(), ..approved.clone() };
+        install_joined(&state, &link, &changed, None, &archive, &Progress::silent("t"))
+            .await
+            .expect_err("a pack that is not what the player approved");
+        assert_eq!(instance_count(&player.0).await, 0, "a refused join left an instance behind");
+
+        // What was approved: installed, remembered as joined, and the server's.
+        let (inst, problems) = install_joined(&state, &link, &approved, None, &archive, &Progress::silent("t"))
+            .await
+            .unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        let saved = instance::load(&player.0, &inst.id).await.unwrap();
+        assert_eq!(saved.joined.as_ref().map(|l| &l.code), Some(&share.code));
+        assert!(saved
+            .content
+            .iter()
+            .any(|r| r.file_name == "homemade.jar" && r.origin == instance::content::Origin::Server));
+        assert!(saved.pack.is_none(), "a joined server is not a published modpack");
+
+        // A personal pack at that address: refused, and nothing more created.
+        make_personal(&archive);
+        let before = instance_count(&player.0).await;
+        let err = install_joined(&state, &link, &approved, None, &archive, &Progress::silent("t"))
+            .await
+            .expect_err("a personal pack is not a server's");
+        assert!(err.to_string().contains("server's pack"), "{err}");
+        assert_eq!(instance_count(&player.0).await, before);
+    }
+
+    /// A server's pack names Modrinth for the mods it does not carry. One that
+    /// names anywhere else is refused before anything is fetched, whether it
+    /// arrives by joining or as a file.
+    #[tokio::test]
+    async fn a_server_pack_that_would_download_from_elsewhere_fetches_nothing() {
+        let admin = scratch("elsewhere-admin");
+        let (server, share) = shared_server(&admin.0).await;
+        let archive = admin.0.root.join("pack.geodepack");
+        share::pack::export_server(&admin.0, &server, archive.clone(), &Progress::silent("t"))
+            .await
+            .unwrap();
+        let approved = share::pack::server_pack_info(&admin.0, &server)
+            .await
+            .unwrap();
+        let link = Link {
+            address: Address::Direct {
+                host: "127.0.0.1".into(),
+                port: 25590,
+            },
+            code: share.code.clone(),
+            pin: Some(Pin([1; 32])),
+        };
+
+        // Somewhere on the player's own machine that notices being asked.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let elsewhere = format!(
+            "http://127.0.0.1:{}/router/reboot",
+            listener.local_addr().unwrap().port()
+        );
+        rewrite_entry(&archive, "modrinth.index.json", |index| {
+            index["files"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "path": "mods/elsewhere.jar",
+                    "hashes": { "sha1": "0000000000000000000000000000000000000000" },
+                    "downloads": [elsewhere],
+                    "fileSize": 1,
+                }));
+        });
+
+        let player = scratch("elsewhere-player");
+        let state = AppState::new(player.0.clone(), crate::config::Config::default());
+        let err = install_joined(
+            &state,
+            &link,
+            &approved,
+            None,
+            &archive,
+            &Progress::silent("t"),
+        )
+        .await
+        .expect_err("a pack downloading from elsewhere");
+        assert!(
+            err.to_string().contains("somewhere other than Modrinth"),
+            "{err}"
+        );
+        assert_eq!(
+            instance_count(&player.0).await,
+            0,
+            "a refused join left an instance behind"
+        );
+
+        let mut inst = instance::create(
+            &player.0,
+            "File".into(),
+            "1.21.1".into(),
+            crate::meta::Loader::Fabric,
+            "0.16.9".into(),
+        )
+        .await
+        .unwrap();
+        // Were it fetched, a listener that never answers would hold it for the
+        // client's whole timeout; a short one keeps that a failure, not a hang.
+        let impatient = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let err = share::pack::import(
+            &impatient,
+            &player.0,
+            &mut inst,
+            &archive,
+            None,
+            &Progress::silent("t"),
+        )
+        .await
+        .expect_err("the same pack imported from a file");
+        assert!(
+            err.to_string().contains("somewhere other than Modrinth"),
+            "{err}"
+        );
+
+        assert_eq!(
+            listener.accept().map_err(|e| e.kind()).err(),
+            Some(std::io::ErrorKind::WouldBlock),
+            "the pack's download was requested"
+        );
+    }
+
+    /// "Trusted from now on" has to be true: a typed address this player has
+    /// joined before is held to the certificate it had, and another machine
+    /// answering there is refused.
+    #[tokio::test]
+    async fn a_typed_address_is_held_to_the_certificate_it_had_when_joined() {
+        let admin = scratch("typed-admin");
+        let (_server, share) = shared_server(&admin.0).await;
+        let host = share::host::Host::start(admin.0.clone(), 0).await.unwrap();
+        let port = host.local_addr.port();
+        let real = share::identity::Identity::load_or_create(&admin.0).await.unwrap().pin();
+        let typed = || JoinInput::Parts { address: format!("127.0.0.1:{port}"), code: share.code.display() };
+
+        let player = scratch("typed-player");
+        let remember = |pin: Pin| {
+            let paths = player.0.clone();
+            let code = share.code.clone();
+            async move {
+                let mut inst = Instance::new("Joined".into(), "1.21.1".into(), crate::meta::Loader::Fabric, "0.16.9".into());
+                inst.id = "joined".into();
+                inst.joined = Some(Link {
+                    address: Address::Direct { host: "127.0.0.1".into(), port },
+                    code,
+                    pin: Some(pin),
+                });
+                inst.save(&paths).await.unwrap();
+            }
+        };
+
+        // Never joined: the first certificate is trusted, and nothing exists yet.
+        let first = preview_join_at(&player.0, typed()).await.unwrap();
+        assert_eq!(first.verified, Verified::FirstUse);
+        assert!(first.existing.is_none());
+
+        // Joined before, and the same machine answers: verified, and the earlier
+        // instance is offered instead of a second one.
+        remember(real).await;
+        let again = preview_join_at(&player.0, typed()).await.unwrap();
+        assert_eq!(again.verified, Verified::Pinned);
+        assert_eq!(again.existing.as_ref().map(|e| e.id.as_str()), Some("joined"));
+
+        // Joined before, and a different machine answers there now: refused.
+        remember(Pin([9; 32])).await;
+        let err = preview_join_at(&player.0, typed()).await.expect_err("a different certificate at a remembered address");
+        assert!(err.to_string().contains("joined there before"), "{err}");
+
+        host.stop().await;
+    }
 }

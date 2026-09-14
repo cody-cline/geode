@@ -16,13 +16,36 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
+# `geode://` links. Single-instance must be registered first, and its
+# `deep-link` feature is what hands a link to the copy already running.
+tauri-plugin-deep-link = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process", "sync", "time", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process", "sync", "time", "io-util", "net"] }
 futures = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "gzip"] }
+url = "2"
+
+# Serving a server's pack to players over TLS with a self-signed, pinned
+# certificate. Every TLS crate is on `ring` with default features off: leaving
+# them on pulls in aws-lc-rs beside the ring that reqwest already uses, and
+# rustls then panics choosing between the two. `rustls` must stay the same
+# 0.23 reqwest links, or `use_preconfigured_tls` fails at runtime, not compile.
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+hyper = { version = "1", features = ["server", "http1"] }
+# One listener for IPv4 and IPv6 alike; Windows needs IPV6_V6ONLY set by hand.
+socket2 = "0.6"
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+tokio-util = { version = "0.7", features = ["io"] }
+
+# Opening the pack port on the router over UPnP-IGD, so an admin never has to.
+igd-next = { version = "0.17", default-features = false, features = ["aio_tokio"] }
 
 thiserror = "2"
 sha1 = "0.10"
@@ -41,6 +64,12 @@ getrandom = "0.3.4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+# A fake UPnP gateway, so port mapping is tested without touching a real router.
+mock-igd = "0.3"
+# Paused time, so a two-minute wait is tested without taking two minutes.
+tokio = { version = "1", features = ["test-util"] }
 
 [profile.release]
 codegen-units = 1

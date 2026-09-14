@@ -78,6 +78,18 @@ pub struct AppState {
     config: tokio::sync::RwLock<Config>,
     /// Cancellation flags for in-flight installs, keyed by progress id.
     cancels: Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
+    /// The latest `geode://join` link, validated and normalised, until the
+    /// window takes it.
+    ///
+    /// Every link is parked here, and the `geode://join-link` event is only a
+    /// nudge to come and take it. A link that starts the app arrives before
+    /// any webview exists to hear an event, and treating the slot as the one
+    /// source of truth means the window handles both cases the same way —
+    /// and a reload never replays a link that was already taken. A newer link
+    /// replaces an older one that was never taken.
+    pub pending_join: Mutex<Option<String>>,
+    /// The pack server and router mapping, running while anything is shared.
+    pub share: crate::share::service::ShareService,
 }
 
 impl AppState {
@@ -94,6 +106,8 @@ impl AppState {
             servers: crate::server::run::ServerRegistry::default(),
             config: tokio::sync::RwLock::new(config),
             cancels: Mutex::new(HashMap::new()),
+            pending_join: Mutex::new(None),
+            share: Default::default(),
         }
     }
 

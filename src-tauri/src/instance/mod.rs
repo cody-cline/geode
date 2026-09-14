@@ -66,6 +66,11 @@ pub struct Instance {
     /// Set when the instance was created from a modpack.
     #[serde(default)]
     pub pack: Option<PackSource>,
+    /// The server this was joined from. Read to recognise a link opened again,
+    /// and to hold a typed address to the certificate it had; nothing updates
+    /// an instance from its server yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub joined: Option<crate::share::link::Link>,
 }
 
 /// Where an instance came from, and enough of the source's identity to keep
@@ -153,6 +158,7 @@ impl Instance {
             overrides: InstanceOverrides::default(),
             content: Vec::new(),
             pack: None,
+            joined: None,
         }
     }
 
@@ -277,6 +283,10 @@ pub async fn duplicate(paths: &Paths, id: &str, new_name: String) -> Result<Inst
     copy.created_at = chrono::Utc::now().timestamp();
     copy.last_played = None;
     copy.play_seconds = 0;
+    // A copy is the player's own, not a join. Kept, its newer date would make
+    // the pin it carries the one a typed address is held to — a certificate
+    // the server may have replaced since, and a later join already knows.
+    copy.joined = None;
 
     copy_dir(&paths.game_dir(id), &paths.game_dir(&copy.id)).await?;
     // The copy keeps the original's `icon` and `banner` names, so the files
@@ -322,6 +332,32 @@ mod tests {
     #[test]
     fn slugify_collapses_runs() {
         assert_eq!(slugify("a///b"), "a-b");
+    }
+
+    /// Duplicating a joined instance makes a copy that is not itself a join.
+    #[tokio::test]
+    async fn a_copy_of_a_joined_instance_is_not_a_join() {
+        let paths = Paths {
+            root: std::env::temp_dir().join(format!("geode-dup-{}", uuid::Uuid::new_v4())),
+        };
+        let mut original = create(&paths, "Survival".into(), "1.21.1".into(), Loader::Fabric, "0.16.9".into())
+            .await
+            .unwrap();
+        original.joined = Some(
+            crate::share::link::Link::parse(&format!(
+                "geode://join?addr=203.0.113.7:25590&code=GEODE-ABCDE-FGHJK&pin={}",
+                "ab".repeat(32)
+            ))
+            .unwrap(),
+        );
+        original.save(&paths).await.unwrap();
+
+        let copy = duplicate(&paths, &original.id, "Backup".into()).await.unwrap();
+        assert!(copy.joined.is_none());
+        assert!(load(&paths, &copy.id).await.unwrap().joined.is_none());
+        assert!(load(&paths, &original.id).await.unwrap().joined.is_some());
+
+        let _ = std::fs::remove_dir_all(&paths.root);
     }
 
     #[test]

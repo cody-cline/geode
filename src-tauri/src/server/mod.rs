@@ -22,6 +22,7 @@ pub mod probe;
 pub mod properties;
 pub mod run;
 pub mod schedule;
+pub mod share;
 
 use serde::{Deserialize, Serialize};
 
@@ -298,6 +299,13 @@ pub struct Server {
     pub schedules: Vec<schedule::Schedule>,
     #[serde(default)]
     pub notes: String,
+    // Whether and how this server is shared is deliberately not here: see
+    // `share.rs` for why it lives in a file of its own.
+    /// `content` as it was when this copy was read, so a late save can tell
+    /// what its own job changed from what changed on disk meanwhile. Never
+    /// written.
+    #[serde(skip)]
+    content_as_loaded: Vec<crate::instance::content::ContentRecord>,
 }
 
 /// Cardboard implements the Bukkit API as a Fabric mod, which makes plugin
@@ -383,22 +391,171 @@ impl Server {
             content: Vec::new(),
             schedules: Vec::new(),
             notes: String::new(),
+            content_as_loaded: Vec::new(),
         }
     }
 
+    /// Write the whole server over what is on disk.
+    ///
+    /// For a load, a change and a save with nothing slow between them. A copy
+    /// that has waited on the network, a download or a backup is out of date by
+    /// the time it is written, and belongs to [`Server::save_keeping_sharing`].
     pub async fn save(&self, paths: &Paths) -> Result<()> {
         let dir = paths.server(&self.id);
         tokio::fs::create_dir_all(&dir).await?;
-        tokio::fs::write(dir.join("server.json"), serde_json::to_vec_pretty(self)?).await?;
+        write_atomic(&dir.join("server.json"), &serde_json::to_vec_pretty(self)?).await
+    }
+
+    /// Save a copy loaded before a long wait, without undoing the sharing
+    /// choices made on disk during it.
+    ///
+    /// A save writes the whole server, so a job that loads one, spends minutes
+    /// downloading and then saves what it loaded puts sharing back the way it
+    /// was when the job started: a mod the admin marked "not shared" while it
+    /// ran goes to players after all. So the server is read again just before
+    /// writing, and on sharing, disk wins over the copy. Each record takes what
+    /// disk now says about the same file or the same mod, a file held back on
+    /// disk that the copy has nothing for stays held back, and a hold-back
+    /// taken off on disk is not put back.
+    ///
+    /// Every command that loads a server and awaits slow work before saving it
+    /// must save through this: installing or updating content, identifying
+    /// untracked files, adding Cardboard, and starting a server, which may
+    /// download Java first. The schedule ticker goes further and writes only
+    /// `last_run`. A command that changes sharing itself uses
+    /// [`Server::save`], because its choice is the newer one.
+    ///
+    /// Records another job saved meanwhile are kept too, when this copy never
+    /// had one for that file: without them, an update of a held-back mod that
+    /// finished during the wait would leave its new jar with no record holding
+    /// it back, and it would go to players.
+    ///
+    /// Only content is protected, and only across the wait: a change landing
+    /// between this read and its write is still lost, as is any other field
+    /// changed during the job. A server that cannot be read now is not written
+    /// over, since what it says about sharing cannot be kept unseen, and one
+    /// deleted while the job ran should stay deleted.
+    pub async fn save_keeping_sharing(&mut self, paths: &Paths) -> Result<()> {
+        let fresh = load(paths, &self.id).await?;
+        carry_sharing(&mut self.content, &self.content_as_loaded, &fresh.content);
+        self.save(paths).await?;
+        self.content_as_loaded = self.content.clone();
         Ok(())
     }
+}
+
+/// Bring a job's records in line with what disk now says about sharing.
+///
+/// A record's counterparts on disk are those for the same file or the same
+/// project: a job that updated a mod holds a record for the new file while disk
+/// still names the old one, and a choice about the old file was a choice about
+/// that mod. Where several stand for one record, any of them held back holds
+/// it back, just as installing over them would.
+///
+/// `loaded` is what the job started from, which is how a record on disk that
+/// the job has nothing for is told apart: for a file the job started with, the
+/// job dropped it, and it stays dropped; for any other file, another job added
+/// it while this one waited, and it is kept.
+fn carry_sharing(
+    records: &mut Vec<crate::instance::content::ContentRecord>,
+    loaded: &[crate::instance::content::ContentRecord],
+    on_disk: &[crate::instance::content::ContentRecord],
+) {
+    use crate::instance::content::{ContentRecord, Sharing};
+
+    fn stands_for(a: &ContentRecord, b: &ContentRecord) -> bool {
+        a.kind == b.kind
+            && (a.file_name == b.file_name
+                || (!a.provider.is_empty()
+                    && a.provider == b.provider
+                    && a.project_id == b.project_id))
+    }
+    // The record `set_excluded` makes for a file nothing else tracks.
+    fn holds_only_sharing(r: &ContentRecord) -> bool {
+        r.provider.is_empty() && r.origin.is_default() && !r.dependency && r.requires.is_none()
+    }
+
+    for record in records.iter_mut() {
+        let mut counterparts = on_disk.iter().filter(|d| stands_for(d, record)).peekable();
+        if counterparts.peek().is_some() {
+            record.sharing = counterparts.fold(Sharing::default(), |kept, d| Sharing {
+                server_only: kept.server_only || d.sharing.server_only,
+                excluded: kept.excluded || d.sharing.excluded,
+            });
+        }
+    }
+
+    // One that only held a choice disk no longer holds: taken back while the
+    // job ran, and if kept it would hold the file back again.
+    records.retain(|r| {
+        !holds_only_sharing(r)
+            || (!r.sharing.is_default() && on_disk.iter().any(|d| stands_for(d, r)))
+    });
+
+    // A record on disk for a file the job neither has nor started with: a jar
+    // held back, or a mod installed or updated, while the job ran. Matched by
+    // file, not project — an update elsewhere leaves this copy naming the old
+    // file of a mod whose new one must still be recorded.
+    let same_file = |r: &ContentRecord, d: &ContentRecord| r.kind == d.kind && r.file_name == d.file_name;
+    for current in on_disk {
+        if !records.iter().chain(loaded).any(|r| same_file(r, current)) {
+            records.push(current.clone());
+        }
+    }
+}
+
+/// Replace a file so that anyone reading it sees the old contents or the new,
+/// never a mix.
+///
+/// A plain write truncates first and fills in after, and a reader in between
+/// finds an empty or half-written file. Things that read server state to decide
+/// what to do — whether anything is still shared, which code opens a pack —
+/// would take that for "nothing here" and act on it. The new contents go to a
+/// file beside the target, so the rename stays on one filesystem, and reach
+/// the disk before the rename, so a crash leaves the old file rather than an
+/// empty new one.
+async fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tokio::io::AsyncWriteExt;
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file");
+    // Named per write, so two saves of one file at once each rename a whole
+    // file of their own rather than truncating each other's.
+    let tmp = path.with_file_name(format!(
+        ".{name}.{}-{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+
+    let written = async {
+        let mut file = tokio::fs::File::create(&tmp).await?;
+        file.write_all(bytes).await?;
+        file.flush().await?;
+        file.sync_all().await?;
+        drop(file);
+        tokio::fs::rename(&tmp, path).await
+    }
+    .await;
+
+    if let Err(e) = written {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e.into());
+    }
+    Ok(())
 }
 
 pub async fn load(paths: &Paths, id: &str) -> Result<Server> {
     let bytes = tokio::fs::read(paths.server(id).join("server.json"))
         .await
         .map_err(|_| Error::msg(format!("server '{id}' was not found")))?;
-    serde_json::from_slice(&bytes).map_err(|e| Error::json("server.json", e))
+    let mut server: Server = serde_json::from_slice(&bytes).map_err(|e| Error::json("server.json", e))?;
+    server.content_as_loaded = server.content.clone();
+    Ok(server)
 }
 
 pub async fn list(paths: &Paths) -> Result<Vec<Server>> {
@@ -724,6 +881,208 @@ mod tests {
             .push(installed(CARDBOARD_SLUG, ContentKind::ResourcePack));
         assert!(!server.has_cardboard());
         assert!(!server.takes_plugins());
+    }
+
+    fn scratch(tag: &str) -> Paths {
+        let root = std::env::temp_dir().join(format!("geode-server-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        Paths { root }
+    }
+
+    /// A reader of `server.json` used to be able to open it between the
+    /// truncate and the write, find nothing parseable, and conclude the server
+    /// was not there — the sharing service then stopped serving a server that
+    /// was still shared. Saved over a large file, so a torn read has a wide
+    /// window to land in, while another thread reads as fast as it can.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reader_never_sees_half_a_saved_server() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let paths = scratch("atomic");
+        let mut server = Server::new("Torn".into(), ServerKind::Fabric, "1.21.1".into());
+        server.notes = "a".repeat(4 << 20);
+        server.save(&paths).await.unwrap();
+
+        let file = paths.server(&server.id).join("server.json");
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader = std::thread::spawn({
+            let stop = stop.clone();
+            move || {
+                let (mut reads, mut torn) = (0u32, 0u32);
+                while !stop.load(Ordering::Relaxed) {
+                    let bytes = std::fs::read(&file).expect("server.json went missing");
+                    reads += 1;
+                    if serde_json::from_slice::<Server>(&bytes).is_err() {
+                        torn += 1;
+                    }
+                }
+                (reads, torn)
+            }
+        });
+
+        for round in 0..40 {
+            server.notes = if round % 2 == 0 { "b" } else { "a" }.repeat(4 << 20);
+            server.save(&paths).await.unwrap();
+        }
+        stop.store(true, Ordering::Relaxed);
+        let (reads, torn) = reader.join().unwrap();
+
+        assert!(reads > 40, "the reader barely ran ({reads} reads), so this proves nothing");
+        assert_eq!(torn, 0, "{torn} of {reads} reads found a half-written server.json");
+
+        // Nothing left behind beside it.
+        let left: Vec<String> = std::fs::read_dir(paths.server(&server.id))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(left, vec!["server.json".to_string()]);
+
+        std::fs::remove_dir_all(&paths.root).unwrap();
+    }
+
+    fn record(
+        file: &str,
+        provider: &str,
+        project: &str,
+    ) -> crate::instance::content::ContentRecord {
+        crate::instance::content::ContentRecord {
+            file_name: file.into(),
+            provider: provider.into(),
+            project_id: project.into(),
+            ..installed("x", crate::instance::content::ContentKind::Mod)
+        }
+    }
+
+    /// A long job — an install, say — loaded the server, and while it
+    /// downloaded, the admin held two mods back from players and let two
+    /// others go. The job's save used to put all four back the way they were.
+    #[tokio::test]
+    async fn a_late_save_keeps_the_sharing_choices_made_while_it_waited() {
+        use crate::instance::content::{set_excluded, ContentKind};
+
+        let paths = scratch("keep-sharing");
+        let mut server = Server::new("Late".into(), ServerKind::Fabric, "1.21.1".into());
+        server.content = vec![
+            record("tool-1.0.jar", "modrinth", "TOOL"),
+            record("sodium.jar", "modrinth", "SODIUM"),
+        ];
+        set_excluded(&mut server.content, ContentKind::Mod, "was-private.jar", true);
+        set_excluded(&mut server.content, ContentKind::Mod, "sodium.jar", true);
+        server.save(&paths).await.unwrap();
+
+        // The job's copy, taken before anyone touched anything.
+        let mut job = load(&paths, &server.id).await.unwrap();
+
+        // Meanwhile, on disk.
+        let mut admin = load(&paths, &server.id).await.unwrap();
+        set_excluded(&mut admin.content, ContentKind::Mod, "tool-1.0.jar", true);
+        set_excluded(&mut admin.content, ContentKind::Mod, "hand-dropped.jar", true);
+        set_excluded(&mut admin.content, ContentKind::Mod, "was-private.jar", false);
+        set_excluded(&mut admin.content, ContentKind::Mod, "sodium.jar", false);
+        admin.save(&paths).await.unwrap();
+
+        // The job updates the tool to a new file and a new record, stamps
+        // what it did, and saves.
+        job.content.retain(|r| r.file_name != "tool-1.0.jar");
+        job.content.push(record("tool-2.0.jar", "modrinth", "TOOL"));
+        job.last_started = Some(42);
+        job.save_keeping_sharing(&paths).await.unwrap();
+
+        let after = load(&paths, &server.id).await.unwrap();
+        let find = |file: &str| after.content.iter().find(|r| r.file_name == file);
+
+        assert!(
+            find("tool-2.0.jar").expect("the job's own record was lost").sharing.excluded,
+            "the update was saved as shared, though the admin held the mod back while it ran"
+        );
+        assert!(
+            find("hand-dropped.jar").is_some_and(|r| r.sharing.excluded),
+            "a jar held back while the job ran is shared again: {:?}",
+            after.content
+        );
+        assert!(
+            find("was-private.jar").is_none(),
+            "a hold-back the admin took off came back: {:?}",
+            after.content
+        );
+        assert!(find("tool-1.0.jar").is_none(), "the replaced file's record came back");
+        assert!(
+            find("sodium.jar").is_some_and(|r| !r.sharing.excluded),
+            "a mod the admin let go while the job ran is held back again"
+        );
+        // What the job owns is still what it saved.
+        assert_eq!(after.last_started, Some(42));
+
+        std::fs::remove_dir_all(&paths.root).unwrap();
+    }
+
+    /// Two jobs on one server at once: a start waiting on a Java download, say,
+    /// and meanwhile an update of a held-back mod and an install of another.
+    /// The start saves last, from a copy naming only the mod's old file. The
+    /// update's record for the new file has to survive that — it is what holds
+    /// the new jar back from players — and so does the install's.
+    #[tokio::test]
+    async fn a_late_save_keeps_what_another_job_saved_while_it_waited() {
+        use crate::instance::content::{set_excluded, ContentKind};
+
+        let paths = scratch("keep-other-job");
+        let mut server = Server::new("Overlap".into(), ServerKind::Fabric, "1.21.1".into());
+        server.content = vec![record("private-1.0.jar", "modrinth", "PRIV")];
+        set_excluded(&mut server.content, ContentKind::Mod, "private-1.0.jar", true);
+        server.save(&paths).await.unwrap();
+
+        let mut waiting = load(&paths, &server.id).await.unwrap();
+
+        let mut other = load(&paths, &server.id).await.unwrap();
+        let mut updated = record("private-2.0.jar", "modrinth", "PRIV");
+        updated.version_id = "2.0".into();
+        updated.sharing.excluded = true;
+        other.content = vec![updated, record("fresh.jar", "modrinth", "FRESH")];
+        other.save_keeping_sharing(&paths).await.unwrap();
+
+        waiting.last_started = Some(7);
+        waiting.save_keeping_sharing(&paths).await.unwrap();
+
+        let after = load(&paths, &server.id).await.unwrap();
+        let find = |file: &str| after.content.iter().find(|r| r.file_name == file);
+        let new_file = find("private-2.0.jar").unwrap_or_else(|| {
+            panic!("the update's record was lost, so its jar is shared: {:?}", after.content)
+        });
+        assert!(new_file.sharing.excluded, "the updated mod is shared again");
+        assert_eq!(new_file.version_id, "2.0", "the record kept is not the update's");
+        assert!(find("fresh.jar").is_some(), "a mod installed meanwhile lost its record");
+        assert_eq!(after.last_started, Some(7));
+
+        // The same copy goes on to remove the mod installed meanwhile, and
+        // saves again. What it saved the first time is now what it started
+        // from, so that removal is its own, and stays.
+        waiting.content.retain(|r| r.file_name != "fresh.jar");
+        waiting.save_keeping_sharing(&paths).await.unwrap();
+        let again = load(&paths, &server.id).await.unwrap();
+        assert!(
+            !again.content.iter().any(|r| r.file_name == "fresh.jar"),
+            "a removal on a second save was undone"
+        );
+
+        std::fs::remove_dir_all(&paths.root).unwrap();
+    }
+
+    /// Deleted while the job ran. Writing the copy back would bring the
+    /// server back from nothing.
+    #[tokio::test]
+    async fn a_late_save_does_not_bring_back_a_deleted_server() {
+        let paths = scratch("keep-sharing-deleted");
+        let server = Server::new("Gone".into(), ServerKind::Fabric, "1.21.1".into());
+        server.save(&paths).await.unwrap();
+
+        let mut job = load(&paths, &server.id).await.unwrap();
+        delete(&paths, &server.id).await.unwrap();
+
+        job.save_keeping_sharing(&paths).await.unwrap_err();
+        assert!(!paths.server(&server.id).exists(), "the deleted server was written again");
+
+        let _ = std::fs::remove_dir_all(&paths.root);
     }
 
     #[test]

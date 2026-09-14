@@ -34,19 +34,22 @@ pub async fn manifest_for(paths: &Paths, instance: &Instance) -> Manifest {
             fullscreen: instance.overrides.fullscreen,
             server_kind: None,
         },
-        icon: instance
-            .icon
-            .as_ref()
-            .filter(|name| media.join(name).is_file())
-            .map(|name| media_entry(name)),
-        banner: instance
-            .banner
-            .as_ref()
-            .filter(|name| media.join(name).is_file())
-            .map(|name| media_entry(name)),
+        icon: artwork(&media, instance.icon.as_ref()),
+        banner: artwork(&media, instance.banner.as_ref()),
         source: instance.pack.clone(),
-        files: notes_for(paths, instance).await,
+        files: notes_for(
+            &paths.game_dir(&instance.id),
+            &instance.content.iter().collect::<Vec<_>>(),
+            true,
+        )
+        .await,
     }
+}
+
+/// Where a picture goes in the zip, when the file it names is really there.
+fn artwork(media: &Path, name: Option<&String>) -> Option<String> {
+    name.filter(|name| media.join(name).is_file())
+        .map(|name| media_entry(name))
 }
 
 fn media_entry(file_name: &str) -> String {
@@ -77,18 +80,24 @@ fn sanitise(file_name: &str, ext: &str) -> String {
 /// **source** is how a file the index cannot point at gets fetched anyway — by
 /// project and version id, resolved through the recipient's own credentials,
 /// rather than by us putting the jar in the zip.
-async fn notes_for(paths: &Paths, instance: &Instance) -> Vec<FileNote> {
-    let game_dir = paths.game_dir(&instance.id);
+///
+/// `follow_links` is the pack's own rule: an instance's pack follows links, a
+/// server's never does — not even to read a hash or a side.
+async fn notes_for(
+    game_dir: &Path,
+    records: &[&instance::content::ContentRecord],
+    follow_links: bool,
+) -> Vec<FileNote> {
     let mut out = Vec::new();
 
-    for record in &instance.content {
+    for record in records {
         let rel = PathBuf::from(record.kind.folder()).join(&record.file_name);
 
         // A record is provenance, not proof. Deleting a file outside the
         // launcher leaves its record behind forever — the module says as much,
         // and nothing prunes it — so a reference written from the record alone
         // would promise the recipient a mod the sharer does not actually have.
-        let Some((full, disabled)) = on_disk(&game_dir, &rel).await else {
+        let Some((full, disabled)) = on_disk(game_dir, &rel, follow_links).await else {
             continue;
         };
 
@@ -126,17 +135,26 @@ async fn notes_for(paths: &Paths, instance: &Instance) -> Vec<FileNote> {
 /// Records are keyed by the enabled name, so a mod that has been turned off is
 /// `foo.jar` in the record and `foo.jar.disabled` on disk. Both count as having
 /// the file.
-async fn on_disk(game_dir: &Path, rel: &Path) -> Option<(PathBuf, bool)> {
+///
+/// Without `follow_links`, only a regular file counts: a link under the enabled
+/// name, beside a real turned-off twin, is not that mod.
+async fn on_disk(game_dir: &Path, rel: &Path, follow_links: bool) -> Option<(PathBuf, bool)> {
+    let present = |path: PathBuf| async move {
+        if follow_links {
+            tokio::fs::metadata(&path).await.is_ok()
+        } else {
+            tokio::fs::symlink_metadata(&path)
+                .await
+                .is_ok_and(|meta| meta.is_file())
+        }
+    };
     let enabled = game_dir.join(rel);
-    if tokio::fs::metadata(&enabled).await.is_ok() {
+    if present(enabled.clone()).await {
         return Some((enabled, false));
     }
 
     let disabled = game_dir.join(disabled_name(rel)?);
-    tokio::fs::metadata(&disabled)
-        .await
-        .is_ok()
-        .then_some((disabled, true))
+    present(disabled.clone()).await.then_some((disabled, true))
 }
 
 /// `mods/foo.jar` → `mods/foo.jar.disabled`.
@@ -174,15 +192,30 @@ pub async fn extras_for(
     instance: &Instance,
     manifest: &Manifest,
 ) -> Result<crate::instance::modpack::Extras> {
+    extras_from(
+        &paths.instance_media(&instance.id),
+        instance.icon.as_ref(),
+        instance.banner.as_ref(),
+        manifest,
+    )
+    .await
+}
+
+/// The same, for artwork kept in any media folder.
+async fn extras_from(
+    media: &Path,
+    icon: Option<&String>,
+    banner: Option<&String>,
+    manifest: &Manifest,
+) -> Result<crate::instance::modpack::Extras> {
     let mut extras = vec![(
         Manifest::PATH.to_string(),
         serde_json::to_vec_pretty(manifest)?,
     )];
 
-    let media = paths.instance_media(&instance.id);
     for (entry, source) in [
-        (manifest.icon.as_ref(), instance.icon.as_ref()),
-        (manifest.banner.as_ref(), instance.banner.as_ref()),
+        (manifest.icon.as_ref(), icon),
+        (manifest.banner.as_ref(), banner),
     ] {
         let (Some(entry), Some(source)) = (entry, source) else {
             continue;
@@ -208,12 +241,27 @@ pub async fn export(
     let manifest = manifest_for(paths, instance).await;
     let extras = extras_for(paths, instance, &manifest).await?;
 
-    // Read off the manifest rather than worked out a second time. A file is
-    // left out of `overrides/` if and only if the manifest actually carries a
-    // reference for it, so the two halves cannot come to disagree about which
-    // files the recipient is expected to fetch — which is the same rule the
-    // format applies to download URLs, for the same reason.
-    let referenced: HashSet<PathBuf> = manifest
+    instance::modpack::export_mrpack(
+        paths,
+        instance,
+        dest,
+        include_saves,
+        extras,
+        &referenced(&manifest),
+        progress,
+    )
+    .await
+}
+
+/// The files a pack names instead of carrying.
+///
+/// Read off the manifest rather than worked out a second time. A file is left
+/// out of `overrides/` if and only if the manifest actually carries a reference
+/// for it, so the two halves cannot come to disagree about which files the
+/// recipient is expected to fetch — which is the same rule the format applies
+/// to download URLs, for the same reason.
+fn referenced(manifest: &Manifest) -> HashSet<PathBuf> {
+    manifest
         .files
         .iter()
         .filter(|note| note.source.is_some())
@@ -221,18 +269,7 @@ pub async fn export(
         // string to `PathBuf`, so a path written on one platform still matches
         // the walk's own on another.
         .map(|note| note.path.split('/').collect::<PathBuf>())
-        .collect();
-
-    instance::modpack::export_mrpack(
-        paths,
-        instance,
-        dest,
-        include_saves,
-        extras,
-        &referenced,
-        progress,
-    )
-    .await
+        .collect()
 }
 
 /// Read the Geode half out of a pack, if it has one.
@@ -240,15 +277,15 @@ pub async fn export(
 /// `Ok(None)` means a plain `.mrpack`, which is a perfectly good thing to be
 /// handed and is imported as one.
 pub fn read_manifest(archive: &Path) -> Result<Option<Manifest>> {
-    let file = std::fs::File::open(archive)?;
-    let mut zip = zip::ZipArchive::new(file)?;
-    let Ok(mut entry) = zip.by_name(Manifest::PATH) else {
+    let mut zip = instance::modpack::open_pack(archive)?;
+    let Ok(entry) = zip.by_name(Manifest::PATH) else {
         return Ok(None);
     };
 
-    let mut text = String::new();
-    std::io::Read::read_to_string(&mut entry, &mut text)?;
-    let manifest: Manifest = serde_json::from_str(&text)
+    // Held to the same ceiling as the index beside it: read whole and then
+    // parsed, it is otherwise a way to exhaust memory from a small file.
+    let raw = instance::modpack::read_json_entry(entry, "Geode manifest")?;
+    let manifest: Manifest = serde_json::from_slice(&raw)
         .map_err(|e| Error::msg(format!("this pack's Geode manifest could not be read: {e}")))?;
 
     if !manifest.readable() {
@@ -266,6 +303,12 @@ pub fn read_manifest(archive: &Path) -> Result<Option<Manifest>> {
 /// Only ever fills in what the pack actually carried: a manifest that recorded
 /// no memory size leaves the importer's default alone rather than writing a
 /// zero over it.
+///
+/// A server's pack never sets memory or Java arguments, whatever it carries.
+/// Geode never writes them into one — a server's are sized for its own heap —
+/// so a server pack that has them was written by something else, and Java
+/// arguments are a way to run code (`-javaagent:`) that no mod count in the
+/// join preview would show.
 pub fn apply(manifest: &Manifest, instance: &mut Instance) {
     let p = &manifest.profile;
     if !p.name.trim().is_empty() {
@@ -277,10 +320,11 @@ pub fn apply(manifest: &Manifest, instance: &mut Instance) {
     if !p.notes.is_empty() {
         instance.notes = p.notes.clone();
     }
-    if p.memory_mb.is_some() {
+    let personal = manifest.kind != Kind::Server;
+    if personal && p.memory_mb.is_some() {
         instance.overrides.memory_mb = p.memory_mb;
     }
-    if p.java_args.is_some() {
+    if personal && p.java_args.is_some() {
         instance.overrides.java_args = p.java_args.clone();
     }
     if p.width.is_some() {
@@ -315,6 +359,12 @@ pub fn apply(manifest: &Manifest, instance: &mut Instance) {
 /// pack has already been claimed for the server. The caller saves a partial
 /// import rather than discarding it, so the ownership has to be right before
 /// the failure is reported, not only on success.
+///
+/// A server's pack also leaves the instance naming no modpack. The mrpack half
+/// labels every import as the pack its index names, which for a server is the
+/// server's own name beside the version of whatever pack the server was built
+/// from — a pack this instance is not. A joined instance says where it came
+/// from through its link instead.
 pub async fn import(
     client: &reqwest::Client,
     paths: &Paths,
@@ -329,6 +379,9 @@ pub async fn import(
         .map_err(|e| Error::msg(format!("reading the pack's manifest panicked: {e}")))??;
 
     let outcome = async {
+        if manifest.as_ref().is_some_and(|m| m.kind == Kind::Server) {
+            check_server_downloads(archive).await?;
+        }
         instance::modpack::import_into(client, paths, instance, archive, curseforge_key, progress)
             .await?;
         match &manifest {
@@ -343,9 +396,48 @@ pub async fn import(
     .await;
 
     if manifest.as_ref().is_some_and(|m| m.kind == Kind::Server) {
+        instance.pack = None;
         instance::content::claim_for_server(paths, instance).await?;
     }
     outcome
+}
+
+/// Refuse a server's pack whose index would download from anywhere but
+/// Modrinth, before anything is fetched.
+///
+/// A server's pack comes from a machine the player was only given an address
+/// for, and its index is a list of URLs fetched without asking. Honoured from
+/// anywhere, it could have the player's Geode request any address — their own
+/// router included — over plain HTTP, and write whatever came back for as long
+/// as it kept coming. Modrinth over HTTPS is the only place [`export_server`]
+/// names, so nothing a real server sends is lost.
+pub async fn check_server_downloads(archive: &Path) -> Result<()> {
+    let probe = archive.to_path_buf();
+    let index = tokio::task::spawn_blocking(move || instance::modpack::read_index(&probe))
+        .await
+        .map_err(|e| Error::msg(format!("reading the pack's index panicked: {e}")))??;
+    let elsewhere = index
+        .iter()
+        .flat_map(|index| &index.files)
+        .find(|file| !file.downloads.iter().all(|url| from_modrinth(url)));
+    match elsewhere {
+        Some(file) => Err(Error::msg(format!(
+            "this server's pack would download {} from somewhere other than Modrinth, so it was not installed",
+            file.path
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// `https://cdn.modrinth.com/…`, and nothing dressed up to look like it.
+fn from_modrinth(url: &str) -> bool {
+    url::Url::parse(url).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url.host_str() == Some("cdn.modrinth.com")
+            && url.port().is_none()
+            && url.username().is_empty()
+            && url.password().is_none()
+    })
 }
 
 /// Apply the Geode half to the instance the mrpack half just built.
@@ -388,8 +480,7 @@ async fn extract_media(
     let media_dir = media.clone();
     let written = tokio::task::spawn_blocking(move || -> Result<Vec<(String, bool)>> {
         use std::io::Read;
-        let file = std::fs::File::open(&archive)?;
-        let mut zip = zip::ZipArchive::new(file)?;
+        let mut zip = instance::modpack::open_pack(&archive)?;
         let mut out = Vec::new();
         for (entry, is_icon) in wanted {
             let Ok(mut source) = zip.by_name(&entry) else {
@@ -583,6 +674,265 @@ fn kind_for(rel: &Path) -> Option<instance::content::ContentKind> {
     .find(|k| k.folder() == folder)
 }
 
+// ---------------------------------------------------------------------------
+// A server's pack, for its players
+// ---------------------------------------------------------------------------
+
+/// The loader and loader version a player's client needs for this server.
+///
+/// Fabric, Forge and NeoForge servers record their loader version directly.
+/// Plugin servers — Paper, Folia, Purpur, Spigot — and vanilla need a vanilla
+/// client and no mods. Proxies (Velocity, Waterfall) have no Minecraft version
+/// of their own and are refused, and so are the kinds whose client loader
+/// version Geode does not record today (Quilt, Mohist, Arclight, Banner) —
+/// with a message saying so, rather than a pack that names a version that
+/// does not exist.
+pub fn client_loader(server: &crate::server::Server) -> Result<(crate::meta::Loader, String)> {
+    use crate::meta::Loader;
+    use crate::server::ServerKind;
+
+    // Every kind by name and no catch-all, so a kind added later fails to
+    // compile here instead of quietly getting somebody else's answer.
+    let loader = match server.kind {
+        ServerKind::Fabric => Loader::Fabric,
+        ServerKind::NeoForge => Loader::NeoForge,
+        ServerKind::Forge => Loader::Forge,
+        ServerKind::Paper
+        | ServerKind::Folia
+        | ServerKind::Purpur
+        | ServerKind::Spigot
+        | ServerKind::Vanilla => return Ok((Loader::Vanilla, String::new())),
+        ServerKind::Velocity | ServerKind::Waterfall => {
+            return Err(Error::msg(format!(
+                "{} is a proxy, which has no Minecraft version of its own to build a pack \
+                 for — share one of the servers behind it instead",
+                server.kind.display_name()
+            )));
+        }
+        // What `build` holds for these is an installer version, a build number
+        // or a file name — never the loader version a client needs.
+        ServerKind::Quilt | ServerKind::Mohist | ServerKind::Arclight | ServerKind::Banner => {
+            return Err(Error::msg(format!(
+                "Geode does not record which loader version a {} server's players need yet, \
+                 so it cannot build them a pack",
+                server.kind.display_name()
+            )));
+        }
+    };
+
+    // For these three the build is the loader version. A server whose install
+    // never finished has none, and a pack naming an empty loader version is one
+    // no launcher can install.
+    if server.build.trim().is_empty() {
+        return Err(Error::msg(format!(
+            "this {} server has no loader installed yet, so there is no version to give players",
+            server.kind.display_name()
+        )));
+    }
+    Ok((loader, server.build.clone()))
+}
+
+/// Which of a server's mods go to its players.
+struct ServerMods<'a> {
+    /// Records for the mods that go. Only these are indexed or referenced.
+    shared: Vec<&'a instance::content::ContentRecord>,
+    /// Every mod file that goes, by its path from the run directory as it is
+    /// named on disk, whether the pack ends up indexing it, referencing it or
+    /// carrying its bytes. The walk carries nothing else from `mods/`, so this
+    /// is also the count a player is shown.
+    carried: HashSet<PathBuf>,
+}
+
+/// Sort a server's `mods/` into what its players get and what they do not.
+///
+/// Read from the folder rather than the records, because disk is the source of
+/// truth: a jar dropped in by hand has no record and is still a mod, and a
+/// record whose jar is gone is not.
+///
+/// Only what a loader would load counts, and only that goes: a regular file
+/// directly inside `mods/` with a jar's name. Everything else an admin leaves
+/// there — a `.bak` of a jar they kept back, a folder of old server-side
+/// tools, a link to somewhere else — is invisible in their Content tab, so
+/// they could never mark it "don't share", and the pack must not send what
+/// they cannot see. A `mods/` that is itself a link shares nothing, for the
+/// reason [`instance::modpack::Walk::Only`] gives.
+async fn server_mods<'a>(
+    run: &Path,
+    records: &'a [instance::content::ContentRecord],
+) -> Result<ServerMods<'a>> {
+    use instance::content::{is_content_file, strip_disabled, ContentKind};
+
+    let dir = run.join(ContentKind::Mod.folder());
+    let excluded: HashSet<String> = records
+        .iter()
+        .filter(|r| r.kind == ContentKind::Mod && !r.sharing.shareable())
+        .map(|r| r.file_name.clone())
+        .collect();
+
+    let names = tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
+        match std::fs::symlink_metadata(&dir) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => return Ok(Vec::new()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        }
+        let mut kept_back = excluded;
+        let mut candidates = Vec::new();
+        for entry in std::fs::read_dir(&dir)?.flatten() {
+            if !entry.file_type().is_ok_and(|t| t.is_file()) {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !is_content_file(&name, ContentKind::Mod)
+                || kept_back.contains(strip_disabled(&name).0)
+            {
+                continue;
+            }
+            // A jar that says it only runs on a server cannot load on a
+            // client, and it is the likeliest place for the server's own
+            // private tooling. Only what the jar itself declared counts: a
+            // NeoForge jar declares nothing, and guessing would drop mods
+            // players need.
+            let side = instance::jar::read(&entry.path()).and_then(|meta| meta.side);
+            if side == Some(instance::jar::Side::Server) {
+                kept_back.insert(strip_disabled(&name).0.to_string());
+                continue;
+            }
+            candidates.push(name);
+        }
+        // Filtered once every jar has been read, so a kept-back jar keeps its
+        // turned-off twin back too whichever of the two was listed first.
+        candidates.retain(|name| !kept_back.contains(strip_disabled(name).0));
+        Ok(candidates)
+    })
+    .await
+    .map_err(|e| Error::msg(format!("reading the server's mods panicked: {e}")))??;
+
+    // Records follow the files. One whose file is kept back, is a link, or is
+    // gone names nothing the pack sends, so it must not be indexed or
+    // referenced either — or the pack would carry a mod the count left out.
+    let going: HashSet<&str> = names.iter().map(|name| strip_disabled(name).0).collect();
+    Ok(ServerMods {
+        shared: records
+            .iter()
+            .filter(|r| r.kind == ContentKind::Mod && going.contains(r.file_name.as_str()))
+            .collect(),
+        carried: names
+            .iter()
+            .map(|name| PathBuf::from(ContentKind::Mod.folder()).join(name))
+            .collect(),
+    })
+}
+
+/// What a player is shown before importing, without building the pack.
+pub async fn server_pack_info(
+    paths: &Paths,
+    server: &crate::server::Server,
+) -> Result<super::host::PackInfo> {
+    let (loader, loader_version) = client_loader(server)?;
+    let mods = server_mods(&paths.server_run(&server.id), &server.content).await?;
+    Ok(super::host::PackInfo {
+        name: server.name.clone(),
+        mc_version: server.mc_version.clone(),
+        loader: loader.as_str().to_string(),
+        loader_version,
+        mods: mods.carried.len(),
+        server_kind: server.kind.as_str().to_string(),
+    })
+}
+
+/// Write the pack a server hands to its players.
+///
+/// The same writer as an instance's pack, walking the server's run directory
+/// by **allowlist** — `mods/`, and `config/` only when the server's share
+/// says so — never by denylist. A server's run directory holds
+/// `server.properties` with its RCON password, `ops.json`, the whitelist, the
+/// ban lists, every world and a few hundred megabytes of libraries; a denylist
+/// is one forgotten entry from shipping any of them.
+///
+/// From `mods/` it takes only the jars sitting directly inside it, and from
+/// either folder it takes nothing through a link, so an allowed folder name
+/// cannot be a way to reach a file outside it. Unlike an instance's pack,
+/// which follows links, nobody reviews this one before it goes.
+///
+/// Records marked `excluded` stay on the server. A jar that declares itself
+/// server-side only stays too: it cannot load on a client, and it is often the
+/// private one. The manifest is `Kind::Server`, so importing it claims every
+/// file for the server.
+pub async fn export_server(
+    paths: &Paths,
+    server: &crate::server::Server,
+    dest: PathBuf,
+    progress: &Progress,
+) -> Result<()> {
+    let (loader, loader_version) = client_loader(server)?;
+    let run = paths.server_run(&server.id);
+    let mods = server_mods(&run, &server.content).await?;
+
+    let media = paths.server_media(&server.id);
+    let manifest = Manifest {
+        geode_format: FORMAT,
+        kind: Kind::Server,
+        profile: Profile {
+            name: server.name.clone(),
+            notes: server.notes.clone(),
+            server_kind: Some(server.kind.as_str().to_string()),
+            // No memory and no Java arguments. A server's are sized for its
+            // own heap, and carried across they would replace the player's.
+            ..Default::default()
+        },
+        icon: artwork(&media, server.icon.as_ref()),
+        banner: artwork(&media, server.banner.as_ref()),
+        // Not the modpack the server was built from, even when it was: that
+        // build dropped the pack's client-only mods, and naming the published
+        // pack here would make a joined instance show — and Browse treat — it
+        // as that pack when it is not. A joined instance says where it came
+        // from through `joined` instead.
+        source: None,
+        files: notes_for(&run, &mods.shared, false).await,
+    };
+    let extras = extras_from(
+        &media,
+        server.icon.as_ref(),
+        server.banner.as_ref(),
+        &manifest,
+    )
+    .await?;
+
+    // Mods by name, exactly the files `server_mods` read and counted, and
+    // `config/` whole when asked for. Neither follows a link.
+    let mut trees = Vec::new();
+    // From the share file, read now: an admin who just stopped sending config
+    // is not second-guessed by a copy of anything loaded earlier. A server that
+    // is not shared at all sends none.
+    let include_config = crate::server::share::load(paths, &server.id)
+        .await?
+        .is_some_and(|share| share.include_config);
+    if include_config {
+        trees.push("config");
+    }
+
+    let input = instance::modpack::PackInput {
+        root: run,
+        name: &server.name,
+        notes: &server.notes,
+        version: server
+            .pack
+            .as_ref()
+            .map(|p| p.version.clone())
+            .unwrap_or_else(|| "1.0.0".into()),
+        mc_version: &server.mc_version,
+        loader,
+        loader_version: &loader_version,
+        content: mods.shared,
+        walk: instance::modpack::Walk::Only {
+            trees,
+            files: mods.carried,
+        },
+    };
+    instance::modpack::write_mrpack(input, dest, extras, &referenced(&manifest), progress).await
+}
+
 /// `My Pack 1.2` becomes `My Pack 1.2.geodepack`.
 pub fn file_name(stem: &str) -> String {
     let cleaned: String = stem
@@ -668,6 +1018,33 @@ mod tests {
         assert_eq!(got.overrides.memory_mb, Some(2048), "kept the local size");
         assert_eq!(got.notes, "my own notes");
         assert!(got.group.is_none());
+    }
+
+    /// A server's JVM settings are not the player's, and Java arguments are a
+    /// way to run code the join preview never mentions. Geode never writes
+    /// them into a server pack, so one that has them is not to be believed.
+    #[test]
+    fn a_server_pack_never_sets_memory_or_java_arguments() {
+        let mut server = manifest();
+        server.kind = Kind::Server;
+        server.profile.java_args = Some("-javaagent:mods/agent.jar".into());
+        server.profile.memory_mb = Some(256);
+
+        let mut joined = instance();
+        apply(&server, &mut joined);
+        assert_eq!(joined.overrides.memory_mb, Some(2048), "kept the player's size");
+        assert_eq!(joined.overrides.java_args, None);
+        // The rest of the profile still arrives.
+        assert_eq!(joined.name, "Shared Pack");
+        assert_eq!(joined.overrides.width, Some(1600));
+
+        // A person's pack is still trusted with both.
+        let mut personal = server.clone();
+        personal.kind = Kind::Instance;
+        let mut got = instance();
+        apply(&personal, &mut got);
+        assert_eq!(got.overrides.memory_mb, Some(256));
+        assert_eq!(got.overrides.java_args.as_deref(), Some("-javaagent:mods/agent.jar"));
     }
 
     /// A Java path is the author's machine, not the pack's. It is never
@@ -1094,6 +1471,41 @@ mod tests {
         assert!(mods.join("private-anticheat.jar").is_file());
     }
 
+    /// The same through the whole import, from a server pack Geode would never
+    /// write: one that sets a Java agent and a heap, and names a modpack. None
+    /// of it lands, while the same pack from a person still carries all three.
+    #[tokio::test]
+    async fn a_server_pack_cannot_set_the_jvm_or_claim_to_be_a_modpack() {
+        let (paths, mut inst) = fixture("jvm", &[("mods", "agent.jar")]).await;
+        inst.overrides.java_args = Some("-javaagent:mods/agent.jar".into());
+        inst.overrides.memory_mb = Some(256);
+        inst.pack = Some(crate::instance::PackSource::local(
+            "Upstream Pack".into(),
+            "4.2.0".into(),
+            Some("modrinth".into()),
+        ));
+
+        let personal = paths.root.join("jvm-personal.geodepack");
+        export(&paths, &inst, personal.clone(), false, &Progress::silent("t")).await.unwrap();
+        let hostile = paths.root.join("jvm-server.geodepack");
+        std::fs::copy(&personal, &hostile).unwrap();
+        rewrite_pack(&hostile, |m| m.kind = Kind::Server, &[]);
+
+        let mut joined = fresh("jvm-joined");
+        import_offline(&paths, &mut joined, &hostile).await.unwrap();
+        assert_eq!(joined.overrides.java_args, None);
+        assert_eq!(joined.overrides.memory_mb, Some(2048));
+        assert!(joined.pack.is_none(), "labelled as a modpack: {:?}", joined.pack);
+
+        let mut shared = fresh("jvm-shared");
+        import_offline(&paths, &mut shared, &personal).await.unwrap();
+        assert_eq!(shared.overrides.java_args.as_deref(), Some("-javaagent:mods/agent.jar"));
+        assert_eq!(shared.overrides.memory_mb, Some(256));
+        assert_eq!(shared.pack.as_ref().map(|p| p.version.as_str()), Some("4.2.0"));
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
     /// A server pack that stops halfway is still the server's. The caller saves
     /// a partial import rather than throwing it away, so ownership has to be
     /// settled before the failure is reported — not only when all went well.
@@ -1120,7 +1532,7 @@ mod tests {
                 "path": "mods/indexed.jar",
                 "hashes": { "sha1": sha1, "sha512": "unused" },
                 "env": { "client": "required", "server": "required" },
-                "downloads": ["http://127.0.0.1:9/never-fetched.jar"],
+                "downloads": ["https://cdn.modrinth.com/data/never/versions/fetched/indexed.jar"],
                 "fileSize": 7
             }],
             "dependencies": { "minecraft": "1.21.1" }
@@ -1254,6 +1666,36 @@ mod tests {
         assert!(!paths.instance_media("big-arrived").join("icon.png").exists());
     }
 
+    /// The Geode manifest is read whole and parsed too, so it is held to the
+    /// same ceiling as the index. Padded with spaces, which is valid JSON, so
+    /// nothing but its size can be what refuses it.
+    #[test]
+    fn an_oversized_geode_manifest_is_refused() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("geode-bigmanifest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let json = serde_json::to_vec(&manifest()).unwrap();
+        for (spaces, readable) in [(1024, true), (9 * 1024 * 1024, false)] {
+            let archive = dir.join(format!("{spaces}.geodepack"));
+            let mut zip = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            zip.start_file(Manifest::PATH, options).unwrap();
+            zip.write_all(&json).unwrap();
+            zip.write_all(&vec![b' '; spaces]).unwrap();
+            zip.finish().unwrap();
+
+            match (read_manifest(&archive), readable) {
+                (Ok(Some(m)), true) => assert_eq!(m.profile.name, "Shared Pack"),
+                (Err(e), false) => assert!(e.to_string().contains("not read"), "{e}"),
+                (got, _) => panic!("{spaces} spaces of padding: {got:?}"),
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Refusing a path is not enough on its own; the refusal has to be said.
     /// An empty list means everything the pack named arrived, and a pack that
     /// names `../../` is exactly the one somebody most needs to hear about.
@@ -1356,6 +1798,575 @@ mod tests {
             zip.write_all(bytes).unwrap();
         }
         zip.finish().unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // A server's pack
+    // -----------------------------------------------------------------------
+
+    use crate::server::share::ServerShare;
+    use crate::server::{Server, ServerKind};
+
+    /// A jar with a real `fabric.mod.json`, so `jar::read` finds its side.
+    fn fabric_jar(id: &str, environment: &str) -> Vec<u8> {
+        use std::io::Write;
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        zip.start_file("fabric.mod.json", options).unwrap();
+        zip.write_all(
+            format!(r#"{{"schemaVersion":1,"id":"{id}","version":"1.0","environment":"{environment}"}}"#)
+                .as_bytes(),
+        )
+        .unwrap();
+        zip.finish().unwrap().into_inner()
+    }
+
+    /// A Fabric server laid out the way a real one is after it has run: the
+    /// secrets, the player lists, the world and the libraries sitting beside
+    /// the mods, which is exactly what its pack must not pick up.
+    async fn server_fixture(tag: &str, include_config: bool) -> (Paths, Server) {
+        let paths = Paths {
+            root: std::env::temp_dir().join(format!("geode-srvpack-{tag}-{}", std::process::id())),
+        };
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+
+        let mut server = Server::new("Survival Club".into(), ServerKind::Fabric, "1.21.1".into());
+        server.id = format!("srv-{tag}");
+        server.build = "0.16.9".into();
+        server.notes = "be nice".into();
+        server.settings.memory_mb = 8192;
+        server.settings.java_args = Some("-XX:+UseZGC".into());
+
+        let run = paths.server_run(&server.id);
+        let files: Vec<(&str, Vec<u8>)> = vec![
+            ("server.properties", b"enable-rcon=true\nrcon.password=secret\n".to_vec()),
+            ("ops.json", br#"[{"name":"admin","level":4}]"#.to_vec()),
+            ("whitelist.json", br#"[{"name":"friend"}]"#.to_vec()),
+            ("banned-players.json", br#"[{"name":"griefer"}]"#.to_vec()),
+            ("usercache.json", br#"[{"name":"friend"}]"#.to_vec()),
+            ("eula.txt", b"eula=true\n".to_vec()),
+            ("logs/latest.log", b"[Server] 203.0.113.9 logged in\n".to_vec()),
+            ("libraries/x.jar", b"library".to_vec()),
+            ("world/level.dat", b"level".to_vec()),
+            ("world/datapacks/dp.zip", b"datapack".to_vec()),
+            ("plugins/p.jar", b"plugin".to_vec()),
+            ("config/secret.toml", b"token = \"secret\"\n".to_vec()),
+            // Indexed: a Modrinth record.
+            ("mods/sodium-mr.jar", b"from modrinth".to_vec()),
+            // Referenced: a CurseForge record.
+            ("mods/create-cf.jar", b"from curseforge".to_vec()),
+            // Carried as bytes: no record, and it runs on both sides.
+            ("mods/homemade.jar", fabric_jar("homemade", "*")),
+            // Excluded, with a CurseForge record that would otherwise be named.
+            ("mods/anticheat.jar", b"private".to_vec()),
+            // Excluded, with a Modrinth record that would otherwise be indexed.
+            ("mods/excluded-mr.jar", b"private".to_vec()),
+            // Excluded while turned off, with no record until it was excluded.
+            ("mods/private-tools.jar.disabled", b"private".to_vec()),
+            // Declares itself server-side, with no record.
+            ("mods/server-side.jar", fabric_jar("serverside", "server")),
+            // Declares itself server-side, with a Modrinth record.
+            ("mods/srv-mr.jar", fabric_jar("srvmr", "server")),
+        ];
+        for (rel, bytes) in files {
+            let path = run.join(rel);
+            tokio::fs::create_dir_all(path.parent().unwrap()).await.unwrap();
+            tokio::fs::write(path, bytes).await.unwrap();
+        }
+
+        let media = paths.server_media(&server.id);
+        tokio::fs::create_dir_all(&media).await.unwrap();
+        tokio::fs::write(media.join("icon.png"), b"PNG").await.unwrap();
+        server.icon = Some("icon.png".into());
+
+        server.content = vec![
+            record("modrinth", "sodium-mr.jar", ContentKind::Mod),
+            record("curseforge", "create-cf.jar", ContentKind::Mod),
+            ContentRecord {
+                sharing: instance::content::Sharing { excluded: true, ..Default::default() },
+                ..record("curseforge", "anticheat.jar", ContentKind::Mod)
+            },
+            ContentRecord {
+                sharing: instance::content::Sharing { excluded: true, ..Default::default() },
+                ..record("modrinth", "excluded-mr.jar", ContentKind::Mod)
+            },
+            record("modrinth", "srv-mr.jar", ContentKind::Mod),
+            // A plugin the index could point at, if the pack looked past mods/.
+            record("modrinth", "p.jar", ContentKind::Plugin),
+        ];
+        instance::content::set_excluded(
+            &mut server.content,
+            ContentKind::Mod,
+            "private-tools.jar.disabled",
+            true,
+        );
+        crate::server::share::save(
+            &paths,
+            &server.id,
+            &ServerShare {
+                code: crate::share::code::Code::generate(),
+                include_config,
+            },
+        )
+        .await
+        .unwrap();
+        (paths, server)
+    }
+
+    fn read_entry(archive: &Path, name: &str) -> Vec<u8> {
+        use std::io::Read;
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(archive).unwrap()).unwrap();
+        let mut bytes = Vec::new();
+        zip.by_name(name).unwrap().read_to_end(&mut bytes).unwrap();
+        bytes
+    }
+
+    fn sorted(mut names: Vec<String>) -> Vec<String> {
+        names.sort();
+        names
+    }
+
+    /// The allowlist, end to end. Everything in the run directory that is not
+    /// a mod a player needs stays where it is — the RCON password, the player
+    /// lists, the world, the libraries, the plugins, the configs, and every mod
+    /// the admin kept back or that only runs on a server.
+    #[tokio::test]
+    async fn a_server_pack_carries_only_what_players_need() {
+        let (paths, server) = server_fixture("only", false).await;
+        let dest = paths.root.join("server.geodepack");
+        export_server(&paths, &server, dest.clone(), &Progress::silent("t")).await.unwrap();
+
+        assert_eq!(
+            sorted(entries(&dest)),
+            vec![
+                "geode/manifest.json",
+                "geode/media/icon.png",
+                "modrinth.index.json",
+                "overrides/mods/homemade.jar",
+            ],
+        );
+
+        // Nothing secret travels under any name, in any entry.
+        for name in entries(&dest) {
+            let bytes = String::from_utf8_lossy(&read_entry(&dest, &name)).to_string();
+            assert!(!bytes.contains("secret"), "{name} carries a secret: {bytes}");
+        }
+
+        let index: crate::instance::modpack::MrIndex =
+            serde_json::from_slice(&read_entry(&dest, "modrinth.index.json")).unwrap();
+        let indexed: Vec<&str> = index.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(indexed, vec!["mods/sodium-mr.jar"], "only the shared Modrinth mod is indexed");
+        assert_eq!(index.name, "Survival Club");
+        assert_eq!(index.dependencies.get("minecraft").map(String::as_str), Some("1.21.1"));
+        assert_eq!(index.dependencies.get("fabric-loader").map(String::as_str), Some("0.16.9"));
+
+        let manifest = read_manifest(&dest).unwrap().expect("a Geode pack");
+        assert_eq!(manifest.kind, Kind::Server);
+        assert_eq!(manifest.profile.name, "Survival Club");
+        assert_eq!(manifest.profile.notes, "be nice");
+        assert_eq!(manifest.profile.server_kind.as_deref(), Some("fabric"));
+        assert_eq!(manifest.profile.memory_mb, None, "the server's heap is not the player's");
+        assert_eq!(manifest.profile.java_args, None, "the server's JVM flags are not the player's");
+        assert_eq!(manifest.icon.as_deref(), Some("geode/media/icon.png"));
+
+        let referenced: Vec<&str> = manifest
+            .files
+            .iter()
+            .filter(|n| n.source.is_some())
+            .map(|n| n.path.as_str())
+            .collect();
+        assert_eq!(referenced, vec!["mods/create-cf.jar"]);
+        for kept in ["anticheat", "excluded-mr", "private-tools", "server-side", "srv-mr", "p.jar"] {
+            assert!(
+                manifest.files.iter().all(|n| !n.path.contains(kept)),
+                "the manifest mentions {kept}: {:?}",
+                manifest.files
+            );
+        }
+    }
+
+    /// `config/` is the one thing beyond mods a server may send, and only when
+    /// its admin said so.
+    #[tokio::test]
+    async fn a_server_sends_its_config_only_when_asked() {
+        let (paths, server) = server_fixture("config", true).await;
+        let dest = paths.root.join("server.geodepack");
+        export_server(&paths, &server, dest.clone(), &Progress::silent("t")).await.unwrap();
+
+        assert_eq!(
+            sorted(entries(&dest)),
+            vec![
+                "geode/manifest.json",
+                "geode/media/icon.png",
+                "modrinth.index.json",
+                "overrides/config/secret.toml",
+                "overrides/mods/homemade.jar",
+            ],
+        );
+    }
+
+    /// What arrives is the server's: every mod, including the one carried as
+    /// bytes with no record, is claimed for the server on the player's side.
+    #[tokio::test]
+    async fn a_server_pack_arrives_as_the_servers_own() {
+        let (paths, mut server) = server_fixture("round", false).await;
+        // Built from a published pack, whose version the index carries.
+        server.pack = Some(crate::instance::PackSource::local(
+            "Upstream Pack".into(),
+            "4.2.0".into(),
+            Some("modrinth".into()),
+        ));
+        let dest = paths.root.join("server.geodepack");
+        export_server(&paths, &server, dest.clone(), &Progress::silent("t")).await.unwrap();
+
+        // The indexed jar is already on the player's disk with the right hash,
+        // so the download step completes offline. Everything else that would
+        // reach the network is sent to a port nothing listens on.
+        let mut arrived = fresh("srvpack-round-arrived");
+        let game = paths.game_dir(&arrived.id);
+        let _ = tokio::fs::remove_dir_all(&game).await;
+        tokio::fs::create_dir_all(game.join("mods")).await.unwrap();
+        tokio::fs::write(game.join("mods/sodium-mr.jar"), b"from modrinth").await.unwrap();
+        let offline = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:9").unwrap())
+            .build()
+            .unwrap();
+
+        let missing = import(&offline, &paths, &mut arrived, &dest, None, &Progress::silent("t"))
+            .await
+            .unwrap();
+
+        assert_eq!(missing.len(), 1, "{missing:?}");
+        assert!(missing[0].contains("create-cf.jar"), "{missing:?}");
+        assert_eq!(arrived.name, "Survival Club");
+        assert_eq!(arrived.overrides.memory_mb, Some(2048), "the player's own memory setting stays");
+        assert!(arrived.pack.is_none(), "labelled as a modpack: {:?}", arrived.pack);
+
+        for file in ["homemade.jar", "sodium-mr.jar"] {
+            let owned = arrived
+                .content
+                .iter()
+                .find(|r| r.file_name == file)
+                .unwrap_or_else(|| panic!("{file} arrived unclaimed: {:?}", arrived.content));
+            assert_eq!(owned.origin, Origin::Server, "{file}");
+        }
+        assert!(arrived.content.iter().all(|r| r.origin == Origin::Server), "{:?}", arrived.content);
+
+        let mut on_disk: Vec<String> = Vec::new();
+        let mut stack = vec![game.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                if entry.path().is_dir() {
+                    stack.push(entry.path());
+                } else {
+                    let rel = entry.path().strip_prefix(&game).unwrap().to_string_lossy().to_string();
+                    on_disk.push(rel);
+                }
+            }
+        }
+        assert_eq!(sorted(on_disk), vec!["mods/homemade.jar", "mods/sodium-mr.jar"]);
+    }
+
+    /// The preview and the pack must agree, or a player is promised a number of
+    /// mods that is not what they get.
+    #[tokio::test]
+    async fn the_preview_counts_the_mods_the_pack_actually_carries() {
+        let (paths, server) = server_fixture("info", false).await;
+        let info = server_pack_info(&paths, &server).await.unwrap();
+
+        assert_eq!(
+            info,
+            crate::share::host::PackInfo {
+                name: "Survival Club".into(),
+                mc_version: "1.21.1".into(),
+                loader: "fabric".into(),
+                loader_version: "0.16.9".into(),
+                mods: 3,
+                server_kind: "fabric".into(),
+            }
+        );
+        assert!(
+            !paths.root.join("server.geodepack").exists(),
+            "a preview must not build the pack"
+        );
+
+        let dest = paths.root.join("server.geodepack");
+        export_server(&paths, &server, dest.clone(), &Progress::silent("t")).await.unwrap();
+        assert_eq!(info.mods, mods_in(&dest));
+    }
+
+    /// Every mod a pack brings, however it brings it: indexed, referenced, or
+    /// carried as bytes.
+    fn mods_in(archive: &Path) -> usize {
+        let index: crate::instance::modpack::MrIndex =
+            serde_json::from_slice(&read_entry(archive, "modrinth.index.json")).unwrap();
+        let manifest = read_manifest(archive).unwrap().unwrap();
+        index.files.iter().filter(|f| f.path.starts_with("mods/")).count()
+            + manifest
+                .files
+                .iter()
+                .filter(|n| n.source.is_some() && n.path.starts_with("mods/"))
+                .count()
+            + entries(archive)
+                .iter()
+                .filter(|n| n.starts_with("overrides/mods/"))
+                .count()
+    }
+
+    /// What an admin leaves lying in `mods/` is not a mod, and what a link in
+    /// either folder points at is not the server's to send.
+    ///
+    /// The allowlist names folders; before this, a link inside one carried
+    /// whatever it pointed at under the allowed name — the run directory's
+    /// `server.properties`, an SSH key — and a `.bak` of a kept-back jar or a
+    /// jar parked in a subfolder went too, none of it visible in the admin's
+    /// Content tab to exclude, and none of it in the count players were shown.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_server_pack_takes_no_strays_and_follows_no_links() {
+        use std::os::unix::fs::symlink;
+
+        let (paths, mut server) = server_fixture("strays", true).await;
+        let run = paths.server_run(&server.id);
+
+        // Outside the run directory: secrets, and jars that would pass every
+        // other check — both sides, with a record saying where they came from.
+        let elsewhere = paths.root.join("elsewhere");
+        tokio::fs::create_dir_all(elsewhere.join(".ssh")).await.unwrap();
+        tokio::fs::write(elsewhere.join("server.properties"), b"rcon.password=secret\n").await.unwrap();
+        tokio::fs::write(elsewhere.join(".ssh/id_ed25519"), b"secret key").await.unwrap();
+        tokio::fs::write(elsewhere.join("linked-mr.jar"), fabric_jar("linkedmr", "*")).await.unwrap();
+        tokio::fs::write(elsewhere.join("linked-cf.jar"), fabric_jar("linkedcf", "*")).await.unwrap();
+        tokio::fs::write(elsewhere.join("linked.jar"), fabric_jar("linked", "*")).await.unwrap();
+        server.content.push(record("modrinth", "linked-mr.jar", ContentKind::Mod));
+        server.content.push(record("curseforge", "linked-cf.jar", ContentKind::Mod));
+
+        let mods = run.join("mods");
+        symlink(&elsewhere, mods.join("backup")).unwrap();
+        symlink(elsewhere.join("linked-mr.jar"), mods.join("linked-mr.jar")).unwrap();
+        symlink(elsewhere.join("linked-cf.jar"), mods.join("linked-cf.jar")).unwrap();
+        symlink(elsewhere.join("linked.jar"), mods.join("linked.jar")).unwrap();
+        symlink(run.join("server.properties"), mods.join("properties.jar")).unwrap();
+        // A copy of the jar the admin kept back, and a jar that runs on both
+        // sides parked where no loader looks.
+        tokio::fs::write(mods.join("anticheat.jar.bak"), b"private").await.unwrap();
+        tokio::fs::create_dir_all(mods.join("old")).await.unwrap();
+        tokio::fs::write(mods.join("old/parked.jar"), fabric_jar("parked", "*")).await.unwrap();
+
+        // `config/` goes whole when asked for, but not through a link either.
+        symlink(&elsewhere, run.join("config/linked")).unwrap();
+        symlink(run.join("server.properties"), run.join("config/linked.toml")).unwrap();
+        tokio::fs::create_dir_all(run.join("config/nested")).await.unwrap();
+        tokio::fs::write(run.join("config/nested/deep.toml"), b"ok = true\n").await.unwrap();
+
+        let dest = paths.root.join("server.geodepack");
+        export_server(&paths, &server, dest.clone(), &Progress::silent("t")).await.unwrap();
+
+        assert_eq!(
+            sorted(entries(&dest)),
+            vec![
+                "geode/manifest.json",
+                "geode/media/icon.png",
+                "modrinth.index.json",
+                "overrides/config/nested/deep.toml",
+                "overrides/config/secret.toml",
+                "overrides/mods/homemade.jar",
+            ],
+        );
+        let index: crate::instance::modpack::MrIndex =
+            serde_json::from_slice(&read_entry(&dest, "modrinth.index.json")).unwrap();
+        let indexed: Vec<&str> = index.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(indexed, vec!["mods/sodium-mr.jar"], "a linked jar was indexed");
+        let manifest = read_manifest(&dest).unwrap().unwrap();
+        let named: Vec<&str> = manifest.files.iter().map(|n| n.path.as_str()).collect();
+        assert_eq!(named, vec!["mods/create-cf.jar"], "a linked jar was named");
+
+        let info = server_pack_info(&paths, &server).await.unwrap();
+        assert_eq!(info.mods, 3);
+        assert_eq!(info.mods, mods_in(&dest));
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    /// A link named like a record, beside a real turned-off copy of that mod:
+    /// the pack carries the copy, and says nothing about where the link goes —
+    /// not its hash, not its size, not that the mod is on.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_link_beside_a_turned_off_twin_is_not_read_through() {
+        use std::os::unix::fs::symlink;
+
+        let (paths, mut server) = server_fixture("twin", false).await;
+        let mods = paths.server_run(&server.id).join("mods");
+        let elsewhere = paths.root.join("elsewhere");
+        tokio::fs::create_dir_all(&elsewhere).await.unwrap();
+        tokio::fs::write(elsewhere.join("secret.txt"), b"hunter2\n")
+            .await
+            .unwrap();
+        let secret_sha1 = crate::net::sha1_file(&elsewhere.join("secret.txt"))
+            .await
+            .unwrap();
+
+        symlink(elsewhere.join("secret.txt"), mods.join("twin-mr.jar")).unwrap();
+        tokio::fs::write(mods.join("twin-mr.jar.disabled"), fabric_jar("twinmr", "*"))
+            .await
+            .unwrap();
+        server
+            .content
+            .push(record("modrinth", "twin-mr.jar", ContentKind::Mod));
+        symlink(elsewhere.join("secret.txt"), mods.join("twin-cf.jar")).unwrap();
+        tokio::fs::write(mods.join("twin-cf.jar.disabled"), fabric_jar("twincf", "*"))
+            .await
+            .unwrap();
+        server
+            .content
+            .push(record("curseforge", "twin-cf.jar", ContentKind::Mod));
+
+        let dest = paths.root.join("server.geodepack");
+        export_server(&paths, &server, dest.clone(), &Progress::silent("t"))
+            .await
+            .unwrap();
+
+        let index: crate::instance::modpack::MrIndex =
+            serde_json::from_slice(&read_entry(&dest, "modrinth.index.json")).unwrap();
+        assert!(
+            index.files.iter().all(|f| f.path != "mods/twin-mr.jar"
+                && f.hashes.get("sha1") != Some(&secret_sha1)),
+            "the link's target was indexed: {:?}",
+            index.files
+        );
+        assert!(entries(&dest).contains(&"overrides/mods/twin-mr.jar.disabled".to_string()));
+
+        let manifest = read_manifest(&dest).unwrap().unwrap();
+        let twin = manifest
+            .files
+            .iter()
+            .find(|n| n.path == "mods/twin-cf.jar")
+            .expect("the real copy is named");
+        assert!(twin.disabled, "the link made a turned-off mod read as on");
+
+        let info = server_pack_info(&paths, &server).await.unwrap();
+        assert_eq!(info.mods, mods_in(&dest), "the count and the pack disagree");
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    /// The same rule one level up: a `mods/` or `config/` that is itself a link
+    /// is not followed, and the count says so rather than promising its mods.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_server_pack_does_not_follow_a_linked_folder() {
+        use std::os::unix::fs::symlink;
+
+        let (paths, server) = server_fixture("linkdir", true).await;
+        let run = paths.server_run(&server.id);
+        let elsewhere = paths.root.join("elsewhere");
+        tokio::fs::create_dir_all(&elsewhere).await.unwrap();
+        for folder in ["mods", "config"] {
+            tokio::fs::rename(run.join(folder), elsewhere.join(folder)).await.unwrap();
+            symlink(elsewhere.join(folder), run.join(folder)).unwrap();
+        }
+
+        let dest = paths.root.join("server.geodepack");
+        export_server(&paths, &server, dest.clone(), &Progress::silent("t")).await.unwrap();
+
+        assert_eq!(
+            sorted(entries(&dest)),
+            vec!["geode/manifest.json", "geode/media/icon.png", "modrinth.index.json"],
+        );
+        assert_eq!(mods_in(&dest), 0);
+        assert_eq!(server_pack_info(&paths, &server).await.unwrap().mods, 0);
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    /// Every kind has an answer, and the ones that cannot give an honest one
+    /// say why instead of naming a loader version that does not exist.
+    #[test]
+    fn every_server_kind_has_a_client_loader_or_a_reason() {
+        use crate::meta::Loader;
+
+        /// A loader and version, or words the refusal must contain.
+        type Expected = std::result::Result<(Loader, &'static str), &'static str>;
+        let table: &[(ServerKind, Expected)] = &[
+            (ServerKind::Fabric, Ok((Loader::Fabric, "BUILD"))),
+            (ServerKind::NeoForge, Ok((Loader::NeoForge, "BUILD"))),
+            (ServerKind::Forge, Ok((Loader::Forge, "BUILD"))),
+            (ServerKind::Paper, Ok((Loader::Vanilla, ""))),
+            (ServerKind::Folia, Ok((Loader::Vanilla, ""))),
+            (ServerKind::Purpur, Ok((Loader::Vanilla, ""))),
+            (ServerKind::Spigot, Ok((Loader::Vanilla, ""))),
+            (ServerKind::Vanilla, Ok((Loader::Vanilla, ""))),
+            (ServerKind::Velocity, Err("proxy")),
+            (ServerKind::Waterfall, Err("proxy")),
+            (ServerKind::Quilt, Err("does not record")),
+            (ServerKind::Mohist, Err("does not record")),
+            (ServerKind::Arclight, Err("does not record")),
+            (ServerKind::Banner, Err("does not record")),
+        ];
+        for kind in ServerKind::ALL {
+            assert!(table.iter().any(|(k, _)| k == kind), "{kind:?} is missing from the table");
+        }
+
+        for (kind, expected) in table {
+            let mut server = Server::new("s".into(), *kind, "1.21.1".into());
+            server.build = "BUILD".into();
+            match (client_loader(&server), expected) {
+                (Ok((loader, version)), Ok((want, want_version))) => {
+                    assert_eq!((loader, version.as_str()), (*want, *want_version), "{kind:?}");
+                }
+                (Err(e), Err(needle)) => {
+                    let text = e.to_string();
+                    assert!(text.contains(needle), "{kind:?}: {text}");
+                    assert!(text.contains(kind.display_name()), "{kind:?} is not named: {text}");
+                }
+                (got, want) => panic!("{kind:?}: got {got:?}, wanted {want:?}"),
+            }
+        }
+    }
+
+    /// A modded server whose install never finished has no loader version, and
+    /// a pack that names an empty one is a pack nothing can install.
+    #[test]
+    fn a_modded_server_with_no_build_is_refused() {
+        for kind in [ServerKind::Fabric, ServerKind::NeoForge, ServerKind::Forge] {
+            let server = Server::new("s".into(), kind, "1.21.1".into());
+            let err = client_loader(&server).expect_err("an empty loader version must be refused");
+            assert!(err.to_string().contains("no loader installed"), "{err}");
+        }
+    }
+
+    /// The pack server hands these to a spawned task, which needs them `Send`.
+    #[test]
+    fn the_server_pack_futures_can_cross_threads() {
+        fn send<T: Send>(_: T) {}
+        let paths = Paths { root: PathBuf::from("unused") };
+        let server = Server::new("s".into(), ServerKind::Fabric, "1.21.1".into());
+        let progress = Progress::silent("t");
+        send(export_server(&paths, &server, PathBuf::from("unused"), &progress));
+        send(server_pack_info(&paths, &server));
+    }
+
+    #[test]
+    fn only_modrinth_over_https_is_a_place_a_server_pack_may_download_from() {
+        assert!(from_modrinth(
+            "https://cdn.modrinth.com/data/AANobbMI/versions/abc/sodium.jar"
+        ));
+        assert!(from_modrinth(
+            "https://CDN.Modrinth.com:443/data/x/versions/y/z.jar"
+        ));
+        for elsewhere in [
+            "http://cdn.modrinth.com/data/x/versions/y/z.jar",
+            "https://cdn.modrinth.com:8443/data/x/versions/y/z.jar",
+            "https://cdn.modrinth.com.example.net/z.jar",
+            "https://user@cdn.modrinth.com/z.jar",
+            "https://github.com/owner/repo/releases/download/v1/z.jar",
+            "https://192.168.1.1/z.jar",
+            "file:///etc/passwd",
+            "cdn.modrinth.com/z.jar",
+        ] {
+            assert!(!from_modrinth(elsewhere), "{elsewhere}");
+        }
     }
 
     #[test]

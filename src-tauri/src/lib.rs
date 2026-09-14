@@ -2,6 +2,7 @@ pub mod auth;
 pub mod commands;
 pub mod config;
 pub mod connector;
+pub mod deeplink;
 pub mod diagnostics;
 pub mod desktop;
 pub mod error;
@@ -29,6 +30,15 @@ use crate::state::AppState;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // First, before any other plugin starts anything: a second Geode, run
+        // by the OS to open a `geode://` link, hands its arguments to this one
+        // and exits instead of becoming a second launcher. The `deep-link`
+        // feature passes the link on to the plugin below; this callback only
+        // brings the window forward, which is all a plain second launch needs.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            deeplink::bring_forward(app);
+        }))
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -64,6 +74,25 @@ pub fn run() {
                 paths,
                 servers,
             ));
+            // A join interrupted by the last exit left its download behind.
+            // Cleared to completion here, before any link can start a new
+            // join whose archive a slower sweep would then delete mid-download.
+            tauri::async_runtime::block_on(crate::share::join::clear_incoming(
+                &app.state::<AppState>().paths,
+            ));
+            // Only once the state is managed: links are parked in it.
+            deeplink::start(app);
+            // A server shared when Geode last closed is shared again now,
+            // without anyone having to reopen it — its players' links point
+            // here and should keep working.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let state = handle.state::<AppState>();
+                state
+                    .share
+                    .reconcile(&state, Some(crate::desktop::sink(handle.clone())))
+                    .await;
+            });
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -180,7 +209,28 @@ pub fn run() {
             commands::import_modpack,
             commands::export_modpack,
             commands::export_geodepack,
+            commands::get_share_status,
+            commands::set_share_settings,
+            commands::get_server_share,
+            commands::share_server,
+            commands::unshare_server,
+            commands::set_server_share_config,
+            commands::rotate_server_share_code,
+            commands::set_server_content_excluded,
+            commands::preview_join,
+            commands::join_server,
+            deeplink::take_pending_join,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Geode");
+        .build(tauri::generate_context!())
+        .expect("error while building Geode")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                // Give the router its port back. Bounded inside, so a router
+                // that has stopped answering cannot hold the exit up; if this
+                // never runs — a crash — the mapping's lease runs out instead.
+                if let Some(state) = app.try_state::<AppState>() {
+                    tauri::async_runtime::block_on(state.share.shutdown());
+                }
+            }
+        });
 }
