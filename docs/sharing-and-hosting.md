@@ -34,13 +34,14 @@ is more actionable than a silently incomplete instance would be.
 |---|---|---|
 | `.geodepack` format | `src-tauri/src/share/manifest.rs` | Done, tested |
 | Export/import of the Geode half | `src-tauri/src/share/pack.rs` | Done, tested |
-| Share codes (server shares only) | `src-tauri/src/share/code.rs` | Done, tested |
+| Share codes — the secret in a join link | `src-tauri/src/share/code.rs` | Done, tested |
 | Referencing rather than copying | `src-tauri/src/share/pack.rs` (`source_for`) | Done, tested |
-| Per-file sharing marks | `src-tauri/src/instance/content.rs` (`Sharing`) | Data model only — `excluded` is read nowhere and no UI sets either mark |
+| "Don't share" per mod | `src-tauri/src/instance/content.rs` (`set_excluded`), server Content tab | Done, tested |
 | Sidedness from the jar | `src-tauri/src/instance/jar.rs` (`Side`) | Done, verified against real jars |
 | Geode pack round trip | `src-tauri/src/share/pack.rs` (`export`, `apply_pack`) | Done, tested end to end |
 | Server vs user mods | `src-tauri/src/instance/content.rs` (`Origin`) | Done, tested — server mods can be disabled, not removed |
-| Rendezvous Worker (server shares only) | `rendezvous/worker.js` | Create-and-read only; **verified locally, not deployed** |
+| Sharing a server directly with players | `src-tauri/src/share/{host,service,portmap,identity,trust,link,join}.rs` | Done, tested end to end over real TLS |
+| `geode://join` links | `src-tauri/src/deeplink.rs`, `src-tauri/geode.desktop.hbs` | Done; delivery verified on Linux through the OS handler |
 | Container image | `container/` | Written, **not built** |
 | Event decoupling | `src-tauri/src/events.rs` | Done — the server half no longer needs a window |
 
@@ -95,9 +96,9 @@ Deliberately **not** done, and each for a reason:
   third-party distribution is a live fact the recipient's own resolution
   already establishes, and a flag written at export is stale the moment the
   author changes their mind.
-- `Sharing::excluded` is still read nowhere. Nothing can set it — no command,
-  no UI, no field on the type the frontend sees — so honouring it would be a
-  consumer for a producer that does not exist.
+- `Sharing::excluded` is honoured only by a server's pack, where the server's
+  Content tab sets it (item 3). Nothing sets it on an instance, so an
+  instance's pack has nothing to honour.
 - Unprovenanced jars are **not** dropped. The design note used to call for
   dropping them behind a per-file confirmation; with no confirmation UI that
   becomes "drop silently", which loses the author's own mod and tells the
@@ -147,19 +148,127 @@ S3 bucket (R2: 10 GB, egress free, presigned URLs valid 1 second to 7 days,
 revocable by deleting the object) and peer-to-peer from the sharing machine.
 The second is what the server path already does.
 
-### 3. Server-to-client sharing
+### 3. Sharing a server with its players — **done**
 
-The data model is in place: one content list with `serverOnly` and `excluded`
-marks per entry. What remains:
+An admin shares a server from its page; players open the link and their Geode
+connects straight to the admin's machine. Nothing sits in the middle.
 
-- A server-side HTTP endpoint serving only the residue — overrides and
-  unlinkable files. With references doing the heavy lifting this is typically
-  single-digit megabytes, which changes what transport is needed.
-- Getting through NAT. Worth evaluating **iroh** (QUIC, hole-punching, relay
-  fallback) before anything hand-rolled. The container case is easier, since it
-  usually has a routable address already.
-- Client import offering the choice: keep server-only mods and match the server
-  exactly, or drop them to save space.
+**How it works**
+
+- One TLS listener on one port — 25590 unless changed — serves every server a
+  machine shares. A request names no server: the share code in its
+  `Authorization` header picks one and is the access secret, so an admin with
+  five servers opens one port, once.
+- The admin's certificate is self-signed and made once (`identity.rs`). Its
+  SHA-256 fingerprint travels in the link, and the player's Geode accepts that
+  certificate and no other (`trust.rs`). The handshake signature is always
+  checked too, so a copy of the certificate without its private key is refused
+  — there is a test that presents exactly that.
+- A link is `geode://join?addr=HOST:PORT&code=CODE&pin=FINGERPRINT`. An admin
+  with their own domain or tunnel in front of the machine sets a public address
+  in Settings; an `https://` one gets ordinary certificate-authority checks and
+  no fingerprint. A player may type an address and code instead of opening a
+  link: that is trusted the first time, and a later join of the same address is
+  held to the certificate it had — a different machine answering there is
+  refused. The first time is still the weaker case, which is why the link is
+  what admins copy.
+- The router is asked to open the port over UPnP (`portmap.rs`): leased for an
+  hour, renewed at half, removed on exit, and retried after ten seconds —
+  doubling to a minute — whenever an attempt fails. A router that only grants
+  forwards that never expire gets none: a crash would leave that port open for
+  good, so the admin forwards it themselves. Manual mode changes nothing on the
+  router, but still asks it for the public address so a link appears without
+  the admin typing it. Either way the address is classified, and a link is only
+  built from one that is actually public, or from the admin's own public
+  address — never from a carrier-grade NAT or second-router address, which
+  would be a link handed out as if it worked.
+- The listener takes IPv4 and IPv6 on one socket, so an admin behind
+  carrier-grade NAT with working IPv6 can hand out an IPv6 address. One
+  address — one IPv6 /56 — may hold eight connections; this machine and the
+  local network are not limited that way, because a tunnel's agent, a reverse
+  proxy or a router looping players back in makes every player one address.
+  When all 128 places are taken, a newcomer takes the place of the oldest
+  connection that has not shown a code, from whichever address holds the most,
+  so filling it to keep players out takes 128 addresses rather than a few. A
+  download is cut off once it has sent nothing for two minutes, however long
+  it has been running.
+- Share state — the code, and whether config is sent — lives in
+  `servers/<id>/share.json`, written by rename and by nothing but sharing.
+  `server.json` is rewritten whole by jobs that load it, work for minutes, and
+  save the copy they loaded; a code rotated because it leaked must not come
+  back when a backup finishes.
+- What a server sends is an **allowlist**: the mod jars directly in `mods/`,
+  and `config/` only when the admin asks. No subfolder of `mods/`, no backup or
+  other stray file, and no symbolic link anywhere — a link in `mods/` pointing
+  at the admin's home would otherwise have been followed. Never
+  `server.properties`, ops, whitelist, bans, worlds, logs, libraries or plugins.
+  Mods marked "don't share" and jars that declare themselves server-side stay
+  behind, and a mod marked "don't share" stays marked through an update — also
+  when the update finishes while another job on that server is still running,
+  whose save keeps the records saved while it waited.
+- The player's side imports through the same sequence as any `.geodepack`, and
+  everything it brings is the server's (item 6). It installs only a server's
+  pack, and only the one the player approved: a pack describing a different
+  Minecraft version or loader from the preview is refused before an instance
+  exists, and a server pack cannot set the player's memory or Java arguments.
+  A server's pack may only name Modrinth, over HTTPS, as where to download a
+  mod: that is all a server writes, and a download from anywhere would let a
+  pack make the player's Geode request any address, their own router
+  included.
+
+**Why direct, and what was tried first.** Players already need a server's
+address to join it, so routing its pack anywhere else hides nothing from them.
+Three alternatives were built or researched and set aside:
+
+- *A relay through a Cloudflare Durable Object.* It worked, but every Geode
+  server in existence would have shared one free-tier budget — about five
+  thousand joins a day — and Cloudflare's terms rule out "similar proxy
+  services" without defining the phrase, leaving the risk on one account.
+- *iroh.* Its free public relays are offered for development and hobby use, not
+  shipped apps, and its direct mode sends each side's LAN addresses while it is
+  still trying to connect.
+- *Cloudflare quick tunnels.* A new random hostname on every restart, which a
+  link handed out yesterday cannot follow.
+
+**Reviewed, twice.** An adversarial review of the first build confirmed 38
+findings — among them one address holding a few dozen idle connections locking
+every player out, symbolic links under `mods/` being followed, and a code
+rotation that a finishing backup could undo. A second review checked the
+fixes: most held, eight held only in part, and it found new problems — a crowd
+of addresses, or one IPv6 subscriber, still filling the listener; every player
+behind a tunnel counted as one address; a joined pack able to download from
+anywhere; and an update of a held-back mod shared after all when another job
+saved late. Those were fixed in turn. The code fixes carry tests, and each
+test was checked by breaking the code it guards and watching it fail. The
+fixes to wording — this document and the hints in Settings — have no tests.
+
+**Verified.** Beyond each module's own tests: an admin shares a real server on
+disk and a player previews, downloads over pinned TLS and imports it; a wrong
+code, a wrong certificate, a replaced code and an unshared server are each
+refused on the next request; a typed address is pinned to the machine that
+first answered; the listener runs exactly while something is shared, follows a
+port change and gives the port back. In the real app, with its data and desktop
+configuration redirected to a scratch directory, a `geode://` link opened
+through the operating system reached the running Geode through single-instance
+forwarding and made it connect, and a hostile link was dropped.
+
+**Known limits**
+
+- Automatic router setup is UPnP-IGD over IPv4 only — no NAT-PMP or PCP, and no
+  IPv6 pinholes. The listener itself accepts IPv6.
+- Geode cannot test its own reachability from outside; the first player to join
+  is the real test.
+- Fabric, Forge, NeoForge, plugin and vanilla servers can be shared. Quilt,
+  Mohist, Arclight and Banner are refused with a reason — Geode does not record
+  their client loader version — and proxies have nothing to share.
+- A joined instance keeps its link, and opening the link again offers that
+  instance rather than making a second — but there is no "update from server"
+  yet, so a changed server pack means joining again.
+- `geode://` delivery is verified on Linux only. Windows and macOS are unbuilt
+  and unrun.
+- Forge 1.12.2 and older also loads jars from `mods/<version>/`. A server's
+  pack takes only the jars directly in `mods/`, so those are not sent, and
+  nothing says so; move them up a level to share them.
 
 ### 4. The container
 
@@ -195,9 +304,9 @@ It used to be unreachable from both ends: the app only ever wrote a plain
 handed back to Geode lost its name, notes, memory, artwork and every per-file
 note. Both ends are now wired:
 
-- `export_geodepack` is a real command, and the export dialog offers both
-  formats. The extension chosen decides which, because the two genuinely differ
-  in what they can express.
+- `export_geodepack` is a real command, and there is a button for each format.
+  The button decides which, never the file name, because the two genuinely
+  differ in what they can express.
 - `share::pack::apply_pack` runs after the mrpack half on import: it applies the
   profile, extracts `geode/media/` (which the override pass cannot reach), and
   resolves each `SourceRef` through the recipient's own CurseForge key.
@@ -250,34 +359,22 @@ failure, and the disabled state being honoured at download time. Both need a
 live CurseForge response to exercise; the note side of the second is tested.
 
 Still open: `server_only` is dropped by `notes_for` for any record whose jar
-declares no side, and the "keep or drop the server-only mods" choice on import
-needs the server transport (item 3) before it means anything.
+declares no side, and nothing yet offers a player the choice to keep or drop a
+server's server-only mods.
 
 ## What needs you
 
 Nothing below is required for anything already committed.
 
-1. **Deploy the Worker** (a few minutes, free, no card). `rendezvous/` is a
-   wrangler project as it stands — nothing to scaffold, nothing to paste:
-   ```bash
-   cd rendezvous && npx wrangler login && npx wrangler deploy
-   ```
-   Only the login needs you; it opens a browser and you approve it. Then put the
-   URL in Geode's settings. Geode holds no Cloudflare credential.
+1. **Share a server with somebody on a different network.** Every test here runs
+   on one machine. Whether your router grants the mapping, and whether a player
+   outside your house can connect, can only be found out that way — and if the
+   share page says your ISP uses carrier-grade NAT, set a public address for a
+   tunnel instead.
 
-   To work on it instead, `npx wrangler dev` runs the whole thing locally —
-   Durable Object, alarms and all — with no account at all. That is how the
-   three bugs in it were found, so prefer it to reading the file.
-
-   **There is no hurry.** What the Worker stores is a `ticket` pointing at the
-   sharing machine, and the transport that produces one does not exist yet
-   (item 3). Deploying today gets a working endpoint with nothing to point at.
-
-2. **Nothing.** Personal packs are files; there is no storage to provision.
-
-3. **Decide the NeoForge sidedness presentation.** NeoForge declares nothing —
+2. **Decide the NeoForge sidedness presentation.** NeoForge declares nothing —
    not on the mod, not on the file — so Geode reports "not declared" rather than
    guessing. If you would rather see a guess, it must be visibly labelled as
    one, because a wrong answer means a server silently missing a mod.
 
-4. **Install Docker** if you want the container built and tested here.
+3. **Install Docker** if you want the container built and tested here.
