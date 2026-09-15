@@ -579,7 +579,7 @@ impl Held {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     //! Every mapping test here talks to mock-igd on loopback, through
     //! [`PortMapper::spawn`] or [`read_external_ip_from`] with a gateway named
     //! outright. None calls [`PortMapper::start`], which would search the real
@@ -1322,6 +1322,19 @@ mod tests {
                 .await
                 .expect("stopping hung");
         }
+    }
+
+    /// A mapping made on a mock router on loopback that answers the add and
+    /// the address read, then never answers again — so stopping the mapper
+    /// waits out a request's timeout, which comes with it. For tests elsewhere
+    /// of what must not wait on the router; keep the router alongside.
+    pub(crate) async fn a_mapping_whose_removal_hangs() -> (PortMapper, MockIgdServer, Duration) {
+        let router = granting("81.2.69.160").await;
+        let addr = hangs_after(2, router.http_addr()).await;
+        let timings = quick(LEASE);
+        let mapper = mapper_at(&[addr], timings);
+        settle(&mapper, |s| matches!(s, Status::Mapped { .. })).await;
+        (mapper, router, timings.request)
     }
 
     #[tokio::test]

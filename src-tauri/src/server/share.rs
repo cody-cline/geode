@@ -32,10 +32,11 @@ pub struct ServerShare {
 pub struct Shared {
     /// Servers that are shared, by id.
     pub servers: Vec<(String, ServerShare)>,
-    /// Share files that exist but could not be read. Reported rather than
-    /// skipped, so a caller deciding whether to stop serving can tell "nothing
-    /// is shared" from "something is, and I could not read it".
-    pub unreadable: usize,
+    /// Servers whose share files exist but could not be read, by id. Reported
+    /// rather than skipped, so a caller deciding whether to stop serving can
+    /// tell "nothing is shared" from "something is, and I could not read it"
+    /// — and which server it could not read.
+    pub unreadable: Vec<String>,
 }
 
 /// `servers/<id>/share.json`.
@@ -94,7 +95,7 @@ pub async fn list(paths: &Paths) -> Result<Shared> {
         match load(paths, &id).await {
             Ok(Some(share)) => shared.servers.push((id, share)),
             Ok(None) => {}
-            Err(_) => shared.unreadable += 1,
+            Err(_) => shared.unreadable.push(id),
         }
     }
 
@@ -235,7 +236,7 @@ mod tests {
             shared.servers,
             vec![("a-shared".to_string(), a), ("b-shared".to_string(), b)]
         );
-        assert_eq!(shared.unreadable, 1);
+        assert_eq!(shared.unreadable, vec!["torn".to_string()]);
 
         std::fs::remove_dir_all(&paths.root).unwrap();
     }

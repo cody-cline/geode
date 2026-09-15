@@ -190,8 +190,22 @@ connects straight to the admin's machine. Nothing sits in the middle.
   When all 128 places are taken, a newcomer takes the place of the oldest
   connection that has not shown a code, from whichever address holds the most,
   so filling it to keep players out takes 128 addresses rather than a few. A
-  download is cut off once it has sent nothing for two minutes, however long
-  it has been running.
+  code does not let anyone hold it either: a download is cut once it hands on
+  less than 256 KiB in any two minutes, at most 32 run at once and four from
+  any one address, and the packs they send take at most 8 GiB of disk
+  together. Each download holds room for its pack from the start, as big as
+  that server's pack was last built, so one there is no room for is refused
+  before a pack is built for it. Past any limit a new download is told the
+  server is busy, and nobody is dropped for it: players sharing a narrow
+  upload are slow together, and dropping the slowest cut one of them at every
+  click. So someone with the code who keeps asking can keep the download
+  places busy — from eight addresses, or from fewer for a pack of several
+  GiB, or from one through a tunnel — but not a player's preview, which is
+  answered from a description at most five seconds old, so a flood of them
+  reads the mods once. The remedy is a new code: that, a change to whether
+  config is sent, or unsharing cuts every connection that came in before it
+  at once, and stopping sharing cuts them all. A pack bigger than 8 GiB by
+  itself is not sent, and the reason is logged on the admin's machine.
 - Share state — the code, and whether config is sent — lives in
   `servers/<id>/share.json`, written by rename and by nothing but sharing.
   `server.json` is rewritten whole by jobs that load it, work for minutes, and

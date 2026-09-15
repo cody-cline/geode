@@ -138,7 +138,7 @@ impl ShareService {
     pub async fn reconcile_with(&self, paths: &Paths, config: &ShareConfig, sink: Option<EventSink>) {
         let wanted = match crate::server::share::list(paths).await {
             Ok(shared) if !shared.servers.is_empty() => Wanted::Share,
-            Ok(shared) if shared.unreadable == 0 => Wanted::Stop,
+            Ok(shared) if shared.unreadable.is_empty() => Wanted::Stop,
             _ => Wanted::Unknown,
         };
         let pin = self.pin(paths).await;
@@ -174,6 +174,11 @@ impl ShareService {
         }
 
         if let Some(running) = inner.running.as_mut() {
+            // Whatever brought this reconcile about may have taken a code away
+            // — a server unshared, or deleted — and a listener kept running
+            // must not keep serving the connections that showed it.
+            running.host.cut_revoked(paths).await;
+
             // Whichever way the router is handled, today's settings decide it,
             // and the watcher is restarted so what it announces uses them too.
             if let Some(watcher) = running.watcher.take() {
@@ -240,6 +245,16 @@ impl ShareService {
         })
     }
 
+    /// Cut every preview and download whose server is no longer shared as it
+    /// was when it came in. For a change to a share that needs no reconcile —
+    /// a new code, or whether config is sent — but must still reach the
+    /// players already being served, not only their next request.
+    pub async fn cut_revoked(&self, paths: &Paths) {
+        if let Some(running) = self.inner.lock().await.running.as_ref() {
+            running.host.cut_revoked(paths).await;
+        }
+    }
+
     /// Stop everything and give the port back, for when the app exits. The
     /// mapping's removal is bounded, so a router that stops answering cannot
     /// hold the exit up; its lease is the safety net.
@@ -264,10 +279,14 @@ async fn stop(mut running: Running) {
     if let Some(watcher) = running.watcher.take() {
         watcher.abort();
     }
-    if let Some(mapper) = running.mapper.take() {
+    // The listener first: its connections are cut at once, where removing the
+    // mapping can wait seconds on a slow router — and a download of a server
+    // just unshared must not run on for them.
+    let mapper = running.mapper.take();
+    running.host.stop().await;
+    if let Some(mapper) = mapper {
         mapper.stop().await;
     }
-    running.host.stop().await;
 }
 
 /// Ask the router for its public address now and then, changing nothing.
@@ -754,6 +773,148 @@ mod tests {
         service.reconcile_with(&admin, &moved, None).await;
         assert!(!service.status(&admin, &moved).await.listening);
         assert!(port_is_free(second), "the port was not given back");
+    }
+
+    /// Unsharing one server while another stays shared keeps the listener up
+    /// — and cuts off a download of the one unshared there and then, not only
+    /// its next request.
+    #[tokio::test]
+    async fn unsharing_a_server_cuts_off_its_downloads_while_another_stays_shared() {
+        use crate::share::host::tests::{ask_for_pack, read_rest};
+
+        let admin = paths("unshare-cut");
+        let (server, share) = shared_server(&admin).await;
+        // Megabytes that do not compress, so the download outlasts every buffer
+        // between the two ends and is still under way when the server is unshared.
+        let mut filler = vec![0u8; 4 * 1024 * 1024];
+        getrandom::fill(&mut filler).unwrap();
+        tokio::fs::write(admin.server_run(&server.id).join("mods/filler.jar"), filler)
+            .await
+            .unwrap();
+        let mut other = Server::new("Creative".into(), ServerKind::Fabric, "1.21.1".into());
+        other.id = "creative".into();
+        other.build = "0.16.9".into();
+        other.save(&admin).await.unwrap();
+        let other_share = ServerShare {
+            code: Code::generate(),
+            include_config: false,
+        };
+        server_share::save(&admin, &other.id, &other_share)
+            .await
+            .unwrap();
+
+        let service = service();
+        let config = manual(free_port(), None);
+        service.reconcile_with(&admin, &config, None).await;
+        assert!(service.status(&admin, &config).await.listening);
+
+        let (mut tls, received, length) = ask_for_pack(config.port, &share.code).await;
+        server_share::clear(&admin, &server.id).await.unwrap();
+        service.reconcile_with(&admin, &config, None).await;
+        assert!(
+            service.status(&admin, &config).await.listening,
+            "the listener stopped with a server still shared"
+        );
+
+        let (received, _) = read_rest(&mut tls, received).await;
+        assert!(
+            received < length,
+            "a download of an unshared server ran to its end"
+        );
+
+        service.shutdown().await;
+        let _ = tokio::fs::remove_dir_all(&admin.root).await;
+    }
+
+    /// Unsharing the last shared server stops the listener, and removing the
+    /// router's mapping on the way can wait seconds on a slow router. A
+    /// download of the server unshared is cut before that wait, not after.
+    #[tokio::test]
+    async fn stopping_cuts_off_downloads_before_waiting_on_the_router() {
+        use crate::share::host::tests::{ask_for_pack, outgoing_files, read_rest};
+        use crate::share::portmap::tests::a_mapping_whose_removal_hangs;
+
+        let admin = paths("stop-cut");
+        let (server, share) = shared_server(&admin).await;
+        // Megabytes that do not compress, so the download outlasts every buffer
+        // between the two ends and is still under way when sharing stops.
+        let mut filler = vec![0u8; 4 * 1024 * 1024];
+        getrandom::fill(&mut filler).unwrap();
+        tokio::fs::write(admin.server_run(&server.id).join("mods/filler.jar"), filler)
+            .await
+            .unwrap();
+
+        let host = Host::start(admin.clone(), 0).await.unwrap();
+        let port = host.local_addr.port();
+        let (mapper, _router, removal) = a_mapping_whose_removal_hangs().await;
+        let running = Running {
+            host,
+            port,
+            mapper: Some(mapper),
+            detected: None,
+            watcher: None,
+        };
+
+        let (mut tls, received, length) = ask_for_pack(port, &share.code).await;
+        let stopping = tokio::spawn(stop(running));
+        // Nothing is read meanwhile, so the download is still waiting on the
+        // player, and only cutting it removes its pack file.
+        let waiting = std::time::Instant::now();
+        while outgoing_files(&admin) > 0 {
+            assert!(
+                waiting.elapsed() < removal / 2,
+                "the download ran on while the router was waited on"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(!stopping.is_finished(), "the router was not waited on");
+        let (received, _) = read_rest(&mut tls, received).await;
+        assert!(
+            received < length,
+            "a download ran to its end as sharing stopped"
+        );
+        stopping.await.unwrap();
+
+        let _ = tokio::fs::remove_dir_all(&admin.root).await;
+    }
+
+    /// A new code needs no reconcile, so what cuts off a download started with
+    /// the old one is the service checking codes again once the new one is
+    /// saved — which is what replacing a code does.
+    #[tokio::test]
+    async fn a_new_code_cuts_off_downloads_through_the_service() {
+        use crate::share::host::tests::{ask_for_pack, read_rest};
+
+        let admin = paths("rotate-cut");
+        let (server, mut share) = shared_server(&admin).await;
+        // Megabytes that do not compress, so the download outlasts every buffer
+        // between the two ends and is still under way when the code changes.
+        let mut filler = vec![0u8; 4 * 1024 * 1024];
+        getrandom::fill(&mut filler).unwrap();
+        tokio::fs::write(admin.server_run(&server.id).join("mods/filler.jar"), filler)
+            .await
+            .unwrap();
+
+        let service = service();
+        let config = manual(free_port(), None);
+        service.reconcile_with(&admin, &config, None).await;
+        assert!(service.status(&admin, &config).await.listening);
+
+        let (mut tls, received, length) = ask_for_pack(config.port, &share.code).await;
+        share.code = Code::generate();
+        server_share::save(&admin, &server.id, &share)
+            .await
+            .unwrap();
+        service.cut_revoked(&admin).await;
+
+        let (received, _) = read_rest(&mut tls, received).await;
+        assert!(
+            received < length,
+            "a download ran to its end on a code replaced"
+        );
+
+        service.shutdown().await;
+        let _ = tokio::fs::remove_dir_all(&admin.root).await;
     }
 
     /// A link is only ever built from an address players can actually reach.

@@ -17,16 +17,27 @@
 //! cheap to refuse: a cap on connections from any one source and on
 //! connections in all, both checked before any TLS is spent on them, with room
 //! made for a newcomer by dropping an idle connection from the busiest source;
-//! short deadlines on the TLS handshake and the request headers, and a
-//! download cut off once it stops moving; no keep-alive; a queue for building
-//! packs; and nothing built or read from disk until a code has matched.
+//! short deadlines on the TLS handshake and the request headers; no
+//! keep-alive; a queue for building packs; and nothing built or read from disk
+//! until a code has matched.
+//!
+//! A code is not a promise of good behaviour either. It is in every player's
+//! link, and links get passed around, so a connection that showed one is held
+//! to limits of its own: a download that falls below a slow minimum pace is
+//! cut; only so many downloads run at once, from any one source and in all,
+//! keeping only so much of the disk; a preview is answered from a description
+//! worked out moments ago; and every connection is cut the moment its server's
+//! share is no longer the one it showed its code against, or the listener
+//! stops.
 
 use std::cmp::Reverse;
+use std::collections::HashMap;
 use std::convert::Infallible;
+use std::future::Future;
 use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use futures::TryStreamExt;
@@ -46,6 +57,7 @@ use tokio_util::io::ReaderStream;
 use crate::error::{Error, Result};
 use crate::net::Progress;
 use crate::paths::Paths;
+use crate::server::share::{ServerShare, Shared};
 use crate::server::Server;
 
 /// The request paths, shared with the client in [`super::join`].
@@ -66,7 +78,11 @@ const PER_SOURCE: usize = 8;
 /// Reaching it does not shut anybody out. A newcomer takes the place of a
 /// connection that has not shown a code yet, from whichever source holds the
 /// most — so filling the listener to keep a player out takes a connection from
-/// each of this many addresses, not [`PER_SOURCE`] from a handful.
+/// each of this many addresses, not [`PER_SOURCE`] from a handful. Nor can
+/// connections that did show a code fill it for long: at most
+/// [`MAX_DOWNLOADS`] of them are downloads, and a preview is answered from a
+/// description worked out in the last few seconds — see [`PREVIEW_FRESH`] —
+/// so previews hold their places only while one server's mods are read.
 const MAX_CONNECTIONS: usize = 128;
 
 /// How long a connection may take to finish TLS, and then to send its request
@@ -75,16 +91,86 @@ const MAX_CONNECTIONS: usize = 128;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const HEADER_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How long an answer may go without sending anything before the connection is
-/// cut. A download is held open by the player reading it, so without this one
-/// that stops reading — or whose network vanished without a word — keeps its
-/// connection, and the pack file being sent, for as long as it likes.
+/// The window an answer's pace is measured over. Once the answer has started,
+/// it must hand on at least [`MIN_PROGRESS`] in every window of this length, or
+/// the connection is cut.
 ///
-/// Measured from when the answer last handed data on, not from when the
+/// A download is held open by the player reading it, so without this one that
+/// stops reading — or whose network vanished without a word — keeps its
+/// connection, and the pack file being sent, for as long as it likes; and so
+/// does one that reads a few kilobytes now and then, which asking only for
+/// *some* progress would never catch.
+///
+/// Measured window by window from when the answer started, not from when the
 /// connection opened, so a big pack on a slow upload is never cut while it is
 /// still moving. Two minutes, because data handed on sits in buffers until the
-/// player's side takes it, and a slow link takes a while to empty them.
+/// player's side takes it, and a slow link takes a while to empty them. For the
+/// same reason an answer that has handed on all of itself is not held to the
+/// pace any more — only emptying those buffers is left — but it is cut if that
+/// has still not finished a window later.
 const STALL_LIMIT: Duration = Duration::from_secs(2 * 60);
+
+/// The least an answer must hand on in each [`STALL_LIMIT`] window: about two
+/// kilobytes a second.
+///
+/// Safely below any real player's link. A 1 Mbit upload — slower than almost
+/// any connection an admin shares from — split evenly between
+/// [`MAX_DOWNLOADS`] players still gives each nearly twice this, and a player
+/// on any ordinary connection takes many times it. What does fall below it is
+/// a reader that barely reads, which is exactly what it is there to cut.
+const MIN_PROGRESS: u64 = 256 * 1024;
+
+/// Pack downloads at once, from every source together. Well below
+/// [`MAX_CONNECTIONS`], so however many a code holder starts, there are always
+/// places left for a player's preview and for newcomers to show their code.
+///
+/// A download counts from the moment its code matches — waiting its turn to be
+/// built, being built, being sent — until its connection ends. When every one
+/// is taken, a new one is told the server is busy, and nobody is dropped for
+/// it, not even the slowest. Players sharing an upload too narrow for all of
+/// them are slow together, so dropping the slowest for each new request cuts
+/// one of them short every time and none finishes; and it would not keep a
+/// code holder out, whose requests still waiting for their packs, or only just
+/// started, have no pace to judge.
+///
+/// So someone with the code who keeps asking can keep these places busy: from
+/// eight addresses, at [`DOWNLOADS_PER_SOURCE`] each; from fewer when a pack of
+/// several GiB reaches [`OUTGOING_LIMIT`] first; or from one through a tunnel.
+/// They still cannot keep a player from a preview, and a new code cuts every
+/// one of them at once.
+const MAX_DOWNLOADS: usize = 32;
+
+/// Downloads one source may run at once: half the connections it may hold.
+/// Enough for a household behind one address to download together, and it
+/// means keeping every download place busy takes eight addresses, not four.
+/// Like [`PER_SOURCE`], not applied where one address stands for many.
+const DOWNLOADS_PER_SOURCE: usize = PER_SOURCE / 2;
+
+/// Bytes of built packs kept on disk for downloads under way, together.
+///
+/// Every download sends a pack built for it alone, kept until its connection
+/// ends, so without this someone with the code reading each of
+/// [`MAX_DOWNLOADS`] downloads at the minimum pace keeps as many copies of a
+/// big pack on the admin's disk for days. Enough for every download at once of
+/// a pack up to 256 MiB, and for four at once of the largest a player's Geode
+/// accepts.
+///
+/// A download holds room from the moment it counts: as much as its server's
+/// pack took when last built, so one there is no room for is refused before
+/// its pack is built rather than after; then as much as its own pack takes.
+/// Past the limit a new download is told the server is busy, and a pack
+/// bigger than the limit by itself is not sent at all.
+const OUTGOING_LIMIT: u64 = 8 << 30;
+
+/// How long a server's description is answered from the one last worked out.
+///
+/// Working one out reads every jar in the server's `mods/`, which for a few
+/// hundred mods takes a while, and a preview's connection holds its place for
+/// all of it — a connection that showed a code is never dropped for a
+/// newcomer. Worked out one at a time and reused for this long, a flood of
+/// previews costs one read of the mods every few seconds, and is otherwise
+/// answered at once.
+const PREVIEW_FRESH: Duration = Duration::from_secs(5);
 
 /// Packs being built at once. Building one hashes and compresses a server's
 /// mods, which is real work for the admin's disk and processor, and every
@@ -94,6 +180,37 @@ const MAX_BUILDS: usize = 2;
 /// Added before every refusal of a code. Guessing is already hopeless against
 /// fifty bits; this just makes it hopeless more slowly.
 const REFUSAL_DELAY: Duration = Duration::from_millis(400);
+
+/// What a download is told when there is no room for it: every download place
+/// taken, or every one its address may have, or [`OUTGOING_LIMIT`] reached.
+/// Not when to try again, which is when some download ends — in seconds, or in
+/// hours for a big pack on a slow upload.
+const BUSY: &str = "this server is busy sending its pack to other players — try again later";
+
+/// The limits a code holder's connections are held to, together so a test can
+/// shrink them.
+#[derive(Debug, Clone, Copy)]
+struct Limits {
+    /// [`STALL_LIMIT`].
+    window: Duration,
+    /// [`MIN_PROGRESS`].
+    min_progress: u64,
+    /// [`MAX_DOWNLOADS`].
+    downloads: usize,
+    /// [`OUTGOING_LIMIT`].
+    outgoing: u64,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            window: STALL_LIMIT,
+            min_progress: MIN_PROGRESS,
+            downloads: MAX_DOWNLOADS,
+            outgoing: OUTGOING_LIMIT,
+        }
+    }
+}
 
 type Body = UnsyncBoxBody<Bytes, std::io::Error>;
 
@@ -115,6 +232,7 @@ pub struct PackInfo {
 /// A running pack server.
 pub struct Host {
     pub local_addr: SocketAddr,
+    gate: Arc<Gate>,
     stop: watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -125,11 +243,11 @@ impl Host {
     /// Port 0 binds any free port, which is what tests use; the address actually
     /// bound is in `local_addr`.
     pub async fn start(paths: Paths, port: u16) -> Result<Self> {
-        Self::start_with(paths, port, STALL_LIMIT).await
+        Self::start_with(paths, port, Limits::default()).await
     }
 
-    /// [`Host::start`], with a stall limit a test can wait out.
-    async fn start_with(paths: Paths, port: u16, stall_limit: Duration) -> Result<Self> {
+    /// [`Host::start`], with limits a test can wait out.
+    async fn start_with(paths: Paths, port: u16, limits: Limits) -> Result<Self> {
         let identity = super::identity::Identity::load_or_create(&paths).await?;
         let acceptor = TlsAcceptor::from(identity.server_config()?);
 
@@ -147,8 +265,13 @@ impl Host {
         let _ = tokio::fs::remove_dir_all(outgoing(&paths)).await;
 
         let (stop, mut stopped) = watch::channel(false);
-        let gate = Arc::new(Gate::default());
+        let gate = Arc::new(Gate {
+            limits,
+            ..Gate::default()
+        });
         let builds = Arc::new(Semaphore::new(MAX_BUILDS));
+        let previews = Arc::new(Previews::default());
+        let admitted_by = gate.clone();
 
         let task = tokio::spawn(async move {
             loop {
@@ -171,15 +294,15 @@ impl Host {
                 let admitted = Arc::new(admitted);
                 let acceptor = acceptor.clone();
                 let paths = paths.clone();
-                let builds = builds.clone();
+                let (builds, previews) = (builds.clone(), previews.clone());
                 tokio::spawn(async move {
                     // Dropping the connection drops the response it was
                     // sending, and with it the pack file that response was
                     // streaming from.
                     tokio::select! {
-                        () = serve(tcp, acceptor, paths, builds, admitted.clone()) => {}
-                        () = admitted.evicted.notified() => {}
-                        () = admitted.stalled(stall_limit) => {}
+                        () = serve(tcp, acceptor, paths, builds, previews, admitted.clone()) => {}
+                        () = admitted.cut.notified() => {}
+                        () = admitted.stalled() => {}
                     }
                 });
             }
@@ -187,16 +310,34 @@ impl Host {
 
         Ok(Self {
             local_addr,
+            gate: admitted_by,
             stop,
             task,
         })
     }
 
-    /// Stop accepting. The port is released as soon as this returns; a
-    /// download already in flight is left to finish, or to stall.
+    /// Cut every connection whose server's share is no longer the one its code
+    /// matched: the server unshared, given a new code, or changed in whether
+    /// it sends `config/`.
+    ///
+    /// Shares are read fresh for every request, so a change turns the next
+    /// request away, or answers it as changed, without this. What this is for
+    /// is the preview or download already under way, which would otherwise run
+    /// on with a code the admin has taken back — or send a `config/` the admin
+    /// has stopped sending. Nothing is cut when what is shared cannot be read.
+    pub async fn cut_revoked(&self, paths: &Paths) {
+        if let Ok(shared) = crate::server::share::list(paths).await {
+            self.gate.revoke(&shared);
+        }
+    }
+
+    /// Stop accepting, and cut every connection this host let in. The port is
+    /// released as soon as this returns, and a download in flight does not run
+    /// on beside whatever listens next.
     pub async fn stop(self) {
         let _ = self.stop.send(true);
         let _ = self.task.await;
+        self.gate.cut_all();
     }
 }
 
@@ -244,25 +385,79 @@ fn bound(socket: Socket, addr: SocketAddr) -> std::io::Result<std::net::TcpListe
 
 /// Connections being served, oldest first.
 #[derive(Default)]
-struct Gate(Mutex<Occupancy>);
+struct Gate {
+    occupancy: Mutex<Occupancy>,
+    limits: Limits,
+}
 
 #[derive(Default)]
 struct Occupancy {
     next_id: u64,
+    /// How many times shares have been checked again by [`Gate::revoke`], so a
+    /// request can tell that one was while it looked its own code up.
+    revocations: u64,
     /// At most [`MAX_CONNECTIONS`], so a scan of it is cheap.
     places: Vec<Place>,
+    /// Bytes each server's pack took when last built, by server id: the room
+    /// a new download of it holds on disk until its own pack is built.
+    sizes: HashMap<String, u64>,
 }
 
 struct Place {
     id: u64,
     source: IpAddr,
-    /// Showed a code that opens a shared server: a player, never dropped to
-    /// make room.
-    proven: bool,
-    evicted: Arc<Notify>,
+    /// Whether the source can be many players at once, so is not held to one
+    /// source's share: see [`stands_for_many`].
+    many: bool,
+    /// What the connection's code opened, once it showed one that did: a
+    /// player, never dropped to make room for anyone, and cut once that server
+    /// is no longer shared as it was.
+    proof: Option<Proof>,
+    /// Asked for a pack with that code, so counts against [`MAX_DOWNLOADS`].
+    downloading: bool,
+    /// Bytes of disk held for the pack it sends, which stays there until the
+    /// connection ends: counted against [`OUTGOING_LIMIT`].
+    holds: u64,
+    cut: Arc<Notify>,
+}
+
+/// The shared server a connection's code matched, and its share as it was
+/// then.
+struct Proof {
+    server: String,
+    share: ServerShare,
+}
+
+/// How much of its answer a connection has handed on, window by window.
+#[derive(Default)]
+struct Flow {
+    /// When the current window began: when the answer started, then the end of
+    /// each window after it. `None` until the answer starts.
+    window_began: Option<Instant>,
+    /// Bytes handed on in the current window.
+    this_window: u64,
+    /// When the whole answer had been handed on, leaving only what sits in
+    /// buffers on its way to the player.
+    finished: Option<Instant>,
+}
+
+impl Occupancy {
+    /// Bytes of disk every download together holds for its pack.
+    fn held(&self) -> u64 {
+        self.places.iter().map(|place| place.holds).sum()
+    }
+
+    /// Take a place away, and tell its connection to end.
+    fn cut(&mut self, index: usize) {
+        self.places.remove(index).cut.notify_one();
+    }
 }
 
 impl Gate {
+    fn lock(&self) -> MutexGuard<'_, Occupancy> {
+        self.occupancy.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     /// Let a connection from `peer` in, unless its source already holds its
     /// share, or every place is taken by a player.
     ///
@@ -271,13 +466,12 @@ impl Gate {
     /// filling the listener from a few addresses loses their own connections
     /// first, and a player's one connection outlasts every source with two.
     fn admit(self: &Arc<Self>, peer: IpAddr) -> Option<Admitted> {
-        let source = source_of(peer);
-        let mut occupancy = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let (source, many) = (source_of(peer), stands_for_many(peer.to_canonical()));
+        let mut occupancy = self.lock();
         let held_by =
             |places: &[Place], source: IpAddr| places.iter().filter(|p| p.source == source).count();
 
-        if !stands_for_many(peer.to_canonical()) && held_by(&occupancy.places, source) >= PER_SOURCE
-        {
+        if !many && held_by(&occupancy.places, source) >= PER_SOURCE {
             return None;
         }
         if occupancy.places.len() >= MAX_CONNECTIONS {
@@ -285,30 +479,69 @@ impl Gate {
                 .places
                 .iter()
                 .enumerate()
-                .filter(|(_, place)| !place.proven)
+                .filter(|(_, place)| place.proof.is_none())
                 .max_by_key(|(i, place)| (held_by(&occupancy.places, place.source), Reverse(*i)))?;
-            occupancy
-                .places
-                .remove(oldest_from_busiest)
-                .evicted
-                .notify_one();
+            occupancy.cut(oldest_from_busiest);
         }
 
         let id = occupancy.next_id;
         occupancy.next_id += 1;
-        let evicted = Arc::new(Notify::new());
+        let cut = Arc::new(Notify::new());
         occupancy.places.push(Place {
             id,
             source,
-            proven: false,
-            evicted: evicted.clone(),
+            many,
+            proof: None,
+            downloading: false,
+            holds: 0,
+            cut: cut.clone(),
         });
         Some(Admitted {
             gate: self.clone(),
             id,
-            evicted,
-            last_sent: Mutex::new(None),
+            cut,
+            flow: Mutex::default(),
         })
+    }
+
+    fn revocations(&self) -> u64 {
+        self.lock().revocations
+    }
+
+    /// Cut every connection whose server is no longer shared as it was when
+    /// its code matched, going by `shared`: with another code, or changed in
+    /// whether it sends `config/`, which a pack built before the change may
+    /// hold. Turning that on cuts too, rather than keep sending packs without
+    /// what the admin now sends.
+    ///
+    /// A server missing from `shared` has been unshared — unless it is missing
+    /// because its own share file could not be read. Its players are left be
+    /// then, the way the listener is left running, rather than cut off from a
+    /// server that may well still be shared. Another server's unreadable file
+    /// says nothing about this one. A share that was changed is always known
+    /// for what it is.
+    fn revoke(&self, shared: &Shared) {
+        let mut occupancy = self.lock();
+        occupancy.revocations += 1;
+        let still_opens =
+            |proof: &Proof| match shared.servers.iter().find(|(id, _)| *id == proof.server) {
+                Some((_, share)) => *share == proof.share,
+                None => shared.unreadable.contains(&proof.server),
+            };
+        occupancy.places.retain(|place| {
+            let keep = place.proof.as_ref().map_or(true, still_opens);
+            if !keep {
+                place.cut.notify_one();
+            }
+            keep
+        });
+    }
+
+    /// Cut every connection, for a listener that is stopping.
+    fn cut_all(&self) {
+        for place in self.lock().places.drain(..) {
+            place.cut.notify_one();
+        }
     }
 }
 
@@ -316,47 +549,155 @@ impl Gate {
 struct Admitted {
     gate: Arc<Gate>,
     id: u64,
-    /// Told when the place was given to a newcomer.
-    evicted: Arc<Notify>,
-    /// When the answer last handed on any data; `None` until it starts.
-    last_sent: Mutex<Option<Instant>>,
+    /// Told when the place is taken away: given to a newcomer, its server no
+    /// longer shared as it was, or the listener stopped.
+    cut: Arc<Notify>,
+    flow: Mutex<Flow>,
 }
 
 impl Admitted {
-    /// The connection showed a code that matched.
-    fn prove(&self) {
-        let mut occupancy = self.gate.0.lock().unwrap_or_else(|p| p.into_inner());
+    /// The connection showed a code that opens `server`, shared as `share`.
+    ///
+    /// Refused — look the code up again — when shares were checked again since
+    /// `revocations` was read, which is done before the lookup. The lookup may
+    /// have found a share the admin changed just before that check, and the
+    /// check came too early to find this connection holding it; taking it as
+    /// proof now would let a download run on with a code already taken back.
+    fn prove(&self, server: &str, share: &ServerShare, revocations: u64) -> bool {
+        let mut occupancy = self.gate.lock();
+        if occupancy.revocations != revocations {
+            return false;
+        }
         if let Some(place) = occupancy
             .places
             .iter_mut()
             .find(|place| place.id == self.id)
         {
-            place.proven = true;
+            place.proof = Some(Proof {
+                server: server.to_string(),
+                share: share.clone(),
+            });
         }
+        true
     }
 
-    fn sent(&self) {
-        *self.last_sent.lock().unwrap_or_else(|p| p.into_inner()) = Some(Instant::now());
+    /// Count the connection as a download, holding room on disk for a pack as
+    /// big as its server's was when last built.
+    ///
+    /// False, with nothing counted, when every download place is taken, or
+    /// every one its source may have, or that room is not there — or when this
+    /// connection has lost its own place already.
+    fn start_download(&self) -> bool {
+        let limits = self.gate.limits;
+        let mut occupancy = self.gate.lock();
+        let Some(index) = occupancy
+            .places
+            .iter()
+            .position(|place| place.id == self.id)
+        else {
+            return false;
+        };
+        let place = &occupancy.places[index];
+        let expected = place
+            .proof
+            .as_ref()
+            .and_then(|proof| occupancy.sizes.get(&proof.server))
+            .copied()
+            .unwrap_or(0);
+        let downloads = occupancy.places.iter().filter(|p| p.downloading);
+        let from_source = downloads.clone().filter(|p| p.source == place.source);
+        if downloads.count() >= limits.downloads
+            || (!place.many && from_source.count() >= DOWNLOADS_PER_SOURCE)
+            || occupancy.held() + expected > limits.outgoing
+        {
+            return false;
+        }
+        let place = &mut occupancy.places[index];
+        place.downloading = true;
+        place.holds = expected;
+        true
     }
 
-    /// Finishes once the answer has started and then sent nothing for `limit`.
-    /// Before it starts — a handshake, a request, a pack being built — the
+    /// Hold room on disk for this download's built pack, `bytes` long, in place
+    /// of what it held until now, and remember the size for the next download
+    /// of its server.
+    ///
+    /// False, with the pack not to be sent, when that would take what every
+    /// download holds past [`OUTGOING_LIMIT`], or when this connection has lost
+    /// its own place already.
+    fn hold(&self, bytes: u64) -> bool {
+        let limits = self.gate.limits;
+        let mut occupancy = self.gate.lock();
+        let Some(index) = occupancy
+            .places
+            .iter()
+            .position(|place| place.id == self.id)
+        else {
+            return false;
+        };
+        if let Some(proof) = &occupancy.places[index].proof {
+            let server = proof.server.clone();
+            occupancy.sizes.insert(server, bytes);
+        }
+        if occupancy.held() - occupancy.places[index].holds + bytes > limits.outgoing {
+            return false;
+        }
+        occupancy.places[index].holds = bytes;
+        true
+    }
+
+    fn flow(&self) -> MutexGuard<'_, Flow> {
+        self.flow.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// The answer handed on `bytes` more.
+    fn sent(&self, bytes: usize) {
+        let mut flow = self.flow();
+        flow.window_began.get_or_insert_with(Instant::now);
+        flow.this_window += bytes as u64;
+    }
+
+    /// The answer has handed on all of itself.
+    fn finished(&self) {
+        self.flow().finished.get_or_insert_with(Instant::now);
+    }
+
+    /// Finishes when the connection has fallen too far behind to keep: a whole
+    /// window in which its answer handed on less than the minimum, or a whole
+    /// window since it handed on the last of itself. Before the answer starts —
+    /// a handshake, a request, a pack waiting its turn or being built — the
     /// deadlines on those, and the build finishing, are what end the wait.
-    async fn stalled(&self, limit: Duration) {
+    async fn stalled(&self) {
+        let Limits {
+            window,
+            min_progress,
+            ..
+        } = self.gate.limits;
         loop {
-            let last_sent = *self.last_sent.lock().unwrap_or_else(|p| p.into_inner());
-            match last_sent {
-                Some(at) if at.elapsed() >= limit => return,
-                Some(at) => tokio::time::sleep_until(at + limit).await,
-                None => tokio::time::sleep(limit).await,
-            }
+            let wake = {
+                let mut flow = self.flow();
+                let now = Instant::now();
+                match (flow.finished, flow.window_began) {
+                    (Some(finished), _) if now >= finished + window => return,
+                    (Some(finished), _) => finished + window,
+                    (None, None) => now + window,
+                    (None, Some(began)) if now < began + window => began + window,
+                    (None, Some(_)) if flow.this_window < min_progress => return,
+                    (None, Some(began)) => {
+                        flow.this_window = 0;
+                        flow.window_began = Some(began + window);
+                        began + window * 2
+                    }
+                }
+            };
+            tokio::time::sleep_until(wake).await;
         }
     }
 }
 
 impl Drop for Admitted {
     fn drop(&mut self) {
-        let mut occupancy = self.gate.0.lock().unwrap_or_else(|p| p.into_inner());
+        let mut occupancy = self.gate.lock();
         // Not there if it was given to a newcomer.
         occupancy.places.retain(|place| place.id != self.id);
     }
@@ -404,15 +745,21 @@ async fn serve(
     acceptor: TlsAcceptor,
     paths: Paths,
     builds: Arc<Semaphore>,
+    previews: Arc<Previews>,
     admitted: Arc<Admitted>,
 ) {
     let Ok(Ok(tls)) = tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await else {
         return;
     };
     let service = hyper::service::service_fn(move |request| {
-        let (paths, builds, admitted) = (paths.clone(), builds.clone(), admitted.clone());
+        let (paths, builds, previews, admitted) = (
+            paths.clone(),
+            builds.clone(),
+            previews.clone(),
+            admitted.clone(),
+        );
         async move {
-            let response = respond(&paths, &builds, &admitted, request).await;
+            let response = respond(&paths, &builds, &previews, &admitted, request).await;
             Ok::<_, Infallible>(response.map(|body| watched(body, admitted)))
         }
     });
@@ -424,20 +771,34 @@ async fn serve(
         .await;
 }
 
-/// A body that marks the connection as still sending each time data is taken
-/// from it — which is only as fast as the player reads, since nothing more is
-/// taken while what was already sent sits unread.
+/// A body that counts what is taken from it as handed on — which is only as
+/// fast as the player reads, since nothing more is taken while what was
+/// already sent sits unread — and marks the answer finished when it is
+/// dropped, which the connection does once it has taken all of it.
 fn watched(body: Body, admitted: Arc<Admitted>) -> Body {
+    let finish = Finish(admitted);
     body.map_frame(move |frame| {
-        admitted.sent();
+        if let Some(data) = frame.data_ref() {
+            finish.0.sent(data.len());
+        }
         frame
     })
     .boxed_unsync()
 }
 
+/// Marks an answer finished when dropped, along with the body it rides in.
+struct Finish(Arc<Admitted>);
+
+impl Drop for Finish {
+    fn drop(&mut self) {
+        self.0.finished();
+    }
+}
+
 async fn respond(
     paths: &Paths,
     builds: &Arc<Semaphore>,
+    previews: &Previews,
     admitted: &Admitted,
     request: Request<Incoming>,
 ) -> Response<Body> {
@@ -447,11 +808,16 @@ async fn respond(
     }
     let want_pack = path == PACK_PATH;
 
-    let Some(server) = shared_server(paths, bearer(&request)).await else {
-        tokio::time::sleep(REFUSAL_DELAY).await;
-        return message(StatusCode::UNAUTHORIZED, "that code is not accepted here");
+    let server = loop {
+        let revocations = admitted.gate.revocations();
+        let Some((id, share, server)) = shared_server(paths, bearer(&request)).await else {
+            tokio::time::sleep(REFUSAL_DELAY).await;
+            return message(StatusCode::UNAUTHORIZED, "that code is not accepted here");
+        };
+        if admitted.prove(&id, &share, revocations) {
+            break server;
+        }
     };
-    admitted.prove();
 
     // Said in the server's own words, and only after the code matched: it is
     // written for the player, and it contains nothing about this machine.
@@ -459,10 +825,39 @@ async fn respond(
         return message(StatusCode::CONFLICT, &e.to_string());
     }
 
+    // Said at once, with no delay: this player's code is good, and the sooner
+    // they know to come back, the sooner they do.
+    if want_pack && !admitted.start_download() {
+        return message(StatusCode::SERVICE_UNAVAILABLE, BUSY);
+    }
+
     let outcome = if want_pack {
-        pack(paths, &server, builds).await
+        pack(paths, &server, builds).await.and_then(|response| {
+            let bytes = response
+                .headers()
+                .get(CONTENT_LENGTH)
+                .and_then(|length| length.to_str().ok()?.parse().ok())
+                .expect("a pack is sent with its length");
+            // Never sent, however few others are downloading, so not "busy":
+            // only the admin can do anything about it.
+            let limit = admitted.gate.limits.outgoing;
+            if bytes > limit {
+                return Err(Error::msg(format!(
+                    "its pack is {bytes} bytes, more than the {limit} kept on disk for downloads"
+                )));
+            }
+            // Refused, the response goes, and the pack file with it.
+            Ok(if admitted.hold(bytes) {
+                response
+            } else {
+                message(StatusCode::SERVICE_UNAVAILABLE, BUSY)
+            })
+        })
     } else {
-        super::pack::server_pack_info(paths, &server)
+        let (paths, described) = (paths.clone(), server.clone());
+        let work = async move { super::pack::server_pack_info(&paths, &described).await };
+        previews
+            .describe(&server.id, work)
             .await
             .map(|info| json(StatusCode::OK, &info))
     };
@@ -494,14 +889,71 @@ fn bearer(request: &Request<Incoming>) -> Option<&str> {
 /// Read from the share files, which nothing but sharing writes, rather than
 /// from `server.json`, which a backup or an install can rewrite with a copy
 /// loaded before the code last changed.
-async fn shared_server(paths: &Paths, code: Option<&str>) -> Option<Server> {
+///
+/// Comes with the server's id as sharing knows it and the share it has, which
+/// is what [`Gate::revoke`] later checks the connection against.
+async fn shared_server(paths: &Paths, code: Option<&str>) -> Option<(String, ServerShare, Server)> {
     let code = code?;
     let shared = crate::server::share::list(paths).await.ok()?;
-    let (id, _) = shared
+    let (id, share) = shared
         .servers
         .into_iter()
         .find(|(_, share)| share.code.matches(code))?;
-    crate::server::load(paths, &id).await.ok()
+    let server = crate::server::load(paths, &id).await.ok()?;
+    Some((id, share, server))
+}
+
+/// Shared servers' descriptions, as last worked out.
+#[derive(Default)]
+struct Previews {
+    /// By server id, with when each was worked out.
+    known: Arc<Mutex<HashMap<String, (Instant, PackInfo)>>>,
+    /// Held while a description is worked out, so only one is at a time.
+    working: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl Previews {
+    /// `server`'s description: the one last worked out, if that was within
+    /// [`PREVIEW_FRESH`], or else what `work` finds once no other description
+    /// is being worked out.
+    ///
+    /// The work is a task of its own that keeps its turn, and keeps what it
+    /// found, even once the request waiting on it is dropped. It reads the
+    /// server's mods on a blocking thread, which dropping a future does not
+    /// stop: a work owned by the request would hand its turn on while that
+    /// thread still read, so hanging up over and over would read the mods as
+    /// many times at once.
+    async fn describe<W>(&self, server: &str, work: W) -> Result<PackInfo>
+    where
+        W: Future<Output = Result<PackInfo>> + Send + 'static,
+    {
+        if let Some(info) = self.fresh(server) {
+            return Ok(info);
+        }
+        let turn = self.working.clone().lock_owned().await;
+        // Whoever had the turn before may have just worked this one out.
+        if let Some(info) = self.fresh(server) {
+            return Ok(info);
+        }
+        let (known, server) = (self.known.clone(), server.to_string());
+        tokio::spawn(async move {
+            let _turn = turn;
+            let info = work.await?;
+            known
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(server, (Instant::now(), info.clone()));
+            Ok(info)
+        })
+        .await
+        .map_err(|e| Error::msg(format!("describing the server stopped: {e}")))?
+    }
+
+    fn fresh(&self, server: &str) -> Option<PackInfo> {
+        let known = self.known.lock().unwrap_or_else(|p| p.into_inner());
+        let (at, info) = known.get(server)?;
+        (at.elapsed() < PREVIEW_FRESH).then(|| info.clone())
+    }
 }
 
 /// Build the server's pack and stream it, removing the file once it is sent.
@@ -583,10 +1035,11 @@ fn message(status: StatusCode, text: &str) -> Response<Body> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     //! The listener against the connections that would keep players out: one
-    //! source holding every slot, a download nobody reads, a crowd of pack
-    //! requests — and a player who can only reach it over IPv6.
+    //! source holding every slot, a download nobody reads or reads barely at
+    //! all, a crowd of pack requests, a code taken back while it is still in
+    //! use — and a player who can only reach it over IPv6.
 
     use std::time::Instant;
 
@@ -596,7 +1049,6 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
-    use crate::server::share::ServerShare;
     use crate::server::ServerKind;
     use crate::share::code::Code;
     use crate::share::identity::Identity;
@@ -670,7 +1122,7 @@ mod tests {
             .await
     }
 
-    fn outgoing_files(paths: &Paths) -> usize {
+    pub(crate) fn outgoing_files(paths: &Paths) -> usize {
         std::fs::read_dir(outgoing(paths)).map_or(0, |entries| entries.count())
     }
 
@@ -772,6 +1224,63 @@ mod tests {
         }
     }
 
+    /// Ask for the pack over a connection with a small receive buffer, and read
+    /// only its headers — so the host is left with the download under way,
+    /// waiting on a reader. Returns the connection, how many bytes of the pack
+    /// have arrived, and how many there are.
+    pub(crate) async fn ask_for_pack(
+        port: u16,
+        code: &Code,
+    ) -> (tokio_rustls::client::TlsStream<TcpStream>, usize, usize) {
+        let mut tls = tls_to(port, 4096).await;
+        let request = format!(
+            "GET {PACK_PATH} HTTP/1.1\r\nHost: geode\r\nAuthorization: Bearer {}\r\n\r\n",
+            code.raw()
+        );
+        tls.write_all(request.as_bytes()).await.unwrap();
+        let (head, received) = read_head(&mut tls).await;
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        let length = head
+            .lines()
+            .find_map(|line| {
+                let line = line.to_ascii_lowercase();
+                line.strip_prefix("content-length:")
+                    .map(|value| value.trim().parse().unwrap())
+            })
+            .expect("the pack's length is sent");
+        (tls, received, length)
+    }
+
+    /// Read until the host is done sending. Returns how many bytes of the body
+    /// arrived in all, and the error the end came with: `UnexpectedEof` for a
+    /// connection cut without TLS's goodbye.
+    pub(crate) async fn read_rest(
+        tls: &mut tokio_rustls::client::TlsStream<TcpStream>,
+        mut received: usize,
+    ) -> (usize, Option<ErrorKind>) {
+        let mut chunk = [0u8; 64 * 1024];
+        loop {
+            match tls.read(&mut chunk).await {
+                Ok(0) => return (received, None),
+                Ok(n) => received += n,
+                Err(e) => return (received, Some(e.kind())),
+            }
+        }
+    }
+
+    /// Wait for every pack file to be removed, which happens once the response
+    /// sending it is dropped.
+    async fn outgoing_files_removed(paths: &Paths) -> bool {
+        let waiting = Instant::now();
+        while outgoing_files(paths) > 0 {
+            if waiting.elapsed() > Duration::from_secs(5) {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        true
+    }
+
     #[test]
     fn a_source_is_one_ipv4_address_or_one_ipv6_prefix() {
         let ip = |text: &str| text.parse::<IpAddr>().unwrap();
@@ -822,7 +1331,7 @@ mod tests {
         );
         drop(from_one);
 
-        assert!(gate.0.lock().unwrap().places.is_empty());
+        assert!(gate.lock().places.is_empty());
     }
 
     /// Everyone arriving through a tunnel's agent or a proxy comes from one
@@ -852,9 +1361,38 @@ mod tests {
         }
     }
 
-    fn evicted(admitted: &Admitted) -> bool {
+    /// Whether the connection has been told to end. Asking takes the telling
+    /// with it, so each connection is asked once.
+    fn cut_off(admitted: &Admitted) -> bool {
         use futures::FutureExt;
-        admitted.evicted.notified().now_or_never().is_some()
+        admitted.cut.notified().now_or_never().is_some()
+    }
+
+    /// A share with `code`, sending no `config/`.
+    fn shared_with(code: &Code) -> ServerShare {
+        ServerShare {
+            code: code.clone(),
+            include_config: false,
+        }
+    }
+
+    /// A connection let in from `peer` that showed `code`, for `server`.
+    fn proven(gate: &Arc<Gate>, peer: IpAddr, server: &str, code: &Code) -> Admitted {
+        let admitted = gate.admit(peer).expect("a connection was turned away");
+        assert!(admitted.prove(server, &shared_with(code), gate.revocations()));
+        admitted
+    }
+
+    fn downloads(gate: &Gate) -> usize {
+        gate.lock()
+            .places
+            .iter()
+            .filter(|place| place.downloading)
+            .count()
+    }
+
+    fn v4(n: u32) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::from(0xcb00_7100 + n))
     }
 
     /// The listener full of connections that have shown no code, from a few
@@ -863,11 +1401,10 @@ mod tests {
     /// player's one connection, and never a connection that showed a code.
     #[test]
     fn a_full_gate_makes_room_from_the_busiest_source_and_never_from_a_player() {
-        let v4 = |n: u32| IpAddr::V4(Ipv4Addr::from(0xcb00_7100 + n));
         let gate = Arc::new(Gate::default());
+        let code = Code::generate();
 
-        let downloading = gate.admit(v4(200)).unwrap();
-        downloading.prove();
+        let downloading = proven(&gate, v4(200), "survival", &code);
         let waiting = gate.admit(v4(201)).unwrap();
         let crowd: Vec<Admitted> = (0..MAX_CONNECTIONS - 2)
             .map(|n| gate.admit(v4((n / PER_SOURCE) as u32)).unwrap())
@@ -880,82 +1417,523 @@ mod tests {
                 gate.admit(v4(1000 + n))
                     .expect("a newcomer was turned away"),
             );
-            assert_eq!(gate.0.lock().unwrap().places.len(), MAX_CONNECTIONS);
+            assert_eq!(gate.lock().places.len(), MAX_CONNECTIONS);
         }
-        let dropped: Vec<bool> = crowd.iter().map(evicted).collect();
+        let dropped: Vec<bool> = crowd.iter().map(cut_off).collect();
         assert_eq!(dropped.iter().filter(|&&d| d).count(), 100);
         // The oldest of the first source went first.
         assert!(dropped[0]);
         assert!(
-            !evicted(&downloading),
+            !cut_off(&downloading),
             "a player downloading lost its place"
         );
         assert!(
-            !evicted(&waiting),
+            !cut_off(&waiting),
             "a player's one connection went before a source with two"
         );
-        assert!(newcomers.iter().all(|n| !evicted(n)));
+        assert!(newcomers.iter().all(|n| !cut_off(n)));
 
         drop((crowd, newcomers, waiting));
         assert_eq!(
-            gate.0.lock().unwrap().places.len(),
+            gate.lock().places.len(),
             1,
             "given-up places are gone"
         );
 
         // Every place held by someone who showed a code: nothing to drop.
         let players: Vec<Admitted> = (1..MAX_CONNECTIONS as u32)
-            .map(|n| {
-                let player = gate.admit(v4(2000 + n)).unwrap();
-                player.prove();
-                player
-            })
+            .map(|n| proven(&gate, v4(2000 + n), "survival", &code))
             .collect();
         assert!(
             gate.admit(v4(9999)).is_none(),
             "a player was dropped for a newcomer"
         );
-        assert!(players.iter().all(|p| !evicted(p)));
+        assert!(players.iter().all(|p| !cut_off(p)));
         drop(downloading);
     }
 
-    /// Only what the player takes counts as moving, and the wait is measured
-    /// from the last of it — so a download that keeps moving is never cut, and
-    /// one that stops is cut the limit after it stopped.
+    /// A code taken back cuts the connections that showed it, and nothing else:
+    /// not another server's players, not connections that showed no code.
+    #[test]
+    fn a_code_taken_back_cuts_the_connections_that_showed_it() {
+        let gate = Arc::new(Gate::default());
+        let (old, new, other) = (Code::generate(), Code::generate(), Code::generate());
+        let shared = |servers: &[(&str, &Code)], unreadable: &[&str]| Shared {
+            servers: servers
+                .iter()
+                .map(|(id, code)| (id.to_string(), shared_with(code)))
+                .collect(),
+            unreadable: unreadable.iter().map(|id| id.to_string()).collect(),
+        };
+
+        let on_old = proven(&gate, v4(1), "survival", &old);
+        let on_other = proven(&gate, v4(2), "creative", &other);
+        let no_code = gate.admit(v4(3)).unwrap();
+
+        // Checked again with nothing changed: nobody is cut.
+        gate.revoke(&shared(&[("survival", &old), ("creative", &other)], &[]));
+        assert_eq!(gate.lock().places.len(), 3);
+
+        // Survival's code replaced.
+        gate.revoke(&shared(&[("survival", &new), ("creative", &other)], &[]));
+        assert!(cut_off(&on_old), "a download ran on with a replaced code");
+        assert_eq!(gate.lock().places.len(), 2, "its place was not given back");
+
+        // Creative missing because its own share file cannot be read: it may
+        // well still be shared, so its players are left be.
+        gate.revoke(&shared(&[("survival", &new)], &["creative"]));
+        assert_eq!(gate.lock().places.len(), 2);
+        // Another server's file that cannot be read says nothing about
+        // creative: its absence means it was unshared.
+        gate.revoke(&shared(&[("survival", &new)], &["old"]));
+        assert!(
+            cut_off(&on_other),
+            "a download ran on from an unshared server"
+        );
+        assert!(
+            !cut_off(&no_code),
+            "a connection that showed no code was cut"
+        );
+
+        // A request that looked its code up before a check, and shows it after,
+        // is sent to look it up again rather than taken at its word.
+        let late = gate.admit(v4(4)).unwrap();
+        let before = gate.revocations();
+        gate.revoke(&shared(&[("survival", &new)], &[]));
+        assert!(
+            !late.prove("survival", &shared_with(&old), before),
+            "a code looked up before it was taken back was accepted after"
+        );
+        assert!(late.prove("survival", &shared_with(&new), gate.revocations()));
+    }
+
+    /// Whether a server sends its `config/` is read when its pack is built, so
+    /// a pack built with it keeps it while it streams. Stopping sending it
+    /// cuts the connections that came in before, as a new code does; so does
+    /// starting, since their packs lack what the admin now sends.
+    #[test]
+    fn a_change_to_whether_config_is_sent_cuts_the_connections_that_came_before() {
+        let gate = Arc::new(Gate::default());
+        let code = Code::generate();
+        let without = shared_with(&code);
+        let with = ServerShare {
+            include_config: true,
+            ..without.clone()
+        };
+        let shared = |share: &ServerShare| Shared {
+            servers: vec![("survival".to_string(), share.clone())],
+            unreadable: Vec::new(),
+        };
+
+        let sending_config = gate.admit(v4(1)).unwrap();
+        assert!(sending_config.prove("survival", &with, gate.revocations()));
+        let not_sending = proven(&gate, v4(2), "survival", &code);
+
+        gate.revoke(&shared(&with));
+        assert!(!cut_off(&sending_config));
+        assert!(
+            cut_off(&not_sending),
+            "a pack without config/ ran on once config/ was sent"
+        );
+        gate.revoke(&shared(&without));
+        assert!(
+            cut_off(&sending_config),
+            "a pack with config/ ran on once config/ stopped being sent"
+        );
+    }
+
+    /// Stopping the listener leaves no connection behind.
+    #[test]
+    fn stopping_cuts_every_connection() {
+        let gate = Arc::new(Gate::default());
+        let code = Code::generate();
+        let player = proven(&gate, v4(1), "survival", &code);
+        let no_code = gate.admit(v4(2)).unwrap();
+        gate.cut_all();
+        assert!(cut_off(&player) && cut_off(&no_code));
+        assert!(gate.lock().places.is_empty());
+    }
+
+    /// A body of `count` frames of `size` bytes, taken as the test takes them.
+    fn frames(size: usize, count: usize) -> Body {
+        let bytes = Bytes::from(vec![7u8; size]);
+        StreamBody::new(futures::stream::iter(
+            std::iter::repeat_with(move || Ok(Frame::data(bytes.clone()))).take(count),
+        ))
+        .boxed_unsync()
+    }
+
+    /// A download read a little every so often never stops moving, and asking
+    /// only for some progress kept it for good. What counts is how much it
+    /// hands on: a trickle is cut the moment its first window ends, however
+    /// steadily its frames keep coming.
     #[tokio::test(start_paused = true)]
-    async fn an_answer_is_stalled_only_once_it_stops_sending() {
+    async fn a_trickle_is_cut_when_its_window_ends_though_it_never_stops() {
         use tokio::time::Instant;
-        let limit = Duration::from_secs(60);
         let gate = Arc::new(Gate::default());
         let admitted = Arc::new(gate.admit("203.0.113.1".parse().unwrap()).unwrap());
 
-        let mut stalled = Box::pin(admitted.stalled(limit));
+        let mut stalled = Box::pin(admitted.stalled());
         // Not started: a pack being built for ten minutes is not a stall.
-        assert!(tokio::time::timeout(limit * 10, &mut stalled)
+        assert!(tokio::time::timeout(STALL_LIMIT * 5, &mut stalled)
             .await
             .is_err());
 
-        let bytes = Bytes::from(vec![7u8; 16 * 1024]);
-        let mut body = watched(
-            StreamBody::new(futures::stream::iter(
-                std::iter::repeat_with(move || Ok(Frame::data(bytes.clone()))).take(40),
-            ))
-            .boxed_unsync(),
-            admitted.clone(),
-        );
-        let mut last_frame = Instant::now();
-        for _ in 0..40 {
-            assert!(body.frame().await.is_some());
-            last_frame = Instant::now();
+        // 16 KiB every ten seconds: 192 KiB a window, short of the minimum.
+        let mut body = watched(frames(16 * 1024, 1000), admitted.clone());
+        assert!(body.frame().await.is_some());
+        let started = Instant::now();
+        while tokio::time::timeout(Duration::from_secs(10), &mut stalled)
+            .await
+            .is_err()
+        {
             assert!(
-                tokio::time::timeout(limit / 2, &mut stalled).await.is_err(),
-                "cut off while still sending"
+                started.elapsed() < STALL_LIMIT * 5,
+                "a trickle was never cut"
+            );
+            assert!(body.frame().await.is_some());
+        }
+        assert_eq!(started.elapsed(), STALL_LIMIT);
+    }
+
+    /// A download that keeps up with the minimum is never cut, however long it
+    /// runs. Once all of it has been handed on it need not keep up any more —
+    /// what is left sits in buffers on its way to the player — but that gets
+    /// one window more, not forever.
+    #[tokio::test(start_paused = true)]
+    async fn a_download_that_keeps_up_is_never_cut_and_a_finished_one_gets_one_window_more() {
+        use tokio::time::Instant;
+        let gate = Arc::new(Gate::default());
+        let admitted = Arc::new(gate.admit("203.0.113.1".parse().unwrap()).unwrap());
+        let mut stalled = Box::pin(admitted.stalled());
+
+        // 64 KiB every ten seconds: 768 KiB a window, for ten windows.
+        let mut body = watched(frames(64 * 1024, 121), admitted.clone());
+        for _ in 0..120 {
+            assert!(body.frame().await.is_some());
+            assert!(
+                tokio::time::timeout(Duration::from_secs(10), &mut stalled)
+                    .await
+                    .is_err(),
+                "cut off while keeping up"
             );
         }
-        tokio::time::timeout(limit * 2, &mut stalled)
+
+        // Ten seconds into a fresh window, the last frame is taken and the body
+        // is done with: far less than the minimum in this window, and still not
+        // cut when it ends, only a whole window after the last of it went.
+        assert!(tokio::time::timeout(Duration::from_secs(10), &mut stalled)
             .await
-            .expect("never cut off after it stopped sending");
-        assert_eq!(last_frame.elapsed(), limit);
+            .is_err());
+        assert!(body.frame().await.is_some());
+        drop(body);
+        let finished = Instant::now();
+        tokio::time::timeout(STALL_LIMIT * 2, &mut stalled)
+            .await
+            .expect("an answer handed on in full was kept for good");
+        assert_eq!(finished.elapsed(), STALL_LIMIT);
+    }
+
+    /// `count` downloads, each from an address of its own, numbered from
+    /// `from`.
+    fn start_downloads(gate: &Arc<Gate>, code: &Code, from: u32, count: usize) -> Vec<Admitted> {
+        (from..from + count as u32)
+            .map(|n| {
+                let download = proven(gate, v4(n), "survival", code);
+                assert!(download.start_download(), "download {n} was turned away");
+                download
+            })
+            .collect()
+    }
+
+    /// Every download place taken: a new download is told to wait, and nobody
+    /// is cut for it, however slowly the others go. Players sharing an upload
+    /// too narrow for all of them go slowly together — here a 2 Mbit upload
+    /// split between every place, under 8 KiB a second each for ten minutes —
+    /// and cutting the slowest for a newcomer cut one of them short at every
+    /// click, so none ever finished. A download that ends gives its place back.
+    #[tokio::test(start_paused = true)]
+    async fn a_new_download_cuts_nobody_however_slowly_the_others_go() {
+        let gate = Arc::new(Gate::default());
+        let code = Code::generate();
+        let mut held = start_downloads(&gate, &code, 0, MAX_DOWNLOADS);
+        for _ in 0..600 {
+            for download in &held {
+                download.sent(7 * 1024 + 512);
+            }
+            tokio::time::advance(Duration::from_secs(1)).await;
+        }
+
+        let newcomer = proven(&gate, v4(1000), "survival", &code);
+        assert!(
+            !newcomer.start_download(),
+            "a download was let in past the limit"
+        );
+        assert!(
+            held.iter().all(|download| !cut_off(download)),
+            "a download was cut for a newcomer"
+        );
+        assert_eq!(downloads(&gate), MAX_DOWNLOADS);
+
+        drop(held.pop());
+        assert!(
+            newcomer.start_download(),
+            "a place given back was not free again"
+        );
+    }
+
+    /// One address gets only its share of the download places, so keeping
+    /// every one busy — reading, or not, or waiting for packs to be built —
+    /// takes many addresses. A player from another address still gets one.
+    /// Through a tunnel, where every player is one address, the share does not
+    /// apply: see the test of a code holder behind one.
+    #[test]
+    fn one_address_gets_only_its_share_of_the_download_places() {
+        let gate = Arc::new(Gate::default());
+        let code = Code::generate();
+        let theirs: Vec<Admitted> = (0..PER_SOURCE)
+            .map(|_| proven(&gate, v4(1), "survival", &code))
+            .collect();
+        let started = theirs
+            .iter()
+            .filter(|download| download.start_download())
+            .count();
+        assert_eq!(
+            started, DOWNLOADS_PER_SOURCE,
+            "one address took more than its share"
+        );
+        let player = proven(&gate, v4(2), "survival", &code);
+        assert!(
+            player.start_download(),
+            "a player from another address was turned away"
+        );
+    }
+
+    /// Every download keeps its own copy of the pack on disk, and holds room
+    /// for it from the start — as much as its server's pack took when last
+    /// built. So past the limit a new one is refused before its pack is built,
+    /// not a whole build later, as each of a crowd arriving at once used to be.
+    /// A pack built bigger than the room left is not sent, and nobody is
+    /// dropped to make room for anything.
+    #[test]
+    fn packs_kept_on_disk_are_held_to_a_limit() {
+        let limits = Limits {
+            outgoing: 10 << 20,
+            ..Limits::default()
+        };
+        let gate = Arc::new(Gate {
+            limits,
+            ..Gate::default()
+        });
+        let code = Code::generate();
+
+        // No pack built yet to go by: the first holds nothing until its own is.
+        let first = start_downloads(&gate, &code, 0, 1).remove(0);
+        assert_eq!(gate.lock().held(), 0);
+        assert!(first.hold(4 << 20), "a pack inside the limit was refused");
+
+        // Then each holds room for 4 MiB before its pack is built, and the one
+        // there is no room for is refused at once.
+        let second = start_downloads(&gate, &code, 1, 1).remove(0);
+        assert_eq!(gate.lock().held(), 8 << 20);
+        let third = proven(&gate, v4(2), "survival", &code);
+        assert!(
+            !third.start_download(),
+            "a download was let in whose pack could not be kept"
+        );
+
+        // Built bigger than the room it held, past the limit: not sent, and
+        // nobody is dropped for it.
+        assert!(!second.hold(7 << 20), "a pack was kept past the limit");
+        assert!(!cut_off(&first), "a download was dropped to make room");
+
+        // Its size is what the next download holds room for.
+        drop(second);
+        assert!(
+            !third.start_download(),
+            "a download held room for less than its server's pack last took"
+        );
+        drop(first);
+        assert!(third.start_download());
+        assert_eq!(gate.lock().held(), 7 << 20);
+    }
+
+    /// Over the network, with room on disk for one copy of the pack: once the
+    /// first player's pack is built, a second player is told the server is
+    /// busy without another being built for them, while the first download
+    /// runs to its end.
+    #[tokio::test]
+    async fn a_pack_with_no_room_on_disk_is_not_sent() {
+        let scratch = Scratch::new("outgoing");
+        let (_, code) = share_a_server(&scratch.paths, 4 * 1024 * 1024).await;
+        let limits = Limits {
+            outgoing: 6 << 20,
+            ..Limits::default()
+        };
+        let host = Host::start_with(scratch.paths.clone(), 0, limits)
+            .await
+            .unwrap();
+        let port = host.local_addr.port();
+        let pin = pin_of(&scratch.paths).await;
+
+        let (mut first, received, length) = ask_for_pack(port, &code).await;
+        assert!(length > 4 << 20, "the pack is smaller than its filler");
+
+        let response = TrustedClient::new(Trust::Pinned(pin))
+            .unwrap()
+            .client
+            .get(format!("https://127.0.0.1:{port}{PACK_PATH}"))
+            .bearer_auth(code.raw())
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        let said: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(said["error"], BUSY);
+        assert_eq!(
+            outgoing_files(&scratch.paths),
+            1,
+            "a pack with no room was kept"
+        );
+
+        let (received, _) = read_rest(&mut first, received).await;
+        assert_eq!(received, length, "the download under way was cut");
+
+        host.stop().await;
+    }
+
+    /// A pack bigger than the room on disk for every download together is not
+    /// sent to anybody, however few are downloading. Saying the server is busy
+    /// would have the player try again for nothing, and tell the admin nothing:
+    /// the player is told to ask the admin instead, and the admin's Geode says
+    /// why.
+    #[tokio::test]
+    async fn a_pack_bigger_than_the_room_for_every_download_is_not_sent() {
+        let scratch = Scratch::new("too-large");
+        let (_, code) = share_a_server(&scratch.paths, 2 * 1024 * 1024).await;
+        let limits = Limits {
+            outgoing: 1 << 20,
+            ..Limits::default()
+        };
+        let host = Host::start_with(scratch.paths.clone(), 0, limits)
+            .await
+            .unwrap();
+        let port = host.local_addr.port();
+        let pin = pin_of(&scratch.paths).await;
+
+        let response = TrustedClient::new(Trust::Pinned(pin))
+            .unwrap()
+            .client
+            .get(format!("https://127.0.0.1:{port}{PACK_PATH}"))
+            .bearer_auth(code.raw())
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let said: serde_json::Value = response.json().await.unwrap();
+        assert_ne!(said["error"], BUSY);
+        assert!(
+            outgoing_files_removed(&scratch.paths).await,
+            "a pack that was not sent was kept"
+        );
+
+        host.stop().await;
+    }
+
+    /// A flood of previews reads a server's mods once, not once each — and a
+    /// player hanging up while they are read starts no second reading beside
+    /// the first. A description older than [`PREVIEW_FRESH`] is worked out
+    /// again.
+    #[tokio::test(start_paused = true)]
+    async fn previews_read_a_servers_mods_once_however_many_ask() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let previews = Arc::new(Previews::default());
+        let readings = Arc::new(AtomicUsize::new(0));
+        let ask = || {
+            let (previews, readings) = (previews.clone(), readings.clone());
+            tokio::spawn(async move {
+                let work = async move {
+                    readings.fetch_add(1, Ordering::SeqCst);
+                    // A few hundred jars.
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    Ok(PackInfo {
+                        name: "Survival".into(),
+                        mc_version: "1.21.1".into(),
+                        loader: "fabric".into(),
+                        loader_version: "0.16.9".into(),
+                        mods: 300,
+                        server_kind: "fabric".into(),
+                    })
+                };
+                previews.describe("survival", work).await
+            })
+        };
+        let read = || readings.load(Ordering::SeqCst);
+
+        // The first to ask hangs up while the mods are being read.
+        let first = ask();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(read(), 1);
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+
+        // A crowd asks meanwhile.
+        let crowd: Vec<_> = (0..100).map(|_| ask()).collect();
+        for asked in crowd {
+            assert_eq!(asked.await.unwrap().unwrap().mods, 300);
+        }
+        assert_eq!(read(), 1, "the mods were read more than once");
+
+        // A second before it is too old, and once it is.
+        tokio::time::sleep(PREVIEW_FRESH - Duration::from_secs(1)).await;
+        ask().await.unwrap().unwrap();
+        assert_eq!(read(), 1);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        ask().await.unwrap().unwrap();
+        assert_eq!(read(), 2, "a description was kept past its time");
+    }
+
+    /// Through a tunnel every player is 127.0.0.1, which no source's share
+    /// applies to. Someone there with the code asks for the pack on every
+    /// connection they can open: they get [`MAX_DOWNLOADS`] downloads, and
+    /// every other request is told to wait and its connection ends. Previews
+    /// are answered from a description already worked out, so what they can
+    /// keep in the places left, beyond a moment, are connections that have not
+    /// shown a code — which a newcomer takes. So a player's preview still gets
+    /// in.
+    #[test]
+    fn a_code_holder_behind_a_tunnel_cannot_keep_a_player_from_a_preview() {
+        let tunnel: IpAddr = "127.0.0.1".parse().unwrap();
+        let gate = Arc::new(Gate::default());
+        let code = Code::generate();
+
+        let mut held = Vec::new();
+        for _ in 0..MAX_CONNECTIONS {
+            let connection = proven(&gate, tunnel, "survival", &code);
+            if connection.start_download() {
+                held.push(connection);
+            } else {
+                drop(connection);
+                held.push(gate.admit(tunnel).unwrap());
+            }
+        }
+        assert_eq!(gate.lock().places.len(), MAX_CONNECTIONS);
+        assert_eq!(downloads(&gate), MAX_DOWNLOADS);
+
+        let player = gate.admit(tunnel).expect("a player's preview was shut out");
+        assert!(player.prove("survival", &shared_with(&code), gate.revocations()));
+        assert_eq!(held.iter().filter(|c| cut_off(c)).count(), 1);
+        assert_eq!(
+            downloads(&gate),
+            MAX_DOWNLOADS,
+            "a download made room for a preview"
+        );
     }
 
     /// The attack the listener used to fall to: one machine opens more
@@ -1062,6 +2040,10 @@ mod tests {
     /// A player who asks for the pack and then stops reading would otherwise
     /// keep the connection, and the pack file on the admin's disk, for as long
     /// as they left the socket open.
+    ///
+    /// The first window is not the one that cuts it: filling the buffers
+    /// between the two ends hands on far more than the minimum. The window
+    /// after, with nothing read, is.
     #[tokio::test]
     async fn a_download_nobody_reads_is_cut_off_once_it_stalls() {
         let scratch = Scratch::new("stall");
@@ -1070,7 +2052,11 @@ mod tests {
         // and the host really is left waiting to send.
         let (_, code) = share_a_server(&scratch.paths, 4 * 1024 * 1024).await;
         let limit = Duration::from_secs(3);
-        let host = Host::start_with(scratch.paths.clone(), 0, limit)
+        let limits = Limits {
+            window: limit,
+            ..Limits::default()
+        };
+        let host = Host::start_with(scratch.paths.clone(), 0, limits)
             .await
             .unwrap();
 
@@ -1091,20 +2077,21 @@ mod tests {
             .expect("the pack's length is sent");
 
         // Nothing more is read. The host is still sending, so its file is there,
-        // and stays there for a while: waiting on a player is not yet a stall.
+        // and stays there past the first window: waiting on a player is not yet
+        // a stall.
         let stopped = Instant::now();
-        tokio::time::sleep_until((stopped + limit / 2).into()).await;
+        tokio::time::sleep_until((stopped + limit * 3 / 2).into()).await;
         assert_eq!(
             outgoing_files(&scratch.paths),
             1,
-            "cut off before the limit, or never sending"
+            "cut off in its first window, or never sending"
         );
 
-        tokio::time::sleep_until((stopped + limit + Duration::from_millis(1500)).into()).await;
+        tokio::time::sleep_until((stopped + limit * 2 + Duration::from_millis(1500)).into()).await;
         assert_eq!(
             outgoing_files(&scratch.paths),
             0,
-            "a download nobody reads still holds its pack file past the stall limit"
+            "a download nobody reads still holds its pack file after a window with nothing sent"
         );
 
         // Reading again gets what was already on its way, then the end — short
@@ -1119,6 +2106,140 @@ mod tests {
         };
         assert!(received < length, "all {length} bytes arrived");
         assert_eq!(ended, Some(ErrorKind::UnexpectedEof));
+
+        host.stop().await;
+    }
+
+    /// A new code cuts off everyone holding the old one: not only on their next
+    /// request, but in the middle of a download they already started.
+    #[tokio::test]
+    async fn a_new_code_cuts_off_a_download_started_with_the_old_one() {
+        let scratch = Scratch::new("rotate");
+        let (server, code) = share_a_server(&scratch.paths, 4 * 1024 * 1024).await;
+        let host = Host::start(scratch.paths.clone(), 0).await.unwrap();
+
+        let (mut tls, mut received, length) = ask_for_pack(host.local_addr.port(), &code).await;
+        // Under way, and slowly: a little is read, and then no more for now.
+        let mut chunk = [0u8; 16 * 1024];
+        received += tls.read(&mut chunk).await.unwrap();
+
+        let replaced = ServerShare {
+            code: Code::generate(),
+            include_config: false,
+        };
+        crate::server::share::save(&scratch.paths, &server.id, &replaced)
+            .await
+            .unwrap();
+        host.cut_revoked(&scratch.paths).await;
+
+        // What was already on its way arrives, then the end, short of the pack.
+        let (received, ended) = read_rest(&mut tls, received).await;
+        assert!(
+            received < length,
+            "all {length} bytes arrived on a code taken back"
+        );
+        assert_eq!(ended, Some(ErrorKind::UnexpectedEof));
+        assert!(
+            outgoing_files_removed(&scratch.paths).await,
+            "the pack file outlived its download"
+        );
+
+        host.stop().await;
+    }
+
+    /// Unsharing a server cuts off its downloads under way, and so does
+    /// stopping the listener, which used to leave them running beside whatever
+    /// listened next.
+    #[tokio::test]
+    async fn unsharing_or_stopping_cuts_off_downloads_under_way() {
+        let scratch = Scratch::new("unshare");
+        let (server, code) = share_a_server(&scratch.paths, 4 * 1024 * 1024).await;
+        let host = Host::start(scratch.paths.clone(), 0).await.unwrap();
+        let port = host.local_addr.port();
+
+        let (mut tls, received, length) = ask_for_pack(port, &code).await;
+        crate::server::share::clear(&scratch.paths, &server.id)
+            .await
+            .unwrap();
+        host.cut_revoked(&scratch.paths).await;
+        let (received, ended) = read_rest(&mut tls, received).await;
+        assert!(
+            received < length,
+            "all {length} bytes arrived from a server unshared"
+        );
+        assert_eq!(ended, Some(ErrorKind::UnexpectedEof));
+        assert!(outgoing_files_removed(&scratch.paths).await);
+
+        // Shared again, with a new code, and a download of it under way.
+        let (_, code) = share_a_server(&scratch.paths, 4 * 1024 * 1024).await;
+        let (mut tls, received, length) = ask_for_pack(port, &code).await;
+        host.stop().await;
+        let (received, ended) = read_rest(&mut tls, received).await;
+        assert!(
+            received < length,
+            "all {length} bytes arrived from a listener stopped"
+        );
+        assert_eq!(ended, Some(ErrorKind::UnexpectedEof));
+        assert!(
+            outgoing_files_removed(&scratch.paths).await,
+            "the pack file outlived its download"
+        );
+    }
+
+    /// Over the network, with every download place taken: a player asking for
+    /// the pack is told the server is busy, at
+    /// once and in words their Geode shows them; a crowd of connections from
+    /// the same address still does not keep a preview out; and the download
+    /// that was there first runs to its end.
+    #[tokio::test]
+    async fn a_busy_server_says_so_and_still_answers_a_preview() {
+        let scratch = Scratch::new("busy");
+        let (_, code) = share_a_server(&scratch.paths, 4 * 1024 * 1024).await;
+        let limits = Limits {
+            downloads: 1,
+            ..Limits::default()
+        };
+        let host = Host::start_with(scratch.paths.clone(), 0, limits)
+            .await
+            .unwrap();
+        let port = host.local_addr.port();
+        let pin = pin_of(&scratch.paths).await;
+
+        let (mut first, received, length) = ask_for_pack(port, &code).await;
+
+        let response = TrustedClient::new(Trust::Pinned(pin))
+            .unwrap()
+            .client
+            .get(format!("https://127.0.0.1:{port}{PACK_PATH}"))
+            .bearer_auth(code.raw())
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        let said: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(said["error"], BUSY);
+
+        let extra = 4;
+        let mut idle: Vec<TcpStream> = (0..MAX_CONNECTIONS + extra)
+            .map(|_| connect_from(Ipv4Addr::LOCALHOST, port, None))
+            .collect();
+        assert!(
+            closed_within(&mut idle[extra - 1], Duration::from_secs(3)).await,
+            "the host never made room for the last connection"
+        );
+        let served = info("127.0.0.1", port, pin, &code).await;
+        assert_eq!(
+            served.map(|info| info.name).map_err(|e| format!("{e:?}")),
+            Ok("Survival".to_string()),
+            "a player's preview was locked out"
+        );
+
+        let (received, _) = read_rest(&mut first, received).await;
+        assert_eq!(
+            received, length,
+            "the download under way was cut for a newcomer"
+        );
 
         host.stop().await;
     }

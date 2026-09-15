@@ -2956,12 +2956,16 @@ pub async fn set_server_share_config(
     let mut share = shared(&state, &id).await?;
     share.include_config = include_config;
     crate::server::share::save(&state.paths, &id, &share).await?;
+    // A pack already being built or sent was built as the share was, and one
+    // with `config/` in it must not keep streaming once config is not sent.
+    state.share.cut_revoked(&state.paths).await;
     Ok(share_view(&state, &server, &share).await)
 }
 
 /// Replace a server's code. Everyone holding the old link is cut off at once:
-/// the pack server reads codes fresh on every request, and nothing but sharing
-/// ever writes the file the code lives in.
+/// the pack server reads codes fresh on every request, a preview or download
+/// already under way with the old code is cut as soon as the new one is saved,
+/// and nothing but sharing ever writes the file the code lives in.
 #[tauri::command]
 pub async fn rotate_server_share_code(
     state: State<'_, AppState>,
@@ -2971,6 +2975,7 @@ pub async fn rotate_server_share_code(
     let mut share = shared(&state, &id).await?;
     share.code = share::code::Code::generate();
     crate::server::share::save(&state.paths, &id, &share).await?;
+    state.share.cut_revoked(&state.paths).await;
     Ok(share_view(&state, &server, &share).await)
 }
 

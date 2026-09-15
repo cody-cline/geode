@@ -268,8 +268,9 @@ pub async fn download(link: &Link, dest: &Path, progress: &Progress) -> Result<(
     progress.stage("Waiting for the server", 0).await;
     // No overall deadline here: a big pack on a slow upload takes as long as it
     // takes. The client's per-read timeout still catches one that stalls, the
-    // player can cancel at any point, and the admin's side ends any connection
-    // that runs past half an hour.
+    // player can cancel at any point, and the admin's side cuts a download that
+    // hands on less than a slow minimum pace — about two kilobytes a second,
+    // measured over two minutes at a time — however long it has been running.
     let response = request(&client, link, PACK_PATH, None, progress).await?;
 
     if response.content_length().is_some_and(|len| len > MAX_PACK_BYTES) {
