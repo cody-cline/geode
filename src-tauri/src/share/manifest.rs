@@ -31,8 +31,8 @@ pub const EXTENSION: &str = "geodepack";
 #[serde(rename_all = "camelCase")]
 pub struct Manifest {
     pub geode_format: u32,
-    /// What was exported. A server pack carries per-file sides and exclusions
-    /// an instance pack has no use for.
+    /// What was exported. A server pack carries per-file sides an instance
+    /// pack has no use for.
     pub kind: Kind,
     pub profile: Profile,
     /// Where the artwork lives inside the zip, if any was exported.
@@ -121,12 +121,6 @@ pub struct FileNote {
     /// not have to re-read every jar to find out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub side: Option<crate::instance::jar::Side>,
-    /// True when the server needs this but a player does not.
-    ///
-    /// This is the thing a client is offered a choice about on import: keep
-    /// them and match the server exactly, or drop them and save the space.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub server_only: bool,
     /// Where to get it, when it is not something the index can point at.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<SourceRef>,
@@ -186,7 +180,6 @@ mod tests {
             files: vec![FileNote {
                 path: "mods/sodium.jar".into(),
                 side: Some(crate::instance::jar::Side::Client),
-                server_only: false,
                 source: None,
                 manual: false,
                 disabled: false,
@@ -211,7 +204,6 @@ mod tests {
             assert!(!json.contains(absent), "{absent} should not be written: {json}");
         }
         // And a file with nothing to say about it carries no flag either.
-        assert!(!json.contains("serverOnly"));
         assert!(!json.contains("manual"));
         assert!(!json.contains("disabled"));
         assert!(!json.contains("source"));
@@ -225,7 +217,6 @@ mod tests {
         let note = FileNote {
             path: "mods/private.jar".into(),
             side: None,
-            server_only: false,
             source: Some(SourceRef {
                 provider: "curseforge".into(),
                 project_id: "12345".into(),

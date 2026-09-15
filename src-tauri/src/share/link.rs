@@ -195,10 +195,10 @@ impl Link {
         }
 
         let addr = addr.ok_or_else(|| Error::msg("this link has no server address"))?;
-        let code = code.ok_or_else(|| Error::msg("this link has no share code"))?;
+        let code = code.ok_or_else(|| Error::msg("this link has no password"))?;
         let address = parse_address(&addr, None)
             .map_err(|e| Error::msg(format!("this link's server address is not valid: {e}")))?;
-        let code = Code::parse(&code).ok_or_else(|| Error::msg("this link's share code is not a valid code"))?;
+        let code = Code::parse(&code).ok_or_else(|| Error::msg("this link's password is not valid"))?;
         let pin = pin
             .map(|hex| {
                 Pin::from_hex(&hex).ok_or_else(|| Error::msg("this link's certificate fingerprint is not valid"))
@@ -221,7 +221,7 @@ impl Link {
     /// What a person typed: an address and a code, and no fingerprint.
     pub fn from_parts(address: &str, code: &str, default_port: u16) -> Result<Self> {
         let address = Address::parse(address, default_port)?;
-        let code = Code::parse(code).ok_or_else(|| Error::msg("that is not a valid share code"))?;
+        let code = Code::parse(code).ok_or_else(|| Error::msg("that is not a valid password — it looks like GEODE-XXXXX-XXXXX"))?;
         Ok(Link { address, code, pin: None })
     }
 
@@ -791,6 +791,11 @@ mod tests {
         ] {
             assert_link_refused(&format!("geode://join?{query}"));
         }
+        // Players are told about a password, whatever the link calls it.
+        let error = Link::parse(&format!("geode://join?{addr}&{pin}"))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "this link has no password");
     }
 
     #[test]
@@ -803,6 +808,12 @@ mod tests {
         ] {
             assert_link_refused(&format!("geode://join?addr=203.0.113.7:25590&code={code}&pin={pin}"));
         }
+        let error = Link::parse(&format!(
+            "geode://join?addr=203.0.113.7:25590&code=K3VB0&pin={EMPTY_SHA256}"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert_eq!(error, "this link's password is not valid");
     }
 
     /// Windows' single-instance plugin splits forwarded arguments on `|`, and
@@ -915,7 +926,11 @@ mod tests {
         );
         assert!(Link::from_parts("http://pack.example.com", CODE, 25590).is_err());
         assert!(Link::from_parts("203.0.113.7:0", CODE, 25590).is_err());
-        assert!(Link::from_parts("203.0.113.7", "not a code", 25590).is_err());
+        let error = Link::from_parts("203.0.113.7", "not a code", 25590)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not a valid password"), "{error}");
+        assert!(error.contains("GEODE-XXXXX-XXXXX"), "{error}");
         assert!(Link::from_parts("203.0.113.7", "", 25590).is_err());
     }
 

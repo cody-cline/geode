@@ -15,7 +15,9 @@ import {
   outcomeLine,
   parsePort,
   readOutHint,
+  replacedPasswordBody,
   routerLine,
+  stoppedLine,
   verificationLine,
 } from "./share.ts";
 
@@ -416,4 +418,25 @@ test("a typed address pinned by an earlier join is not credited to a link", () =
 
   const linked = verificationLine("pinned", false);
   assert.match(linked.detail, /in the link/);
+});
+
+test("a stopped share promises only what sharing again brings back", () => {
+  const off = stoppedLine(false);
+  assert.equal(off.tone, "info");
+  assert.equal(off.title, "Sharing is off");
+  // A password replaced while stopped is not the one in links already sent, so
+  // those are not promised to work again: only links carrying the one it has.
+  assert.doesNotMatch(off.detail, /links you already sent/);
+  assert.match(off.detail, /links you sent with it work again/);
+  assert.doesNotMatch(off.detail, /config/);
+
+  // A config folder that was being sent goes again, and the admin is told
+  // before sharing again rather than after.
+  assert.match(stoppedLine(true).detail, /also sends the config folder/);
+});
+
+test("a password replaced while sharing is stopped is not sent before sharing again", () => {
+  assert.equal(replacedPasswordBody(true), "Send players the new link or password.");
+  // The new link reaches nothing until the server is shared again.
+  assert.match(replacedPasswordBody(false), /^Share the server again, then send players the new link or password\.$/);
 });

@@ -118,7 +118,6 @@ async fn notes_for(
         out.push(FileNote {
             path: rel.to_string_lossy().replace('\\', "/"),
             side,
-            server_only: record.sharing.server_only,
             // Only a reference needs telling. A file carried as bytes keeps its
             // `.disabled` name on the way through, and a note written for its
             // side alone would be saying it twice.
@@ -638,7 +637,6 @@ async fn resolve_references(
             slug: None,
             icon_url: None,
             dependency: false,
-            sharing: Default::default(),
             origin: Default::default(),
             requires: None,
         }));
@@ -743,19 +741,19 @@ struct ServerMods<'a> {
     carried: HashSet<PathBuf>,
 }
 
-/// Sort a server's `mods/` into what its players get and what they do not.
+/// List what of a server's `mods/` goes to its players: every jar in it.
 ///
 /// Read from the folder rather than the records, because disk is the source of
 /// truth: a jar dropped in by hand has no record and is still a mod, and a
 /// record whose jar is gone is not.
 ///
-/// Only what a loader would load counts, and only that goes: a regular file
-/// directly inside `mods/` with a jar's name. Everything else an admin leaves
-/// there — a `.bak` of a jar they kept back, a folder of old server-side
-/// tools, a link to somewhere else — is invisible in their Content tab, so
-/// they could never mark it "don't share", and the pack must not send what
-/// they cannot see. A `mods/` that is itself a link shares nothing, for the
-/// reason [`instance::modpack::Walk::Only`] gives.
+/// Every regular file directly inside `mods/` with a jar's name goes, turned
+/// off or not and with a record or without one — jars the admin added by hand,
+/// and jars that declare themselves server-side, included. Only what a loader
+/// would not load stays: a `.bak` of a jar, a folder of old tools, a link to
+/// somewhere else. None of that shows in the admin's Content tab, and the pack
+/// must not send what they cannot see. A `mods/` that is itself a link shares
+/// nothing, for the reason [`instance::modpack::Walk::Only`] gives.
 async fn server_mods<'a>(
     run: &Path,
     records: &'a [instance::content::ContentRecord],
@@ -763,12 +761,6 @@ async fn server_mods<'a>(
     use instance::content::{is_content_file, strip_disabled, ContentKind};
 
     let dir = run.join(ContentKind::Mod.folder());
-    let excluded: HashSet<String> = records
-        .iter()
-        .filter(|r| r.kind == ContentKind::Mod && !r.sharing.shareable())
-        .map(|r| r.file_name.clone())
-        .collect();
-
     let names = tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
         match std::fs::symlink_metadata(&dir) {
             Ok(meta) if meta.is_dir() => {}
@@ -776,41 +768,24 @@ async fn server_mods<'a>(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e.into()),
         }
-        let mut kept_back = excluded;
-        let mut candidates = Vec::new();
+        let mut names = Vec::new();
         for entry in std::fs::read_dir(&dir)?.flatten() {
             if !entry.file_type().is_ok_and(|t| t.is_file()) {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            if !is_content_file(&name, ContentKind::Mod)
-                || kept_back.contains(strip_disabled(&name).0)
-            {
-                continue;
+            if is_content_file(&name, ContentKind::Mod) {
+                names.push(name);
             }
-            // A jar that says it only runs on a server cannot load on a
-            // client, and it is the likeliest place for the server's own
-            // private tooling. Only what the jar itself declared counts: a
-            // NeoForge jar declares nothing, and guessing would drop mods
-            // players need.
-            let side = instance::jar::read(&entry.path()).and_then(|meta| meta.side);
-            if side == Some(instance::jar::Side::Server) {
-                kept_back.insert(strip_disabled(&name).0.to_string());
-                continue;
-            }
-            candidates.push(name);
         }
-        // Filtered once every jar has been read, so a kept-back jar keeps its
-        // turned-off twin back too whichever of the two was listed first.
-        candidates.retain(|name| !kept_back.contains(strip_disabled(name).0));
-        Ok(candidates)
+        Ok(names)
     })
     .await
     .map_err(|e| Error::msg(format!("reading the server's mods panicked: {e}")))??;
 
-    // Records follow the files. One whose file is kept back, is a link, or is
-    // gone names nothing the pack sends, so it must not be indexed or
-    // referenced either — or the pack would carry a mod the count left out.
+    // Records follow the files. One whose file is a link, or is gone, names
+    // nothing the pack sends, so it must not be indexed or referenced either —
+    // or the pack would carry a mod the count left out.
     let going: HashSet<&str> = names.iter().map(|name| strip_disabled(name).0).collect();
     Ok(ServerMods {
         shared: records
@@ -855,10 +830,11 @@ pub async fn server_pack_info(
 /// cannot be a way to reach a file outside it. Unlike an instance's pack,
 /// which follows links, nobody reviews this one before it goes.
 ///
-/// Records marked `excluded` stay on the server. A jar that declares itself
-/// server-side only stays too: it cannot load on a client, and it is often the
-/// private one. The manifest is `Kind::Server`, so importing it claims every
-/// file for the server.
+/// Every jar in `mods/` goes: one from a provider as a reference, and the rest
+/// — jars added by hand, and jars that declare themselves server-side — as
+/// copies. Only links, subfolders and files that are not jars stay. The
+/// manifest is `Kind::Server`, so importing it claims every file for the
+/// server.
 pub async fn export_server(
     paths: &Paths,
     server: &crate::server::Server,
@@ -904,10 +880,10 @@ pub async fn export_server(
     let mut trees = Vec::new();
     // From the share file, read now: an admin who just stopped sending config
     // is not second-guessed by a copy of anything loaded earlier. A server that
-    // is not shared at all sends none.
+    // is not shared, now or ever, sends none.
     let include_config = crate::server::share::load(paths, &server.id)
         .await?
-        .is_some_and(|share| share.include_config);
+        .is_some_and(|share| share.shared && share.include_config);
     if include_config {
         trees.push("config");
     }
@@ -1113,7 +1089,6 @@ mod tests {
             slug: None,
             icon_url: None,
             dependency: false,
-            sharing: Default::default(),
             origin: Default::default(),
             requires: None,
         }
@@ -1712,7 +1687,6 @@ mod tests {
                 m.files.push(FileNote {
                     path: "../../mods/escape.jar".into(),
                     side: None,
-                    server_only: false,
                     source: Some(SourceRef {
                         provider: "curseforge".into(),
                         project_id: "1".into(),
@@ -1857,11 +1831,11 @@ mod tests {
             ("mods/create-cf.jar", b"from curseforge".to_vec()),
             // Carried as bytes: no record, and it runs on both sides.
             ("mods/homemade.jar", fabric_jar("homemade", "*")),
-            // Excluded, with a CurseForge record that would otherwise be named.
+            // Once held back from players, with a CurseForge record.
             ("mods/anticheat.jar", b"private".to_vec()),
-            // Excluded, with a Modrinth record that would otherwise be indexed.
+            // Once held back from players, with a Modrinth record.
             ("mods/excluded-mr.jar", b"private".to_vec()),
-            // Excluded while turned off, with no record until it was excluded.
+            // The admin's own, turned off, with no record.
             ("mods/private-tools.jar.disabled", b"private".to_vec()),
             // Declares itself server-side, with no record.
             ("mods/server-side.jar", fabric_jar("serverside", "server")),
@@ -1882,30 +1856,19 @@ mod tests {
         server.content = vec![
             record("modrinth", "sodium-mr.jar", ContentKind::Mod),
             record("curseforge", "create-cf.jar", ContentKind::Mod),
-            ContentRecord {
-                sharing: instance::content::Sharing { excluded: true, ..Default::default() },
-                ..record("curseforge", "anticheat.jar", ContentKind::Mod)
-            },
-            ContentRecord {
-                sharing: instance::content::Sharing { excluded: true, ..Default::default() },
-                ..record("modrinth", "excluded-mr.jar", ContentKind::Mod)
-            },
+            record("curseforge", "anticheat.jar", ContentKind::Mod),
+            record("modrinth", "excluded-mr.jar", ContentKind::Mod),
             record("modrinth", "srv-mr.jar", ContentKind::Mod),
             // A plugin the index could point at, if the pack looked past mods/.
             record("modrinth", "p.jar", ContentKind::Plugin),
         ];
-        instance::content::set_excluded(
-            &mut server.content,
-            ContentKind::Mod,
-            "private-tools.jar.disabled",
-            true,
-        );
         crate::server::share::save(
             &paths,
             &server.id,
             &ServerShare {
                 code: crate::share::code::Code::generate(),
                 include_config,
+                shared: true,
             },
         )
         .await
@@ -1926,12 +1889,12 @@ mod tests {
         names
     }
 
-    /// The allowlist, end to end. Everything in the run directory that is not
-    /// a mod a player needs stays where it is — the RCON password, the player
-    /// lists, the world, the libraries, the plugins, the configs, and every mod
-    /// the admin kept back or that only runs on a server.
+    /// The allowlist, end to end. Every jar in `mods/` goes — the admin's own,
+    /// one turned off, one that only runs on a server — and everything else in
+    /// the run directory stays where it is: the RCON password, the player
+    /// lists, the world, the libraries, the plugins and the configs.
     #[tokio::test]
-    async fn a_server_pack_carries_only_what_players_need() {
+    async fn a_server_pack_carries_every_mod_and_nothing_else() {
         let (paths, server) = server_fixture("only", false).await;
         let dest = paths.root.join("server.geodepack");
         export_server(&paths, &server, dest.clone(), &Progress::silent("t")).await.unwrap();
@@ -1943,6 +1906,8 @@ mod tests {
                 "geode/media/icon.png",
                 "modrinth.index.json",
                 "overrides/mods/homemade.jar",
+                "overrides/mods/private-tools.jar.disabled",
+                "overrides/mods/server-side.jar",
             ],
         );
 
@@ -1954,8 +1919,27 @@ mod tests {
 
         let index: crate::instance::modpack::MrIndex =
             serde_json::from_slice(&read_entry(&dest, "modrinth.index.json")).unwrap();
-        let indexed: Vec<&str> = index.files.iter().map(|f| f.path.as_str()).collect();
-        assert_eq!(indexed, vec!["mods/sodium-mr.jar"], "only the shared Modrinth mod is indexed");
+        let indexed = sorted(index.files.iter().map(|f| f.path.clone()).collect());
+        assert_eq!(
+            indexed,
+            vec![
+                "mods/excluded-mr.jar",
+                "mods/sodium-mr.jar",
+                "mods/srv-mr.jar"
+            ],
+            "every Modrinth mod is indexed"
+        );
+        // A server-only jar does nothing on a client, and is not refused there.
+        let env = index
+            .files
+            .iter()
+            .find(|f| f.path == "mods/srv-mr.jar")
+            .and_then(|f| f.env.as_ref())
+            .expect("an env for the server-side mod");
+        assert_eq!(
+            (env.client.as_str(), env.server.as_str()),
+            ("optional", "required")
+        );
         assert_eq!(index.name, "Survival Club");
         assert_eq!(index.dependencies.get("minecraft").map(String::as_str), Some("1.21.1"));
         assert_eq!(index.dependencies.get("fabric-loader").map(String::as_str), Some("0.16.9"));
@@ -1969,20 +1953,56 @@ mod tests {
         assert_eq!(manifest.profile.java_args, None, "the server's JVM flags are not the player's");
         assert_eq!(manifest.icon.as_deref(), Some("geode/media/icon.png"));
 
-        let referenced: Vec<&str> = manifest
-            .files
-            .iter()
-            .filter(|n| n.source.is_some())
-            .map(|n| n.path.as_str())
-            .collect();
-        assert_eq!(referenced, vec!["mods/create-cf.jar"]);
-        for kept in ["anticheat", "excluded-mr", "private-tools", "server-side", "srv-mr", "p.jar"] {
-            assert!(
-                manifest.files.iter().all(|n| !n.path.contains(kept)),
-                "the manifest mentions {kept}: {:?}",
-                manifest.files
-            );
+        let referenced = sorted(
+            manifest
+                .files
+                .iter()
+                .filter(|n| n.source.is_some())
+                .map(|n| n.path.clone())
+                .collect(),
+        );
+        assert_eq!(referenced, vec!["mods/anticheat.jar", "mods/create-cf.jar"]);
+        assert!(
+            manifest.files.iter().all(|n| !n.path.contains("p.jar")),
+            "the manifest mentions the plugin: {:?}",
+            manifest.files
+        );
+    }
+
+    /// A mod an admin held back while that could be done is an ordinary mod
+    /// now. Its record still says so in `server.json`, and still reads.
+    #[tokio::test]
+    async fn a_mod_once_held_back_is_shared_now() {
+        let (paths, server) = server_fixture("held-back", false).await;
+        server.save(&paths).await.unwrap();
+        let file = paths.server(&server.id).join("server.json");
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        for record in json["content"].as_array_mut().unwrap() {
+            if record["fileName"] == "excluded-mr.jar" {
+                record["sharing"] = serde_json::json!({ "excluded": true });
+            }
         }
+        std::fs::write(&file, serde_json::to_vec(&json).unwrap()).unwrap();
+
+        let server = crate::server::load(&paths, &server.id).await.unwrap();
+        let dest = paths.root.join("server.geodepack");
+        export_server(&paths, &server, dest.clone(), &Progress::silent("t"))
+            .await
+            .unwrap();
+
+        let index: crate::instance::modpack::MrIndex =
+            serde_json::from_slice(&read_entry(&dest, "modrinth.index.json")).unwrap();
+        assert!(
+            index.files.iter().any(|f| f.path == "mods/excluded-mr.jar"),
+            "the mod once held back was left out: {:?}",
+            index.files.iter().map(|f| &f.path).collect::<Vec<_>>()
+        );
+        let info = server_pack_info(&paths, &server).await.unwrap();
+        assert_eq!(info.mods, 8);
+        assert_eq!(info.mods, mods_in(&dest));
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     /// `config/` is the one thing beyond mods a server may send, and only when
@@ -2001,7 +2021,23 @@ mod tests {
                 "modrinth.index.json",
                 "overrides/config/secret.toml",
                 "overrides/mods/homemade.jar",
+                "overrides/mods/private-tools.jar.disabled",
+                "overrides/mods/server-side.jar",
             ],
+        );
+
+        // A server whose sharing is stopped keeps the choice for when it is
+        // shared again, and sends no config meanwhile.
+        crate::server::share::stop(&paths, &server.id)
+            .await
+            .unwrap();
+        export_server(&paths, &server, dest.clone(), &Progress::silent("t"))
+            .await
+            .unwrap();
+        assert!(
+            entries(&dest).iter().all(|name| !name.contains("config/")),
+            "a stopped share sent config: {:?}",
+            entries(&dest)
         );
     }
 
@@ -2019,30 +2055,30 @@ mod tests {
         let dest = paths.root.join("server.geodepack");
         export_server(&paths, &server, dest.clone(), &Progress::silent("t")).await.unwrap();
 
-        // The indexed jar is already on the player's disk with the right hash,
-        // so the download step completes offline. Everything else that would
-        // reach the network is sent to a port nothing listens on.
+        // The indexed jars are already on the player's disk with the right
+        // hash, so the download step completes offline. Everything else that
+        // would reach the network is sent to a port nothing listens on.
         let mut arrived = fresh("srvpack-round-arrived");
         let game = paths.game_dir(&arrived.id);
         let _ = tokio::fs::remove_dir_all(&game).await;
-        tokio::fs::create_dir_all(game.join("mods")).await.unwrap();
-        tokio::fs::write(game.join("mods/sodium-mr.jar"), b"from modrinth").await.unwrap();
-        let offline = reqwest::Client::builder()
-            .proxy(reqwest::Proxy::all("http://127.0.0.1:9").unwrap())
-            .build()
-            .unwrap();
+        seed_indexed_mods(&paths, &server, &game).await;
 
-        let missing = import(&offline, &paths, &mut arrived, &dest, None, &Progress::silent("t"))
+        let missing = import(&offline(), &paths, &mut arrived, &dest, None, &Progress::silent("t"))
             .await
             .unwrap();
 
-        assert_eq!(missing.len(), 1, "{missing:?}");
-        assert!(missing[0].contains("create-cf.jar"), "{missing:?}");
+        assert_eq!(missing.len(), 2, "{missing:?}");
+        for referenced in ["anticheat.jar", "create-cf.jar"] {
+            assert!(
+                missing.iter().any(|m| m.contains(referenced)),
+                "{missing:?}"
+            );
+        }
         assert_eq!(arrived.name, "Survival Club");
         assert_eq!(arrived.overrides.memory_mb, Some(2048), "the player's own memory setting stays");
         assert!(arrived.pack.is_none(), "labelled as a modpack: {:?}", arrived.pack);
 
-        for file in ["homemade.jar", "sodium-mr.jar"] {
+        for file in ["homemade.jar", "sodium-mr.jar", "private-tools.jar"] {
             let owned = arrived
                 .content
                 .iter()
@@ -2064,7 +2100,94 @@ mod tests {
                 }
             }
         }
-        assert_eq!(sorted(on_disk), vec!["mods/homemade.jar", "mods/sodium-mr.jar"]);
+        assert_eq!(
+            sorted(on_disk),
+            vec![
+                "mods/excluded-mr.jar",
+                "mods/homemade.jar",
+                "mods/private-tools.jar.disabled",
+                "mods/server-side.jar",
+                "mods/sodium-mr.jar",
+                "mods/srv-mr.jar",
+            ]
+        );
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    /// A client that tries to reach the network reaches a port nothing
+    /// listens on, so a test that downloads anything fails instead.
+    fn offline() -> reqwest::Client {
+        reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:9").unwrap())
+            .build()
+            .unwrap()
+    }
+
+    /// Put the fixture's Modrinth-indexed jars into a player's `mods/` with
+    /// the bytes the server has, so an import finds them there and downloads
+    /// nothing.
+    async fn seed_indexed_mods(paths: &Paths, server: &Server, game: &Path) {
+        let run = paths.server_run(&server.id);
+        tokio::fs::create_dir_all(game.join("mods")).await.unwrap();
+        for jar in ["excluded-mr.jar", "sodium-mr.jar", "srv-mr.jar"] {
+            tokio::fs::copy(run.join("mods").join(jar), game.join("mods").join(jar))
+                .await
+                .unwrap();
+        }
+    }
+
+    /// A jar that declares it runs only on a server used to stay behind. It
+    /// reaches the player now, whether it travels as bytes or through the
+    /// index, and it is the server's like everything else the pack brings.
+    #[tokio::test]
+    async fn a_server_side_jar_reaches_the_player() {
+        let (paths, server) = server_fixture("server-side", false).await;
+        let dest = paths.root.join("server.geodepack");
+        export_server(&paths, &server, dest.clone(), &Progress::silent("t"))
+            .await
+            .unwrap();
+
+        let mut arrived = fresh("srvpack-server-side-arrived");
+        let game = paths.game_dir(&arrived.id);
+        let _ = tokio::fs::remove_dir_all(&game).await;
+        seed_indexed_mods(&paths, &server, &game).await;
+        let recorder = std::sync::Arc::new(crate::events::Recorder::default());
+        import(
+            &offline(),
+            &paths,
+            &mut arrived,
+            &dest,
+            None,
+            &Progress::new(recorder.clone(), "t"),
+        )
+        .await
+        .unwrap();
+
+        // The jar is on disk already, so what shows the index entry was taken
+        // is that the import set out to fetch it along with the other two.
+        let fetched = recorder
+            .events()
+            .into_iter()
+            .find(|(_, e)| e["stage"] == "Downloading pack contents")
+            .map(|(_, e)| e["total"].as_u64());
+        assert_eq!(fetched, Some(Some(3)), "an indexed mod was skipped on import");
+
+        let run = paths.server_run(&server.id);
+        for jar in ["server-side.jar", "srv-mr.jar"] {
+            assert_eq!(
+                std::fs::read(game.join("mods").join(jar)).ok(),
+                Some(std::fs::read(run.join("mods").join(jar)).unwrap()),
+                "{jar} did not arrive as the server has it"
+            );
+            let record = arrived
+                .content
+                .iter()
+                .find(|r| r.file_name == jar)
+                .unwrap_or_else(|| panic!("{jar} has no record: {:?}", arrived.content));
+            assert_eq!(record.origin, Origin::Server, "{jar}");
+        }
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     /// The preview and the pack must agree, or a player is promised a number of
@@ -2081,7 +2204,7 @@ mod tests {
                 mc_version: "1.21.1".into(),
                 loader: "fabric".into(),
                 loader_version: "0.16.9".into(),
-                mods: 3,
+                mods: 8,
                 server_kind: "fabric".into(),
             }
         );
@@ -2118,9 +2241,9 @@ mod tests {
     ///
     /// The allowlist names folders; before this, a link inside one carried
     /// whatever it pointed at under the allowed name — the run directory's
-    /// `server.properties`, an SSH key — and a `.bak` of a kept-back jar or a
-    /// jar parked in a subfolder went too, none of it visible in the admin's
-    /// Content tab to exclude, and none of it in the count players were shown.
+    /// `server.properties`, an SSH key — and a `.bak` of a jar or a jar parked
+    /// in a subfolder went too, none of it visible in the admin's Content tab,
+    /// and none of it in the count players were shown.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_server_pack_takes_no_strays_and_follows_no_links() {
@@ -2147,8 +2270,8 @@ mod tests {
         symlink(elsewhere.join("linked-cf.jar"), mods.join("linked-cf.jar")).unwrap();
         symlink(elsewhere.join("linked.jar"), mods.join("linked.jar")).unwrap();
         symlink(run.join("server.properties"), mods.join("properties.jar")).unwrap();
-        // A copy of the jar the admin kept back, and a jar that runs on both
-        // sides parked where no loader looks.
+        // A copy of a jar, and a jar that runs on both sides parked where no
+        // loader looks.
         tokio::fs::write(mods.join("anticheat.jar.bak"), b"private").await.unwrap();
         tokio::fs::create_dir_all(mods.join("old")).await.unwrap();
         tokio::fs::write(mods.join("old/parked.jar"), fabric_jar("parked", "*")).await.unwrap();
@@ -2171,18 +2294,36 @@ mod tests {
                 "overrides/config/nested/deep.toml",
                 "overrides/config/secret.toml",
                 "overrides/mods/homemade.jar",
+                "overrides/mods/private-tools.jar.disabled",
+                "overrides/mods/server-side.jar",
             ],
         );
         let index: crate::instance::modpack::MrIndex =
             serde_json::from_slice(&read_entry(&dest, "modrinth.index.json")).unwrap();
-        let indexed: Vec<&str> = index.files.iter().map(|f| f.path.as_str()).collect();
-        assert_eq!(indexed, vec!["mods/sodium-mr.jar"], "a linked jar was indexed");
+        let indexed = sorted(index.files.iter().map(|f| f.path.clone()).collect());
+        assert_eq!(
+            indexed,
+            vec![
+                "mods/excluded-mr.jar",
+                "mods/sodium-mr.jar",
+                "mods/srv-mr.jar"
+            ],
+            "a linked jar was indexed"
+        );
         let manifest = read_manifest(&dest).unwrap().unwrap();
-        let named: Vec<&str> = manifest.files.iter().map(|n| n.path.as_str()).collect();
-        assert_eq!(named, vec!["mods/create-cf.jar"], "a linked jar was named");
+        let named = sorted(manifest.files.iter().map(|n| n.path.clone()).collect());
+        assert_eq!(
+            named,
+            vec![
+                "mods/anticheat.jar",
+                "mods/create-cf.jar",
+                "mods/srv-mr.jar"
+            ],
+            "a linked jar was named"
+        );
 
         let info = server_pack_info(&paths, &server).await.unwrap();
-        assert_eq!(info.mods, 3);
+        assert_eq!(info.mods, 8);
         assert_eq!(info.mods, mods_in(&dest));
 
         let _ = tokio::fs::remove_dir_all(&paths.root).await;

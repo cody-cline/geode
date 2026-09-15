@@ -812,7 +812,10 @@ async fn respond(
         let revocations = admitted.gate.revocations();
         let Some((id, share, server)) = shared_server(paths, bearer(&request)).await else {
             tokio::time::sleep(REFUSAL_DELAY).await;
-            return message(StatusCode::UNAUTHORIZED, "that code is not accepted here");
+            return message(
+                StatusCode::UNAUTHORIZED,
+                "that password is not accepted here",
+            );
         };
         if admitted.prove(&id, &share, revocations) {
             break server;
@@ -1095,6 +1098,7 @@ pub(super) mod tests {
             &ServerShare {
                 code: code.clone(),
                 include_config: false,
+                shared: true,
             },
         )
         .await
@@ -1373,6 +1377,7 @@ pub(super) mod tests {
         ServerShare {
             code: code.clone(),
             include_config: false,
+            shared: true,
         }
     }
 
@@ -2126,6 +2131,7 @@ pub(super) mod tests {
         let replaced = ServerShare {
             code: Code::generate(),
             include_config: false,
+            shared: true,
         };
         crate::server::share::save(&scratch.paths, &server.id, &replaced)
             .await
@@ -2158,7 +2164,7 @@ pub(super) mod tests {
         let port = host.local_addr.port();
 
         let (mut tls, received, length) = ask_for_pack(port, &code).await;
-        crate::server::share::clear(&scratch.paths, &server.id)
+        crate::server::share::stop(&scratch.paths, &server.id)
             .await
             .unwrap();
         host.cut_revoked(&scratch.paths).await;

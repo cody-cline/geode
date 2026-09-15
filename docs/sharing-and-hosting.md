@@ -34,9 +34,8 @@ is more actionable than a silently incomplete instance would be.
 |---|---|---|
 | `.geodepack` format | `src-tauri/src/share/manifest.rs` | Done, tested |
 | Export/import of the Geode half | `src-tauri/src/share/pack.rs` | Done, tested |
-| Share codes — the secret in a join link | `src-tauri/src/share/code.rs` | Done, tested |
+| Server passwords (the share code) — the secret in a join link | `src-tauri/src/share/code.rs`, `src-tauri/src/server/share.rs` | Done, tested |
 | Referencing rather than copying | `src-tauri/src/share/pack.rs` (`source_for`) | Done, tested |
-| "Don't share" per mod | `src-tauri/src/instance/content.rs` (`set_excluded`), server Content tab | Done, tested |
 | Sidedness from the jar | `src-tauri/src/instance/jar.rs` (`Side`) | Done, verified against real jars |
 | Geode pack round trip | `src-tauri/src/share/pack.rs` (`export`, `apply_pack`) | Done, tested end to end |
 | Server vs user mods | `src-tauri/src/instance/content.rs` (`Origin`) | Done, tested — server mods can be disabled, not removed |
@@ -96,9 +95,6 @@ Deliberately **not** done, and each for a reason:
   third-party distribution is a live fact the recipient's own resolution
   already establishes, and a flag written at export is stale the moment the
   author changes their mind.
-- `Sharing::excluded` is honoured only by a server's pack, where the server's
-  Content tab sets it (item 3). Nothing sets it on an instance, so an
-  instance's pack has nothing to honour.
 - Unprovenanced jars are **not** dropped. The design note used to call for
   dropping them behind a per-file confirmation; with no confirmation UI that
   becomes "drop silently", which loses the author's own mod and tells the
@@ -206,20 +202,50 @@ connects straight to the admin's machine. Nothing sits in the middle.
   config is sent, or unsharing cuts every connection that came in before it
   at once, and stopping sharing cuts them all. A pack bigger than 8 GiB by
   itself is not sent, and the reason is logged on the admin's machine.
-- Share state — the code, and whether config is sent — lives in
-  `servers/<id>/share.json`, written by rename and by nothing but sharing.
-  `server.json` is rewritten whole by jobs that load it, work for minutes, and
-  save the copy they loaded; a code rotated because it leaked must not come
-  back when a backup finishes.
+- The share code is the server's **password**, and players are only ever told
+  "password"; the link's `code=`, the bearer token and the JSON field names are
+  unchanged, so links already sent keep working. Geode generates it the first
+  time a server is shared, and it stays the same through Stop sharing, sharing
+  again and restarts: stopping renames `share.json` to `share.stopped.json`,
+  keeping the password and whether `config/` is sent, so sharing again brings
+  the links already sent back to life, and sends `config/` again if it was sent
+  before — the stopped Share tab says so. Stopping renames the file rather than
+  marking it stopped because a Geode from before this reads every `share.json`
+  as shared, and one opened after a stop would share the server again at
+  startup, router and `config/` included, without telling anyone. Only New
+  password replaces the password, and that works while sharing is stopped too,
+  so a leaked password can be replaced before the server is shared again. A
+  `share.json` from before this reads as shared.
+- Share state — the password, whether config is sent, and whether the server
+  is shared right now — lives in `servers/<id>/share.json`, or
+  `share.stopped.json` while sharing is stopped, written by rename
+  and by nothing but sharing. `server.json` is rewritten whole by jobs that
+  load it, work for minutes, and save the copy they loaded; a password replaced
+  because it leaked must not come back when a backup finishes. Those jobs save
+  through `Server::save_if_present`, which replaced `save_keeping_sharing` when
+  per-mod sharing choices went away: it refuses to write back a server deleted
+  while the job ran, and keeps the records another job saved meanwhile for
+  files this copy neither has nor started with — two installs clicked one after
+  the other would otherwise lose the first one's record, leaving its jar
+  untracked and, for a CurseForge mod, sent to players as a copy. Any other
+  field saved meanwhile is overwritten.
 - What a server sends is an **allowlist**: the mod jars directly in `mods/`,
   and `config/` only when the admin asks. No subfolder of `mods/`, no backup or
   other stray file, and no symbolic link anywhere — a link in `mods/` pointing
   at the admin's home would otherwise have been followed. Never
   `server.properties`, ops, whitelist, bans, worlds, logs, libraries or plugins.
-  Mods marked "don't share" and jars that declare themselves server-side stay
-  behind, and a mod marked "don't share" stays marked through an update — also
-  when the update finishes while another job on that server is still running,
-  whose save keeps the records saved while it waited.
+  Every regular jar directly in `mods/` travels to players, turned off or not:
+  one with a Modrinth or CurseForge record as a reference, and every other one
+  as a copy — jars added by hand with no record, jars whose CurseForge author
+  forbids third-party downloads (which can only be on a server by hand), and
+  jars that declare themselves server-side. An index entry for a server-side
+  jar says optional on a client, since it does nothing there, and required on
+  a server, so other launchers still install nothing unexpected on one — the
+  same in a personal pack. There is no per-mod "don't share":
+  the only ways to keep a jar from players are not sharing the server, or
+  taking the jar out of `mods/`. Records the old choice left for jars added by
+  hand are dropped when the server loads, so those jars read as untracked
+  again, and a mod once held back goes to players from the next pack on.
 - The player's side imports through the same sequence as any `.geodepack`, and
   everything it brings is the server's (item 6). It installs only a server's
   pack, and only the one the player approved: a pack describing a different
@@ -250,16 +276,16 @@ every player out, symbolic links under `mods/` being followed, and a code
 rotation that a finishing backup could undo. A second review checked the
 fixes: most held, eight held only in part, and it found new problems — a crowd
 of addresses, or one IPv6 subscriber, still filling the listener; every player
-behind a tunnel counted as one address; a joined pack able to download from
-anywhere; and an update of a held-back mod shared after all when another job
-saved late. Those were fixed in turn. The code fixes carry tests, and each
+behind a tunnel counted as one address; and a joined pack able to download
+from anywhere. Those were fixed in turn. The code fixes carry tests, and each
 test was checked by breaking the code it guards and watching it fail. The
 fixes to wording — this document and the hints in Settings — have no tests.
 
 **Verified.** Beyond each module's own tests: an admin shares a real server on
 disk and a player previews, downloads over pinned TLS and imports it; a wrong
-code, a wrong certificate, a replaced code and an unshared server are each
-refused on the next request; a typed address is pinned to the machine that
+password, a wrong certificate, a replaced password and a server whose sharing
+is stopped are each refused on the next request, and sharing again brings the
+same link back; a typed address is pinned to the machine that
 first answered; the listener runs exactly while something is shared, follows a
 port change and gives the port back. In the real app, with its data and desktop
 configuration redirected to a scratch directory, a `geode://` link opened
@@ -371,10 +397,6 @@ file name the Linux save dialog may not have given an extension.
 **Not covered by an offline test:** keeping records after a partial download
 failure, and the disabled state being honoured at download time. Both need a
 live CurseForge response to exercise; the note side of the second is tested.
-
-Still open: `server_only` is dropped by `notes_for` for any record whose jar
-declares no side, and nothing yet offers a player the choice to keep or drop a
-server's server-only mods.
 
 ## What needs you
 

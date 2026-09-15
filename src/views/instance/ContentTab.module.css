@@ -119,14 +119,6 @@
   opacity: 0.5;
 }
 
-/* A server mod held back from players' packs. Only the lock takes the colour:
-   the mod is still installed and running, so the row is not dimmed the way a
-   disabled one is. */
-.keptBack,
-.keptBack:hover:not(:disabled) {
-  color: var(--accent);
-}
-
 .toggle input {
   accent-color: var(--accent);
   cursor: pointer;

@@ -64,11 +64,16 @@ pub struct MrEnv {
 /// A jar that did not say is treated as both-sides, which is what every
 /// launcher assumes anyway — the alternative is marking it unsupported
 /// somewhere and having it silently not install.
+///
+/// A server-only jar is optional on a client rather than unsupported. It does
+/// nothing there — the loader skips a mod for the other side — and players
+/// choose whether to keep these, so a launcher is told it may install one, not
+/// that it must not. Nothing unexpected is installed on a server either way.
 fn env_for(side: Option<crate::instance::jar::Side>) -> MrEnv {
     use crate::instance::jar::Side;
     let (client, server) = match side {
         Some(Side::Client) => ("required", "unsupported"),
-        Some(Side::Server) => ("unsupported", "required"),
+        Some(Side::Server) => ("optional", "required"),
         Some(Side::Both) | None => ("required", "required"),
     };
     MrEnv {
@@ -535,7 +540,6 @@ pub async fn import_into(
                     slug: None,
                     icon_url: None,
                     dependency: !entry.required,
-                    sharing: Default::default(),
                     origin: Default::default(),
                     // Pack manifests carry no dependency graph; the jars do.
                     requires: None,
@@ -723,7 +727,6 @@ async fn record_mrpack_provenance(
             slug: project.map(|p| p.slug.clone()),
             icon_url: project.and_then(|p| p.icon_url.clone()),
             dependency: false,
-            sharing: Default::default(),
             origin: Default::default(),
             requires: None,
         });
@@ -1086,8 +1089,10 @@ mod tests {
         assert_eq!(client.client, "required");
         assert_eq!(client.server, "unsupported");
 
+        // Optional rather than unsupported: it does nothing on a client, and
+        // whether a player keeps it is theirs to choose.
         let server = env_for(Some(Side::Server));
-        assert_eq!(server.client, "unsupported");
+        assert_eq!(server.client, "optional");
         assert_eq!(server.server, "required");
 
         // Both-sides and "the jar did not say" are treated the same, because

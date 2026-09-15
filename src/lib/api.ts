@@ -463,8 +463,6 @@ export const api = {
     invoke<ServerShareView>("set_server_share_config", { id, includeConfig }),
   rotateServerShareCode: (id: string) =>
     invoke<ServerShareView>("rotate_server_share_code", { id }),
-  setServerContentExcluded: (id: string, kind: string, file: string, excluded: boolean) =>
-    invoke<void>("set_server_content_excluded", { id, kind, file, excluded }),
 
   // Joining a shared server. A geode:// link opened while Geode runs arrives
   // as the `geode://join-link` event (payload: the link string); one that

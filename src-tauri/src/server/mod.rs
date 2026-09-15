@@ -301,9 +301,9 @@ pub struct Server {
     pub notes: String,
     // Whether and how this server is shared is deliberately not here: see
     // `share.rs` for why it lives in a file of its own.
-    /// `content` as it was when this copy was read, so a late save can tell
-    /// what its own job changed from what changed on disk meanwhile. Never
-    /// written.
+    /// `content` as it was when this copy was read or last saved, so a late
+    /// save can tell a record its own job dropped from one another job saved
+    /// while it waited. Never written.
     #[serde(skip)]
     content_as_loaded: Vec<crate::instance::content::ContentRecord>,
 }
@@ -399,108 +399,53 @@ impl Server {
     ///
     /// For a load, a change and a save with nothing slow between them. A copy
     /// that has waited on the network, a download or a backup is out of date by
-    /// the time it is written, and belongs to [`Server::save_keeping_sharing`].
+    /// the time it is written, and belongs to [`Server::save_if_present`].
     pub async fn save(&self, paths: &Paths) -> Result<()> {
         let dir = paths.server(&self.id);
         tokio::fs::create_dir_all(&dir).await?;
         write_atomic(&dir.join("server.json"), &serde_json::to_vec_pretty(self)?).await
     }
 
-    /// Save a copy loaded before a long wait, without undoing the sharing
-    /// choices made on disk during it.
-    ///
-    /// A save writes the whole server, so a job that loads one, spends minutes
-    /// downloading and then saves what it loaded puts sharing back the way it
-    /// was when the job started: a mod the admin marked "not shared" while it
-    /// ran goes to players after all. So the server is read again just before
-    /// writing, and on sharing, disk wins over the copy. Each record takes what
-    /// disk now says about the same file or the same mod, a file held back on
-    /// disk that the copy has nothing for stays held back, and a hold-back
-    /// taken off on disk is not put back.
+    /// Save a copy loaded before a long wait, unless the server is gone, and
+    /// without losing what other jobs recorded while it waited.
     ///
     /// Every command that loads a server and awaits slow work before saving it
-    /// must save through this: installing or updating content, identifying
+    /// saves through this: installing or updating content, identifying
     /// untracked files, adding Cardboard, and starting a server, which may
-    /// download Java first. The schedule ticker goes further and writes only
-    /// `last_run`. A command that changes sharing itself uses
-    /// [`Server::save`], because its choice is the newer one.
+    /// download Java first. A server deleted while the job ran stays deleted,
+    /// rather than being written back from nothing.
     ///
-    /// Records another job saved meanwhile are kept too, when this copy never
-    /// had one for that file: without them, an update of a held-back mod that
-    /// finished during the wait would leave its new jar with no record holding
-    /// it back, and it would go to players.
+    /// Installs clicked one after another run side by side, each from its own
+    /// copy, and the last to save would drop every mod the others recorded:
+    /// their jars would read as untracked, with no update checks, and one from
+    /// CurseForge would go to players as a copy rather than a reference. So the
+    /// server is read again just before writing, and a record on disk for a
+    /// file this copy neither has nor started with is kept. One for a file it
+    /// did start with is a record its own job dropped, and stays dropped.
     ///
-    /// Only content is protected, and only across the wait: a change landing
-    /// between this read and its write is still lost, as is any other field
-    /// changed during the job. A server that cannot be read now is not written
-    /// over, since what it says about sharing cannot be kept unseen, and one
-    /// deleted while the job ran should stay deleted.
-    pub async fn save_keeping_sharing(&mut self, paths: &Paths) -> Result<()> {
+    /// Only records are kept, and only across the wait: a change landing
+    /// between this read and its write is still lost, and any other field saved
+    /// meanwhile is overwritten by this copy. The password is safe from that
+    /// because it lives in a file of its own.
+    pub async fn save_if_present(&mut self, paths: &Paths) -> Result<()> {
+        use crate::instance::content::ContentRecord;
+
         let fresh = load(paths, &self.id).await?;
-        carry_sharing(&mut self.content, &self.content_as_loaded, &fresh.content);
+        let same_file =
+            |r: &ContentRecord, d: &ContentRecord| r.kind == d.kind && r.file_name == d.file_name;
+        for current in fresh.content {
+            if !self
+                .content
+                .iter()
+                .chain(&self.content_as_loaded)
+                .any(|r| same_file(r, &current))
+            {
+                self.content.push(current);
+            }
+        }
         self.save(paths).await?;
         self.content_as_loaded = self.content.clone();
         Ok(())
-    }
-}
-
-/// Bring a job's records in line with what disk now says about sharing.
-///
-/// A record's counterparts on disk are those for the same file or the same
-/// project: a job that updated a mod holds a record for the new file while disk
-/// still names the old one, and a choice about the old file was a choice about
-/// that mod. Where several stand for one record, any of them held back holds
-/// it back, just as installing over them would.
-///
-/// `loaded` is what the job started from, which is how a record on disk that
-/// the job has nothing for is told apart: for a file the job started with, the
-/// job dropped it, and it stays dropped; for any other file, another job added
-/// it while this one waited, and it is kept.
-fn carry_sharing(
-    records: &mut Vec<crate::instance::content::ContentRecord>,
-    loaded: &[crate::instance::content::ContentRecord],
-    on_disk: &[crate::instance::content::ContentRecord],
-) {
-    use crate::instance::content::{ContentRecord, Sharing};
-
-    fn stands_for(a: &ContentRecord, b: &ContentRecord) -> bool {
-        a.kind == b.kind
-            && (a.file_name == b.file_name
-                || (!a.provider.is_empty()
-                    && a.provider == b.provider
-                    && a.project_id == b.project_id))
-    }
-    // The record `set_excluded` makes for a file nothing else tracks.
-    fn holds_only_sharing(r: &ContentRecord) -> bool {
-        r.provider.is_empty() && r.origin.is_default() && !r.dependency && r.requires.is_none()
-    }
-
-    for record in records.iter_mut() {
-        let mut counterparts = on_disk.iter().filter(|d| stands_for(d, record)).peekable();
-        if counterparts.peek().is_some() {
-            record.sharing = counterparts.fold(Sharing::default(), |kept, d| Sharing {
-                server_only: kept.server_only || d.sharing.server_only,
-                excluded: kept.excluded || d.sharing.excluded,
-            });
-        }
-    }
-
-    // One that only held a choice disk no longer holds: taken back while the
-    // job ran, and if kept it would hold the file back again.
-    records.retain(|r| {
-        !holds_only_sharing(r)
-            || (!r.sharing.is_default() && on_disk.iter().any(|d| stands_for(d, r)))
-    });
-
-    // A record on disk for a file the job neither has nor started with: a jar
-    // held back, or a mod installed or updated, while the job ran. Matched by
-    // file, not project — an update elsewhere leaves this copy naming the old
-    // file of a mod whose new one must still be recorded.
-    let same_file = |r: &ContentRecord, d: &ContentRecord| r.kind == d.kind && r.file_name == d.file_name;
-    for current in on_disk {
-        if !records.iter().chain(loaded).any(|r| same_file(r, current)) {
-            records.push(current.clone());
-        }
     }
 }
 
@@ -554,8 +499,22 @@ pub async fn load(paths: &Paths, id: &str) -> Result<Server> {
         .await
         .map_err(|_| Error::msg(format!("server '{id}' was not found")))?;
     let mut server: Server = serde_json::from_slice(&bytes).map_err(|e| Error::json("server.json", e))?;
+    server.content.retain(|r| !left_by_dont_share(r));
     server.content_as_loaded = server.content.clone();
     Ok(server)
+}
+
+/// A record that says nothing but that a mod was once kept from players.
+///
+/// Only the removed "don't share" choice ever wrote this shape: no provider,
+/// the admin's own, not a dependency and no requirements looked up. Its choice
+/// no longer means anything, and left in place it would stop a jar added by
+/// hand from reading as untracked, so it could not be identified.
+fn left_by_dont_share(r: &crate::instance::content::ContentRecord) -> bool {
+    r.provider.is_empty()
+        && r.origin == crate::instance::content::Origin::User
+        && !r.dependency
+        && r.requires.is_none()
 }
 
 pub async fn list(paths: &Paths) -> Result<Vec<Server>> {
@@ -791,7 +750,6 @@ mod tests {
             slug: Some(slug.into()),
             icon_url: None,
             dependency: false,
-            sharing: Default::default(),
             origin: Default::default(),
             requires: None,
         }
@@ -954,116 +912,41 @@ mod tests {
         }
     }
 
-    /// A long job — an install, say — loaded the server, and while it
-    /// downloaded, the admin held two mods back from players and let two
-    /// others go. The job's save used to put all four back the way they were.
+    /// "Don't share" left a record behind for a jar added by hand, saying
+    /// nothing else. Kept, it would stop that jar reading as untracked; every
+    /// record that says something more stays.
     #[tokio::test]
-    async fn a_late_save_keeps_the_sharing_choices_made_while_it_waited() {
-        use crate::instance::content::{set_excluded, ContentKind};
+    async fn a_record_left_by_dont_share_is_dropped_on_load() {
+        use crate::instance::content::Origin;
 
-        let paths = scratch("keep-sharing");
-        let mut server = Server::new("Late".into(), ServerKind::Fabric, "1.21.1".into());
+        let paths = scratch("left-by-dont-share");
+        let mut server = Server::new("Old".into(), ServerKind::Fabric, "1.21.1".into());
+        let bare = |file: &str| crate::instance::content::ContentRecord {
+            project_id: String::new(),
+            version_id: String::new(),
+            ..record(file, "", "")
+        };
         server.content = vec![
-            record("tool-1.0.jar", "modrinth", "TOOL"),
+            bare("hand.jar"),
+            crate::instance::content::ContentRecord {
+                origin: Origin::Server,
+                ..bare("from-server.jar")
+            },
+            crate::instance::content::ContentRecord {
+                dependency: true,
+                ..bare("library.jar")
+            },
             record("sodium.jar", "modrinth", "SODIUM"),
         ];
-        set_excluded(&mut server.content, ContentKind::Mod, "was-private.jar", true);
-        set_excluded(&mut server.content, ContentKind::Mod, "sodium.jar", true);
         server.save(&paths).await.unwrap();
 
-        // The job's copy, taken before anyone touched anything.
-        let mut job = load(&paths, &server.id).await.unwrap();
-
-        // Meanwhile, on disk.
-        let mut admin = load(&paths, &server.id).await.unwrap();
-        set_excluded(&mut admin.content, ContentKind::Mod, "tool-1.0.jar", true);
-        set_excluded(&mut admin.content, ContentKind::Mod, "hand-dropped.jar", true);
-        set_excluded(&mut admin.content, ContentKind::Mod, "was-private.jar", false);
-        set_excluded(&mut admin.content, ContentKind::Mod, "sodium.jar", false);
-        admin.save(&paths).await.unwrap();
-
-        // The job updates the tool to a new file and a new record, stamps
-        // what it did, and saves.
-        job.content.retain(|r| r.file_name != "tool-1.0.jar");
-        job.content.push(record("tool-2.0.jar", "modrinth", "TOOL"));
-        job.last_started = Some(42);
-        job.save_keeping_sharing(&paths).await.unwrap();
-
-        let after = load(&paths, &server.id).await.unwrap();
-        let find = |file: &str| after.content.iter().find(|r| r.file_name == file);
-
-        assert!(
-            find("tool-2.0.jar").expect("the job's own record was lost").sharing.excluded,
-            "the update was saved as shared, though the admin held the mod back while it ran"
-        );
-        assert!(
-            find("hand-dropped.jar").is_some_and(|r| r.sharing.excluded),
-            "a jar held back while the job ran is shared again: {:?}",
-            after.content
-        );
-        assert!(
-            find("was-private.jar").is_none(),
-            "a hold-back the admin took off came back: {:?}",
-            after.content
-        );
-        assert!(find("tool-1.0.jar").is_none(), "the replaced file's record came back");
-        assert!(
-            find("sodium.jar").is_some_and(|r| !r.sharing.excluded),
-            "a mod the admin let go while the job ran is held back again"
-        );
-        // What the job owns is still what it saved.
-        assert_eq!(after.last_started, Some(42));
-
-        std::fs::remove_dir_all(&paths.root).unwrap();
-    }
-
-    /// Two jobs on one server at once: a start waiting on a Java download, say,
-    /// and meanwhile an update of a held-back mod and an install of another.
-    /// The start saves last, from a copy naming only the mod's old file. The
-    /// update's record for the new file has to survive that — it is what holds
-    /// the new jar back from players — and so does the install's.
-    #[tokio::test]
-    async fn a_late_save_keeps_what_another_job_saved_while_it_waited() {
-        use crate::instance::content::{set_excluded, ContentKind};
-
-        let paths = scratch("keep-other-job");
-        let mut server = Server::new("Overlap".into(), ServerKind::Fabric, "1.21.1".into());
-        server.content = vec![record("private-1.0.jar", "modrinth", "PRIV")];
-        set_excluded(&mut server.content, ContentKind::Mod, "private-1.0.jar", true);
-        server.save(&paths).await.unwrap();
-
-        let mut waiting = load(&paths, &server.id).await.unwrap();
-
-        let mut other = load(&paths, &server.id).await.unwrap();
-        let mut updated = record("private-2.0.jar", "modrinth", "PRIV");
-        updated.version_id = "2.0".into();
-        updated.sharing.excluded = true;
-        other.content = vec![updated, record("fresh.jar", "modrinth", "FRESH")];
-        other.save_keeping_sharing(&paths).await.unwrap();
-
-        waiting.last_started = Some(7);
-        waiting.save_keeping_sharing(&paths).await.unwrap();
-
-        let after = load(&paths, &server.id).await.unwrap();
-        let find = |file: &str| after.content.iter().find(|r| r.file_name == file);
-        let new_file = find("private-2.0.jar").unwrap_or_else(|| {
-            panic!("the update's record was lost, so its jar is shared: {:?}", after.content)
-        });
-        assert!(new_file.sharing.excluded, "the updated mod is shared again");
-        assert_eq!(new_file.version_id, "2.0", "the record kept is not the update's");
-        assert!(find("fresh.jar").is_some(), "a mod installed meanwhile lost its record");
-        assert_eq!(after.last_started, Some(7));
-
-        // The same copy goes on to remove the mod installed meanwhile, and
-        // saves again. What it saved the first time is now what it started
-        // from, so that removal is its own, and stays.
-        waiting.content.retain(|r| r.file_name != "fresh.jar");
-        waiting.save_keeping_sharing(&paths).await.unwrap();
-        let again = load(&paths, &server.id).await.unwrap();
-        assert!(
-            !again.content.iter().any(|r| r.file_name == "fresh.jar"),
-            "a removal on a second save was undone"
-        );
+        let loaded = load(&paths, &server.id).await.unwrap();
+        let files: Vec<&str> = loaded
+            .content
+            .iter()
+            .map(|r| r.file_name.as_str())
+            .collect();
+        assert_eq!(files, vec!["from-server.jar", "library.jar", "sodium.jar"]);
 
         std::fs::remove_dir_all(&paths.root).unwrap();
     }
@@ -1072,17 +955,77 @@ mod tests {
     /// server back from nothing.
     #[tokio::test]
     async fn a_late_save_does_not_bring_back_a_deleted_server() {
-        let paths = scratch("keep-sharing-deleted");
+        let paths = scratch("late-save-deleted");
         let server = Server::new("Gone".into(), ServerKind::Fabric, "1.21.1".into());
         server.save(&paths).await.unwrap();
 
         let mut job = load(&paths, &server.id).await.unwrap();
         delete(&paths, &server.id).await.unwrap();
 
-        job.save_keeping_sharing(&paths).await.unwrap_err();
+        job.save_if_present(&paths).await.unwrap_err();
         assert!(!paths.server(&server.id).exists(), "the deleted server was written again");
 
         let _ = std::fs::remove_dir_all(&paths.root);
+    }
+
+    /// Two installs clicked one after the other, or a start waiting on a Java
+    /// download while an install finishes. Whichever saves last must not take
+    /// the other's record with it, or that mod reads as untracked — and one
+    /// from CurseForge goes to players as a copy.
+    #[tokio::test]
+    async fn a_late_save_keeps_what_another_job_saved_while_it_waited() {
+        let paths = scratch("keep-other-job");
+        let mut server = Server::new("Overlap".into(), ServerKind::Fabric, "1.21.1".into());
+        server.content = vec![
+            record("sodium.jar", "modrinth", "SODIUM"),
+            record("old.jar", "modrinth", "OLD"),
+        ];
+        server.save(&paths).await.unwrap();
+
+        let mut waiting = load(&paths, &server.id).await.unwrap();
+
+        let mut other = load(&paths, &server.id).await.unwrap();
+        other
+            .content
+            .push(record("create-cf.jar", "curseforge", "328085"));
+        other.save_if_present(&paths).await.unwrap();
+
+        // The waiting job removes a mod it started with, adds its own, and
+        // saves last.
+        waiting.content.retain(|r| r.file_name != "old.jar");
+        waiting
+            .content
+            .push(record("lithium.jar", "modrinth", "LITHIUM"));
+        waiting.last_started = Some(7);
+        waiting.save_if_present(&paths).await.unwrap();
+
+        let after = load(&paths, &server.id).await.unwrap();
+        let files = |server: &Server| {
+            let mut files: Vec<String> =
+                server.content.iter().map(|r| r.file_name.clone()).collect();
+            files.sort();
+            files
+        };
+        assert_eq!(
+            files(&after),
+            vec!["create-cf.jar", "lithium.jar", "sodium.jar"],
+            "a record was lost, or a removal undone"
+        );
+        assert_eq!(after.last_started, Some(7));
+
+        // The same copy goes on to remove the mod installed meanwhile, and
+        // saves again. What it saved the first time is now what it started
+        // from, so that removal is its own, and stays.
+        waiting.content.retain(|r| r.file_name != "create-cf.jar");
+        waiting.save_if_present(&paths).await.unwrap();
+        let again = load(&paths, &server.id).await.unwrap();
+        assert_eq!(
+            files(&again),
+            vec!["lithium.jar", "sodium.jar"],
+            "a removal on a second save was undone"
+        );
+
+        std::fs::remove_dir_all(&paths.root).unwrap();
     }
 
     #[test]

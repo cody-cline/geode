@@ -108,8 +108,6 @@ export interface ContentItem {
    * bring it back. Absent means it is yours.
    */
   origin?: "user" | "server";
-  /** Kept on the server when it shares its pack with players. */
-  excluded?: boolean;
   /** File names of installed mods this one needs. */
   requires: string[];
   /** File names of installed mods that need this one. */
@@ -592,11 +590,13 @@ export interface ShareStatus {
 }
 
 export interface ServerShareView {
-  /** `GEODE-XXXXX-XXXXX`, for reading out or typing. */
+  /** The server's password, `GEODE-XXXXX-XXXXX`, for reading out or typing. */
   code: string;
   /** The `geode://join` link, or null while no address is known to put in it. */
   link: string | null;
   includeConfig: boolean;
+  /** False while sharing is stopped; the password is kept. */
+  shared: boolean;
   /** Why this server cannot be shared, when it cannot (a proxy, an unsupported loader). */
   unsupported: string | null;
 }
@@ -626,7 +626,7 @@ export interface JoinPreview {
   /** `pinned`: matched the link. `domain`: checked by its certificate authority. `firstUse`: typed by hand, trusted now and pinned from here on. */
   verified: "pinned" | "domain" | "firstUse";
   link: JoinLink;
-  /** An instance already joined from this server with this code: offer to open it rather than make a second. */
+  /** An instance already joined from this server with this password: offer to open it rather than make a second. */
   existing: { id: string; name: string } | null;
 }
 

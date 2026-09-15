@@ -77,7 +77,7 @@ export function nextJoin(
  * Once an import has made an instance, nothing offers to import again — not
  * even after one that came back with problems — because a second import makes
  * a second instance rather than finishing the first. A server already joined
- * with this code offers the instance it made the first time, for the same
+ * with this password offers the instance it made the first time, for the same
  * reason.
  */
 export function joinStep(
@@ -375,7 +375,36 @@ export function linkPendingReason(status: ShareStatus | null, hasPublicAddress: 
 }
 
 /**
- * What an admin reading out their address and code has to tell a player.
+ * What the Share tab says about a server whose sharing is stopped.
+ *
+ * Sharing again brings back the share as it was, so the note promises what
+ * that is and nothing more. Links work again only if they carry the password
+ * the server has now, which is not so once it was replaced while stopped; and
+ * a config folder that was being sent is sent again, which an admin who has
+ * stopped sharing may not expect.
+ */
+export function stoppedLine(includeConfig: boolean): StatusLine {
+  const config = includeConfig ? " Sharing again also sends the config folder, as it did before." : "";
+  return {
+    tone: "info",
+    title: "Sharing is off",
+    detail: `This server keeps its password while it is not shared. Sharing again uses the same password, so links you sent with it work again.${config} If the password reached someone it should not have, replace it first.`,
+  };
+}
+
+/**
+ * What to tell an admin who has just replaced the password. A server whose
+ * sharing is stopped answers nobody, so its new link is no use to players
+ * until it is shared again.
+ */
+export function replacedPasswordBody(shared: boolean): string {
+  return shared
+    ? "Send players the new link or password."
+    : "Share the server again, then send players the new link or password.";
+}
+
+/**
+ * What an admin reading out their address and password has to tell a player.
  *
  * The address is the one links carry, port and all, but a player who types it
  * without the port is looked up on 25590 whatever this machine listens on —

@@ -216,7 +216,6 @@ pub fn run() {
             commands::unshare_server,
             commands::set_server_share_config,
             commands::rotate_server_share_code,
-            commands::set_server_content_excluded,
             commands::preview_join,
             commands::join_server,
             deeplink::take_pending_join,

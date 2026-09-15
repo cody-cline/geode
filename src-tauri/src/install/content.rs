@@ -7,7 +7,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::error::{Error, Result};
-use crate::instance::content::{ContentKind, ContentRecord, Sharing};
+use crate::instance::content::{ContentKind, ContentRecord};
 use crate::instance::Instance;
 use crate::net::{Download, Progress};
 use crate::paths::Paths;
@@ -107,22 +107,6 @@ pub async fn install_into(
     )
     .await?;
 
-    // How a server shares the records about to be replaced holds for their
-    // replacement. An update or a reinstall is the same mod, and a file
-    // written over one held back by name takes its place; starting from the
-    // default would quietly send players a mod the admin chose to keep back.
-    // Held back if any of them was, since a merge that could let one go is
-    // not one to make unasked.
-    let sharing = records
-        .iter()
-        .filter(|r| {
-            r.kind == kind && (previous.contains(&r.file_name) || r.file_name == file.filename)
-        })
-        .fold(Sharing::default(), |kept, r| Sharing {
-            server_only: kept.server_only || r.sharing.server_only,
-            excluded: kept.excluded || r.sharing.excluded,
-        });
-
     for old in previous {
         if old == file.filename {
             continue;
@@ -145,7 +129,6 @@ pub async fn install_into(
         slug,
         icon_url,
         dependency: as_dependency,
-        sharing,
         origin: Default::default(),
         requires: Some(required_ids(version)),
     });
@@ -519,7 +502,6 @@ mod tests {
             slug: None,
             icon_url: None,
             dependency: false,
-            sharing: Default::default(),
             origin: crate::instance::content::Origin::Server,
             requires: None,
         }
@@ -577,72 +559,6 @@ mod tests {
         )
         .await
         .expect_err("a same-named file must not overwrite the server's");
-    }
-
-    /// An admin held a mod back from players, then updated it from the Content
-    /// tab. The update wrote a fresh record that said nothing about sharing,
-    /// and the next player to join got the mod. Reinstalling over a hand-dropped
-    /// jar held back by name did the same.
-    #[tokio::test]
-    async fn an_update_keeps_a_mod_held_back() {
-        use crate::instance::content::{set_excluded, Origin};
-
-        let dir = std::env::temp_dir().join(format!("geode-update-held-back-{}", std::process::id()));
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        tokio::fs::create_dir_all(&dir).await.unwrap();
-        // Already in place, so nothing is downloaded.
-        for jar in ["private-1.0.jar", "private-2.0.jar", "hand.jar", "other.jar"] {
-            tokio::fs::write(dir.join(jar), b"jar").await.unwrap();
-        }
-
-        let mut records = vec![ContentRecord {
-            origin: Origin::User,
-            ..server_record("private-1.0.jar", "p")
-        }];
-        set_excluded(&mut records, ContentKind::Mod, "private-1.0.jar", true);
-        set_excluded(&mut records, ContentKind::Mod, "hand.jar", true);
-
-        let install = |id: &str, project: &str, file: &str| {
-            let mut v = version(id, "release", true);
-            v.project_id = project.into();
-            v.files[0].filename = file.into();
-            v
-        };
-        for v in [
-            install("2.0", "p", "private-2.0.jar"),
-            install("h", "HAND", "hand.jar"),
-            install("o", "OTHER", "other.jar"),
-        ] {
-            install_into(
-                &reqwest::Client::new(),
-                &dir,
-                &mut records,
-                &v,
-                ContentKind::Mod,
-                "Mod",
-                None,
-                None,
-                false,
-            )
-            .await
-            .unwrap();
-        }
-
-        let excluded = |file: &str| {
-            records
-                .iter()
-                .find(|r| r.file_name == file)
-                .unwrap_or_else(|| panic!("{file} has no record: {records:?}"))
-                .sharing
-                .excluded
-        };
-        assert!(excluded("private-2.0.jar"), "the update is shared: {records:?}");
-        assert!(!records.iter().any(|r| r.file_name == "private-1.0.jar"));
-        assert!(excluded("hand.jar"), "the install over a held-back jar is shared");
-        assert!(!excluded("other.jar"), "a new mod came in held back, though it replaced nothing");
-        assert_eq!(records.len(), 3, "{records:?}");
-
-        tokio::fs::remove_dir_all(&dir).await.unwrap();
     }
 
     /// Not offered either. "Update all" would otherwise stop at the first
@@ -868,7 +784,6 @@ pub async fn link_untracked_in(
             slug: project.map(|p| p.slug.clone()),
             icon_url: project.and_then(|p| p.icon_url.clone()),
             dependency: false,
-            sharing: Default::default(),
             origin: Default::default(),
             // A hash lookup gives provenance, not a dependency list.
             requires: None,

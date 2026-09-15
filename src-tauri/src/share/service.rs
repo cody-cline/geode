@@ -489,6 +489,7 @@ mod tests {
         let share = ServerShare {
             code: Code::generate(),
             include_config: false,
+            shared: true,
         };
         let run = paths.server_run(&server.id);
         let files: Vec<(&str, Vec<u8>)> = vec![
@@ -557,7 +558,11 @@ mod tests {
         assert_eq!(preview.info.mc_version, "1.21.1");
         assert_eq!(preview.info.loader, "fabric");
         assert_eq!(preview.info.loader_version, "0.16.9");
-        assert_eq!(preview.info.mods, 1, "only the mod a player can load: {:?}", preview.info);
+        assert_eq!(
+            preview.info.mods, 2,
+            "every mod in the server's mods folder: {:?}",
+            preview.info
+        );
         assert_eq!(preview.verified, join::Verified::Pinned);
 
         // What actually crosses the network.
@@ -568,8 +573,13 @@ mod tests {
 
         let sent = entries(&archive);
         let names: Vec<&str> = sent.iter().map(|(n, _)| n.as_str()).collect();
-        assert!(names.contains(&"overrides/mods/homemade.jar"), "{names:?}");
-        for never in ["server-only.jar", "server.properties", "ops.json", "tokens.toml"] {
+        for jar in [
+            "overrides/mods/homemade.jar",
+            "overrides/mods/server-only.jar",
+        ] {
+            assert!(names.contains(&jar), "{jar} was not sent: {names:?}");
+        }
+        for never in ["server.properties", "ops.json", "tokens.toml"] {
             assert!(!names.iter().any(|n| n.contains(never)), "{never} was sent: {names:?}");
         }
         // Belt and braces: the secret appears in no entry's contents either.
@@ -622,41 +632,64 @@ mod tests {
 
     /// Everything that should turn a player away does, and says why.
     #[tokio::test]
-    async fn the_wrong_code_the_wrong_machine_and_an_old_code_are_refused() {
+    async fn a_wrong_password_the_wrong_machine_and_a_replaced_password_are_refused() {
         let admin = paths("refuse");
-        let (server, mut share) = shared_server(&admin).await;
+        let (server, share) = shared_server(&admin).await;
         let host = Host::start(admin.clone(), 0).await.unwrap();
         let port = host.local_addr.port();
         let pin = pin_of(&admin).await;
         let original = share.code.clone();
 
         let err = join::preview(link(port, &Code::generate(), pin)).await.unwrap_err();
-        assert!(err.to_string().contains("did not accept this code"), "{err}");
+        assert!(
+            err.to_string().contains("did not accept this password"),
+            "{err}"
+        );
 
         let impostor = Pin([7u8; 32]);
         let err = join::preview(link(port, &original, impostor)).await.unwrap_err();
         assert!(err.to_string().contains("did not prove"), "{err}");
 
-        // A new code cuts off the old one on the very next request.
-        share.code = Code::generate();
-        server_share::save(&admin, &server.id, &share).await.unwrap();
+        // A new password cuts off the old one on the very next request.
+        let share = server_share::replace_password(&admin, &server.id)
+            .await
+            .unwrap();
         let err = join::preview(link(port, &original, pin)).await.unwrap_err();
-        assert!(err.to_string().contains("did not accept this code"), "{err}");
+        assert!(
+            err.to_string().contains("did not accept this password"),
+            "{err}"
+        );
         join::preview(link(port, &share.code, pin)).await.unwrap();
 
         // And a whole-server save made from a copy loaded before the rotation —
-        // a backup finishing, an install saving — cannot bring the old code
-        // back, because the code does not live in the file it writes.
+        // a backup finishing, an install saving — cannot bring the old
+        // password back, because the password does not live in the file it
+        // writes.
         let stale = server.clone();
         stale.save(&admin).await.unwrap();
         let err = join::preview(link(port, &original, pin)).await.unwrap_err();
-        assert!(err.to_string().contains("did not accept this code"), "{err}");
+        assert!(
+            err.to_string().contains("did not accept this password"),
+            "{err}"
+        );
 
-        // Unsharing cuts everyone off.
+        // Stopping sharing cuts everyone off, with the password kept.
         let current = share.code.clone();
-        server_share::clear(&admin, &server.id).await.unwrap();
+        server_share::stop(&admin, &server.id).await.unwrap();
         let err = join::preview(link(port, &current, pin)).await.unwrap_err();
-        assert!(err.to_string().contains("did not accept this code"), "{err}");
+        assert!(
+            err.to_string().contains("did not accept this password"),
+            "{err}"
+        );
+
+        // Sharing again brings the same link back, and not the replaced one.
+        server_share::start(&admin, &server.id).await.unwrap();
+        join::preview(link(port, &current, pin)).await.unwrap();
+        let err = join::preview(link(port, &original, pin)).await.unwrap_err();
+        assert!(
+            err.to_string().contains("did not accept this password"),
+            "{err}"
+        );
 
         // Nothing but the two paths is served, even with a good connection.
         let client = crate::share::trust::TrustedClient::new(crate::share::trust::Trust::Pinned(pin)).unwrap();
@@ -730,14 +763,18 @@ mod tests {
         let service = service();
 
         // Nothing shared: nothing listens.
-        server_share::clear(&admin, &server.id).await.unwrap();
+        server_share::stop(&admin, &server.id).await.unwrap();
         let first = free_port();
         let config = manual(first, Some(format!("127.0.0.1:{first}")));
         service.reconcile_with(&admin, &config, None).await;
         assert!(!service.status(&admin, &config).await.listening);
 
-        // Shared: listening, with a link that works.
-        server_share::save(&admin, &server.id, &share).await.unwrap();
+        // Shared again: listening, with the same password, and a link that
+        // works.
+        assert_eq!(
+            server_share::start(&admin, &server.id).await.unwrap(),
+            share
+        );
         service.reconcile_with(&admin, &config, None).await;
         let status = service.status(&admin, &config).await;
         assert!(status.listening, "{status:?}");
@@ -768,11 +805,21 @@ mod tests {
         assert!(service.status(&admin, &moved).await.listening, "an unreadable share stopped the listener");
         server_share::save(&admin, &server.id, &share).await.unwrap();
 
-        // Unshared again: stops, and the port is free.
-        server_share::clear(&admin, &server.id).await.unwrap();
+        // Stopped again: stops, and the port is free.
+        server_share::stop(&admin, &server.id).await.unwrap();
         service.reconcile_with(&admin, &moved, None).await;
         assert!(!service.status(&admin, &moved).await.listening);
         assert!(port_is_free(second), "the port was not given back");
+
+        // And sharing again listens again, on the same password.
+        server_share::start(&admin, &server.id).await.unwrap();
+        service.reconcile_with(&admin, &moved, None).await;
+        assert!(service.status(&admin, &moved).await.listening);
+        let link = service.link_for(&admin, &moved, &share).await.unwrap();
+        join::preview(link).await.unwrap();
+
+        service.shutdown().await;
+        let _ = tokio::fs::remove_dir_all(&admin.root).await;
     }
 
     /// Unsharing one server while another stays shared keeps the listener up
@@ -798,6 +845,7 @@ mod tests {
         let other_share = ServerShare {
             code: Code::generate(),
             include_config: false,
+            shared: true,
         };
         server_share::save(&admin, &other.id, &other_share)
             .await
@@ -809,7 +857,7 @@ mod tests {
         assert!(service.status(&admin, &config).await.listening);
 
         let (mut tls, received, length) = ask_for_pack(config.port, &share.code).await;
-        server_share::clear(&admin, &server.id).await.unwrap();
+        server_share::stop(&admin, &server.id).await.unwrap();
         service.reconcile_with(&admin, &config, None).await;
         assert!(
             service.status(&admin, &config).await.listening,

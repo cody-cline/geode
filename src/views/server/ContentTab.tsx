@@ -6,8 +6,6 @@ import {
   FilePlus2,
   Link2,
   Loader2,
-  Lock,
-  LockOpen,
   Package,
   RefreshCw,
   Search,
@@ -111,31 +109,6 @@ export default function ServerContentTab({
       await load();
     } catch (e) {
       reportError("Could not toggle that file", e);
-    }
-  }
-
-  /**
-   * Keep a mod on the server when it shares its pack, or share it again.
-   *
-   * Only mods have the choice: a server's pack takes its mods folder and
-   * nothing else from here, so plugins and datapacks never leave anyway.
-   */
-  async function setExcluded(item: ContentItem) {
-    try {
-      await api.setServerContentExcluded(
-        server.id,
-        folder,
-        item.fileName,
-        !item.excluded,
-      );
-      await load();
-    } catch (e) {
-      reportError(
-        item.excluded
-          ? `Could not share ${item.name} with players again`
-          : `Could not keep ${item.name} from players`,
-        e,
-      );
     }
   }
 
@@ -456,14 +429,6 @@ export default function ServerContentTab({
                         {providerShort(item.provider)}
                       </span>
                     )}
-                    {folder === "mod" && item.excluded && (
-                      <span
-                        className="badge"
-                        title="Stays on the server when it shares its pack"
-                      >
-                        not shared
-                      </span>
-                    )}
                   </div>
                   <div className={styles.itemMeta}>
                     {item.version && <span>{item.version}</span>}
@@ -485,25 +450,6 @@ export default function ServerContentTab({
                       <ArrowUpCircle size={13} />
                     )}
                     Update
-                  </button>
-                )}
-
-                {folder === "mod" && (
-                  <button
-                    className={clsx(
-                      "btn btn-ghost btn-icon btn-sm",
-                      item.excluded && styles.keptBack,
-                    )}
-                    onClick={() => void setExcluded(item)}
-                    aria-pressed={Boolean(item.excluded)}
-                    title={
-                      item.excluded
-                        ? "Not shared with players — click to share it again"
-                        : "Don't share with players"
-                    }
-                    aria-label={`Don't share ${item.name} with players`}
-                  >
-                    {item.excluded ? <Lock size={14} /> : <LockOpen size={14} />}
                   </button>
                 )}
 

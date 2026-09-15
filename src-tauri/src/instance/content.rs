@@ -49,23 +49,6 @@ impl ContentKind {
     }
 }
 
-/// What a server does with one installed file when it shares its setup.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct Sharing {
-    /// The server needs it; a player does not.
-    ///
-    /// Still shared, because a client that wants to match the server exactly
-    /// should be able to — but offered as something to drop on import. A
-    /// performance mod or an anti-cheat is the usual case.
-    pub server_only: bool,
-    /// Never leaves this machine, whatever anybody asks.
-    ///
-    /// For the admin's own tooling, anything with a licence that forbids
-    /// passing it on, and anything with a secret in its config.
-    pub excluded: bool,
-}
-
 /// Who put a file here.
 ///
 /// A client that has joined a server's pack holds two kinds of thing at once:
@@ -93,17 +76,6 @@ impl Origin {
     }
 }
 
-impl Sharing {
-    pub fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
-
-    /// Whether this file goes to a client at all.
-    pub fn shareable(&self) -> bool {
-        !self.excluded
-    }
-}
-
 /// Provenance for one installed file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -124,13 +96,6 @@ pub struct ContentRecord {
     /// offered for cleanup when the parent goes away.
     #[serde(default)]
     pub dependency: bool,
-    /// How this file is treated when a server shares its setup with players.
-    ///
-    /// A server keeps one list, not two — a mod is installed or it is not —
-    /// and these say what happens to each entry on the way out. Defaults mean
-    /// "share it, and a player needs it", which is true of most things.
-    #[serde(default, skip_serializing_if = "Sharing::is_default")]
-    pub sharing: Sharing,
     /// Whether this arrived with a server's pack or was installed here.
     #[serde(default, skip_serializing_if = "Origin::is_default")]
     pub origin: Origin,
@@ -173,9 +138,6 @@ pub struct ContentItem {
     /// fails.
     #[serde(default, skip_serializing_if = "Origin::is_default")]
     pub origin: Origin,
-    /// Kept on the server when it shares its pack with players.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub excluded: bool,
     /// File names of installed mods this one needs.
     #[serde(default)]
     pub requires: Vec<String>,
@@ -304,7 +266,6 @@ pub async fn list_in(
                 dependency: false,
                 from_disk: false,
                 origin: r.origin,
-                excluded: r.sharing.excluded,
                 ..Default::default()
             },
             Some(r) => ContentItem {
@@ -322,7 +283,6 @@ pub async fn list_in(
                 dependency: r.dependency,
                 from_disk: false,
                 origin: r.origin,
-                excluded: r.sharing.excluded,
                 ..Default::default()
             },
             None => ContentItem {
@@ -586,77 +546,12 @@ pub async fn claim_for_server(paths: &Paths, instance: &mut super::Instance) -> 
                 slug: None,
                 icon_url: None,
                 dependency: false,
-                sharing: Default::default(),
                 origin: Origin::Server,
                 requires: None,
             });
         }
     }
     Ok(())
-}
-
-/// Keep a file on the server when it shares its pack, or stop keeping it.
-///
-/// A file with no record — a jar dropped in by hand, often the private one —
-/// gets one that records nothing but this choice, because the choice has to
-/// live somewhere and the record list is where sharing looks.
-///
-/// Taking the choice back removes such a record again rather than leaving it
-/// behind saying nothing. A record with no provider is not the same as none —
-/// the content list stops calling the file one read from disk — so a record
-/// left over from switching this on and off would change how an untouched jar
-/// is shown.
-pub fn set_excluded(
-    records: &mut Vec<ContentRecord>,
-    kind: ContentKind,
-    file: &str,
-    excluded: bool,
-) {
-    // Keyed by the enabled name, like every record, so the choice survives the
-    // file being turned off and on.
-    let (base, _) = strip_disabled(file);
-
-    if let Some(i) = records
-        .iter()
-        .position(|r| r.file_name == base && r.kind == kind)
-    {
-        records[i].sharing.excluded = excluded;
-        if says_nothing(&records[i]) {
-            records.remove(i);
-        }
-        return;
-    }
-    if !excluded {
-        // No record already means "share it".
-        return;
-    }
-    records.push(ContentRecord {
-        file_name: base.to_string(),
-        kind,
-        provider: String::new(),
-        project_id: String::new(),
-        version_id: String::new(),
-        name: base.to_string(),
-        version_number: String::new(),
-        slug: None,
-        icon_url: None,
-        dependency: false,
-        sharing: Sharing {
-            excluded: true,
-            ..Default::default()
-        },
-        origin: Origin::User,
-        requires: None,
-    });
-}
-
-/// A record with nothing in it that having no record would not also say.
-fn says_nothing(record: &ContentRecord) -> bool {
-    record.provider.is_empty()
-        && record.sharing.is_default()
-        && record.origin.is_default()
-        && !record.dependency
-        && record.requires.is_none()
 }
 
 pub async fn set_enabled(
@@ -740,15 +635,18 @@ mod tests {
         assert_eq!(records.len(), 1);
     }
 
-    /// A record written before sharing existed must read back as "share it,
-    /// and a player needs it" — the safe default — rather than as excluded.
+    /// A server.json written while mods could be held back from players still
+    /// reads, and the choice it carried is gone on the next save rather than
+    /// written back.
     #[test]
-    fn an_older_record_defaults_to_being_shareable() {
+    fn an_old_record_with_a_sharing_choice_still_reads() {
         let json = r#"{"fileName":"jei.jar","kind":"mod","provider":"modrinth",
-            "projectId":"p","versionId":"v","name":"JEI","versionNumber":"1.0"}"#;
+            "projectId":"p","versionId":"v","name":"JEI","versionNumber":"1.0",
+            "sharing":{"excluded":true,"serverOnly":true}}"#;
         let record: ContentRecord = serde_json::from_str(json).unwrap();
-        assert!(record.sharing.shareable());
-        assert!(!record.sharing.server_only);
+        assert_eq!(record.file_name, "jei.jar");
+        let written = serde_json::to_string(&record).unwrap();
+        assert!(!written.contains("sharing"), "{written}");
     }
 
     /// The default is not written out, so adding this field does not rewrite
@@ -766,20 +664,21 @@ mod tests {
             slug: None,
             icon_url: None,
             dependency: false,
-            sharing: Sharing::default(),
             origin: Default::default(),
             requires: None,
         };
         let json = serde_json::to_string(&record).unwrap();
-        assert!(!json.contains("sharing"), "{json}");
+        assert!(!json.contains("origin"), "{json}");
 
-        let excluded = ContentRecord {
-            sharing: Sharing { server_only: false, excluded: true },
-            origin: Default::default(),
+        let servers = ContentRecord {
+            origin: Origin::Server,
             ..record
         };
-        let json = serde_json::to_string(&excluded).unwrap();
-        assert!(json.contains("excluded"), "an actual choice is written: {json}");
+        let json = serde_json::to_string(&servers).unwrap();
+        assert!(
+            json.contains(r#""origin":"server""#),
+            "an actual origin is written: {json}"
+        );
     }
     use super::*;
     use crate::instance::jar::JarMeta;
@@ -816,7 +715,6 @@ mod tests {
             slug: None,
             icon_url: None,
             dependency: false,
-            sharing: Default::default(),
             origin: Default::default(),
             requires: Some(requires.iter().map(|s| s.to_string()).collect()),
         }
@@ -969,7 +867,6 @@ mod tests {
             slug: None,
             icon_url: None,
             dependency: false,
-            sharing: Default::default(),
             origin: Default::default(),
             requires: Some(vec!["BBB".into()]),
         }];
@@ -1073,112 +970,6 @@ mod tests {
         assert!(items[1].required_by.is_empty());
     }
 
-    /// Keeping a recorded mod back changes that record and nothing else, and
-    /// letting it go again leaves the provenance where it was.
-    #[test]
-    fn excluding_a_recorded_file_marks_its_own_record() {
-        let mut records = vec![
-            record("jei.jar", ContentKind::Mod, "JEI", &[]),
-            // The same name in another folder is a different file. Its
-            // requirements were never looked up, as for anything that arrived
-            // through a modpack, so only its provider says it is provenance.
-            ContentRecord {
-                requires: None,
-                ..record("jei.jar", ContentKind::Plugin, "JEI-P", &[])
-            },
-        ];
-
-        set_excluded(&mut records, ContentKind::Plugin, "jei.jar", true);
-        assert_eq!(records.len(), 2, "{records:?}");
-        assert!(records[1].sharing.excluded);
-        assert!(!records[0].sharing.excluded, "the mod of the same name was marked");
-
-        set_excluded(&mut records, ContentKind::Plugin, "jei.jar", false);
-        assert_eq!(records.len(), 2, "a record with provenance must never be dropped");
-        assert!(!records[1].sharing.excluded);
-        assert_eq!(records[1].project_id, "JEI-P");
-    }
-
-    /// A mod that is turned off is `foo.jar.disabled` on disk and `foo.jar` in
-    /// its record. Excluding it by the name on disk has to find that record,
-    /// not start a second one the export would never match.
-    #[test]
-    fn excluding_a_disabled_file_marks_the_record_under_its_enabled_name() {
-        let mut records = vec![record("jei.jar", ContentKind::Mod, "JEI", &[])];
-        set_excluded(&mut records, ContentKind::Mod, "jei.jar.disabled", true);
-
-        assert_eq!(records.len(), 1, "{records:?}");
-        assert_eq!(records[0].file_name, "jei.jar");
-        assert!(records[0].sharing.excluded);
-    }
-
-    /// A jar dropped in by hand has no record, and the choice has to live
-    /// somewhere. The record it gets says nothing else — no provider to check
-    /// for updates and no ownership — and goes away when the choice does.
-    #[test]
-    fn excluding_an_unrecorded_file_gives_it_a_record_that_says_only_that() {
-        let mut records = vec![record("jei.jar", ContentKind::Mod, "JEI", &[])];
-
-        set_excluded(&mut records, ContentKind::Mod, "private.jar", false);
-        assert_eq!(records.len(), 1, "sharing a file needs no record");
-
-        set_excluded(&mut records, ContentKind::Mod, "private.jar.disabled", true);
-        assert_eq!(records.len(), 2, "{records:?}");
-        let added = &records[1];
-        assert_eq!(added.file_name, "private.jar");
-        assert_eq!(added.name, "private.jar");
-        assert_eq!(added.kind, ContentKind::Mod);
-        assert!(added.provider.is_empty() && added.project_id.is_empty() && added.version_id.is_empty());
-        assert_eq!(added.origin, Origin::User);
-        assert!(added.sharing.excluded);
-        assert!(!added.sharing.server_only);
-
-        set_excluded(&mut records, ContentKind::Mod, "private.jar", false);
-        assert_eq!(records.len(), 1, "the record that only held the choice outlived it: {records:?}");
-        assert_eq!(records[0].file_name, "jei.jar");
-    }
-
-    /// The content list is where an admin sees the choice, including on a jar
-    /// that is turned off and one with no provenance.
-    #[tokio::test]
-    async fn the_content_list_says_what_is_kept_on_the_server() {
-        let dir = std::env::temp_dir().join(format!("geode-excluded-list-{}", std::process::id()));
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        tokio::fs::create_dir_all(&dir).await.unwrap();
-        for name in ["shared.jar", "kept.jar.disabled", "hand.jar"] {
-            tokio::fs::write(dir.join(name), b"x").await.unwrap();
-        }
-
-        let mut records = vec![
-            record("shared.jar", ContentKind::Mod, "S", &[]),
-            record("kept.jar", ContentKind::Mod, "K", &[]),
-        ];
-        set_excluded(&mut records, ContentKind::Mod, "kept.jar.disabled", true);
-        set_excluded(&mut records, ContentKind::Mod, "hand.jar", true);
-
-        let items = list_in(&dir, &records, ContentKind::Mod, &super::super::jar::MetaCache::new())
-            .await
-            .unwrap();
-        let excluded = |file: &str| {
-            items
-                .iter()
-                .find(|i| i.file_name == file)
-                .unwrap_or_else(|| panic!("{file} is not listed"))
-                .excluded
-        };
-        assert!(!excluded("shared.jar"));
-        assert!(excluded("kept.jar.disabled"));
-        assert!(excluded("hand.jar"));
-
-        // Written only when true, like every other flag the list carries.
-        let shared = items.iter().find(|i| i.file_name == "shared.jar").unwrap();
-        assert!(!serde_json::to_string(shared).unwrap().contains("excluded"));
-        let kept = items.iter().find(|i| i.file_name == "hand.jar").unwrap();
-        assert!(serde_json::to_string(kept).unwrap().contains(r#""excluded":true"#));
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-    }
-
     #[test]
     fn a_disabled_file_still_matches_its_record() {
         let mut items = vec![item("mod.jar.disabled", false), item("lib.jar", true)];
@@ -1199,7 +990,6 @@ mod tests {
             slug: None,
             icon_url: None,
             dependency: false,
-            sharing: Default::default(),
             origin: Default::default(),
             requires: Some(vec!["BBB".into()]),
         }];

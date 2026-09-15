@@ -13,7 +13,14 @@ import {
 import Modal from "../../components/Modal";
 import StatusNote from "../../components/StatusNote";
 import { api, errorMessage } from "../../lib/api";
-import { linkPendingReason, listenLine, readOutHint, routerLine } from "../../lib/share";
+import {
+  linkPendingReason,
+  listenLine,
+  readOutHint,
+  replacedPasswordBody,
+  routerLine,
+  stoppedLine,
+} from "../../lib/share";
 import { useStore } from "../../lib/store";
 import type { Server, ServerShareView } from "../../lib/types";
 
@@ -52,7 +59,7 @@ function CopyButton({ text, what }: { text: string; what: string }) {
 
 /**
  * Handing this server's pack to the people who play on it: the link, the
- * code, what goes in the pack, and whether players can reach it at all.
+ * password, what goes in the pack, and whether players can reach it at all.
  */
 export default function ShareTab({ server }: { server: Server }) {
   const config = useStore((s) => s.config);
@@ -62,7 +69,11 @@ export default function ShareTab({ server }: { server: Server }) {
   const toast = useStore((s) => s.toast);
   const reportError = useStore((s) => s.reportError);
 
-  /** `undefined` while loading; `null` when this server is not shared. */
+  /**
+   * `undefined` while loading; `null` when this server has never been shared.
+   * A server whose sharing is stopped still has one, with `shared` false, so
+   * its password is there to share again with.
+   */
   const [share, setShare] = useState<ServerShareView | null | undefined>(undefined);
   const [shareError, setShareError] = useState<string | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
@@ -130,15 +141,15 @@ export default function ShareTab({ server }: { server: Server }) {
 
   async function rotate() {
     setConfirming(null);
-    const view = await run("rotate", "Could not make a new code", () =>
+    const view = await run("rotate", "Could not replace the password", () =>
       api.rotateServerShareCode(server.id),
     );
     if (view) {
       setShare(view);
       toast({
         kind: "success",
-        title: "New code made",
-        body: "The old link no longer works. Send players the new one.",
+        title: "Password replaced",
+        body: replacedPasswordBody(view.shared),
       });
     }
   }
@@ -150,7 +161,15 @@ export default function ShareTab({ server }: { server: Server }) {
       return true;
     });
     if (done) {
-      setShare(null);
+      // Read back rather than cleared: the server keeps its password, and the
+      // tab offers to share again with it.
+      api
+        .getServerShare(server.id)
+        .then(setShare)
+        .catch((e) => {
+          setShare(undefined);
+          setShareError(errorMessage(e));
+        });
       loadShareStatus().catch(() => {});
     }
   }
@@ -163,6 +182,32 @@ export default function ShareTab({ server }: { server: Server }) {
       <SettingsIcon size={13} />
       Sharing settings
     </button>
+  );
+
+  const newPasswordButton = (
+    <button
+      className="btn"
+      onClick={() => setConfirming("rotate")}
+      disabled={busy !== null}
+    >
+      {busy === "rotate" ? (
+        <Loader2 size={14} className="spin" />
+      ) : (
+        <RefreshCw size={14} />
+      )}
+      New password
+    </button>
+  );
+
+  const aboutSharing = (
+    <p className={viewStyles.eula}>
+      Players open a link, or type this computer&apos;s address and the
+      server&apos;s password, and their Geode sets up this server&apos;s loader
+      and mods, ready to join. The pack comes straight from this computer:
+      nothing is uploaded anywhere. Mods on Modrinth or CurseForge travel as
+      references; every other jar in the mods folder, including jars you added
+      by hand, is sent as a copy.
+    </p>
   );
 
   return (
@@ -185,15 +230,11 @@ export default function ShareTab({ server }: { server: Server }) {
           <div className="skeleton" style={{ height: 120 }} />
         ) : share === null ? (
           <div className={styles.stack}>
-            <p className={viewStyles.eula}>
-              Players open a link and their Geode sets up this server&apos;s
-              loader and mods, ready to join. The pack comes straight from this
-              computer: nothing is uploaded anywhere, and mods that are on
-              Modrinth or CurseForge travel as references rather than copies.
-            </p>
+            {aboutSharing}
             <p className={viewStyles.pending}>
-              The link carries a code, and only someone holding it can download
-              anything.{" "}
+              Only someone with the password can download anything. Geode makes
+              one the first time you share this server, and it stays the same
+              until you replace it.{" "}
               {config &&
                 (config.share.mapping === "manual"
                   ? `Router setup is manual, so you forward TCP port ${config.share.port} to this computer yourself.`
@@ -212,6 +253,27 @@ export default function ShareTab({ server }: { server: Server }) {
                 )}
                 Share this server
               </button>
+              {settingsButton}
+            </div>
+          </div>
+        ) : !share.shared ? (
+          <div className={styles.stack}>
+            {aboutSharing}
+            <StatusNote line={stoppedLine(share.includeConfig)} />
+            <div className={styles.actions}>
+              <button
+                className="btn btn-primary"
+                onClick={() => void start()}
+                disabled={busy !== null}
+              >
+                {busy === "share" ? (
+                  <Loader2 size={14} className="spin" />
+                ) : (
+                  <Share2 size={14} />
+                )}
+                Share again
+              </button>
+              {newPasswordButton}
               {settingsButton}
             </div>
           </div>
@@ -273,11 +335,11 @@ export default function ShareTab({ server }: { server: Server }) {
               )}
             </div>
 
-            {/* The address as well as the code: typed by hand, a player needs
-                both, and outside a link the address — its port above all —
-                is shown nowhere else. */}
+            {/* The address as well as the password: typed by hand, a player
+                needs both, and outside a link the address — its port above
+                all — is shown nowhere else. */}
             <div>
-              <span className="label">Address and code</span>
+              <span className="label">Address and password</span>
               <div className={styles.readOut}>
                 {status?.address && (
                   <div className={styles.copyRow}>
@@ -287,7 +349,7 @@ export default function ShareTab({ server }: { server: Server }) {
                 )}
                 <div className={styles.copyRow}>
                   <code className={styles.code}>{share.code}</code>
-                  <CopyButton text={share.code} what="code" />
+                  <CopyButton text={share.code} what="password" />
                 </div>
               </div>
               <p className="hint">{readOutHint(status?.address ?? null)}</p>
@@ -307,26 +369,15 @@ export default function ShareTab({ server }: { server: Server }) {
                   mods whose settings have to match on both sides.{" "}
                   <span className={styles.secret}>
                     Configs can hold secrets — bot tokens, database passwords,
-                    proxy keys — and everyone with the code gets them. Look
-                    through the folder before turning this on.
+                    proxy keys — and everyone with the password gets them.
+                    Look through the folder before turning this on.
                   </span>
                 </span>
               </span>
             </label>
 
             <div className={styles.actions}>
-              <button
-                className="btn"
-                onClick={() => setConfirming("rotate")}
-                disabled={busy !== null}
-              >
-                {busy === "rotate" ? (
-                  <Loader2 size={14} className="spin" />
-                ) : (
-                  <RefreshCw size={14} />
-                )}
-                New code
-              </button>
+              {newPasswordButton}
               <button
                 className="btn btn-danger"
                 onClick={() => setConfirming("stop")}
@@ -344,7 +395,7 @@ export default function ShareTab({ server }: { server: Server }) {
         )}
       </section>
 
-      {share && !share.unsupported && (
+      {share?.shared && !share.unsupported && (
         <section className={viewStyles.section}>
           <h2 className={viewStyles.sectionTitle}>Can players connect?</h2>
           <div className={styles.stack}>
@@ -379,7 +430,7 @@ export default function ShareTab({ server }: { server: Server }) {
 
       {confirming === "rotate" && (
         <Modal
-          title="Make a new code?"
+          title="Replace the password?"
           subtitle={server.name}
           onClose={() => setConfirming(null)}
           width={460}
@@ -389,18 +440,18 @@ export default function ShareTab({ server }: { server: Server }) {
                 Cancel
               </button>
               <button className="btn btn-danger" onClick={() => void rotate()}>
-                New code
+                Replace password
               </button>
             </>
           }
         >
           <p className={viewStyles.eula}>
-            Everyone holding the current link or code is cut off: they cannot
-            download this pack again until you send them the new link. What
-            they already imported stays on their computers.
+            Everyone holding the current link or password is cut off: they
+            cannot download this pack again until you send them the new link or
+            password. What they already imported stays on their computers.
           </p>
           <p className={viewStyles.eula}>
-            Do this when a link has reached someone it should not have.
+            Do this when the password has reached someone it should not have.
           </p>
         </Modal>
       )}
@@ -423,8 +474,10 @@ export default function ShareTab({ server }: { server: Server }) {
         >
           <p className={viewStyles.eula}>
             Players can no longer download this pack from here, and the link you
-            sent stops working. What they already imported stays on their
-            computers.
+            sent stops working until you share again. The password stays the
+            same, so sharing again brings that link back; to cut someone off for
+            good, use New password. What players already imported stays on
+            their computers.
           </p>
         </Modal>
       )}

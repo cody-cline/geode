@@ -152,8 +152,8 @@ pub async fn run_due(sink: &EventSink, paths: &Paths, servers: &ServerRegistry, 
 ///
 /// The server is read again here rather than `current` being saved, because
 /// `current` is as old as the backup was long. Saving it would undo whatever
-/// changed in those minutes — a mod held back from players, a setting, the
-/// schedules themselves.
+/// changed in those minutes — a mod installed, a setting, the schedules
+/// themselves.
 async fn stamp(paths: &Paths, id: &str, ran: &[Schedule], now: i64) {
     // Gone while the work ran: saving would bring back a deleted server.
     let Ok(mut fresh) = super::load(paths, id).await else {
@@ -283,15 +283,14 @@ mod tests {
 
     /// A scheduled backup lasts as long as the world is big, and the ticker
     /// used to save the copy of the server it loaded before starting one. That
-    /// undid whatever changed in between: a mod held back from players, a
-    /// note. A pipe in the run folder holds the backup at a known point, so the
-    /// change lands inside it every time.
+    /// undid whatever changed in between, such as a note. A pipe in the run
+    /// folder holds the backup at a known point, so the change lands inside it
+    /// every time.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_backup_saves_that_it_ran_and_nothing_else() {
         use std::os::unix::ffi::OsStrExt;
 
-        use crate::instance::content::{set_excluded, ContentKind};
         use crate::server::{Server, ServerKind};
 
         let paths = Paths {
@@ -323,7 +322,6 @@ mod tests {
         // before this.
         let writer = open_once_read(&pipe).await;
         let mut admin = crate::server::load(&paths, &server.id).await.unwrap();
-        set_excluded(&mut admin.content, ContentKind::Mod, "private.jar", true);
         admin.notes = "written during the backup".into();
         admin.save(&paths).await.unwrap();
         assert!(!job.is_finished(), "the backup finished before the change it should race");
@@ -334,11 +332,6 @@ mod tests {
 
         let after = crate::server::load(&paths, &server.id).await.unwrap();
         assert_eq!(after.schedules[0].last_run, Some(now), "the run was not recorded");
-        assert!(
-            after.content.iter().any(|r| r.file_name == "private.jar" && r.sharing.excluded),
-            "a mod held back during the backup is shared again: {:?}",
-            after.content
-        );
         assert_eq!(after.notes, "written during the backup");
         assert_eq!(
             crate::server::backup::list(&paths, &server.id).await.unwrap().len(),

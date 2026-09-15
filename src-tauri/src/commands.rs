@@ -1769,7 +1769,7 @@ pub async fn add_cardboard(
     // The folder a plugin gets dropped into should exist before anyone goes
     // looking for it.
     tokio::fs::create_dir_all(run.join(ContentKind::Plugin.folder())).await?;
-    server.save_keeping_sharing(&state.paths).await?;
+    server.save_if_present(&state.paths).await?;
     progress.finish().await;
 
     Ok(server_view(server, &state))
@@ -1821,7 +1821,7 @@ pub async fn start_server(
     .await?;
 
     server.last_started = Some(chrono::Utc::now().timestamp());
-    server.save_keeping_sharing(&state.paths).await?;
+    server.save_if_present(&state.paths).await?;
     Ok(pid)
 }
 
@@ -2012,7 +2012,7 @@ pub async fn link_untracked_server_content(
     state.clear_cancel(progress.id());
     match result {
         Ok(report) => {
-            server.save_keeping_sharing(&state.paths).await?;
+            server.save_if_present(&state.paths).await?;
             Ok(report)
         }
         Err(e) => {
@@ -2154,7 +2154,7 @@ pub async fn install_server_content(
 
     // Saved either way: a walk that failed part-way through still put files on
     // disk, and a record list that does not mention them is worse than none.
-    let _ = server.save_keeping_sharing(&state.paths).await;
+    let _ = server.save_if_present(&state.paths).await;
 
     match result {
         Ok(report) => {
@@ -2785,13 +2785,16 @@ pub async fn export_modpack(
 // Sharing a server with players
 // ---------------------------------------------------------------------------
 
-/// A shared server as its admin sees it.
+/// A server's sharing as its admin sees it, shared now or stopped.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerShareView {
+    /// The server's password.
     pub code: String,
     pub link: Option<String>,
     pub include_config: bool,
+    /// False while sharing is stopped. The password is kept either way.
+    pub shared: bool,
     pub unsupported: Option<String>,
 }
 
@@ -2810,6 +2813,7 @@ async fn share_view(
         code: share.code.display(),
         link,
         include_config: share.include_config,
+        shared: share.shared,
         unsupported: share::pack::client_loader(server).err().map(|e| e.to_string()),
     }
 }
@@ -2822,11 +2826,12 @@ async fn reconcile_sharing(app: &AppHandle, state: &AppState) {
         .await;
 }
 
-/// The share state of a server that must be shared for the command to mean
-/// anything.
+/// The share state of a server that must be shared right now for the command
+/// to mean anything.
 async fn shared(state: &AppState, id: &str) -> Result<crate::server::share::ServerShare> {
     crate::server::share::load(&state.paths, id)
         .await?
+        .filter(|share| share.shared)
         .ok_or_else(|| Error::msg("this server is not being shared"))
 }
 
@@ -2902,6 +2907,8 @@ fn check_public_address(address: &str, port: u16) -> Result<()> {
         .map_err(|e| Error::msg(format!("links made with that public address would not work: {e}")))
 }
 
+/// The server's sharing, shared now or stopped; `None` only for a server that
+/// has never been shared.
 #[tauri::command]
 pub async fn get_server_share(
     state: State<'_, AppState>,
@@ -2921,27 +2928,19 @@ pub async fn share_server(
     id: String,
 ) -> Result<ServerShareView> {
     let server = crate::server::load(&state.paths, &id).await?;
-    // Refused before a code exists rather than after: a share that can only
-    // ever answer "not supported" would hand players a link that goes nowhere.
+    // Refused before a password exists rather than after: a share that can
+    // only ever answer "not supported" would hand players a link that goes
+    // nowhere.
     share::pack::client_loader(&server)?;
-    let share = match crate::server::share::load(&state.paths, &id).await? {
-        Some(existing) => existing,
-        None => {
-            let fresh = crate::server::share::ServerShare {
-                code: share::code::Code::generate(),
-                include_config: false,
-            };
-            crate::server::share::save(&state.paths, &id, &fresh).await?;
-            fresh
-        }
-    };
+    let share = crate::server::share::start(&state.paths, &id).await?;
     reconcile_sharing(&app, &state).await;
     Ok(share_view(&state, &server, &share).await)
 }
 
+/// Stop sharing, keeping the server's password for when it is shared again.
 #[tauri::command]
 pub async fn unshare_server(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<()> {
-    crate::server::share::clear(&state.paths, &id).await?;
+    crate::server::share::stop(&state.paths, &id).await?;
     reconcile_sharing(&app, &state).await;
     Ok(())
 }
@@ -2962,35 +2961,20 @@ pub async fn set_server_share_config(
     Ok(share_view(&state, &server, &share).await)
 }
 
-/// Replace a server's code. Everyone holding the old link is cut off at once:
-/// the pack server reads codes fresh on every request, a preview or download
-/// already under way with the old code is cut as soon as the new one is saved,
-/// and nothing but sharing ever writes the file the code lives in.
+/// Replace a server's password, whether it is shared now or stopped. Everyone
+/// holding the old link is cut off at once: the pack server reads passwords
+/// fresh on every request, a preview or download already under way with the
+/// old one is cut as soon as the new one is saved, and nothing but sharing ever
+/// writes the file the password lives in.
 #[tauri::command]
 pub async fn rotate_server_share_code(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<ServerShareView> {
     let server = crate::server::load(&state.paths, &id).await?;
-    let mut share = shared(&state, &id).await?;
-    share.code = share::code::Code::generate();
-    crate::server::share::save(&state.paths, &id, &share).await?;
+    let share = crate::server::share::replace_password(&state.paths, &id).await?;
     state.share.cut_revoked(&state.paths).await;
     Ok(share_view(&state, &server, &share).await)
-}
-
-#[tauri::command]
-pub async fn set_server_content_excluded(
-    state: State<'_, AppState>,
-    id: String,
-    kind: String,
-    file: String,
-    excluded: bool,
-) -> Result<()> {
-    let kind = parse_kind(&kind)?;
-    let mut server = crate::server::load(&state.paths, &id).await?;
-    instance::content::set_excluded(&mut server.content, kind, &file, excluded);
-    server.save(&state.paths).await
 }
 
 // ---------------------------------------------------------------------------
@@ -3232,7 +3216,7 @@ mod tests {
         let mods = paths.server_run(&server.id).join("mods");
         tokio::fs::create_dir_all(&mods).await.unwrap();
         tokio::fs::write(mods.join("homemade.jar"), fabric_jar("homemade")).await.unwrap();
-        let share = ServerShare { code: Code::generate(), include_config: false };
+        let share = ServerShare { code: Code::generate(), include_config: false, shared: true };
         crate::server::share::save(paths, &server.id, &share).await.unwrap();
         (server, share)
     }

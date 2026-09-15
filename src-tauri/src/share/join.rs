@@ -324,7 +324,7 @@ async fn request(
     match response.status() {
         s if s.is_success() => Ok(response),
         reqwest::StatusCode::UNAUTHORIZED => Err(Error::msg(
-            "the server did not accept this code — it may have been replaced; ask the admin for the current link",
+            "the server did not accept this password — it may have been replaced; ask the admin for the current link",
         )),
         reqwest::StatusCode::NOT_FOUND => Err(Error::msg(
             "something answered at that address, but it is not a Geode server sharing a pack",

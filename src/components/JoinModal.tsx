@@ -240,7 +240,7 @@ export default function JoinModal({
         {(
           [
             ["link", "Link"],
-            ["address", "Address and code"],
+            ["address", "Address and password"],
           ] as const
         ).map(([mode, label]) => (
           <button
@@ -295,7 +295,7 @@ export default function JoinModal({
             </div>
             <div>
               <label className="label" htmlFor="join-code">
-                Code
+                Password
               </label>
               <input
                 id="join-code"
