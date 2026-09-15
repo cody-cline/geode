@@ -62,9 +62,11 @@ pub fn is_due(schedule: &Schedule, now: i64) -> bool {
     }
 }
 
-/// Say something in the server's own console, so scheduled work is visible
-/// where the user is already looking rather than only in a log.
-fn announce(sink: &EventSink, server_id: &str, line: String) {
+/// Say something in the server's own console, so scheduled work, and what
+/// Geode does to a server as it starts, is visible where the user is already
+/// looking rather than only in a log. Marked as Geode's, so it reads apart
+/// from the server's own output.
+pub(crate) fn announce(sink: &EventSink, server_id: &str, line: String) {
     events::emit(
         &Some(sink.clone()),
         "geode://server-log",

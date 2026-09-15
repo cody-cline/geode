@@ -761,6 +761,69 @@ pub async fn move_mod(
     Ok(())
 }
 
+/// Move every mod in Mods whose own jar says it only runs in a player's game
+/// into Client mods, and name the files moved.
+///
+/// Run as a server starts, before its process exists, so the server never
+/// loads a renderer or a minimap — at best dead weight, at worst a crash on
+/// boot — while its players still get it with the pack.
+///
+/// Only the jar's own declaration counts. Modrinth's listing is an author's
+/// tick-box and can be wrong, and a mod taken out of a server on its word would
+/// simply be missing there; those are badged in the Content tab for the admin
+/// to move. A move [`move_mod`] refuses — Client mods already has that mod —
+/// is skipped, and the rest still move. A `mods/` or `client-mods/` that is a
+/// link is somewhere else, perhaps shared with other servers, and nothing is
+/// moved out of or into it: a pack sends nothing from a linked folder, so a mod
+/// moved into one would stop reaching players.
+pub async fn move_client_only_mods(paths: &Paths, server: &mut Server) -> Vec<String> {
+    use crate::instance::content::{is_content_file, ContentKind};
+    use crate::instance::jar::Side;
+
+    if !server.takes_mods() {
+        return Vec::new();
+    }
+    let dir = content_dir(paths, &server.id, ContentKind::Mod).await;
+    let client_dir = content_dir(paths, &server.id, ContentKind::ClientMod).await;
+    let client_only = tokio::task::spawn_blocking(move || {
+        if !std::fs::symlink_metadata(&dir).is_ok_and(|meta| meta.is_dir()) {
+            return Vec::new();
+        }
+        // Missing is fine, since the first move makes it.
+        match std::fs::symlink_metadata(&client_dir) {
+            Ok(meta) if meta.is_dir() => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Vec::new(),
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = entries
+            .flatten()
+            // The entry's own type, so what a link points at is never read.
+            .filter(|entry| entry.file_type().is_ok_and(|t| t.is_file()))
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| is_content_file(name, ContentKind::Mod))
+            .filter(|name| {
+                crate::instance::jar::read(&dir.join(name)).and_then(|meta| meta.side)
+                    == Some(Side::Client)
+            })
+            .collect();
+        names.sort();
+        names
+    })
+    .await
+    .unwrap_or_default();
+
+    let mut moved = Vec::new();
+    for name in client_only {
+        if move_mod(paths, server, &name, true).await.is_ok() {
+            moved.push(name);
+        }
+    }
+    moved
+}
+
 /// Write `eula.txt`, which Mojang requires before a server will start.
 ///
 /// Only ever called after the user has actually agreed in the UI. Writing it
@@ -875,6 +938,7 @@ mod tests {
             origin: Default::default(),
             requires: None,
             side: None,
+            server_off: false,
         }
     }
 
@@ -1292,6 +1356,117 @@ mod tests {
             .await
             .unwrap();
         assert!(run.join("mods/cloth-15.0.jar").is_file());
+
+        std::fs::remove_dir_all(&paths.root).unwrap();
+    }
+
+    /// A jar with a real `fabric.mod.json`, so reading it finds its side.
+    fn fabric_jar(id: &str, environment: &str) -> Vec<u8> {
+        use std::io::Write;
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        zip.start_file("fabric.mod.json", options).unwrap();
+        zip.write_all(
+            format!(
+                r#"{{"schemaVersion":1,"id":"{id}","version":"1.0","environment":"{environment}"}}"#
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        zip.finish().unwrap().into_inner()
+    }
+
+    /// Starting a server takes out of Mods what its own jar says only a player's
+    /// game runs, record and all. A jar for both sides stays, and so does one
+    /// only Modrinth lists as client-side, since a listing can be wrong. A mod
+    /// Client mods already has is left where it is, and the rest still move.
+    #[tokio::test]
+    async fn starting_moves_the_mods_that_declare_they_only_run_in_players_games() {
+        use crate::instance::content::ContentKind;
+        use crate::instance::jar::Side;
+
+        let paths = scratch("start-moves-client-mods");
+        let mut server = Server::new("Starter".into(), ServerKind::Fabric, "1.21.1".into());
+        let run = paths.server_run(&server.id);
+        tokio::fs::create_dir_all(run.join("mods")).await.unwrap();
+        tokio::fs::create_dir_all(run.join("client-mods"))
+            .await
+            .unwrap();
+        for (rel, environment) in [
+            ("mods/minimap.jar", "client"),
+            ("mods/both.jar", "*"),
+            ("mods/listed.jar", "*"),
+            ("mods/already.jar", "client"),
+            ("client-mods/already.jar", "client"),
+        ] {
+            tokio::fs::write(run.join(rel), fabric_jar("x", environment))
+                .await
+                .unwrap();
+        }
+        server.content = vec![
+            record("minimap.jar", "modrinth", "MINIMAP"),
+            crate::instance::content::ContentRecord {
+                side: Some(Side::Client),
+                ..record("listed.jar", "modrinth", "LISTED")
+            },
+        ];
+
+        let moved = move_client_only_mods(&paths, &mut server).await;
+
+        assert_eq!(moved, vec!["minimap.jar"]);
+        assert!(run.join("client-mods/minimap.jar").is_file());
+        assert!(!run.join("mods/minimap.jar").exists());
+        for stays in ["both.jar", "listed.jar", "already.jar"] {
+            assert!(run.join("mods").join(stays).is_file(), "{stays} was moved");
+        }
+        let kind = |file: &str| {
+            server
+                .content
+                .iter()
+                .find(|r| r.file_name == file)
+                .map(|r| r.kind)
+        };
+        assert_eq!(kind("minimap.jar"), Some(ContentKind::ClientMod));
+        assert_eq!(kind("listed.jar"), Some(ContentKind::Mod));
+
+        std::fs::remove_dir_all(&paths.root).unwrap();
+    }
+
+    /// A `client-mods/` that is a link is somewhere else, and a pack sends
+    /// nothing from it, so a jar moved through it would stop reaching players
+    /// and turn up in a folder the admin never put it in. Starting moves
+    /// nothing then. A `client-mods/` that is not there yet is made by the move.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn starting_moves_nothing_into_a_linked_client_mods_folder() {
+        use crate::instance::content::ContentKind;
+
+        let paths = scratch("start-linked-client-mods");
+        let mut server = Server::new("Linked".into(), ServerKind::Fabric, "1.21.1".into());
+        let run = paths.server_run(&server.id);
+        let elsewhere = paths.root.join("elsewhere");
+        tokio::fs::create_dir_all(run.join("mods")).await.unwrap();
+        tokio::fs::create_dir_all(&elsewhere).await.unwrap();
+        tokio::fs::write(
+            run.join("mods/minimap.jar"),
+            fabric_jar("minimap", "client"),
+        )
+        .await
+        .unwrap();
+        std::os::unix::fs::symlink(&elsewhere, run.join("client-mods")).unwrap();
+        server.content = vec![record("minimap.jar", "modrinth", "MINIMAP")];
+
+        assert!(move_client_only_mods(&paths, &mut server).await.is_empty());
+        assert!(run.join("mods/minimap.jar").is_file());
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+        assert_eq!(server.content[0].kind, ContentKind::Mod);
+
+        std::fs::remove_file(run.join("client-mods")).unwrap();
+        assert_eq!(
+            move_client_only_mods(&paths, &mut server).await,
+            vec!["minimap.jar"]
+        );
+        assert!(run.join("client-mods/minimap.jar").is_file());
 
         std::fs::remove_dir_all(&paths.root).unwrap();
     }

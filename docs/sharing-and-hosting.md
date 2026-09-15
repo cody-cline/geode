@@ -378,12 +378,12 @@ An adversarial review found all three, and the first by running it.
 
 What holds now, each pinned by a test that fails without its fix:
 
-- `claim_for_server` gives every content file on disk a record — one that says
-  nothing except whose it is, when nothing else is known — rather than tagging
-  only the records that happen to exist.
+- `settle_server_files` gives every file the pack brought a record — one that
+  says nothing except whose it is, when nothing else is known — rather than
+  tagging only the records that happen to exist.
 - `share::pack::import` is the one sequence the command and the tests both run,
-  and it claims a server pack's files on **every** exit, including an error or a
-  cancel, because the caller saves a partial import rather than discarding it.
+  and it settles a server pack's files on **every** exit, including an error or
+  a cancel, because the caller saves a partial import rather than discarding it.
 - `install_into` refuses to replace a server's mod before downloading or
   deleting anything, and `check_updates` never queues one.
 - The removal guard is in `remove_in`, so disabling then deleting is not a way
@@ -401,6 +401,51 @@ file name the Linux save dialog may not have given an extension.
 **Not covered by an offline test:** keeping records after a partial download
 failure, and the disabled state being honoured at download time. Both need a
 live CurseForge response to exercise; the note side of the second is tested.
+
+**Only what the pack brought is the server's.** A joined instance can hold the
+player's own mods beside the server's, so claiming every file in the folder
+would make a minimap the player dropped in undeletable. `share::pack::arrivals`
+reads what a server's pack itself names before anything lands: index entries a
+client installs, references in `geode/manifest.json`, and files carried as
+bytes directly in a content folder under `overrides/` or `client-overrides/` —
+nothing deeper, and nothing a client never installs. The notes then give each
+its side. `settle_server_files` works through that list and nothing else: each
+file ends up on disk once, on or off, owned by the server, and a file that did
+not land is skipped. An untracked jar of the player's stays untracked, and a
+mod they installed stays theirs to delete. A mod the pack brings both on and
+off arrives once, on.
+
+**Server-side mods are the player's choice.** A mod only the server needs — a
+profiler, a backup tool — does nothing in a player's game but take time to
+load. So a player decides whether a server's server-side mods are on: in the
+join dialog, which shows the preview's `serverMods` count and defaults to on,
+and later in the instance's Settings, under Server. The choice is kept on the
+instance as `server_side_mods_off`, and turning them off renames them to
+`.disabled` rather than skipping the download, so it can be changed later
+offline and at once. A duplicate of a joined instance is not a join and does
+not keep it.
+
+Each server file's record keeps what the server said about it: `side`, the
+server's classification from the pack's notes, and `server_off`, whether the
+server itself had the file turned off. That is what tells the server's choices
+apart from the player's. `content::set_server_side_mods` touches only the
+server's own mods whose side is server, and the rule is:
+
+- Turning server-side mods **off** turns off every one of them that is on.
+- Turning them **on** never turns on one the server had off — that was the
+  admin's decision — but does turn on one the player switched off by hand,
+  since on is a choice about all of them.
+- The server's mods for both sides, and the player's own mods, are never
+  touched, and the switch is refused while the game runs. A launch still
+  preparing when it changes reads the instance again before recording the
+  play, so it does not put the old setting back over the renamed files.
+
+Existing joined instances read the setting as on. Their server files were
+recorded before sides were, with no `side` and no `server_off`, so the switch
+finds no server-side mods in them and changes nothing. Nothing records those
+for an instance that already exists, since there is no update from the server
+yet (item 3's known limits): joining the server again makes a new instance
+that has them.
 
 ### 7. Client, server and both — **done**
 
@@ -439,8 +484,19 @@ boot, and it is still part of the server's pack. The Content tab shows it as a
 update and delete, and a row in Mods says `client` or `server` when its mod
 belongs on one side only.
 
-**What goes there by itself.** Only new installs, and only on Modrinth's word:
+**What goes there by itself.** A server ignores client mods, so:
 
+- Starting a server moves every jar directly in its `mods/`, on or off, whose
+  own metadata declares it client only into Client mods, before the process
+  launches (`server::move_client_only_mods`). The console says so for each
+  one, as *[Geode] Moved x.jar to Client mods: it only runs in players'
+  games*, and `start_server` returns the names, so the app says so too on
+  whichever tab Start was pressed from, and the Content tab reads its folders
+  again. Each goes through `move_mod`, record and all; one it refuses, because
+  Client mods already has that mod, stays and the rest still move. When
+  `mods/` or `client-mods/` is a link, nothing moves: a pack sends nothing
+  from a linked folder, so a jar moved into one would stop reaching players,
+  hand-added ones included.
 - A Browse install into Mods of a mod Modrinth lists as client only goes to
   Client mods instead (`commands::install_folder`), and the app says so. An
   update names its version and stays in the folder it is in, and a project the
@@ -453,9 +509,11 @@ belongs on one side only.
   never loads that copy; a walk into Client mods skips a library already in
   Mods, since players get that one anyway.
 
-Geode never moves a jar that is already installed. Jars in `run/mods` stay
-there even when they read as client mods; the badge says so, and the admin
-decides.
+Only the jar's own word moves a jar that is already installed. One that reads
+as a client mod only because of Modrinth's listing stays in `run/mods`, since a
+listing can be wrong and a mod moved on its word would simply be missing from
+the server; the badge says so, and the admin decides. Updates stay in the
+folder they are in.
 
 **Moving a mod.** Each row in Mods and Client mods has a move button
 (`server::move_mod`). The file keeps its name, `.disabled` included, and its
@@ -463,7 +521,9 @@ record moves with it, so it is still tracked for updates and still travels as
 a reference. A move onto a mod the other folder already has, on or off, under
 that name or as the same Modrinth or CurseForge project under another, is
 refused with nothing changed, and so is any move while the server runs: it
-read `mods/` when it started. There is no way to mark a mod
+read `mods/` when it started. Moving a mod whose own jar declares it client
+only into Mods lasts until the server next starts, which moves it back, since
+a server ignores client mods; the button says so. There is no way to mark a mod
 server or both by hand; those are always worked out.
 
 **How a pack carries each side.** A player's game has one mods folder, so a
@@ -482,7 +542,8 @@ client mod arrives as an ordinary mod in `mods/`, and nothing in a pack names
 - Every mod that belongs on one side only gets a manifest note carrying its
   side, however it travels; in a server's pack `FileNote.side` is the
   server's classification, not only what the jar declared. The preview's
-  `serverMods` counts the server-side ones.
+  `serverMods` counts the server-side ones, which a player may keep turned
+  off (item 6).
 
 **A mod in both folders goes once**, from `mods/`: a client mod with the same
 file name as a jar in `mods/`, or with the same Modrinth or CurseForge project

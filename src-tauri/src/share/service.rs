@@ -563,6 +563,7 @@ mod tests {
             "every mod in the server's mods folder: {:?}",
             preview.info
         );
+        assert_eq!(preview.info.server_mods, 1, "{:?}", preview.info);
         assert_eq!(preview.verified, join::Verified::Pinned);
 
         // What actually crosses the network.
@@ -623,6 +624,16 @@ mod tests {
             .find(|r| r.file_name == "homemade.jar")
             .expect("the server's jar has a record");
         assert_eq!(record.origin, Origin::Server);
+        let server_only = instance
+            .content
+            .iter()
+            .find(|r| r.file_name == "server-only.jar")
+            .expect("the server-side jar has a record");
+        assert_eq!(
+            server_only.side,
+            Some(crate::instance::jar::Side::Server),
+            "the server's classification did not arrive"
+        );
         crate::instance::content::remove_in(&mods, &mut instance.content, ContentKind::Mod, "homemade.jar")
             .await
             .expect_err("a player cannot delete the server's mod");

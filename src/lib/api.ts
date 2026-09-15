@@ -127,6 +127,9 @@ export const api = {
     file: string,
     enabled: boolean,
   ) => invoke<string>("set_content_enabled", { id, kind, file, enabled }),
+  /** Turn a joined instance's server-side mods on or off; resolves to how many changed. */
+  setServerSideMods: (id: string, on: boolean) =>
+    invoke<number>("set_server_side_mods", { id, on }),
   removeContent: (id: string, kind: ContentKind, file: string) =>
     invoke<void>("remove_content", { id, kind, file }),
   addLocalContent: (id: string, kind: ContentKind, files: string[]) =>
@@ -331,7 +334,9 @@ export const api = {
   ) => invoke<Server>("update_server", { id, patch }),
   acceptServerEula: (id: string) =>
     invoke<Server>("accept_server_eula", { id }),
-  startServer: (id: string) => invoke<number>("start_server", { id }),
+  /** `moved` names the mods moved to Client mods before the server launched. */
+  startServer: (id: string) =>
+    invoke<{ pid: number; moved: string[] }>("start_server", { id }),
   stopServer: (id: string) => invoke<boolean>("stop_server", { id }),
   killServer: (id: string) => invoke<boolean>("kill_server", { id }),
   sendServerCommand: (id: string, command: string) =>
@@ -472,7 +477,7 @@ export const api = {
   // started Geode is waiting in takePendingJoin.
   previewJoin: (input: JoinInput) => invoke<JoinPreview>("preview_join", { input }),
   /** `info` is what the player approved; the import is refused if the downloaded pack describes something else. */
-  joinServer: (link: JoinLink, info: PackInfo, name?: string) =>
-    invoke<JoinOutcome>("join_server", { link, info, name: name ?? null }),
+  joinServer: (link: JoinLink, info: PackInfo, serverSideMods: boolean, name?: string) =>
+    invoke<JoinOutcome>("join_server", { link, info, serverSideMods, name: name ?? null }),
   takePendingJoin: () => invoke<string | null>("take_pending_join"),
 };

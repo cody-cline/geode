@@ -344,9 +344,10 @@ pub fn apply(manifest: &Manifest, instance: &mut Instance) {
 /// a named list is more actionable than an instance that is quietly incomplete.
 ///
 /// On any exit, including an error or a cancel, whatever landed from a server's
-/// pack has already been claimed for the server. The caller saves a partial
-/// import rather than discarding it, so the ownership has to be right before
-/// the failure is reported, not only on success.
+/// pack has already been claimed for the server, and turned on or off as it
+/// should be. The caller saves a partial import rather than discarding it, so
+/// the ownership has to be right before the failure is reported, not only on
+/// success.
 ///
 /// A server's pack also leaves the instance naming no modpack. The mrpack half
 /// labels every import as the pack its index names, which for a server is the
@@ -366,6 +367,21 @@ pub async fn import(
         .await
         .map_err(|e| Error::msg(format!("reading the pack's manifest panicked: {e}")))??;
 
+    // Read before anything lands, so what the server claims afterwards is what
+    // the pack itself names and nothing else that happens to be on disk.
+    let arrived = match manifest.as_ref().filter(|m| m.kind == Kind::Server) {
+        Some(manifest) => {
+            let probe = archive.to_path_buf();
+            let manifest = manifest.clone();
+            Some(
+                tokio::task::spawn_blocking(move || arrivals(&probe, &manifest))
+                    .await
+                    .map_err(|e| Error::msg(format!("reading the pack's files panicked: {e}")))??,
+            )
+        }
+        None => None,
+    };
+
     let outcome = async {
         if manifest.as_ref().is_some_and(|m| m.kind == Kind::Server) {
             check_server_downloads(archive).await?;
@@ -383,11 +399,226 @@ pub async fn import(
     }
     .await;
 
-    if manifest.as_ref().is_some_and(|m| m.kind == Kind::Server) {
+    if let Some(arrived) = &arrived {
         instance.pack = None;
-        instance::content::claim_for_server(paths, instance).await?;
+        settle_server_files(paths, instance, arrived, &PlayerOff::default()).await?;
     }
     outcome
+}
+
+/// One content file a server's pack brings, however it brings it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Arrival {
+    /// The server had it turned off.
+    pub off: bool,
+    /// How the server classified it, when its pack said.
+    pub side: Option<instance::jar::Side>,
+    /// The provider and project it is, when the pack names one.
+    pub project: Option<(String, String)>,
+}
+
+/// Every content file a server's pack brings, by kind and enabled file name.
+///
+/// Read off the pack rather than the disk after importing, because a joined
+/// instance holds more than the server's files: a player's own mod beside
+/// them is theirs, and must not be claimed for the server just for being in
+/// the same folder. So only what the pack names counts — its index entries a
+/// client installs, its references, and the files it carries as bytes directly
+/// in a content folder — and the notes then say which side each belongs on.
+///
+/// A mod the pack brings both on and off is one mod, and arrives on: that is
+/// the copy a server's pack names.
+///
+/// Blocking: it reads the zip.
+pub(crate) fn arrivals(
+    archive: &Path,
+    manifest: &Manifest,
+) -> Result<HashMap<(instance::content::ContentKind, String), Arrival>> {
+    let mut found: HashMap<(instance::content::ContentKind, String), Arrival> = HashMap::new();
+    let mut add = |rel: &str, off: bool, project: Option<(String, String)>| {
+        let Some((kind, base, disabled)) = content_file(rel) else {
+            return;
+        };
+        found
+            .entry((kind, base))
+            .and_modify(|a| {
+                a.off &= off || disabled;
+                a.project = a.project.take().or(project.clone());
+            })
+            .or_insert(Arrival {
+                off: off || disabled,
+                side: None,
+                project,
+            });
+    };
+
+    for file in instance::modpack::read_index(archive)?
+        .into_iter()
+        .flat_map(|index| index.files)
+    {
+        // What an index says a client does not install never lands.
+        if file
+            .env
+            .as_ref()
+            .is_some_and(|env| env.client == "unsupported")
+        {
+            continue;
+        }
+        let project = file
+            .downloads
+            .iter()
+            .find_map(|url| crate::install::content::ids_from_modrinth_url(url))
+            .map(|(project, _)| ("modrinth".to_string(), project));
+        add(&file.path, false, project);
+    }
+    for note in &manifest.files {
+        if let Some(source) = &note.source {
+            let project = (source.provider.clone(), source.project_id.clone());
+            add(&note.path, note.disabled, Some(project));
+        }
+    }
+    let zip = instance::modpack::open_pack(archive)?;
+    for name in zip.file_names() {
+        if let Some(rel) = ["overrides/", "client-overrides/"]
+            .iter()
+            .find_map(|root| name.strip_prefix(root))
+        {
+            add(rel, false, None);
+        }
+    }
+
+    for note in &manifest.files {
+        if let Some((kind, base, _)) = content_file(&note.path) {
+            if let Some(arrival) = found.get_mut(&(kind, base)) {
+                arrival.side = note.side;
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// A pack path naming a content file directly inside its folder: the kind,
+/// the enabled name, and whether the name is turned off.
+///
+/// Anything deeper, or anywhere else, is not a file a content folder lists,
+/// so it is nothing to claim.
+fn content_file(rel: &str) -> Option<(instance::content::ContentKind, String, bool)> {
+    let path = Path::new(rel);
+    if !crate::paths::is_safe_relative(path) || path.components().count() != 2 {
+        return None;
+    }
+    let kind = kind_for(path)?;
+    let name = path.file_name()?.to_str()?;
+    if !instance::content::is_content_file(name, kind) {
+        return None;
+    }
+    let (base, enabled) = instance::content::strip_disabled(name);
+    Some((kind, base.to_string(), !enabled))
+}
+
+/// What a player turned off themselves among a server's files, to keep off
+/// when the server sends them again.
+#[derive(Debug, Default)]
+pub(crate) struct PlayerOff {
+    /// By kind and enabled file name.
+    pub names: HashSet<(instance::content::ContentKind, String)>,
+    /// By provider and project, so a new version under a new name stays off.
+    pub projects: HashSet<(String, String)>,
+}
+
+/// Make what a server's pack brought the server's, in the state it should be.
+///
+/// Tagging records alone is not enough, and was the first version's mistake: a
+/// jar with no provenance travels as an override, lands with no record at all,
+/// and so could never be tagged — which left exactly the mods a server most
+/// needs to keep, the ones with no public download, as the only ones a player
+/// could delete. So every file the pack brought gets a record here, and one
+/// that had none gets a record that says nothing except whose it is. Files the
+/// pack did not bring are left alone, record or not: they are the player's.
+///
+/// Each file ends up on disk once, on or off. It is off when the server had it
+/// off, when the player turned it off before, or when it is a server-side mod
+/// and the player keeps those off; its record remembers the server's side and
+/// whether the server had it off, so the player's choices can be told apart
+/// from the server's later.
+///
+/// Safe to run on a failed import too, and should be: a server pack that
+/// stopped halfway is still the server's, and a file that did not land is
+/// simply skipped.
+pub(crate) async fn settle_server_files(
+    paths: &Paths,
+    instance: &mut Instance,
+    arrivals: &HashMap<(instance::content::ContentKind, String), Arrival>,
+    player_off: &PlayerOff,
+) -> Result<()> {
+    use instance::content::{
+        content_dir, is_regular_file, set_enabled_in, ContentRecord, Origin, DISABLED_SUFFIX,
+    };
+
+    for ((kind, name), arrival) in arrivals {
+        let dir = content_dir(paths, &instance.id, *kind);
+        let disabled = format!("{name}{DISABLED_SUFFIX}");
+        let (fresh, stale) = if arrival.off {
+            (&disabled, name)
+        } else {
+            (name, &disabled)
+        };
+        let (has_fresh, has_stale) = (
+            is_regular_file(&dir.join(fresh)).await,
+            is_regular_file(&dir.join(stale)).await,
+        );
+        if !has_fresh && !has_stale {
+            continue;
+        }
+        // Both on and off is one mod twice, and the one the pack just wrote is
+        // the one it named.
+        if has_fresh && has_stale {
+            tokio::fs::remove_file(dir.join(stale)).await?;
+        }
+        let current = if has_fresh { fresh } else { stale };
+
+        let off = arrival.off
+            || player_off.names.contains(&(*kind, name.clone()))
+            || arrival
+                .project
+                .as_ref()
+                .is_some_and(|project| player_off.projects.contains(project))
+            || (instance.server_side_mods_off && arrival.side == Some(instance::jar::Side::Server));
+        if (current == &disabled) != off {
+            set_enabled_in(&dir, current, !off).await?;
+        }
+
+        match instance
+            .content
+            .iter_mut()
+            .find(|r| r.kind == *kind && &r.file_name == name)
+        {
+            Some(record) => {
+                record.origin = Origin::Server;
+                record.side = arrival.side;
+                record.server_off = arrival.off;
+            }
+            None => instance.content.push(ContentRecord {
+                file_name: name.clone(),
+                kind: *kind,
+                // Nothing is known about where it came from, and nothing is
+                // pretended: no provider means no update check and no source.
+                provider: String::new(),
+                project_id: String::new(),
+                version_id: String::new(),
+                name: name.clone(),
+                version_number: String::new(),
+                slug: None,
+                icon_url: None,
+                dependency: false,
+                origin: Origin::Server,
+                requires: None,
+                side: arrival.side,
+                server_off: arrival.off,
+            }),
+        }
+    }
+    Ok(())
 }
 
 /// Refuse a server's pack whose index would download from anywhere but
@@ -629,6 +860,7 @@ async fn resolve_references(
             origin: Default::default(),
             requires: None,
             side: None,
+            server_off: false,
         }));
     }
 
@@ -1192,6 +1424,7 @@ mod tests {
             origin: Default::default(),
             requires: None,
             side: None,
+            server_off: false,
         }
     }
 
@@ -2866,6 +3099,296 @@ mod tests {
             );
         }
         assert!(!game.join("client-mods").exists());
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    // -----------------------------------------------------------------------
+    // A player's choice about server-side mods
+    // -----------------------------------------------------------------------
+
+    /// What a server's pack brings is read off the pack: an index entry a
+    /// client installs, a reference in the state the server had it, files
+    /// carried as bytes on or off and from either overrides folder, and the
+    /// side each note gives. Nothing a client never installs, and nothing
+    /// outside a content folder, counts.
+    #[tokio::test]
+    async fn what_a_server_pack_brings_is_read_from_the_pack() {
+        let (paths, mut server) = server_fixture("arrivals", false).await;
+        add_client_mods(&paths, &mut server).await;
+        let mods = paths.server_run(&server.id).join("mods");
+        tokio::fs::rename(
+            mods.join("anticheat.jar"),
+            mods.join("anticheat.jar.disabled"),
+        )
+        .await
+        .unwrap();
+        let dest = paths.root.join("server.geodepack");
+        export_server(&paths, &server, dest.clone(), &Progress::silent("t"))
+            .await
+            .unwrap();
+        let manifest = read_manifest(&dest).unwrap().unwrap();
+
+        let found = arrivals(&dest, &manifest).unwrap();
+        let get = |name: &str| {
+            found
+                .get(&(ContentKind::Mod, name.to_string()))
+                .cloned()
+                .unwrap_or_else(|| panic!("{name} is not an arrival: {found:?}"))
+        };
+        let project = |provider: &str| Some((provider.to_string(), "proj-1".to_string()));
+        assert_eq!(
+            get("sodium-mr.jar"),
+            Arrival {
+                off: false,
+                side: None,
+                project: project("modrinth")
+            }
+        );
+        assert_eq!(
+            get("anticheat.jar"),
+            Arrival {
+                off: true,
+                side: None,
+                project: project("curseforge")
+            }
+        );
+        assert_eq!(
+            get("create-cf.jar"),
+            Arrival {
+                off: false,
+                side: None,
+                project: project("curseforge")
+            }
+        );
+        assert_eq!(
+            get("private-tools.jar"),
+            Arrival {
+                off: true,
+                side: None,
+                project: None
+            }
+        );
+        assert_eq!(
+            get("homemade.jar"),
+            Arrival {
+                off: false,
+                side: None,
+                project: None
+            }
+        );
+        assert_eq!(
+            get("hand.jar"),
+            Arrival {
+                off: false,
+                side: Some(Side::Client),
+                project: None
+            }
+        );
+        assert_eq!(get("server-side.jar").side, Some(Side::Server));
+        assert_eq!(get("srv-mr.jar").side, Some(Side::Server));
+        assert_eq!(found.len(), 11, "{found:?}");
+
+        // A pack Geode would not write: an index entry no client installs,
+        // and bytes outside a content folder or escaping it.
+        let hand_built = paths.root.join("hand-built.geodepack");
+        let index = serde_json::json!({
+            "formatVersion": 1, "game": "minecraft", "versionId": "1", "name": "S",
+            "files": [
+                {
+                    "path": "mods/server-only.jar",
+                    "hashes": { "sha1": "0" },
+                    "env": { "client": "unsupported", "server": "required" },
+                    "downloads": ["https://cdn.modrinth.com/data/P/versions/V/server-only.jar"],
+                },
+                {
+                    "path": "mods/installed.jar",
+                    "hashes": { "sha1": "0" },
+                    "downloads": ["https://cdn.modrinth.com/data/Q/versions/V/installed.jar"],
+                },
+            ],
+            "dependencies": { "minecraft": "1.21.1" }
+        });
+        write_pack(
+            &hand_built,
+            &index,
+            &manifest,
+            &[
+                ("overrides/somewhere/unknown.jar", b"x"),
+                ("overrides/../mods/escape.jar", b"x"),
+                ("overrides/mods/nested/deep.jar", b"x"),
+                ("overrides/config/mods/config.jar", b"x"),
+                ("overrides/mods/notes.txt", b"x"),
+            ],
+        );
+        let found = arrivals(&hand_built, &manifest).unwrap();
+        let mut names: Vec<&str> = found.keys().map(|(_, name)| name.as_str()).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "anticheat.jar",
+                "cf-client.jar",
+                "create-cf.jar",
+                "installed.jar"
+            ],
+            "{found:?}"
+        );
+        assert_eq!(
+            found[&(ContentKind::Mod, "installed.jar".to_string())].project,
+            Some(("modrinth".into(), "Q".into()))
+        );
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    /// A joined instance can hold the player's own mods beside the server's.
+    /// Only what the pack brought becomes the server's: an untracked jar the
+    /// player dropped in stays untracked, and their own installed mod stays
+    /// theirs to delete.
+    #[tokio::test]
+    async fn a_server_pack_claims_only_what_it_brought() {
+        let (paths, server) = server_fixture("claims-only", false).await;
+        let dest = paths.root.join("server.geodepack");
+        export_server(&paths, &server, dest.clone(), &Progress::silent("t"))
+            .await
+            .unwrap();
+
+        let mut arrived = fresh("srvpack-claims-only-arrived");
+        let game = paths.game_dir(&arrived.id);
+        let _ = tokio::fs::remove_dir_all(&game).await;
+        seed_indexed_mods(&paths, &server, &game).await;
+        let mods = game.join("mods");
+        tokio::fs::write(mods.join("own.jar"), fabric_jar("own", "*"))
+            .await
+            .unwrap();
+        tokio::fs::write(mods.join("own-mr.jar"), fabric_jar("ownmr", "*"))
+            .await
+            .unwrap();
+        arrived
+            .content
+            .push(record("modrinth", "own-mr.jar", ContentKind::Mod));
+
+        import(
+            &offline(),
+            &paths,
+            &mut arrived,
+            &dest,
+            None,
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            arrived.content.iter().all(|r| r.file_name != "own.jar"),
+            "the player's untracked jar was claimed: {:?}",
+            arrived.content
+        );
+        let own = arrived
+            .content
+            .iter()
+            .find(|r| r.file_name == "own-mr.jar")
+            .expect("the player's own record is kept");
+        assert_eq!(own.origin, Origin::User);
+        crate::instance::content::remove_in(
+            &mods,
+            &mut arrived.content,
+            ContentKind::Mod,
+            "own-mr.jar",
+        )
+        .await
+        .expect("the player's own mod stays theirs to delete");
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    /// Import a server fixture's pack into a fresh instance, offline, with
+    /// server-side mods on or off.
+    async fn import_choosing(tag: &str, server_side_mods_off: bool) -> (Paths, Instance) {
+        let (paths, server) = server_fixture(tag, false).await;
+        let dest = paths.root.join("server.geodepack");
+        export_server(&paths, &server, dest.clone(), &Progress::silent("t"))
+            .await
+            .unwrap();
+
+        let mut arrived = fresh(&format!("srvpack-{tag}-arrived"));
+        arrived.server_side_mods_off = server_side_mods_off;
+        let game = paths.game_dir(&arrived.id);
+        let _ = tokio::fs::remove_dir_all(&game).await;
+        seed_indexed_mods(&paths, &server, &game).await;
+        import(
+            &offline(),
+            &paths,
+            &mut arrived,
+            &dest,
+            None,
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+        (paths, arrived)
+    }
+
+    /// A player who keeps server-side mods off still gets them, turned off,
+    /// however they travel — and every other mod arrives on. A player who
+    /// keeps them gets them on.
+    #[tokio::test]
+    async fn a_player_who_turned_server_side_mods_off_gets_them_off() {
+        for off in [true, false] {
+            let (paths, arrived) = import_choosing(&format!("side-off-{off}"), off).await;
+            let mods = paths.game_dir(&arrived.id).join("mods");
+
+            for jar in ["server-side.jar", "srv-mr.jar"] {
+                let disabled = format!("{jar}.disabled");
+                assert_eq!(
+                    (mods.join(jar).is_file(), mods.join(&disabled).is_file()),
+                    (!off, off),
+                    "{jar} with server-side mods off: {off}"
+                );
+                let record = arrived
+                    .content
+                    .iter()
+                    .find(|r| r.file_name == jar)
+                    .unwrap_or_else(|| panic!("{jar} has no record: {:?}", arrived.content));
+                assert_eq!(
+                    (record.origin, record.side, record.server_off),
+                    (Origin::Server, Some(Side::Server), false),
+                    "{jar}"
+                );
+            }
+            assert!(mods.join("homemade.jar").is_file(), "off: {off}");
+            assert!(mods.join("sodium-mr.jar").is_file(), "off: {off}");
+
+            let _ = tokio::fs::remove_dir_all(&paths.root).await;
+        }
+    }
+
+    /// A mod the admin turned off is off for the player too, and its record
+    /// says the server did it — so turning server-side mods on later does not
+    /// undo the admin's choice.
+    #[tokio::test]
+    async fn a_mod_the_server_turned_off_arrives_off_and_says_so() {
+        let (paths, arrived) = import_choosing("server-off", false).await;
+        let mods = paths.game_dir(&arrived.id).join("mods");
+
+        assert!(mods.join("private-tools.jar.disabled").is_file());
+        assert!(!mods.join("private-tools.jar").exists());
+        let record = arrived
+            .content
+            .iter()
+            .find(|r| r.file_name == "private-tools.jar")
+            .expect("the turned-off jar has a record");
+        assert!(record.server_off, "{record:?}");
+        assert!(
+            arrived
+                .content
+                .iter()
+                .filter(|r| r.file_name != "private-tools.jar")
+                .all(|r| !r.server_off),
+            "{:?}",
+            arrived.content
+        );
 
         let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }

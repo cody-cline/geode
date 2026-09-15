@@ -9,6 +9,7 @@ import { useStore } from "../../lib/store";
 import { LOADERS } from "../../lib/types";
 import type { Instance, InstanceOverrides } from "../../lib/types";
 
+import viewStyles from "../ServerView.module.css";
 import styles from "./SettingsTab.module.css";
 
 /** Empty inputs mean "inherit the global default", not "set to zero". */
@@ -54,6 +55,7 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [duplicating, setDuplicating] = useState(false);
+  const [changingServerSide, setChangingServerSide] = useState(false);
   const [systemMemory, setSystemMemory] = useState<number | null>(null);
 
   useEffect(() => {
@@ -107,6 +109,28 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
       reportError("Could not save", e);
     } finally {
       setSaving(false);
+    }
+  }
+
+  // Applied the moment it is ticked rather than with Save: it renames files on
+  // disk, and a box that says off while the mods are still on would be a lie.
+  async function setServerSideMods(on: boolean) {
+    setChangingServerSide(true);
+    try {
+      const changed = await api.setServerSideMods(instance.id, on);
+      await refreshInstances();
+      toast({
+        kind: "success",
+        title: on ? "Server-side mods on" : "Server-side mods off",
+        body:
+          changed > 0
+            ? `Turned ${on ? "on" : "off"} ${changed} mod${changed === 1 ? "" : "s"}.`
+            : undefined,
+      });
+    } catch (e) {
+      reportError("Could not change server-side mods", e);
+    } finally {
+      setChangingServerSide(false);
     }
   }
 
@@ -461,6 +485,32 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
             Hooks run in the instance's game directory with your shell.
           </p>
         </section>
+
+        {instance.joined && (
+          <section className={styles.section}>
+            <h2 className={styles.sectionTitle}>Server</h2>
+            <label
+              className={viewStyles.settingToggle}
+              title={instance.running ? "Stop the game to change this" : undefined}
+            >
+              <input
+                type="checkbox"
+                checked={!instance.serverSideModsOff}
+                disabled={changingServerSide || instance.running}
+                onChange={(e) => void setServerSideMods(e.target.checked)}
+              />
+              <span>
+                <strong>Server-side mods</strong>
+                <span className={viewStyles.settingWhy}>
+                  Mods only the server needs. Keep them on to match the server
+                  exactly, or turn them off for better performance. This
+                  applies straight away, and to everything the server sends
+                  later.
+                </span>
+              </span>
+            </label>
+          </section>
+        )}
 
         <section className={styles.section}>
           <h2 className={styles.sectionTitle}>Manage</h2>

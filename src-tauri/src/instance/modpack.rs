@@ -544,6 +544,7 @@ pub async fn import_into(
                     // Pack manifests carry no dependency graph; the jars do.
                     requires: None,
                     side: None,
+                    server_off: false,
                 });
             }
 
@@ -731,6 +732,7 @@ async fn record_mrpack_provenance(
             origin: Default::default(),
             requires: None,
             side: None,
+            server_off: false,
         });
     }
 }

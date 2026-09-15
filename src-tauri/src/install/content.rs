@@ -134,6 +134,7 @@ pub async fn install_into(
         origin: Default::default(),
         requires: Some(required_ids(version)),
         side,
+        server_off: false,
     });
 
     Ok(file.filename.clone())
@@ -535,6 +536,7 @@ mod tests {
             origin: crate::instance::content::Origin::Server,
             requires: None,
             side: None,
+            server_off: false,
         }
     }
 
@@ -899,6 +901,7 @@ pub async fn link_untracked_in(
             // A hash lookup gives provenance, not a dependency list.
             requires: None,
             side: project.and_then(|p| p.listed_side()),
+            server_off: false,
         });
         identified += 1;
     }

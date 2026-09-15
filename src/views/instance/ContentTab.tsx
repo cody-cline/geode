@@ -347,6 +347,14 @@ export default function ContentTab({
                         server
                       </span>
                     )}
+                    {item.origin === "server" && item.side === "server" && (
+                      <span
+                        className="badge"
+                        title="Only the server needs this. Turn all of these on or off in Settings, under Server."
+                      >
+                        server-side
+                      </span>
+                    )}
                     {item.provider && (
                       <span className={clsx("badge", `badge-${item.provider}`)}>
                         {providerShort(item.provider)}

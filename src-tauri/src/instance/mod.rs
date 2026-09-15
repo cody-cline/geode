@@ -71,6 +71,14 @@ pub struct Instance {
     /// an instance from its server yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub joined: Option<crate::share::link::Link>,
+    /// This joined instance keeps its server's server-side mods turned off,
+    /// now and for everything the server sends later.
+    ///
+    /// Mods only the server needs do nothing in a player's game but take time
+    /// to load, so a player may do without them. They still arrive, turned
+    /// off, so turning them back on needs no download.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub server_side_mods_off: bool,
 }
 
 /// Where an instance came from, and enough of the source's identity to keep
@@ -159,6 +167,7 @@ impl Instance {
             content: Vec::new(),
             pack: None,
             joined: None,
+            server_side_mods_off: false,
         }
     }
 
@@ -287,6 +296,9 @@ pub async fn duplicate(paths: &Paths, id: &str, new_name: String) -> Result<Inst
     // the pin it carries the one a typed address is held to — a certificate
     // the server may have replaced since, and a later join already knows.
     copy.joined = None;
+    // Nothing updates a copy from a server, so there is no later pack for the
+    // setting to apply to.
+    copy.server_side_mods_off = false;
 
     copy_dir(&paths.game_dir(id), &paths.game_dir(&copy.id)).await?;
     // The copy keeps the original's `icon` and `banner` names, so the files
@@ -350,11 +362,15 @@ mod tests {
             ))
             .unwrap(),
         );
+        original.server_side_mods_off = true;
         original.save(&paths).await.unwrap();
 
         let copy = duplicate(&paths, &original.id, "Backup".into()).await.unwrap();
         assert!(copy.joined.is_none());
-        assert!(load(&paths, &copy.id).await.unwrap().joined.is_none());
+        assert!(!copy.server_side_mods_off);
+        let saved = load(&paths, &copy.id).await.unwrap();
+        assert!(saved.joined.is_none());
+        assert!(!saved.server_side_mods_off);
         assert!(load(&paths, &original.id).await.unwrap().joined.is_some());
 
         let _ = std::fs::remove_dir_all(&paths.root);

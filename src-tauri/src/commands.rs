@@ -505,6 +505,30 @@ pub async fn set_content_enabled(
     instance::content::set_enabled(&state.paths, &id, kind, &file, enabled).await
 }
 
+/// Turn a joined instance's server-side mods on or off, and say how many
+/// changed.
+#[tauri::command]
+pub async fn set_server_side_mods(
+    state: State<'_, AppState>,
+    id: String,
+    on: bool,
+) -> Result<usize> {
+    // The game has its mods open, and a jar renamed under it would not stop it
+    // loading, only mislead the player about what is running.
+    if state.games.is_running(&id) {
+        return Err(Error::msg("Stop the game before changing server-side mods"));
+    }
+    let mut inst = instance::load(&state.paths, &id).await?;
+    if inst.joined.is_none() {
+        return Err(Error::msg(
+            "only an instance joined from a server has server-side mods",
+        ));
+    }
+    let changed = instance::content::set_server_side_mods(&state.paths, &mut inst, on).await?;
+    inst.save(&state.paths).await?;
+    Ok(changed)
+}
+
 #[tauri::command]
 pub async fn remove_content(
     state: State<'_, AppState>,
@@ -1776,16 +1800,43 @@ pub async fn add_cardboard(
     Ok(server_view(server, &state))
 }
 
+/// A server that started, and the mods moved out of its Mods first.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerStart {
+    pub pid: u32,
+    /// File names moved to Client mods, so the app can say so on whichever
+    /// tab the admin pressed Start from.
+    pub moved: Vec<String>,
+}
+
 #[tauri::command]
 pub async fn start_server(
     app: AppHandle,
     state: State<'_, AppState>,
     id: String,
-) -> Result<u32> {
+) -> Result<ServerStart> {
     if state.servers.is_running(&id) {
         return Err(Error::msg("that server is already running"));
     }
     let mut server = crate::server::load(&state.paths, &id).await?;
+
+    // While nothing is running, so the server never loads a mod that only
+    // runs in players' games. Saved straight away, so the moves stay recorded
+    // even if the start fails, and said in the console too, which is the only
+    // place a start that fails later still says it.
+    let moved = crate::server::move_client_only_mods(&state.paths, &mut server).await;
+    if !moved.is_empty() {
+        server.save_if_present(&state.paths).await?;
+        let sink = crate::desktop::sink(app.clone());
+        for name in &moved {
+            crate::server::schedule::announce(
+                &sink,
+                &id,
+                format!("Moved {name} to Client mods: it only runs in players' games"),
+            );
+        }
+    }
 
     // The server rotates its own log as it starts, so this is the moment the
     // oldest archive becomes one too many.
@@ -1823,7 +1874,7 @@ pub async fn start_server(
 
     server.last_started = Some(chrono::Utc::now().timestamp());
     server.save_if_present(&state.paths).await?;
-    Ok(pid)
+    Ok(ServerStart { pid, moved })
 }
 
 /// Ask the server to stop the way an operator would, so it saves first.
@@ -2588,7 +2639,7 @@ pub async fn launch_instance(
     }
 
     let config = state.config().await;
-    let mut inst = instance::load(&state.paths, &id).await?;
+    let inst = instance::load(&state.paths, &id).await?;
     let progress = Progress::new(crate::desktop::sink(app.clone()), format!("launch:{id}"));
     state.register_cancel(progress.id(), progress.cancel_flag());
 
@@ -2638,8 +2689,14 @@ pub async fn launch_instance(
     let plan = crate::launch::build_plan(&state.paths, &config, &inst, &installed, &session)?;
     let pid = crate::launch::spawn(&app, &state.paths, &inst, plan, state.games.clone()).await?;
 
-    inst.last_played = Some(chrono::Utc::now().timestamp());
-    inst.save(&state.paths).await?;
+    // Read again, as the game's exit does, rather than saving the copy from
+    // before preparing, which can take minutes: a setting changed meanwhile —
+    // server-side mods turned off, their jars already renamed — would be put
+    // back while the files stayed as they are.
+    if let Ok(mut played) = instance::load(&state.paths, &id).await {
+        played.last_played = Some(chrono::Utc::now().timestamp());
+        played.save(&state.paths).await?;
+    }
 
     if config.hide_on_launch {
         if let Some(window) = app.get_webview_window("main") {
@@ -3098,6 +3155,7 @@ pub async fn join_server(
     state: State<'_, AppState>,
     link: share::link::Link,
     info: share::host::PackInfo,
+    server_side_mods: bool,
     name: Option<String>,
 ) -> Result<JoinOutcome> {
     // Back from the webview, so checked again by the same strict parser as a
@@ -3110,7 +3168,16 @@ pub async fn join_server(
     let progress = Progress::new(crate::desktop::sink(app.clone()), format!("join:{run}"));
     state.register_cancel(progress.id(), progress.cancel_flag());
 
-    let outcome = join_into_new_instance(&state, &link, &info, name, &archive, &progress).await;
+    let outcome = join_into_new_instance(
+        &state,
+        &link,
+        &info,
+        server_side_mods,
+        name,
+        &archive,
+        &progress,
+    )
+    .await;
 
     state.clear_cancel(progress.id());
     let _ = tokio::fs::remove_file(&archive).await;
@@ -3143,20 +3210,32 @@ async fn join_into_new_instance(
     state: &AppState,
     link: &share::link::Link,
     approved: &share::host::PackInfo,
+    server_side_mods: bool,
     name: Option<String>,
     archive: &std::path::Path,
     progress: &Progress,
 ) -> Result<(Instance, Vec<String>)> {
     share::join::download(link, archive, progress).await?;
-    install_joined(state, link, approved, name, archive, progress).await
+    install_joined(
+        state,
+        link,
+        approved,
+        server_side_mods,
+        name,
+        archive,
+        progress,
+    )
+    .await
 }
 
 /// Check a downloaded server pack against what the player approved, and
-/// install it as a new instance.
+/// install it as a new instance, with its server-side mods on or off as the
+/// player chose.
 async fn install_joined(
     state: &AppState,
     link: &share::link::Link,
     approved: &share::host::PackInfo,
+    server_side_mods: bool,
     name: Option<String>,
     archive: &std::path::Path,
     progress: &Progress,
@@ -3190,6 +3269,8 @@ async fn install_joined(
     )
     .await?;
     inst.joined = Some(link.clone());
+    // Before the import, which turns them off as they land.
+    inst.server_side_mods_off = !server_side_mods;
     inst.save(&state.paths).await?;
 
     let config = state.config().await;
@@ -3249,13 +3330,13 @@ mod tests {
         Scratch(Paths { root })
     }
 
-    fn fabric_jar(id: &str) -> Vec<u8> {
+    fn fabric_jar(id: &str, environment: &str) -> Vec<u8> {
         let mut bytes = Vec::new();
         {
             let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
             let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
             zip.start_file("fabric.mod.json", options).unwrap();
-            write!(zip, r#"{{"schemaVersion":1,"id":"{id}","version":"1.0.0","environment":"*"}}"#).unwrap();
+            write!(zip, r#"{{"schemaVersion":1,"id":"{id}","version":"1.0.0","environment":"{environment}"}}"#).unwrap();
             zip.finish().unwrap();
         }
         bytes
@@ -3268,7 +3349,15 @@ mod tests {
         server.save(paths).await.unwrap();
         let mods = paths.server_run(&server.id).join("mods");
         tokio::fs::create_dir_all(&mods).await.unwrap();
-        tokio::fs::write(mods.join("homemade.jar"), fabric_jar("homemade")).await.unwrap();
+        tokio::fs::write(mods.join("homemade.jar"), fabric_jar("homemade", "*"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            mods.join("server-side.jar"),
+            fabric_jar("serverside", "server"),
+        )
+        .await
+        .unwrap();
         let share = ServerShare { code: Code::generate(), include_config: false, shared: true };
         crate::server::share::save(paths, &server.id, &share).await.unwrap();
         (server, share)
@@ -3420,15 +3509,31 @@ mod tests {
 
         // Not what was approved: refused, and nothing created.
         let changed = share::host::PackInfo { loader: "forge".into(), ..approved.clone() };
-        install_joined(&state, &link, &changed, None, &archive, &Progress::silent("t"))
-            .await
-            .expect_err("a pack that is not what the player approved");
+        install_joined(
+            &state,
+            &link,
+            &changed,
+            true,
+            None,
+            &archive,
+            &Progress::silent("t"),
+        )
+        .await
+        .expect_err("a pack that is not what the player approved");
         assert_eq!(instance_count(&player.0).await, 0, "a refused join left an instance behind");
 
         // What was approved: installed, remembered as joined, and the server's.
-        let (inst, problems) = install_joined(&state, &link, &approved, None, &archive, &Progress::silent("t"))
-            .await
-            .unwrap();
+        let (inst, problems) = install_joined(
+            &state,
+            &link,
+            &approved,
+            true,
+            None,
+            &archive,
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
         assert!(problems.is_empty(), "{problems:?}");
         let saved = instance::load(&player.0, &inst.id).await.unwrap();
         assert_eq!(saved.joined.as_ref().map(|l| &l.code), Some(&share.code));
@@ -3437,13 +3542,47 @@ mod tests {
             .iter()
             .any(|r| r.file_name == "homemade.jar" && r.origin == instance::content::Origin::Server));
         assert!(saved.pack.is_none(), "a joined server is not a published modpack");
+        assert!(!saved.server_side_mods_off);
+        let mods = player.0.game_dir(&inst.id).join("mods");
+        assert!(
+            mods.join("server-side.jar").is_file(),
+            "a server-side mod the player kept is off"
+        );
+
+        // Without server-side mods: the choice is kept, and the server-side mod
+        // arrives turned off while the rest are on.
+        let (inst, _) = install_joined(
+            &state,
+            &link,
+            &approved,
+            false,
+            None,
+            &archive,
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+        let saved = instance::load(&player.0, &inst.id).await.unwrap();
+        assert!(saved.server_side_mods_off);
+        let mods = player.0.game_dir(&inst.id).join("mods");
+        assert!(mods.join("server-side.jar.disabled").is_file());
+        assert!(!mods.join("server-side.jar").exists());
+        assert!(mods.join("homemade.jar").is_file());
 
         // A personal pack at that address: refused, and nothing more created.
         make_personal(&archive);
         let before = instance_count(&player.0).await;
-        let err = install_joined(&state, &link, &approved, None, &archive, &Progress::silent("t"))
-            .await
-            .expect_err("a personal pack is not a server's");
+        let err = install_joined(
+            &state,
+            &link,
+            &approved,
+            true,
+            None,
+            &archive,
+            &Progress::silent("t"),
+        )
+        .await
+        .expect_err("a personal pack is not a server's");
         assert!(err.to_string().contains("server's pack"), "{err}");
         assert_eq!(instance_count(&player.0).await, before);
     }
@@ -3496,6 +3635,7 @@ mod tests {
             &state,
             &link,
             &approved,
+            true,
             None,
             &archive,
             &Progress::silent("t"),

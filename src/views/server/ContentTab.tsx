@@ -86,10 +86,12 @@ export default function ServerContentTab({
     }
   }, [server.id, folder, reportError]);
 
+  // Read again when the server starts or stops as well: starting moves client
+  // mods out of Mods, and a row left behind would name a file no longer there.
   useEffect(() => {
     setItems(null);
     void load();
-  }, [load]);
+  }, [load, server.running]);
 
   const shown = useMemo(() => {
     if (!items) return null;
@@ -514,7 +516,7 @@ export default function ServerContentTab({
                         ? "Stop the server to move mods between folders"
                         : folder === "mod"
                           ? "Move to Client mods — players get it, this server stops loading it"
-                          : "Move to Mods — this server loads it too"
+                          : "Move to Mods — this server loads it too. A mod that itself says it only runs in players' games goes back to Client mods when the server starts."
                     }
                     aria-label={`Move ${item.name} to ${
                       folder === "mod" ? "Client mods" : "Mods"

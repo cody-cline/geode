@@ -17,6 +17,7 @@ import { useStore } from "../lib/store";
 import { LOADERS } from "../lib/types";
 import type { JoinOutcome, JoinPreview } from "../lib/types";
 
+import viewStyles from "../views/ServerView.module.css";
 import styles from "./JoinModal.module.css";
 
 /** `neoforge` as NeoForge, `paper` as Paper — ids are for machines. */
@@ -53,6 +54,8 @@ export default function JoinModal({
   const [looking, setLooking] = useState(false);
   const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Whether the server's server-side mods arrive turned on. Asked afresh for each server looked up. */
+  const [includeServerSide, setIncludeServerSide] = useState(true);
   /** An import that made its instance but came back with problems. */
   const [outcome, setOutcome] = useState<JoinOutcome | null>(null);
 
@@ -75,7 +78,10 @@ export default function JoinModal({
     setPreview(null);
     try {
       const found = await api.previewJoin(input);
-      if (id === lookups.current) setPreview(found);
+      if (id === lookups.current) {
+        setPreview(found);
+        setIncludeServerSide(true);
+      }
     } catch (e) {
       if (id === lookups.current) setError(errorMessage(e));
     } finally {
@@ -114,7 +120,7 @@ export default function JoinModal({
     try {
       // What the player approved goes back with the link, so a pack that has
       // come to describe something else by the time it downloads is refused.
-      joined = await api.joinServer(preview.link, preview.info);
+      joined = await api.joinServer(preview.link, preview.info, includeServerSide);
     } catch (e) {
       // Nothing was made: an import that gets as far as an instance comes back
       // as an outcome, problems and all. So this is safe to try again, from a
@@ -361,6 +367,25 @@ export default function JoinModal({
               <dd className={styles.mono}>{preview.address}</dd>
             </dl>
           </div>
+
+          {info.serverMods > 0 && (
+            <label className={viewStyles.settingToggle}>
+              <input
+                type="checkbox"
+                checked={includeServerSide}
+                disabled={importing}
+                onChange={(e) => setIncludeServerSide(e.target.checked)}
+              />
+              <span>
+                <strong>Include server-side mods ({info.serverMods})</strong>
+                <span className={viewStyles.settingWhy}>
+                  Mods only the server needs. Keep them to match the server
+                  exactly, or turn them off for better performance. You can
+                  change this later in the instance&apos;s Settings.
+                </span>
+              </span>
+            </label>
+          )}
 
           <StatusNote line={verificationLine(preview.verified, typed)} />
 

@@ -126,6 +126,14 @@ pub struct ContentRecord {
     /// not filled in after the fact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub side: Option<super::jar::Side>,
+    /// The server had this turned off when it last sent it.
+    ///
+    /// Only ever set on a joined instance's server files, where a file that is
+    /// off may be off because the server said so or because the player chose
+    /// to. The two are different promises: turning server-side mods back on
+    /// is the player undoing their own choice, never the server's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub server_off: bool,
 }
 
 /// Where a mod belongs, from everything known about it.
@@ -553,71 +561,58 @@ pub async fn remove_in(
     Ok(())
 }
 
-/// Mark everything in an instance as having arrived with a server's pack.
+/// Turn a joined instance's server-side mods on or off, all at once.
 ///
-/// Tagging records alone is not enough, and was the first version's mistake: a
-/// jar with no provenance travels as an override, lands with no record at all,
-/// and so could never be tagged — which left exactly the mods a server most
-/// needs to keep, the ones with no public download, as the only ones a player
-/// could delete. So every content file on disk gets a record here, and a file
-/// that had none gets one that says nothing except whose it is.
+/// Only the server's own mods that it classified as needing nothing but the
+/// server are touched, by renaming each to or from `.disabled`, so the choice
+/// can be changed later without downloading anything. The player's own mods,
+/// and the server's mods for both sides, are left as they are.
 ///
-/// Meant for a freshly imported instance, where everything present came from
-/// the pack. Safe to run on a failed import too, and should be: a server pack
-/// that stopped halfway is still the server's.
-pub async fn claim_for_server(paths: &Paths, instance: &mut super::Instance) -> Result<()> {
-    for record in &mut instance.content {
-        record.origin = Origin::Server;
-    }
+/// Turning them on never turns on one the server itself had off: that was the
+/// admin's decision, not the player's. It does turn on one the player switched
+/// off by hand, since "on" is a choice about all of them. The setting is kept
+/// on the instance either way, and applies to what the server sends later.
+///
+/// Returns how many files changed state. A record whose file is gone is
+/// skipped, the same as anywhere a record outlives its file.
+pub async fn set_server_side_mods(
+    paths: &Paths,
+    instance: &mut super::Instance,
+    on: bool,
+) -> Result<usize> {
+    let dir = content_dir(paths, &instance.id, ContentKind::Mod);
 
-    for kind in [
-        ContentKind::Mod,
-        ContentKind::ResourcePack,
-        ContentKind::ShaderPack,
-        ContentKind::DataPack,
-    ] {
-        let dir = content_dir(paths, &instance.id, kind);
-        let mut entries = match tokio::fs::read_dir(&dir).await {
-            Ok(e) => e,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e.into()),
+    let mut changed = 0;
+    for record in &instance.content {
+        let servers_side_mod = record.origin == Origin::Server
+            && record.kind == ContentKind::Mod
+            && record.side == Some(super::jar::Side::Server);
+        if !servers_side_mod || (on && record.server_off) {
+            continue;
+        }
+        let disabled = format!("{}{DISABLED_SUFFIX}", record.file_name);
+        let (on_disk, enabled) = if is_regular_file(&dir.join(&record.file_name)).await {
+            (record.file_name.as_str(), true)
+        } else if is_regular_file(&dir.join(&disabled)).await {
+            (disabled.as_str(), false)
+        } else {
+            continue;
         };
-        while let Some(entry) = entries.next_entry().await? {
-            if !entry.file_type().await?.is_file() {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().to_string();
-            if !is_content_file(&name, kind) {
-                continue;
-            }
-            let (base, _) = strip_disabled(&name);
-            if instance
-                .content
-                .iter()
-                .any(|r| r.file_name == base && r.kind == kind)
-            {
-                continue;
-            }
-            instance.content.push(ContentRecord {
-                file_name: base.to_string(),
-                kind,
-                // Nothing is known about where it came from, and nothing is
-                // pretended: no provider means no update check and no source.
-                provider: String::new(),
-                project_id: String::new(),
-                version_id: String::new(),
-                name: base.to_string(),
-                version_number: String::new(),
-                slug: None,
-                icon_url: None,
-                dependency: false,
-                origin: Origin::Server,
-                requires: None,
-                side: None,
-            });
+        if enabled != on {
+            set_enabled_in(&dir, on_disk, on).await?;
+            changed += 1;
         }
     }
-    Ok(())
+    instance.server_side_mods_off = !on;
+    Ok(changed)
+}
+
+/// A regular file at this path, and not a link to one — the same files a
+/// content listing shows.
+pub(crate) async fn is_regular_file(path: &Path) -> bool {
+    tokio::fs::symlink_metadata(path)
+        .await
+        .is_ok_and(|meta| meta.is_file())
 }
 
 pub async fn set_enabled(
@@ -733,6 +728,7 @@ mod tests {
             origin: Default::default(),
             requires: None,
             side: None,
+            server_off: false,
         };
         let json = serde_json::to_string(&record).unwrap();
         assert!(!json.contains("origin"), "{json}");
@@ -785,6 +781,7 @@ mod tests {
             origin: Default::default(),
             requires: Some(requires.iter().map(|s| s.to_string()).collect()),
             side: None,
+            server_off: false,
         }
     }
 
@@ -938,6 +935,7 @@ mod tests {
             origin: Default::default(),
             requires: Some(vec!["BBB".into()]),
             side: None,
+            server_off: false,
         }];
         link(&mut items, &[None, None], &records);
 
@@ -1159,6 +1157,94 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
+    /// The switch reaches only the server's own server-side mods. Turning them
+    /// off leaves the server's other mods and the player's own alone; turning
+    /// them on leaves off what the server itself had off. A record whose file
+    /// is gone is passed over, and the choice is kept either way.
+    #[tokio::test]
+    async fn turning_server_side_mods_off_and_on_touches_only_the_servers_server_side_mods() {
+        use crate::instance::jar::Side;
+
+        let paths = Paths {
+            root: std::env::temp_dir().join(format!("geode-server-side-{}", std::process::id())),
+        };
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+        let mut instance = super::super::Instance::new(
+            "Joined".into(),
+            "1.21.1".into(),
+            crate::meta::Loader::Fabric,
+            "0.16.9".into(),
+        );
+        let dir = content_dir(&paths, &instance.id, ContentKind::Mod);
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        for file in [
+            "profiler.jar",
+            "admin-off.jar.disabled",
+            "both.jar",
+            "mine.jar",
+        ] {
+            tokio::fs::write(dir.join(file), b"x").await.unwrap();
+        }
+        let servers = |file: &str, side: Option<Side>| ContentRecord {
+            origin: Origin::Server,
+            side,
+            ..record(file, ContentKind::Mod, file, &[])
+        };
+        instance.content = vec![
+            servers("profiler.jar", Some(Side::Server)),
+            ContentRecord {
+                server_off: true,
+                ..servers("admin-off.jar", Some(Side::Server))
+            },
+            servers("both.jar", None),
+            ContentRecord {
+                side: Some(Side::Server),
+                ..record("mine.jar", ContentKind::Mod, "MINE", &[])
+            },
+            servers("gone.jar", Some(Side::Server)),
+        ];
+        let on_disk = || {
+            let mut names: Vec<String> = std::fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+                .collect();
+            names.sort();
+            names
+        };
+
+        let changed = set_server_side_mods(&paths, &mut instance, false)
+            .await
+            .unwrap();
+        assert_eq!(changed, 1);
+        assert!(instance.server_side_mods_off);
+        assert_eq!(
+            on_disk(),
+            vec![
+                "admin-off.jar.disabled",
+                "both.jar",
+                "mine.jar",
+                "profiler.jar.disabled"
+            ]
+        );
+
+        let changed = set_server_side_mods(&paths, &mut instance, true)
+            .await
+            .unwrap();
+        assert_eq!(changed, 1);
+        assert!(!instance.server_side_mods_off);
+        assert_eq!(
+            on_disk(),
+            vec![
+                "admin-off.jar.disabled",
+                "both.jar",
+                "mine.jar",
+                "profiler.jar"
+            ]
+        );
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
     #[test]
     fn a_record_of_another_kind_is_never_borrowed() {
         // The same file name can sit in mods/ and in plugins/. Matching on the
@@ -1200,6 +1286,7 @@ mod tests {
             origin: Default::default(),
             requires: Some(vec!["BBB".into()]),
             side: None,
+            server_off: false,
         }];
         link(&mut items, &[None, None], &records);
         assert_eq!(items[1].required_by, vec!["mod.jar.disabled"]);

@@ -88,6 +88,10 @@ export interface Instance {
   playSeconds: number;
   overrides: InstanceOverrides;
   pack?: PackSource | null;
+  /** The server this was joined from, when it was. */
+  joined?: JoinLink | null;
+  /** A joined instance keeps its server's server-side mods turned off. */
+  serverSideModsOff?: boolean;
   /** Added by the backend view layer. */
   running: boolean;
   modCount: number;

@@ -269,6 +269,23 @@ export default function ServerView({ id }: { id: string }) {
     );
   }
 
+  // Starting takes out of Mods what only players' games run, and the admin may
+  // have pressed Start from any tab, not only the console that also says so.
+  function sayMoved(moved: string[]) {
+    if (moved.length === 0) return;
+    toast({
+      kind: "info",
+      title:
+        moved.length === 1
+          ? `Moved ${moved[0]} to Client mods`
+          : `Moved ${moved.length} mods to Client mods`,
+      body:
+        moved.length === 1
+          ? "It only runs in players' games, so this server keeps it for players and never loads it."
+          : `${moved.join(", ")} only run in players' games, so this server keeps them for players and never loads them.`,
+    });
+  }
+
   async function start(server: Server) {
     // Mojang's EULA is the user's to accept, and asking before the first start
     // means the answer is not a failed boot followed by a second one.
@@ -278,8 +295,9 @@ export default function ServerView({ id }: { id: string }) {
     }
     setBusy(true);
     try {
-      await api.startServer(server.id);
+      const started = await api.startServer(server.id);
       await refreshServers();
+      sayMoved(started.moved);
     } catch (e) {
       reportError(`Could not start ${server.name}`, e);
     } finally {
@@ -291,9 +309,10 @@ export default function ServerView({ id }: { id: string }) {
     setBusy(true);
     try {
       await api.acceptServerEula(server.id);
-      await api.startServer(server.id);
+      const started = await api.startServer(server.id);
       await refreshServers();
       setAskEula(false);
+      sayMoved(started.moved);
     } catch (e) {
       reportError(`Could not start ${server.name}`, e);
     } finally {
