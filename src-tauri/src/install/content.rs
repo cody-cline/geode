@@ -41,6 +41,7 @@ pub async fn install(
         icon_url,
         slug,
         as_dependency,
+        None,
     )
     .await
 }
@@ -60,6 +61,7 @@ pub async fn install_into(
     icon_url: Option<String>,
     slug: Option<String>,
     as_dependency: bool,
+    side: Option<crate::instance::jar::Side>,
 ) -> Result<String> {
     if let Some(reason) = &version.blocked_reason {
         return Err(Error::msg(reason.clone()));
@@ -131,6 +133,7 @@ pub async fn install_into(
         dependency: as_dependency,
         origin: Default::default(),
         requires: Some(required_ids(version)),
+        side,
     });
 
     Ok(file.filename.clone())
@@ -153,6 +156,9 @@ pub struct InstallReport {
     pub installed: Vec<String>,
     /// Dependencies we could not resolve or download, with the reason.
     pub skipped: Vec<String>,
+    /// The folder it went into. A server may send a mod asked for as a mod to
+    /// its Client mods instead, and the UI says so.
+    pub kind: ContentKind,
 }
 
 /// Install a version plus everything it requires.
@@ -224,6 +230,7 @@ pub async fn install_with_dependencies_into(
     let mut report = InstallReport {
         installed: Vec::new(),
         skipped: Vec::new(),
+        kind,
     };
 
     progress.stage("Installing", 1).await;
@@ -237,6 +244,7 @@ pub async fn install_with_dependencies_into(
         project.icon_url.clone(),
         Some(project.slug.clone()),
         false,
+        project.listed_side(),
     )
     .await?;
     report.installed.push(file);
@@ -245,15 +253,14 @@ pub async fn install_with_dependencies_into(
     // Only things that load other things have dependencies worth chasing. A
     // plugin's are plugins, and they belong in the same folder as their parent,
     // which is why the kind travels down rather than being assumed to be a mod.
-    if !matches!(kind, ContentKind::Mod | ContentKind::Plugin) {
+    if !matches!(
+        kind,
+        ContentKind::Mod | ContentKind::ClientMod | ContentKind::Plugin
+    ) {
         return Ok(report);
     }
 
-    let mut seen: HashSet<String> = records
-        .iter()
-        .filter(|r| r.provider == version.provider.as_str())
-        .map(|r| r.project_id.clone())
-        .collect();
+    let mut seen = installed_projects(records, version.provider.as_str(), kind);
 
     let mut queue: Vec<String> = version
         .dependencies
@@ -349,9 +356,31 @@ async fn resolve_dependency(
         project.icon_url.clone(),
         Some(project.slug.clone()),
         true,
+        project.listed_side(),
     )
     .await?;
     Ok(Some((filename, best.clone())))
+}
+
+/// The projects of one provider already installed, as far as a dependency walk
+/// into `kind` is concerned.
+///
+/// A library a server has only in Client mods is not installed for the server:
+/// the server never loads that folder, so a mod needing the library would not
+/// start. So a walk into Mods looks past client mods, while a walk into Client
+/// mods counts both folders — a library the server loads is one its players
+/// get with the pack anyway.
+fn installed_projects(
+    records: &[ContentRecord],
+    provider: &str,
+    kind: ContentKind,
+) -> HashSet<String> {
+    records
+        .iter()
+        .filter(|r| r.provider == provider)
+        .filter(|r| !(kind == ContentKind::Mod && r.kind == ContentKind::ClientMod))
+        .map(|r| r.project_id.clone())
+        .collect()
 }
 
 /// Prefer a stable release; fall back to the newest prerelease when that is all
@@ -415,8 +444,9 @@ pub async fn check_updates(
 
         // Resource packs, shaders and datapacks are not loader-specific, and
         // neither is a plugin: its platform is not a mod loader, so asking for
-        // one would match nothing.
-        let loader = (record.kind == ContentKind::Mod)
+        // one would match nothing. A client mod is built for the same loader
+        // as the server's mods.
+        let loader = matches!(record.kind, ContentKind::Mod | ContentKind::ClientMod)
             .then_some(mod_loader)
             .flatten();
         let versions = match providers::versions(
@@ -504,6 +534,7 @@ mod tests {
             dependency: false,
             origin: crate::instance::content::Origin::Server,
             requires: None,
+            side: None,
         }
     }
 
@@ -533,6 +564,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         )
         .await
         .expect_err("an update must not replace the server's mod");
@@ -556,9 +588,88 @@ mod tests {
             None,
             None,
             false,
+            None,
         )
         .await
         .expect_err("a same-named file must not overwrite the server's");
+    }
+
+    /// The listing's side is kept on the record at install time, because it is
+    /// the only word there is for a jar that declares nothing, and nothing
+    /// asks the provider again later.
+    #[tokio::test]
+    async fn install_into_records_the_side_it_is_given() {
+        use crate::instance::jar::Side;
+
+        let dir = std::env::temp_dir().join(format!("geode-install-side-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        // Already on disk with the right hash, so nothing is downloaded, and
+        // the client is pointed at a port nothing listens on in case it is.
+        tokio::fs::write(dir.join("a.jar"), b"zoom").await.unwrap();
+        let mut zoom = version("1.0", "release", true);
+        zoom.files[0].sha1 = Some(crate::net::sha1_file(&dir.join("a.jar")).await.unwrap());
+        let offline = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:9").unwrap())
+            .build()
+            .unwrap();
+
+        let mut records = Vec::new();
+        install_into(
+            &offline,
+            &dir,
+            &mut records,
+            &zoom,
+            ContentKind::Mod,
+            "Zoom",
+            None,
+            None,
+            false,
+            Some(Side::Client),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].side, Some(Side::Client));
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// A walk into Mods installs a library the server has only in Client mods,
+    /// since the server never loads that folder. A walk into Client mods
+    /// counts both folders, since players get the server's mods anyway.
+    #[test]
+    fn a_library_only_in_client_mods_is_still_installed_for_the_server() {
+        let mut in_mods = server_record("api.jar", "API");
+        in_mods.origin = Default::default();
+        let in_client_mods = ContentRecord {
+            kind: ContentKind::ClientMod,
+            ..server_record("cloth.jar", "CLOTH")
+        };
+        let elsewhere = ContentRecord {
+            provider: "curseforge".into(),
+            ..server_record("other.jar", "OTHER")
+        };
+        let records = vec![in_mods, in_client_mods, elsewhere];
+
+        let sorted = |set: HashSet<String>| {
+            let mut ids: Vec<String> = set.into_iter().collect();
+            ids.sort();
+            ids
+        };
+        assert_eq!(
+            sorted(installed_projects(&records, "modrinth", ContentKind::Mod)),
+            vec!["API"]
+        );
+        assert_eq!(
+            sorted(installed_projects(
+                &records,
+                "modrinth",
+                ContentKind::ClientMod
+            )),
+            vec!["API", "CLOTH"]
+        );
     }
 
     /// Not offered either. "Update all" would otherwise stop at the first
@@ -787,6 +898,7 @@ pub async fn link_untracked_in(
             origin: Default::default(),
             // A hash lookup gives provenance, not a dependency list.
             requires: None,
+            side: project.and_then(|p| p.listed_side()),
         });
         identified += 1;
     }

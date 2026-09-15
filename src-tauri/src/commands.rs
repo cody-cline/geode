@@ -1763,6 +1763,7 @@ pub async fn add_cardboard(
         project.icon_url.clone(),
         Some(project.slug.clone()),
         false,
+        project.listed_side(),
     )
     .await?;
 
@@ -1986,7 +1987,7 @@ pub async fn link_untracked_server_content(
     // hash nothing and report on a folder that does not exist.
     let mut wanted = Vec::new();
     if server.takes_mods() {
-        wanted.push(ContentKind::Mod);
+        wanted.extend([ContentKind::Mod, ContentKind::ClientMod]);
     }
     if server.takes_plugins() {
         wanted.push(ContentKind::Plugin);
@@ -2045,6 +2046,7 @@ pub async fn install_server_content(
 
     let mut server = crate::server::load(&state.paths, &id).await?;
     let project = providers::project(&state.http, provider, &project_id, cf_key).await?;
+    let kind = install_folder(kind, version_id.as_deref(), &project, &server.content);
 
     // SpigotMC lists Bukkit plugins and nothing else. A proxy speaks its own
     // plugin API and would take the jar, write it into plugins/, and fail at
@@ -2075,7 +2077,7 @@ pub async fn install_server_content(
     // installed takes Bukkit plugins, and the kind alone cannot know that.
     let loaders: Vec<&str> = match kind {
         ContentKind::Plugin => server.plugin_loaders(),
-        ContentKind::Mod => server.kind.mod_loader().into_iter().collect(),
+        ContentKind::Mod | ContentKind::ClientMod => server.kind.mod_loader().into_iter().collect(),
         _ => Vec::new(),
     };
 
@@ -2085,7 +2087,7 @@ pub async fn install_server_content(
     // work. A mod always declares its loader, so an untagged match is not a
     // lenient reading of the metadata, it is a Fabric jar being put into a
     // Forge server, where it will not load and will not say why.
-    let allow_any_loader = kind != ContentKind::Mod;
+    let allow_any_loader = !matches!(kind, ContentKind::Mod | ContentKind::ClientMod);
     let attempts: Vec<Option<&str>> = loaders
         .iter()
         .map(|l| Some(*l))
@@ -2168,11 +2170,62 @@ pub async fn install_server_content(
     }
 }
 
+/// Which of a server's folders a new install goes into.
+///
+/// A mod Modrinth lists as not running on servers is kept for players in
+/// Client mods rather than put where the server would load it. Only a fresh
+/// install is routed: an update names its version and stays in the folder it
+/// is in, and so does a project the server already has in Mods, where the
+/// admin put it or kept it.
+fn install_folder(
+    asked: ContentKind,
+    version_id: Option<&str>,
+    project: &crate::providers::Project,
+    records: &[crate::instance::content::ContentRecord],
+) -> ContentKind {
+    let in_mods = records.iter().any(|r| {
+        r.kind == ContentKind::Mod
+            && r.provider == project.provider.as_str()
+            && r.project_id == project.id
+    });
+    if asked == ContentKind::Mod
+        && version_id.is_none()
+        && project.listed_side() == Some(crate::instance::jar::Side::Client)
+        && !in_mods
+    {
+        ContentKind::ClientMod
+    } else {
+        asked
+    }
+}
+
+/// Move a server's mod between Mods and Client mods, record and all.
+///
+/// Refused while the server runs. The loader read `mods/` when it started, so
+/// a move would change nothing until a restart, and the Content tab would
+/// stop describing the server that is running.
+#[tauri::command]
+pub async fn move_server_mod(
+    state: State<'_, AppState>,
+    id: String,
+    file: String,
+    to_client: bool,
+) -> Result<()> {
+    if state.servers.is_running(&id) {
+        return Err(Error::msg(
+            "Stop the server before moving mods between folders",
+        ));
+    }
+    let mut server = crate::server::load(&state.paths, &id).await?;
+    crate::server::move_mod(&state.paths, &mut server, &file, to_client).await?;
+    server.save(&state.paths).await
+}
+
 /// The server's logs: the one it is writing now, and the ones it rotated.
 /// Build a plan into a server rather than an instance.
 ///
 /// The plan resolves exactly as it would for an instance; what differs is that
-/// mods which do not run on a server are left out and named, and that most
+/// mods which do not run on a server go into its Client mods, and that most
 /// targets cannot be a server at all.
 #[tauri::command]
 pub async fn create_server_from_plan(
@@ -3261,6 +3314,70 @@ mod tests {
 
     async fn instance_count(paths: &Paths) -> usize {
         instance::list(paths).await.map(|l| l.len()).unwrap_or(0)
+    }
+
+    /// Only a fresh install of a mod Modrinth lists as client-only is sent to
+    /// Client mods. An update, a project the server already has in Mods, and
+    /// anything listed otherwise or not at all stays where it was asked for.
+    #[test]
+    fn a_mod_no_server_runs_goes_to_client_mods() {
+        use crate::instance::content::ContentRecord;
+
+        let listed = |client: Option<&str>, server: Option<&str>| -> crate::providers::Project {
+            serde_json::from_value(serde_json::json!({
+                "provider": "modrinth", "id": "SODIUM", "slug": "sodium", "name": "Sodium",
+                "summary": "", "downloads": 0, "follows": 0, "author": "",
+                "kind": "mod", "pageUrl": "", "clientSide": client, "serverSide": server,
+            }))
+            .unwrap()
+        };
+        let client_only = listed(Some("required"), Some("unsupported"));
+        let in_mods: ContentRecord = serde_json::from_value(serde_json::json!({
+            "fileName": "sodium.jar", "kind": "mod", "provider": "modrinth",
+            "projectId": "SODIUM", "versionId": "v", "name": "Sodium", "versionNumber": "1",
+        }))
+        .unwrap();
+        let in_client_mods = ContentRecord {
+            kind: ContentKind::ClientMod,
+            ..in_mods.clone()
+        };
+
+        assert_eq!(
+            install_folder(ContentKind::Mod, None, &client_only, &[]),
+            ContentKind::ClientMod
+        );
+        assert_eq!(
+            install_folder(ContentKind::Mod, None, &client_only, &[in_client_mods]),
+            ContentKind::ClientMod
+        );
+        assert_eq!(
+            install_folder(ContentKind::Mod, Some("v2"), &client_only, &[]),
+            ContentKind::Mod
+        );
+        assert_eq!(
+            install_folder(ContentKind::Mod, None, &client_only, &[in_mods]),
+            ContentKind::Mod
+        );
+        for (client, server) in [
+            (Some("unsupported"), Some("required")),
+            (Some("required"), Some("required")),
+            (None, None),
+        ] {
+            assert_eq!(
+                install_folder(ContentKind::Mod, None, &listed(client, server), &[]),
+                ContentKind::Mod,
+                "{client:?} {server:?}"
+            );
+        }
+        assert_eq!(
+            install_folder(
+                ContentKind::ClientMod,
+                None,
+                &listed(Some("required"), Some("required")),
+                &[]
+            ),
+            ContentKind::ClientMod
+        );
     }
 
     /// An address that parses can still be one no player can use. Those are

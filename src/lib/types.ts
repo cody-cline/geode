@@ -17,13 +17,18 @@ export type ProjectKind =
   | "shader"
   | "datapack"
   | "plugin";
-/** `plugin` only ever applies to a server — instances have no plugins folder. */
+/**
+ * `plugin` only ever applies to a server — instances have no plugins folder.
+ * Neither does `clientmod`: a server's Client mods, which it never loads and
+ * its players get as ordinary mods.
+ */
 export type ContentKind =
   | "mod"
   | "resourcepack"
   | "shaderpack"
   | "datapack"
-  | "plugin";
+  | "plugin"
+  | "clientmod";
 
 export interface GameVersion {
   id: string;
@@ -118,6 +123,12 @@ export interface ContentItem {
   declaresDeps: boolean;
   /** Mod ids this file answers to. Stable where display names are not. */
   modIds: string[];
+  /**
+   * Which side a mod or client mod belongs on: its folder, then what the jar
+   * declares, then the listing. A file from a server's pack carries the
+   * server's answer, or none.
+   */
+  side?: "client" | "server" | "both";
 }
 
 export interface ProviderRef {
@@ -399,8 +410,8 @@ export interface BuildReport {
 }
 
 /**
- * The same, for a plan built as a server. `skipped` carries the client-only
- * mods that were deliberately left out, not only things that failed.
+ * The same, for a plan built as a server. Client-only mods are installed into
+ * the server's Client mods, so `skipped` is only what failed.
  */
 export interface ServerBuildReport {
   serverId: string;
@@ -608,6 +619,8 @@ export interface PackInfo {
   loader: string;
   loaderVersion: string;
   mods: number;
+  /** Of `mods`, how many only the server needs. */
+  serverMods: number;
   serverKind: string;
 }
 
@@ -701,6 +714,8 @@ export interface UpdateCandidate {
 export interface InstallReport {
   installed: string[];
   skipped: string[];
+  /** The folder it went into, which on a server may be Client mods rather than the one asked for. */
+  kind: ContentKind;
 }
 
 export interface PackPreview {

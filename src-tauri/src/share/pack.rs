@@ -5,7 +5,7 @@
 //! is the mrpack reader plus a pass that applies what the index had nowhere to
 //! record. Neither half duplicates the other — see [`super::manifest`].
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
@@ -40,7 +40,6 @@ pub async fn manifest_for(paths: &Paths, instance: &Instance) -> Manifest {
         files: notes_for(
             &paths.game_dir(&instance.id),
             &instance.content.iter().collect::<Vec<_>>(),
-            true,
         )
         .await,
     }
@@ -81,12 +80,11 @@ fn sanitise(file_name: &str, ext: &str) -> String {
 /// project and version id, resolved through the recipient's own credentials,
 /// rather than by us putting the jar in the zip.
 ///
-/// `follow_links` is the pack's own rule: an instance's pack follows links, a
-/// server's never does — not even to read a hash or a side.
+/// For an instance's pack, which follows links like the rest of its walk. A
+/// server's pack follows none, and writes its notes with [`server_notes`].
 async fn notes_for(
     game_dir: &Path,
     records: &[&instance::content::ContentRecord],
-    follow_links: bool,
 ) -> Vec<FileNote> {
     let mut out = Vec::new();
 
@@ -97,7 +95,7 @@ async fn notes_for(
         // launcher leaves its record behind forever — the module says as much,
         // and nothing prunes it — so a reference written from the record alone
         // would promise the recipient a mod the sharer does not actually have.
-        let Some((full, disabled)) = on_disk(game_dir, &rel, follow_links).await else {
+        let Some((full, disabled)) = on_disk(game_dir, &rel).await else {
             continue;
         };
 
@@ -134,26 +132,17 @@ async fn notes_for(
 /// Records are keyed by the enabled name, so a mod that has been turned off is
 /// `foo.jar` in the record and `foo.jar.disabled` on disk. Both count as having
 /// the file.
-///
-/// Without `follow_links`, only a regular file counts: a link under the enabled
-/// name, beside a real turned-off twin, is not that mod.
-async fn on_disk(game_dir: &Path, rel: &Path, follow_links: bool) -> Option<(PathBuf, bool)> {
-    let present = |path: PathBuf| async move {
-        if follow_links {
-            tokio::fs::metadata(&path).await.is_ok()
-        } else {
-            tokio::fs::symlink_metadata(&path)
-                .await
-                .is_ok_and(|meta| meta.is_file())
-        }
-    };
+async fn on_disk(game_dir: &Path, rel: &Path) -> Option<(PathBuf, bool)> {
     let enabled = game_dir.join(rel);
-    if present(enabled.clone()).await {
+    if tokio::fs::metadata(&enabled).await.is_ok() {
         return Some((enabled, false));
     }
 
     let disabled = game_dir.join(disabled_name(rel)?);
-    present(disabled.clone()).await.then_some((disabled, true))
+    tokio::fs::metadata(&disabled)
+        .await
+        .is_ok()
+        .then_some((disabled, true))
 }
 
 /// `mods/foo.jar` → `mods/foo.jar.disabled`.
@@ -639,6 +628,7 @@ async fn resolve_references(
             dependency: false,
             origin: Default::default(),
             requires: None,
+            side: None,
         }));
     }
 
@@ -736,67 +726,170 @@ struct ServerMods<'a> {
     shared: Vec<&'a instance::content::ContentRecord>,
     /// Every mod file that goes, by its path from the run directory as it is
     /// named on disk, whether the pack ends up indexing it, referencing it or
-    /// carrying its bytes. The walk carries nothing else from `mods/`, so this
-    /// is also the count a player is shown.
+    /// carrying its bytes. The walk carries nothing else from `mods/` or
+    /// `client-mods/`, so this is also the count a player is shown.
     carried: HashSet<PathBuf>,
+    /// Where each carried file belongs, by the same path as `carried`.
+    sides: HashMap<PathBuf, instance::jar::Side>,
 }
 
-/// List what of a server's `mods/` goes to its players: every jar in it.
+/// List what of a server's `mods/` and `client-mods/` goes to its players:
+/// every jar in either, each mod once.
 ///
-/// Read from the folder rather than the records, because disk is the source of
-/// truth: a jar dropped in by hand has no record and is still a mod, and a
+/// Read from the folders rather than the records, because disk is the source
+/// of truth: a jar dropped in by hand has no record and is still a mod, and a
 /// record whose jar is gone is not.
 ///
-/// Every regular file directly inside `mods/` with a jar's name goes, turned
-/// off or not and with a record or without one — jars the admin added by hand,
-/// and jars that declare themselves server-side, included. Only what a loader
-/// would not load stays: a `.bak` of a jar, a folder of old tools, a link to
-/// somewhere else. None of that shows in the admin's Content tab, and the pack
-/// must not send what they cannot see. A `mods/` that is itself a link shares
-/// nothing, for the reason [`instance::modpack::Walk::Only`] gives.
+/// Every regular file directly inside either folder with a jar's name goes,
+/// turned off or not and with a record or without one — jars the admin added
+/// by hand, and jars that declare themselves server-side, included. Only what a
+/// loader would not load stays: a `.bak` of a jar, a folder of old tools, a
+/// link to somewhere else. None of that shows in the admin's Content tab, and
+/// the pack must not send what they cannot see. A folder that is itself a link
+/// shares nothing, for the reason [`instance::modpack::Walk::Only`] gives.
+///
+/// A player's game has one mods folder, so a mod the server has in both goes
+/// once, from `mods/`: a client mod with the name of a jar in `mods/`, or with
+/// the Modrinth or CurseForge project of a mod in `mods/` that goes, stays.
 async fn server_mods<'a>(
     run: &Path,
     records: &'a [instance::content::ContentRecord],
 ) -> Result<ServerMods<'a>> {
-    use instance::content::{is_content_file, strip_disabled, ContentKind};
+    use instance::content::{is_content_file, side_of, strip_disabled, ContentKind};
 
-    let dir = run.join(ContentKind::Mod.folder());
-    let names = tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
-        match std::fs::symlink_metadata(&dir) {
-            Ok(meta) if meta.is_dir() => {}
-            Ok(_) => return Ok(Vec::new()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(e.into()),
-        }
-        let mut names = Vec::new();
-        for entry in std::fs::read_dir(&dir)?.flatten() {
-            if !entry.file_type().is_ok_and(|t| t.is_file()) {
-                continue;
+    type Found = (ContentKind, String, Option<instance::jar::Side>);
+    let run_dir = run.to_path_buf();
+    let found = tokio::task::spawn_blocking(move || -> Result<Vec<Found>> {
+        let mut found = Vec::new();
+        for kind in [ContentKind::Mod, ContentKind::ClientMod] {
+            let dir = run_dir.join(kind.folder());
+            match std::fs::symlink_metadata(&dir) {
+                Ok(meta) if meta.is_dir() => {}
+                Ok(_) => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
             }
-            let name = entry.file_name().to_string_lossy().to_string();
-            if is_content_file(&name, ContentKind::Mod) {
-                names.push(name);
+            for entry in std::fs::read_dir(&dir)?.flatten() {
+                if !entry.file_type().is_ok_and(|t| t.is_file()) {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().to_string();
+                if is_content_file(&name, kind) {
+                    // Only a regular file gets this far, so reading what it
+                    // declares follows no link.
+                    let declared = instance::jar::read(&entry.path()).and_then(|meta| meta.side);
+                    found.push((kind, name, declared));
+                }
             }
         }
-        Ok(names)
+        Ok(found)
     })
     .await
     .map_err(|e| Error::msg(format!("reading the server's mods panicked: {e}")))??;
 
-    // Records follow the files. One whose file is a link, or is gone, names
-    // nothing the pack sends, so it must not be indexed or referenced either —
-    // or the pack would carry a mod the count left out.
-    let going: HashSet<&str> = names.iter().map(|name| strip_disabled(name).0).collect();
-    Ok(ServerMods {
-        shared: records
+    let record_for = |kind: ContentKind, base: &str| {
+        records
             .iter()
-            .filter(|r| r.kind == ContentKind::Mod && going.contains(r.file_name.as_str()))
-            .collect(),
-        carried: names
+            .find(|r| r.kind == kind && r.file_name == base)
+    };
+    let project = |r: &'a instance::content::ContentRecord| {
+        (!r.provider.is_empty() && !r.project_id.is_empty())
+            .then_some((r.provider.as_str(), r.project_id.as_str()))
+    };
+    let in_mods: HashSet<&str> = found
+        .iter()
+        .filter(|(kind, ..)| *kind == ContentKind::Mod)
+        .map(|(_, name, _)| strip_disabled(name).0)
+        .collect();
+    let projects_in_mods: HashSet<(&str, &str)> = in_mods
+        .iter()
+        .filter_map(|base| record_for(ContentKind::Mod, base).and_then(project))
+        .collect();
+
+    let mut mods = ServerMods {
+        shared: Vec::new(),
+        carried: HashSet::new(),
+        sides: HashMap::new(),
+    };
+    for (kind, name, declared) in &found {
+        let base = strip_disabled(name).0;
+        // Records follow the files. One whose file is a link, or is gone, names
+        // nothing the pack sends, so it must not be indexed or referenced
+        // either — or the pack would carry a mod the count left out.
+        let record = record_for(*kind, base);
+        let twin_in_mods = *kind == ContentKind::ClientMod
+            && (in_mods.contains(base)
+                || record
+                    .and_then(project)
+                    .is_some_and(|p| projects_in_mods.contains(&p)));
+        if twin_in_mods {
+            continue;
+        }
+        let rel = PathBuf::from(kind.folder()).join(name);
+        let side = side_of(*kind, *declared, record.and_then(|r| r.side));
+        mods.sides.insert(rel.clone(), side);
+        mods.carried.insert(rel);
+        // A mod on disk both on and off is two files and one record, which is
+        // indexed or referenced once.
+        if let Some(record) = record.filter(|r| !mods.shared.iter().any(|s| std::ptr::eq(*s, *r))) {
+            mods.shared.push(record);
+        }
+    }
+    Ok(mods)
+}
+
+/// What a server's pack says about each mod it sends.
+///
+/// Every mod that belongs on one side only is noted with that side, whatever
+/// carries it, so a player's Geode knows which mods only the server needs.
+/// Every mod the index cannot point at is noted with where to get it, and
+/// whether the server had it turned off. A mod for both sides that travels in
+/// the index or as bytes has nothing to say.
+fn server_notes(mods: &ServerMods) -> Vec<FileNote> {
+    use instance::content::{strip_disabled, ContentKind};
+    use instance::jar::Side;
+
+    let mut carried: Vec<&PathBuf> = mods.carried.iter().collect();
+    carried.sort();
+
+    let mut out = Vec::new();
+    for path in carried {
+        let kind = if path.starts_with(ContentKind::ClientMod.folder()) {
+            ContentKind::ClientMod
+        } else {
+            ContentKind::Mod
+        };
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let (base, enabled) = strip_disabled(name);
+        // A mod on disk both on and off is one mod to a player, and is noted
+        // once, as the copy that is on.
+        if !enabled && mods.carried.contains(&path.with_file_name(base)) {
+            continue;
+        }
+        let source = mods
+            .shared
             .iter()
-            .map(|name| PathBuf::from(ContentKind::Mod.folder()).join(name))
-            .collect(),
-    })
+            .find(|r| r.kind == kind && r.file_name == base)
+            .and_then(|r| source_for(r));
+        let side = mods.sides.get(path).copied().unwrap_or(Side::Both);
+        if side == Side::Both && source.is_none() {
+            continue;
+        }
+        let referenced = source.is_some();
+        out.push(FileNote {
+            // Where a player's game keeps it, which for a client mod is not
+            // where the server does.
+            path: format!("{}/{base}", ContentKind::Mod.folder()),
+            side: (side != Side::Both).then_some(side),
+            source,
+            // Only a reference needs telling; bytes keep their `.disabled`.
+            disabled: !enabled && referenced,
+            manual: false,
+        });
+    }
+    out
 }
 
 /// What a player is shown before importing, without building the pack.
@@ -812,6 +905,11 @@ pub async fn server_pack_info(
         loader: loader.as_str().to_string(),
         loader_version,
         mods: mods.carried.len(),
+        server_mods: mods
+            .sides
+            .values()
+            .filter(|side| **side == instance::jar::Side::Server)
+            .count(),
         server_kind: server.kind.as_str().to_string(),
     })
 }
@@ -819,22 +917,24 @@ pub async fn server_pack_info(
 /// Write the pack a server hands to its players.
 ///
 /// The same writer as an instance's pack, walking the server's run directory
-/// by **allowlist** — `mods/`, and `config/` only when the server's share
-/// says so — never by denylist. A server's run directory holds
+/// by **allowlist** — `mods/`, `client-mods/`, and `config/` only when the
+/// server's share says so — never by denylist. A server's run directory holds
 /// `server.properties` with its RCON password, `ops.json`, the whitelist, the
 /// ban lists, every world and a few hundred megabytes of libraries; a denylist
 /// is one forgotten entry from shipping any of them.
 ///
-/// From `mods/` it takes only the jars sitting directly inside it, and from
-/// either folder it takes nothing through a link, so an allowed folder name
-/// cannot be a way to reach a file outside it. Unlike an instance's pack,
-/// which follows links, nobody reviews this one before it goes.
+/// From `mods/` and `client-mods/` it takes only the jars sitting directly
+/// inside them, and from any folder it takes nothing through a link, so an
+/// allowed folder name cannot be a way to reach a file outside it. Unlike an
+/// instance's pack, which follows links, nobody reviews this one before it
+/// goes.
 ///
 /// Every jar in `mods/` goes: one from a provider as a reference, and the rest
 /// — jars added by hand, and jars that declare themselves server-side — as
-/// copies. Only links, subfolders and files that are not jars stay. The
-/// manifest is `Kind::Server`, so importing it claims every file for the
-/// server.
+/// copies. Client mods go the same way, as mods in the player's `mods/`, and
+/// each mod's side goes with it. Only links, subfolders and files that are not
+/// jars stay. The manifest is `Kind::Server`, so importing it claims every file
+/// for the server.
 pub async fn export_server(
     paths: &Paths,
     server: &crate::server::Server,
@@ -859,13 +959,13 @@ pub async fn export_server(
         },
         icon: artwork(&media, server.icon.as_ref()),
         banner: artwork(&media, server.banner.as_ref()),
-        // Not the modpack the server was built from, even when it was: that
-        // build dropped the pack's client-only mods, and naming the published
-        // pack here would make a joined instance show — and Browse treat — it
-        // as that pack when it is not. A joined instance says where it came
-        // from through `joined` instead.
+        // Not the modpack the server was built from, even when it was: the
+        // server's mods are the admin's to change since, and naming the
+        // published pack here would make a joined instance show — and Browse
+        // treat — it as that pack when it is not. A joined instance says where
+        // it came from through `joined` instead.
         source: None,
-        files: notes_for(&run, &mods.shared, false).await,
+        files: server_notes(&mods),
     };
     let extras = extras_from(
         &media,
@@ -875,8 +975,8 @@ pub async fn export_server(
     )
     .await?;
 
-    // Mods by name, exactly the files `server_mods` read and counted, and
-    // `config/` whole when asked for. Neither follows a link.
+    // Mods and client mods by name, exactly the files `server_mods` read and
+    // counted, and `config/` whole when asked for. Neither follows a link.
     let mut trees = Vec::new();
     // From the share file, read now: an admin who just stopped sending config
     // is not second-guessed by a copy of anything loaded earlier. A server that
@@ -1091,6 +1191,7 @@ mod tests {
             dependency: false,
             origin: Default::default(),
             requires: None,
+            side: None,
         }
     }
 
@@ -2205,6 +2306,7 @@ mod tests {
                 loader: "fabric".into(),
                 loader_version: "0.16.9".into(),
                 mods: 8,
+                server_mods: 2,
                 server_kind: "fabric".into(),
             }
         );
@@ -2219,7 +2321,7 @@ mod tests {
     }
 
     /// Every mod a pack brings, however it brings it: indexed, referenced, or
-    /// carried as bytes.
+    /// carried as bytes, client mods among them.
     fn mods_in(archive: &Path) -> usize {
         let index: crate::instance::modpack::MrIndex =
             serde_json::from_slice(&read_entry(archive, "modrinth.index.json")).unwrap();
@@ -2232,7 +2334,9 @@ mod tests {
                 .count()
             + entries(archive)
                 .iter()
-                .filter(|n| n.starts_with("overrides/mods/"))
+                .filter(|n| {
+                    n.starts_with("overrides/mods/") || n.starts_with("client-overrides/mods/")
+                })
                 .count()
     }
 
@@ -2276,6 +2380,21 @@ mod tests {
         tokio::fs::create_dir_all(mods.join("old")).await.unwrap();
         tokio::fs::write(mods.join("old/parked.jar"), fabric_jar("parked", "*")).await.unwrap();
 
+        // Client mods go to players by the same rule, so a link there is no
+        // way around it, record or not.
+        let client_mods = run.join("client-mods");
+        tokio::fs::create_dir_all(&client_mods).await.unwrap();
+        symlink(elsewhere.join("linked.jar"), client_mods.join("linked.jar")).unwrap();
+        symlink(
+            elsewhere.join("linked-cf.jar"),
+            client_mods.join("linked-client-cf.jar"),
+        )
+        .unwrap();
+        server.content.push(ContentRecord {
+            project_id: "linked-client-cf".into(),
+            ..record("curseforge", "linked-client-cf.jar", ContentKind::ClientMod)
+        });
+
         // `config/` goes whole when asked for, but not through a link either.
         symlink(&elsewhere, run.join("config/linked")).unwrap();
         symlink(run.join("server.properties"), run.join("config/linked.toml")).unwrap();
@@ -2317,6 +2436,7 @@ mod tests {
             vec![
                 "mods/anticheat.jar",
                 "mods/create-cf.jar",
+                "mods/server-side.jar",
                 "mods/srv-mr.jar"
             ],
             "a linked jar was named"
@@ -2392,8 +2512,9 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
-    /// The same rule one level up: a `mods/` or `config/` that is itself a link
-    /// is not followed, and the count says so rather than promising its mods.
+    /// The same rule one level up: a `mods/`, `client-mods/` or `config/` that
+    /// is itself a link is not followed, and the count says so rather than
+    /// promising its mods.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_server_pack_does_not_follow_a_linked_folder() {
@@ -2403,7 +2524,16 @@ mod tests {
         let run = paths.server_run(&server.id);
         let elsewhere = paths.root.join("elsewhere");
         tokio::fs::create_dir_all(&elsewhere).await.unwrap();
-        for folder in ["mods", "config"] {
+        tokio::fs::create_dir_all(run.join("client-mods"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            run.join("client-mods/minimap.jar"),
+            fabric_jar("minimap", "client"),
+        )
+        .await
+        .unwrap();
+        for folder in ["mods", "config", "client-mods"] {
             tokio::fs::rename(run.join(folder), elsewhere.join(folder)).await.unwrap();
             symlink(elsewhere.join(folder), run.join(folder)).unwrap();
         }
@@ -2417,6 +2547,325 @@ mod tests {
         );
         assert_eq!(mods_in(&dest), 0);
         assert_eq!(server_pack_info(&paths, &server).await.unwrap().mods, 0);
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Client, server and both
+    // -----------------------------------------------------------------------
+
+    use crate::instance::jar::Side;
+
+    /// Client mods beside the fixture's mods: one added by hand, one from
+    /// Modrinth and one from CurseForge, each its own project. Every jar says
+    /// it runs on both sides, so only the folder makes them client mods.
+    async fn add_client_mods(paths: &Paths, server: &mut Server) {
+        let dir = paths.server_run(&server.id).join("client-mods");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        for (name, id) in [
+            ("hand.jar", "hand"),
+            ("mr-client.jar", "mrclient"),
+            ("cf-client.jar", "cfclient"),
+        ] {
+            tokio::fs::write(dir.join(name), fabric_jar(id, "*"))
+                .await
+                .unwrap();
+        }
+        server.content.push(ContentRecord {
+            project_id: "mr-client".into(),
+            ..record("modrinth", "mr-client.jar", ContentKind::ClientMod)
+        });
+        server.content.push(ContentRecord {
+            project_id: "cf-client".into(),
+            ..record("curseforge", "cf-client.jar", ContentKind::ClientMod)
+        });
+    }
+
+    /// A player's game has no Client mods folder. What the server keeps there
+    /// arrives as mods, each carried the way any mod is — bytes under
+    /// `client-overrides/`, which a launcher installing on a server skips, an
+    /// index entry no server installs, or a reference — and the pack never
+    /// names the server's folder.
+    #[tokio::test]
+    async fn a_server_pack_hands_client_mods_to_players_as_mods() {
+        let (paths, mut server) = server_fixture("client-mods", false).await;
+        add_client_mods(&paths, &mut server).await;
+        let dest = paths.root.join("server.geodepack");
+        export_server(&paths, &server, dest.clone(), &Progress::silent("t"))
+            .await
+            .unwrap();
+
+        let names = entries(&dest);
+        assert!(
+            names.contains(&"client-overrides/mods/hand.jar".to_string()),
+            "{names:?}"
+        );
+
+        let index: crate::instance::modpack::MrIndex =
+            serde_json::from_slice(&read_entry(&dest, "modrinth.index.json")).unwrap();
+        let env = index
+            .files
+            .iter()
+            .find(|f| f.path == "mods/mr-client.jar")
+            .and_then(|f| f.env.as_ref())
+            .expect("the Modrinth client mod is indexed as a mod");
+        assert_eq!(
+            (env.client.as_str(), env.server.as_str()),
+            ("required", "unsupported")
+        );
+
+        let manifest = read_manifest(&dest).unwrap().unwrap();
+        let cf = manifest
+            .note("mods/cf-client.jar")
+            .expect("the CurseForge client mod is referenced as a mod");
+        assert!(cf.source.is_some(), "{cf:?}");
+        assert_eq!(cf.side, Some(Side::Client));
+
+        let named = names
+            .iter()
+            .chain(index.files.iter().map(|f| &f.path))
+            .chain(manifest.files.iter().map(|n| &n.path));
+        for name in named {
+            assert!(
+                !name.contains("client-mods"),
+                "{name} names the server's folder"
+            );
+        }
+
+        let info = server_pack_info(&paths, &server).await.unwrap();
+        assert_eq!(info.mods, 11);
+        assert_eq!(info.mods, mods_in(&dest));
+        // A client mod is not one only the server needs.
+        assert_eq!(info.server_mods, 2);
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    /// One mods folder on the player's side means one copy of each mod. The
+    /// server's `mods/` wins: a client mod goes only when neither its file
+    /// name nor its project is already going from there.
+    #[tokio::test]
+    async fn a_mod_in_both_folders_is_sent_once() {
+        let (paths, mut server) = server_fixture("both-folders", false).await;
+        let run = paths.server_run(&server.id);
+        tokio::fs::create_dir_all(run.join("client-mods"))
+            .await
+            .unwrap();
+        tokio::fs::write(run.join("client-mods/homemade.jar"), b"the client copy")
+            .await
+            .unwrap();
+        tokio::fs::write(run.join("mods/p-2.jar"), b"p two")
+            .await
+            .unwrap();
+        tokio::fs::write(run.join("client-mods/p-1.jar"), b"p one")
+            .await
+            .unwrap();
+        server.content.push(ContentRecord {
+            project_id: "P".into(),
+            ..record("modrinth", "p-2.jar", ContentKind::Mod)
+        });
+        server.content.push(ContentRecord {
+            project_id: "P".into(),
+            ..record("modrinth", "p-1.jar", ContentKind::ClientMod)
+        });
+
+        let dest = paths.root.join("server.geodepack");
+        export_server(&paths, &server, dest.clone(), &Progress::silent("t"))
+            .await
+            .unwrap();
+
+        let names = entries(&dest);
+        assert!(
+            !names.iter().any(|n| n.starts_with("client-overrides/")),
+            "a client mod went beside the mod of the same name: {names:?}"
+        );
+        assert_eq!(
+            read_entry(&dest, "overrides/mods/homemade.jar"),
+            std::fs::read(run.join("mods/homemade.jar")).unwrap()
+        );
+        let index: crate::instance::modpack::MrIndex =
+            serde_json::from_slice(&read_entry(&dest, "modrinth.index.json")).unwrap();
+        let indexed: Vec<&str> = index.files.iter().map(|f| f.path.as_str()).collect();
+        assert!(indexed.contains(&"mods/p-2.jar"), "{indexed:?}");
+        assert!(
+            !indexed.contains(&"mods/p-1.jar"),
+            "the project went twice: {indexed:?}"
+        );
+
+        let info = server_pack_info(&paths, &server).await.unwrap();
+        assert_eq!(info.mods, 9);
+        assert_eq!(info.mods, mods_in(&dest));
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    /// Updating a mod whose file name stays the same, after turning it off,
+    /// leaves it on disk both on and off. It is still one mod: indexed once,
+    /// referenced once, and noted once, as the copy that is on.
+    #[tokio::test]
+    async fn a_mod_on_disk_both_on_and_off_is_named_once() {
+        let (paths, server) = server_fixture("on-and-off", false).await;
+        let mods = paths.server_run(&server.id).join("mods");
+        for (name, bytes) in [
+            ("sodium-mr.jar.disabled", b"older from modrinth".to_vec()),
+            ("create-cf.jar.disabled", b"older from curseforge".to_vec()),
+            (
+                "server-side.jar.disabled",
+                fabric_jar("serverside", "server"),
+            ),
+        ] {
+            tokio::fs::write(mods.join(name), bytes).await.unwrap();
+        }
+
+        let dest = paths.root.join("server.geodepack");
+        export_server(&paths, &server, dest.clone(), &Progress::silent("t"))
+            .await
+            .unwrap();
+
+        let index: crate::instance::modpack::MrIndex =
+            serde_json::from_slice(&read_entry(&dest, "modrinth.index.json")).unwrap();
+        let indexed = index
+            .files
+            .iter()
+            .filter(|f| f.path == "mods/sodium-mr.jar")
+            .count();
+        assert_eq!(indexed, 1, "{:?}", index.files);
+
+        let manifest = read_manifest(&dest).unwrap().unwrap();
+        for path in ["mods/create-cf.jar", "mods/server-side.jar"] {
+            let notes: Vec<&FileNote> = manifest.files.iter().filter(|n| n.path == path).collect();
+            assert_eq!(notes.len(), 1, "{path}: {:?}", manifest.files);
+            assert!(
+                !notes[0].disabled,
+                "{path} was noted as the copy that is off"
+            );
+        }
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    /// Whatever carries a mod only the server needs, the manifest says so: a
+    /// jar that declares it and goes as bytes, and a jar that declares nothing
+    /// useful but is listed that way and goes through the index. The preview's
+    /// count of them is the same number.
+    #[tokio::test]
+    async fn a_server_pack_marks_what_only_the_server_needs() {
+        let (paths, mut server) = server_fixture("server-notes", false).await;
+        let run = paths.server_run(&server.id);
+        tokio::fs::write(
+            run.join("mods/listed-srv.jar"),
+            fabric_jar("listedsrv", "*"),
+        )
+        .await
+        .unwrap();
+        server.content.push(ContentRecord {
+            project_id: "listed-srv".into(),
+            side: Some(Side::Server),
+            ..record("modrinth", "listed-srv.jar", ContentKind::Mod)
+        });
+
+        let dest = paths.root.join("server.geodepack");
+        export_server(&paths, &server, dest.clone(), &Progress::silent("t"))
+            .await
+            .unwrap();
+
+        assert!(entries(&dest).contains(&"overrides/mods/server-side.jar".to_string()));
+        let manifest = read_manifest(&dest).unwrap().unwrap();
+        let bytes = manifest
+            .note("mods/server-side.jar")
+            .expect("the server-side jar carried as bytes has a note");
+        assert_eq!(
+            (bytes.side, bytes.source.is_none()),
+            (Some(Side::Server), true)
+        );
+        assert_eq!(
+            manifest.note("mods/listed-srv.jar").and_then(|n| n.side),
+            Some(Side::Server)
+        );
+
+        let index: crate::instance::modpack::MrIndex =
+            serde_json::from_slice(&read_entry(&dest, "modrinth.index.json")).unwrap();
+        let env = index
+            .files
+            .iter()
+            .find(|f| f.path == "mods/listed-srv.jar")
+            .and_then(|f| f.env.as_ref())
+            .expect("the listed server mod is indexed");
+        assert_eq!(
+            (env.client.as_str(), env.server.as_str()),
+            ("optional", "required")
+        );
+
+        let noted = manifest
+            .files
+            .iter()
+            .filter(|n| n.side == Some(Side::Server))
+            .count();
+        assert_eq!(noted, 3, "{:?}", manifest.files);
+        assert_eq!(
+            server_pack_info(&paths, &server).await.unwrap().server_mods,
+            noted
+        );
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    /// On the player's side a client mod is simply one of the server's mods,
+    /// owned like the rest; one the player has to fetch is named.
+    #[tokio::test]
+    async fn a_player_gets_client_mods_as_the_servers_own_mods() {
+        let (paths, mut server) = server_fixture("client-mods-arrive", false).await;
+        add_client_mods(&paths, &mut server).await;
+        let dest = paths.root.join("server.geodepack");
+        export_server(&paths, &server, dest.clone(), &Progress::silent("t"))
+            .await
+            .unwrap();
+
+        let mut arrived = fresh("srvpack-client-mods-arrived");
+        let game = paths.game_dir(&arrived.id);
+        let _ = tokio::fs::remove_dir_all(&game).await;
+        seed_indexed_mods(&paths, &server, &game).await;
+        let run = paths.server_run(&server.id);
+        tokio::fs::copy(
+            run.join("client-mods/mr-client.jar"),
+            game.join("mods/mr-client.jar"),
+        )
+        .await
+        .unwrap();
+
+        let missing = import(
+            &offline(),
+            &paths,
+            &mut arrived,
+            &dest,
+            None,
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            missing.iter().any(|m| m.contains("cf-client.jar")),
+            "{missing:?}"
+        );
+
+        for jar in ["hand.jar", "mr-client.jar"] {
+            assert!(
+                game.join("mods").join(jar).is_file(),
+                "{jar} did not arrive in mods/"
+            );
+            let record = arrived
+                .content
+                .iter()
+                .find(|r| r.file_name == jar)
+                .unwrap_or_else(|| panic!("{jar} has no record: {:?}", arrived.content));
+            assert_eq!(
+                (record.kind, record.origin),
+                (ContentKind::Mod, Origin::Server),
+                "{jar}"
+            );
+        }
+        assert!(!game.join("client-mods").exists());
 
         let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }

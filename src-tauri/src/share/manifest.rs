@@ -117,8 +117,10 @@ pub struct SourceRef {
 pub struct FileNote {
     /// The same path the index uses, so the two halves line up by key.
     pub path: String,
-    /// What the jar declared about itself, carried across so an importer does
-    /// not have to re-read every jar to find out.
+    /// Which side the file belongs on. In an instance's pack, what the jar
+    /// declared about itself, carried across so an importer does not have to
+    /// re-read every jar to find out. In a server's pack, how the server
+    /// classified it — its folder, then the jar, then the listing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub side: Option<crate::instance::jar::Side>,
     /// Where to get it, when it is not something the index can point at.

@@ -57,7 +57,7 @@ export default function PackServerModal({
   return (
     <Modal
       title={`Host ${project.name}`}
-      subtitle="Its mods, minus the ones that only matter on a client."
+      subtitle="Its mods, with the ones that only matter on a client kept in Client mods for players."
       onClose={onClose}
       width={500}
       footer={

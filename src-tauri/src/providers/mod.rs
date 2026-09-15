@@ -153,6 +153,25 @@ impl Project {
     pub fn runs_on_a_server(&self) -> bool {
         !matches!(self.server_side.as_deref(), Some("unsupported"))
     }
+
+    /// Which side the listing says this belongs on, when it says.
+    ///
+    /// Unsupported on a server is a client mod, and unsupported on a client is
+    /// a server one. Optional on a client while required on a server is a
+    /// server mod too: a player may leave it out, and the server may not. Every
+    /// other stated pair runs on both. CurseForge states nothing, so its
+    /// projects have no listed side; SpigotMC's plugins are listed as server
+    /// software by Geode itself.
+    pub fn listed_side(&self) -> Option<crate::instance::jar::Side> {
+        use crate::instance::jar::Side;
+        match (self.client_side.as_deref(), self.server_side.as_deref()) {
+            (_, Some("unsupported")) => Some(Side::Client),
+            (Some("unsupported"), _) => Some(Side::Server),
+            (Some("optional"), Some("required")) => Some(Side::Server),
+            (Some(_), Some(_)) => Some(Side::Both),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -645,6 +664,30 @@ mod tests {
         let unknown = project(Provider::CurseForge, "whatever", "Whatever", 0);
         assert!(unknown.server_side.is_none());
         assert!(unknown.runs_on_a_server());
+    }
+
+    /// Modrinth's two tick-boxes become one side, and a platform that ticks
+    /// neither gives none rather than a guess.
+    #[test]
+    fn modrinths_sides_become_a_listed_side() {
+        use crate::instance::jar::Side;
+
+        let table = [
+            (Some("required"), Some("unsupported"), Some(Side::Client)),
+            (Some("unsupported"), Some("unsupported"), Some(Side::Client)),
+            (Some("unsupported"), Some("required"), Some(Side::Server)),
+            (Some("optional"), Some("required"), Some(Side::Server)),
+            (Some("optional"), Some("optional"), Some(Side::Both)),
+            (Some("required"), Some("optional"), Some(Side::Both)),
+            (Some("required"), Some("required"), Some(Side::Both)),
+            (None, None, None),
+        ];
+        for (client, server, want) in table {
+            let mut p = project(Provider::Modrinth, "x", "X", 0);
+            p.client_side = client.map(str::to_string);
+            p.server_side = server.map(str::to_string);
+            assert_eq!(p.listed_side(), want, "client={client:?} server={server:?}");
+        }
     }
 
     #[test]

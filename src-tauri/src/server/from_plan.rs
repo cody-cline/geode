@@ -3,7 +3,8 @@
 //! A plan is a list of mods and a target the *client* can run. A server is not
 //! a client: it renders nothing, so the half of any modpack that exists to make
 //! the game look better has no business in its mods folder. Sodium and Iris say
-//! so themselves, and this drops them and reports that it did.
+//! so themselves, and this keeps them in the server's Client mods, which the
+//! server never loads and its players receive with the rest.
 //!
 //! Only some of a plan's possible targets can become a server at all. Paper and
 //! Purpur are not mod loaders, and Forge and NeoForge servers need an installer
@@ -13,7 +14,6 @@
 use serde::Serialize;
 
 use crate::error::{Error, Result};
-use crate::instance::content::ContentKind;
 use crate::net::Progress;
 use crate::paths::Paths;
 use crate::plan::resolve::{Fit, Target};
@@ -28,8 +28,7 @@ pub struct ServerBuildReport {
     pub server_id: String,
     pub server_name: String,
     pub installed: Vec<String>,
-    /// What did not make it, and why — client-only mods included, since their
-    /// absence is a decision rather than a failure.
+    /// What did not make it, and why.
     pub skipped: Vec<String>,
 }
 
@@ -55,7 +54,8 @@ fn refuse(loader: &str) -> Error {
     ))
 }
 
-/// Create a server at this target and install the plan's server-capable mods.
+/// Create a server at this target and install the plan's mods, the ones that
+/// do not run on a server into its Client mods.
 pub async fn from_plan(
     client: &reqwest::Client,
     paths: &Paths,
@@ -87,7 +87,6 @@ pub async fn from_plan(
 
     let wanted: Vec<_> = target.fits.iter().filter(|f| f.fit != Fit::Missing).collect();
     progress.stage("Installing mods", wanted.len() as u64).await;
-    let dir = paths.server_run(&server.id).join(ContentKind::Mod.folder());
 
     for fit in wanted {
         progress.check_cancelled()?;
@@ -106,7 +105,7 @@ pub async fn from_plan(
 
         match install_one(
             client,
-            &dir,
+            paths,
             &mut server,
             fit,
             &target.loader,
@@ -115,10 +114,7 @@ pub async fn from_plan(
         )
         .await
         {
-            Ok(Installed::File(file)) => report.installed.push(file),
-            Ok(Installed::NotForServers(name)) => report
-                .skipped
-                .push(format!("{name}: does not run on a server")),
+            Ok(file) => report.installed.push(file),
             Err(e) => report.skipped.push(format!("{}: {e}", fit.name)),
         }
     }
@@ -127,28 +123,19 @@ pub async fn from_plan(
     Ok(report)
 }
 
-enum Installed {
-    File(String),
-    /// Left out on purpose, which is not the same as having failed.
-    NotForServers(String),
-}
-
 #[allow(clippy::too_many_arguments)] // one mod's coordinates, travelling together
 async fn install_one(
     client: &reqwest::Client,
-    dir: &std::path::Path,
+    paths: &Paths,
     server: &mut super::Server,
     fit: &crate::plan::resolve::ModFit,
     loader: &str,
     game_version: &str,
     curseforge_key: Option<&str>,
-) -> Result<Installed> {
+) -> Result<String> {
     let provider = Provider::parse(&fit.provider).ok_or_else(|| Error::msg("unknown provider"))?;
     let project = providers::project(client, provider, &fit.project_id, curseforge_key).await?;
-
-    if !project.runs_on_a_server() {
-        return Ok(Installed::NotForServers(project.name));
-    }
+    let kind = super::folder_for(&project);
 
     // The version this mod's verdict named, which is the target's own except
     // where the resolver reached into a neighbouring patch.
@@ -168,17 +155,18 @@ async fn install_one(
 
     let file = crate::install::content::install_into(
         client,
-        dir,
+        &super::content_dir(paths, &server.id, kind).await,
         &mut server.content,
         best,
-        ContentKind::Mod,
+        kind,
         &project.name,
         project.icon_url.clone(),
         Some(project.slug.clone()),
         false,
+        project.listed_side(),
     )
     .await?;
-    Ok(Installed::File(file))
+    Ok(file)
 }
 
 #[cfg(test)]

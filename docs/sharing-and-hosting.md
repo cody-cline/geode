@@ -37,6 +37,7 @@ is more actionable than a silently incomplete instance would be.
 | Server passwords (the share code) — the secret in a join link | `src-tauri/src/share/code.rs`, `src-tauri/src/server/share.rs` | Done, tested |
 | Referencing rather than copying | `src-tauri/src/share/pack.rs` (`source_for`) | Done, tested |
 | Sidedness from the jar | `src-tauri/src/instance/jar.rs` (`Side`) | Done, verified against real jars |
+| Client, server and both on a server | `src-tauri/src/instance/content.rs` (`side_of`), `src-tauri/src/server/mod.rs` (`move_mod`), `src-tauri/src/share/pack.rs` (`server_mods`) | Done, tested (item 7) |
 | Geode pack round trip | `src-tauri/src/share/pack.rs` (`export`, `apply_pack`) | Done, tested end to end |
 | Server vs user mods | `src-tauri/src/instance/content.rs` (`Origin`) | Done, tested — server mods can be disabled, not removed |
 | Sharing a server directly with players | `src-tauri/src/share/{host,service,portmap,identity,trust,link,join}.rs` | Done, tested end to end over real TLS |
@@ -227,13 +228,16 @@ connects straight to the admin's machine. Nothing sits in the middle.
   while the job ran, and keeps the records another job saved meanwhile for
   files this copy neither has nor started with — two installs clicked one after
   the other would otherwise lose the first one's record, leaving its jar
-  untracked and, for a CurseForge mod, sent to players as a copy. Any other
-  field saved meanwhile is overwritten.
-- What a server sends is an **allowlist**: the mod jars directly in `mods/`,
-  and `config/` only when the admin asks. No subfolder of `mods/`, no backup or
-  other stray file, and no symbolic link anywhere — a link in `mods/` pointing
-  at the admin's home would otherwise have been followed. Never
-  `server.properties`, ops, whitelist, bans, worlds, logs, libraries or plugins.
+  untracked and, for a CurseForge mod, sent to players as a copy. A mod moved
+  between Mods and Client mods meanwhile keeps its move: the job's record
+  under the folder it left gives way, rather than tracking the mod in both.
+  Any other field saved meanwhile is overwritten.
+- What a server sends is an **allowlist**: the mod jars directly in `mods/`
+  and `client-mods/` (item 7), and `config/` only when the admin asks. No
+  subfolder of either, no backup or other stray file, and no symbolic link
+  anywhere — a link in `mods/` pointing at the admin's home would otherwise
+  have been followed. Never `server.properties`, ops, whitelist, bans, worlds,
+  logs, libraries or plugins.
   Every regular jar directly in `mods/` travels to players, turned off or not:
   one with a Modrinth or CurseForge record as a reference, and every other one
   as a copy — jars added by hand with no record, jars whose CurseForge author
@@ -307,8 +311,8 @@ forwarding and made it connect, and a hostile link was dropped.
 - `geode://` delivery is verified on Linux only. Windows and macOS are unbuilt
   and unrun.
 - Forge 1.12.2 and older also loads jars from `mods/<version>/`. A server's
-  pack takes only the jars directly in `mods/`, so those are not sent, and
-  nothing says so; move them up a level to share them.
+  pack takes only the jars directly in `mods/` and `client-mods/`, so those are
+  not sent, and nothing says so; move them up a level to share them.
 
 ### 4. The container
 
@@ -397,6 +401,98 @@ file name the Linux save dialog may not have given an extension.
 **Not covered by an offline test:** keeping records after a partial download
 failure, and the disabled state being honoured at download time. Both need a
 live CurseForge response to exercise; the note side of the second is tested.
+
+### 7. Client, server and both — **done**
+
+A server's mods are not all the server's. Half of a modpack is rendering, UI
+and minimaps, which a server has no use for and players do; a few mods — a
+profiler, a backup tool, an anti-cheat — are the reverse. So Geode sorts each
+of a server's mods into **client**, **server** or **both**, and the pack its
+players get says which.
+
+**Where a side comes from.** `content::side_of` answers from three things, in
+this order:
+
+1. The folder. A mod in Client mods is a client mod, whatever it says, because
+   putting it there was the admin's decision.
+2. What the jar declares — `environment` in `fabric.mod.json`, Forge's
+   `clientSideOnly` — when it declares client or server. A jar declaring both
+   says nothing the next source cannot sharpen.
+3. Modrinth's listing, captured when the mod was installed and kept on its
+   record as `side`. `Project::listed_side` reads the two tick-boxes: server
+   unsupported is client; client unsupported, or client optional with server
+   required, is server; any other stated pair is both. CurseForge states
+   nothing, so its projects have no listed side. (SpigotMC's projects are
+   listed as server software by Geode itself, which only a plugin ever is.)
+
+Nothing said anywhere is both. That is the known limit: a CurseForge mod, or a
+NeoForge mod — NeoForge has no field for this — that its jar does not
+classify counts as both, and goes to players and stays in the server's `mods/`
+as it always did. Records written before this have no `side` and are not
+backfilled; they are classified from their jar alone until they are
+reinstalled, updated or identified.
+
+**Client mods live in `run/client-mods/`.** No loader reads that folder, which
+is the whole point: a mod there cannot slow the server down or crash it on
+boot, and it is still part of the server's pack. The Content tab shows it as a
+**Client mods** folder beside Mods, with its own install, add-file, identify,
+update and delete, and a row in Mods says `client` or `server` when its mod
+belongs on one side only.
+
+**What goes there by itself.** Only new installs, and only on Modrinth's word:
+
+- A Browse install into Mods of a mod Modrinth lists as client only goes to
+  Client mods instead (`commands::install_folder`), and the app says so. An
+  update names its version and stays in the folder it is in, and a project the
+  server already has in Mods stays there.
+- A server built from a modpack or a plan puts the pack's mods that do not run
+  on a server into Client mods (`server::folder_for`), where it used to leave
+  them out.
+- A mod's dependencies follow it into its folder. A walk into Mods still
+  installs a library the server only has in Client mods, since the server
+  never loads that copy; a walk into Client mods skips a library already in
+  Mods, since players get that one anyway.
+
+Geode never moves a jar that is already installed. Jars in `run/mods` stay
+there even when they read as client mods; the badge says so, and the admin
+decides.
+
+**Moving a mod.** Each row in Mods and Client mods has a move button
+(`server::move_mod`). The file keeps its name, `.disabled` included, and its
+record moves with it, so it is still tracked for updates and still travels as
+a reference. A move onto a mod the other folder already has, on or off, under
+that name or as the same Modrinth or CurseForge project under another, is
+refused with nothing changed, and so is any move while the server runs: it
+read `mods/` when it started. There is no way to mark a mod
+server or both by hand; those are always worked out.
+
+**How a pack carries each side.** A player's game has one mods folder, so a
+client mod arrives as an ordinary mod in `mods/`, and nothing in a pack names
+`client-mods/`:
+
+- A Modrinth mod is indexed at `mods/<file>` with an `env` from its side:
+  client required and server unsupported for a client mod, client optional and
+  server required for a server mod, required on both otherwise. Every other
+  launcher installing the pack on a server therefore leaves client mods out.
+- A client mod carried as bytes goes under `client-overrides/mods/`, which the
+  `.mrpack` format applies only on a client. Mods go under `overrides/mods/`
+  as before.
+- A CurseForge mod is referenced at `mods/<file>` in `geode/manifest.json`, as
+  before.
+- Every mod that belongs on one side only gets a manifest note carrying its
+  side, however it travels; in a server's pack `FileNote.side` is the
+  server's classification, not only what the jar declared. The preview's
+  `serverMods` counts the server-side ones.
+
+**A mod in both folders goes once**, from `mods/`: a client mod with the same
+file name as a jar in `mods/`, or with the same Modrinth or CurseForge project
+as a mod in `mods/` that goes, is left out of the pack. A mod on disk both on
+and off in one folder, which updating a turned-off mod whose file name stays
+the same leaves behind, is indexed or referenced once and noted once, as the
+copy that is on.
+
+**Older Geodes.** A player on an older Geode extracts `client-overrides/` and
+installs files whose client `env` is optional, so they still get every mod.
 
 ## What needs you
 

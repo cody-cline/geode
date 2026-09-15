@@ -228,12 +228,16 @@ export default function ServerView({ id }: { id: string }) {
         server={{
           name: server.name,
           installed: present,
-          kind: adding,
+          // Client mods are mods to search for; only where they go differs.
+          kind: adding === "clientmod" ? "mod" : adding,
           mcVersion: server.mcVersion,
-          // Only the mods folder is loader-specific. A Bukkit plugin runs on
-          // Paper, Spigot and Purpur alike, so narrowing plugins to one of
-          // those would hide most of them.
-          loader: adding === "mod" ? (server.modLoader ?? null) : null,
+          // Only mods are loader-specific. A Bukkit plugin runs on Paper,
+          // Spigot and Purpur alike, so narrowing plugins to one of those
+          // would hide most of them.
+          loader:
+            adding === "mod" || adding === "clientmod"
+              ? (server.modLoader ?? null)
+              : null,
           onInstall: (project) => {
             void api
               .installServerContent(id, project.provider, project.id, adding)
@@ -241,6 +245,15 @@ export default function ServerView({ id }: { id: string }) {
                 setPresent((was) =>
                   new Set(was).add(`${project.provider}:${project.id}`),
                 );
+                // The server keeps a mod Modrinth lists as client-only for its
+                // players rather than loading it, and says where it went.
+                if (adding === "mod" && report.kind === "clientmod") {
+                  toast({
+                    kind: "info",
+                    title: `${project.name} went to Client mods`,
+                    body: "It only runs in players' games, so this server keeps it for players and never loads it.",
+                  });
+                }
                 if (report.skipped.length > 0) {
                   toast({
                     kind: "error",

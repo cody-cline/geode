@@ -163,6 +163,7 @@ pub fn run() {
             commands::install_server_content,
             commands::remove_server_content,
             commands::set_server_content_enabled,
+            commands::move_server_mod,
             commands::add_cardboard,
             commands::set_instance_image,
             commands::set_server_image,

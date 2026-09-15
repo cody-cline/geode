@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::paths::Paths;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ContentKind {
     #[default]
@@ -24,6 +24,13 @@ pub enum ContentKind {
     /// Server plugins. Only servers have a `plugins/` folder; an instance that
     /// somehow has one lists nothing, which is the honest answer.
     Plugin,
+    /// A mod a server keeps for its players and never loads.
+    ///
+    /// Only servers have these, in `client-mods/`, a folder no loader reads —
+    /// which is the point: a renderer or a minimap in `mods/` is at best dead
+    /// weight on a server and at worst a crash on boot. A player receives each
+    /// one as an ordinary mod in `mods/`.
+    ClientMod,
 }
 
 impl ContentKind {
@@ -34,6 +41,7 @@ impl ContentKind {
             ContentKind::ShaderPack => "shaderpacks",
             ContentKind::DataPack => "datapacks",
             ContentKind::Plugin => "plugins",
+            ContentKind::ClientMod => "client-mods",
         }
     }
 
@@ -44,6 +52,7 @@ impl ContentKind {
             "shaderpack" | "shader" => Some(ContentKind::ShaderPack),
             "datapack" => Some(ContentKind::DataPack),
             "plugin" => Some(ContentKind::Plugin),
+            "clientmod" => Some(ContentKind::ClientMod),
             _ => None,
         }
     }
@@ -108,6 +117,39 @@ pub struct ContentRecord {
     /// delete a library half their mods depend on.
     #[serde(default)]
     pub requires: Option<Vec<String>>,
+    /// Which side this belongs on, as told by someone other than the jar.
+    ///
+    /// On a server or a player's own install, that is Modrinth's listing,
+    /// captured when it was installed. On a joined instance's server files, it
+    /// is how the server classified the file. `None` when nobody has said —
+    /// CurseForge lists nothing, and records written before this was kept are
+    /// not filled in after the fact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub side: Option<super::jar::Side>,
+}
+
+/// Where a mod belongs, from everything known about it.
+///
+/// The folder comes first, because it is the admin's own decision: a mod in
+/// Client mods is a client mod whatever it says. Then what the jar declares,
+/// because that is what the loader enforces. Then the listing, which is an
+/// author's tick-box and the only word there is for a jar that says nothing —
+/// most of NeoForge. Nothing said anywhere is both, never a guess at one side:
+/// a wrong guess leaves a server missing a mod, or a player without one.
+pub fn side_of(
+    kind: ContentKind,
+    declared: Option<super::jar::Side>,
+    listed: Option<super::jar::Side>,
+) -> super::jar::Side {
+    use super::jar::Side;
+    if kind == ContentKind::ClientMod {
+        return Side::Client;
+    }
+    match (declared, listed) {
+        (Some(side @ (Side::Client | Side::Server)), _) => side,
+        (_, Some(side @ (Side::Client | Side::Server))) => side,
+        _ => Side::Both,
+    }
 }
 
 /// One row in the instance's content list.
@@ -157,6 +199,12 @@ pub struct ContentItem {
     /// to match on when a specific mod needs recognising.
     #[serde(default)]
     pub mod_ids: Vec<String>,
+    /// Which side a mod belongs on, for mods and client mods only.
+    ///
+    /// Worked out with [`side_of`], except for a file that arrived with a
+    /// server's pack: that one carries the server's own answer, or none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub side: Option<super::jar::Side>,
 }
 
 pub(crate) const DISABLED_SUFFIX: &str = ".disabled";
@@ -176,7 +224,7 @@ pub(crate) fn is_content_file(name: &str, kind: ContentKind) -> bool {
     match kind {
         // A plugin is a jar as much as a mod is. What differs is the folder it
         // belongs in and what loads it, neither of which the name can show.
-        ContentKind::Mod | ContentKind::Plugin => lower.ends_with(".jar"),
+        ContentKind::Mod | ContentKind::ClientMod | ContentKind::Plugin => lower.ends_with(".jar"),
         ContentKind::ResourcePack | ContentKind::DataPack => lower.ends_with(".zip"),
         ContentKind::ShaderPack => lower.ends_with(".zip") || lower.ends_with(".zip.txt"),
     }
@@ -242,7 +290,9 @@ pub async fn list_in(
         // different file, and reading it is what gives a plugins folder real
         // edges rather than only the ones recorded at install time.
         let meta = match kind {
-            ContentKind::Mod | ContentKind::Plugin => jars.get(&entry.path()).await,
+            ContentKind::Mod | ContentKind::ClientMod | ContentKind::Plugin => {
+                jars.get(&entry.path()).await
+            }
             _ => None,
         };
 
@@ -304,6 +354,18 @@ pub async fn list_in(
             },
         };
         item.mod_ids = meta.as_ref().map(|m| m.primary.clone()).unwrap_or_default();
+        if matches!(kind, ContentKind::Mod | ContentKind::ClientMod) {
+            // A server's file is the server's to classify, and a joined
+            // instance takes its word rather than second-guessing it here.
+            item.side = match record {
+                Some(r) if r.origin == Origin::Server => r.side,
+                _ => Some(side_of(
+                    kind,
+                    meta.as_ref().and_then(|m| m.side),
+                    record.and_then(|r| r.side),
+                )),
+            };
+        }
         items.push(item);
         metas.push(meta);
     }
@@ -315,7 +377,10 @@ pub async fn list_in(
     // honest either way: `declares_deps` is false, saying the jar did not tell
     // us, and `unused` only ever marks something installed *as* a dependency,
     // so a plugin dropped in by hand is never called unneeded.
-    if matches!(kind, ContentKind::Mod | ContentKind::Plugin) {
+    if matches!(
+        kind,
+        ContentKind::Mod | ContentKind::ClientMod | ContentKind::Plugin
+    ) {
         link(&mut items, &metas, records);
     }
 
@@ -548,6 +613,7 @@ pub async fn claim_for_server(paths: &Paths, instance: &mut super::Instance) -> 
                 dependency: false,
                 origin: Origin::Server,
                 requires: None,
+                side: None,
             });
         }
     }
@@ -666,6 +732,7 @@ mod tests {
             dependency: false,
             origin: Default::default(),
             requires: None,
+            side: None,
         };
         let json = serde_json::to_string(&record).unwrap();
         assert!(!json.contains("origin"), "{json}");
@@ -717,6 +784,7 @@ mod tests {
             dependency: false,
             origin: Default::default(),
             requires: Some(requires.iter().map(|s| s.to_string()).collect()),
+            side: None,
         }
     }
 
@@ -869,6 +937,7 @@ mod tests {
             dependency: false,
             origin: Default::default(),
             requires: Some(vec!["BBB".into()]),
+            side: None,
         }];
         link(&mut items, &[None, None], &records);
 
@@ -952,6 +1021,144 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
+    /// The folder outranks the jar, and the jar outranks the listing. A
+    /// declaration of both sides says nothing a listing cannot sharpen, and
+    /// silence everywhere is both rather than a guess.
+    #[test]
+    fn side_of_prefers_the_folder_then_the_jar_then_the_listing() {
+        use crate::instance::jar::Side;
+        use ContentKind::{ClientMod, Mod};
+
+        let table = [
+            (
+                ClientMod,
+                Some(Side::Server),
+                Some(Side::Server),
+                Side::Client,
+            ),
+            (Mod, Some(Side::Client), Some(Side::Server), Side::Client),
+            (Mod, Some(Side::Server), Some(Side::Client), Side::Server),
+            (Mod, Some(Side::Both), Some(Side::Client), Side::Client),
+            (Mod, None, Some(Side::Server), Side::Server),
+            (Mod, Some(Side::Both), None, Side::Both),
+            (Mod, None, None, Side::Both),
+        ];
+        for (kind, declared, listed, want) in table {
+            assert_eq!(
+                side_of(kind, declared, listed),
+                want,
+                "{kind:?} {declared:?} {listed:?}"
+            );
+        }
+    }
+
+    /// A jar with a real `fabric.mod.json`, so reading it finds a side.
+    fn fabric_jar(id: &str, environment: &str) -> Vec<u8> {
+        use std::io::Write;
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        zip.start_file("fabric.mod.json", options).unwrap();
+        zip.write_all(
+            format!(
+                r#"{{"schemaVersion":1,"id":"{id}","version":"1.0","environment":"{environment}"}}"#
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        zip.finish().unwrap().into_inner()
+    }
+
+    /// Client mods are read like mods — the jar opened, the record found — and
+    /// never borrow the record of a mod in the other folder with the same file
+    /// name.
+    #[tokio::test]
+    async fn a_client_mods_folder_lists_like_mods() {
+        let dir = std::env::temp_dir()
+            .join(format!("geode-client-mods-{}", std::process::id()))
+            .join("client-mods");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        // Declares both sides, so only the folder can make it a client mod.
+        tokio::fs::write(dir.join("minimap.jar"), fabric_jar("minimap", "*"))
+            .await
+            .unwrap();
+
+        let records = vec![
+            record("minimap.jar", ContentKind::Mod, "IN-MODS", &[]),
+            record("minimap.jar", ContentKind::ClientMod, "IN-CLIENT-MODS", &[]),
+        ];
+        let items = list_in(
+            &dir,
+            &records,
+            ContentKind::ClientMod,
+            &crate::instance::jar::MetaCache::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].kind, ContentKind::ClientMod);
+        assert_eq!(items[0].project_id.as_deref(), Some("IN-CLIENT-MODS"));
+        assert_eq!(items[0].mod_ids, vec!["minimap"], "the jar was not read");
+        assert_eq!(items[0].side, Some(crate::instance::jar::Side::Client));
+
+        let _ = tokio::fs::remove_dir_all(dir.parent().unwrap()).await;
+    }
+
+    /// Each mod row says where it belongs. A file that came from a server
+    /// carries the server's word or none, never what the jar says on its own.
+    #[tokio::test]
+    async fn the_list_says_which_side_each_mod_is_on() {
+        use crate::instance::jar::Side;
+
+        let dir = std::env::temp_dir().join(format!("geode-list-sides-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        for (file, environment) in [
+            ("tick-profiler.jar", "server"),
+            ("zoom.jar", "*"),
+            ("from-server.jar", "client"),
+        ] {
+            tokio::fs::write(
+                dir.join(file),
+                fabric_jar(&file.replace(['.', '-'], ""), environment),
+            )
+            .await
+            .unwrap();
+        }
+        let records = vec![
+            ContentRecord {
+                side: Some(Side::Client),
+                ..record("zoom.jar", ContentKind::Mod, "ZOOM", &[])
+            },
+            ContentRecord {
+                origin: Origin::Server,
+                ..record("from-server.jar", ContentKind::Mod, "SRV", &[])
+            },
+        ];
+
+        let items = list_in(
+            &dir,
+            &records,
+            ContentKind::Mod,
+            &crate::instance::jar::MetaCache::new(),
+        )
+        .await
+        .unwrap();
+        let side = |file: &str| {
+            items
+                .iter()
+                .find(|i| i.file_name == file)
+                .unwrap_or_else(|| panic!("{file} is not listed: {items:?}"))
+                .side
+        };
+        assert_eq!(side("tick-profiler.jar"), Some(Side::Server));
+        assert_eq!(side("zoom.jar"), Some(Side::Client));
+        assert_eq!(side("from-server.jar"), None);
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
     #[test]
     fn a_record_of_another_kind_is_never_borrowed() {
         // The same file name can sit in mods/ and in plugins/. Matching on the
@@ -992,6 +1199,7 @@ mod tests {
             dependency: false,
             origin: Default::default(),
             requires: Some(vec!["BBB".into()]),
+            side: None,
         }];
         link(&mut items, &[None, None], &records);
         assert_eq!(items[1].required_by, vec!["mod.jar.disabled"]);

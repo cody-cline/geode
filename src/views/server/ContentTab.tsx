@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import clsx from "clsx";
 import {
+  ArrowLeftRight,
   ArrowUpCircle,
   FilePlus2,
   Link2,
@@ -25,15 +26,21 @@ import styles from "../instance/ContentTab.module.css";
 /**
  * The folders a server actually has. Narrower than `ContentKind`: a server has
  * no resource packs or shaders of its own, and offering to install one would
- * promise somewhere to put it that does not exist.
+ * promise somewhere to put it that does not exist. Client mods are the mods it
+ * keeps for its players and never loads.
  */
-export type ServerFolder = "plugin" | "mod" | "datapack";
+export type ServerFolder = "plugin" | "mod" | "clientmod" | "datapack";
 
 const PICKS: Record<ServerFolder, { label: string; extensions: string[] }> = {
   plugin: { label: "Plugins", extensions: ["jar"] },
   mod: { label: "Mods", extensions: ["jar"] },
+  clientmod: { label: "Client mods", extensions: ["jar"] },
   datapack: { label: "Data Packs", extensions: ["zip"] },
 };
+
+/** The same update: one project, in one folder. */
+const sameUpdate = (a: UpdateCandidate, b: UpdateCandidate) =>
+  a.provider === b.provider && a.projectId === b.projectId && a.kind === b.kind;
 
 export default function ServerContentTab({
   server,
@@ -53,7 +60,10 @@ export default function ServerContentTab({
   const folders = useMemo(() => {
     const out: { id: ServerFolder; label: string }[] = [];
     if (server.takesPlugins) out.push({ id: "plugin", label: PICKS.plugin.label });
-    if (server.takesMods) out.push({ id: "mod", label: PICKS.mod.label });
+    if (server.takesMods) {
+      out.push({ id: "mod", label: PICKS.mod.label });
+      out.push({ id: "clientmod", label: PICKS.clientmod.label });
+    }
     if (server.hasWorld) out.push({ id: "datapack", label: PICKS.datapack.label });
     return out;
   }, [server.takesPlugins, server.takesMods, server.hasWorld]);
@@ -63,7 +73,7 @@ export default function ServerContentTab({
   const [filter, setFilter] = useState("");
   const [updates, setUpdates] = useState<UpdateCandidate[]>([]);
   const [checking, setChecking] = useState(false);
-  const [updating, setUpdating] = useState<string | null>(null);
+  const [updating, setUpdating] = useState<UpdateCandidate | null>(null);
   const [linking, setLinking] = useState(false);
   const [addingCardboard, setAddingCardboard] = useState(false);
 
@@ -93,9 +103,14 @@ export default function ServerContentTab({
       : items;
   }, [items, filter]);
 
+  // The same project can sit in Mods and in Client mods, and each row is
+  // offered only its own folder's update.
   const updateFor = (item: ContentItem) =>
     updates.find(
-      (u) => u.projectId === item.projectId && u.provider === item.provider,
+      (u) =>
+        u.projectId === item.projectId &&
+        u.provider === item.provider &&
+        u.kind === folder,
     );
 
   async function toggle(item: ContentItem) {
@@ -109,6 +124,24 @@ export default function ServerContentTab({
       await load();
     } catch (e) {
       reportError("Could not toggle that file", e);
+    }
+  }
+
+  /**
+   * Move a mod between Mods and Client mods, record and on/off state with it.
+   * Only while the server is stopped: it read its mods folder when it started.
+   */
+  async function move(item: ContentItem) {
+    const toClient = folder === "mod";
+    try {
+      await api.moveServerMod(server.id, item.fileName, toClient);
+      await Promise.all([load(), refreshServers()]);
+      toast({
+        kind: "success",
+        title: `Moved ${item.name} to ${toClient ? "Client mods" : "Mods"}`,
+      });
+    } catch (e) {
+      reportError(`Could not move ${item.name}`, e);
     }
   }
 
@@ -185,18 +218,18 @@ export default function ServerContentTab({
   }
 
   async function applyUpdate(candidate: UpdateCandidate) {
-    setUpdating(candidate.projectId);
+    setUpdating(candidate);
     try {
       await api.applyServerContentUpdate(
         server.id,
         candidate.provider,
         candidate.projectId,
         candidate.newVersionId,
-        folder,
+        candidate.kind,
       );
-      setUpdates((prev) =>
-        prev.filter((u) => u.projectId !== candidate.projectId),
-      );
+      // Only this folder's copy was updated; the project's copy in the other
+      // folder, if any, still has its own update waiting.
+      setUpdates((prev) => prev.filter((u) => !sameUpdate(u, candidate)));
       await Promise.all([load(), refreshServers()]);
       toast({
         kind: "success",
@@ -368,11 +401,13 @@ export default function ServerContentTab({
             <p>
               {filter
                 ? `Nothing matches “${filter}”.`
-                : `No ${noun} yet. Anything you add lands in ${
-                    folder === "datapack"
-                      ? "the world's datapacks folder"
-                      : `the server's ${folder}s folder`
-                  }.`}
+                : folder === "clientmod"
+                  ? "No client mods yet. Players get these with the server's pack; this server never loads them."
+                  : `No ${noun} yet. Anything you add lands in ${
+                      folder === "datapack"
+                        ? "the world's datapacks folder"
+                        : `the server's ${folder}s folder`
+                    }.`}
             </p>
             {!filter && (
               <button
@@ -429,6 +464,22 @@ export default function ServerContentTab({
                         {providerShort(item.provider)}
                       </span>
                     )}
+                    {folder === "mod" && item.side === "client" && (
+                      <span
+                        className="badge"
+                        title="Runs only in players' games. Players get it with the pack; move it to Client mods to keep it out of this server's mods folder."
+                      >
+                        client
+                      </span>
+                    )}
+                    {folder === "mod" && item.side === "server" && (
+                      <span
+                        className="badge"
+                        title="Only this server needs it. Players get it too, and can keep server-side mods turned off."
+                      >
+                        server
+                      </span>
+                    )}
                   </div>
                   <div className={styles.itemMeta}>
                     {item.version && <span>{item.version}</span>}
@@ -444,12 +495,32 @@ export default function ServerContentTab({
                     disabled={updating !== null}
                     title={`Update to ${update.newVersionNumber}`}
                   >
-                    {updating === update.projectId ? (
+                    {updating && sameUpdate(updating, update) ? (
                       <Loader2 size={12} className="spin" />
                     ) : (
                       <ArrowUpCircle size={13} />
                     )}
                     Update
+                  </button>
+                )}
+
+                {(folder === "mod" || folder === "clientmod") && (
+                  <button
+                    className="btn btn-ghost btn-icon btn-sm"
+                    onClick={() => void move(item)}
+                    disabled={server.running}
+                    title={
+                      server.running
+                        ? "Stop the server to move mods between folders"
+                        : folder === "mod"
+                          ? "Move to Client mods — players get it, this server stops loading it"
+                          : "Move to Mods — this server loads it too"
+                    }
+                    aria-label={`Move ${item.name} to ${
+                      folder === "mod" ? "Client mods" : "Mods"
+                    }`}
+                  >
+                    <ArrowLeftRight size={14} />
                   </button>
                 )}
 

@@ -423,16 +423,39 @@ impl Server {
     /// file this copy neither has nor started with is kept. One for a file it
     /// did start with is a record its own job dropped, and stays dropped.
     ///
+    /// A mod moved between Mods and Client mods meanwhile is the same file
+    /// under the other kind. This copy's record of the kind it started with
+    /// gives way to the moved one rather than staying beside it, where an
+    /// update would put the mod back in the folder it was moved out of.
+    ///
     /// Only records are kept, and only across the wait: a change landing
     /// between this read and its write is still lost, and any other field saved
     /// meanwhile is overwritten by this copy. The password is safe from that
     /// because it lives in a file of its own.
     pub async fn save_if_present(&mut self, paths: &Paths) -> Result<()> {
-        use crate::instance::content::ContentRecord;
+        use crate::instance::content::{ContentKind, ContentRecord};
 
         let fresh = load(paths, &self.id).await?;
         let same_file =
             |r: &ContentRecord, d: &ContentRecord| r.kind == d.kind && r.file_name == d.file_name;
+        let has = |records: &[ContentRecord], kind: ContentKind, name: &str| {
+            records
+                .iter()
+                .any(|r| r.kind == kind && r.file_name == name)
+        };
+        let as_loaded = &self.content_as_loaded;
+        self.content.retain(|r| {
+            let other = match r.kind {
+                ContentKind::Mod => ContentKind::ClientMod,
+                ContentKind::ClientMod => ContentKind::Mod,
+                _ => return true,
+            };
+            let moved = has(as_loaded, r.kind, &r.file_name)
+                && !has(as_loaded, other, &r.file_name)
+                && !has(&fresh.content, r.kind, &r.file_name)
+                && has(&fresh.content, other, &r.file_name);
+            !moved
+        });
         for current in fresh.content {
             if !self
                 .content
@@ -639,6 +662,105 @@ pub async fn content_dir(
     run.join(level_name(declared.as_deref())).join(kind.folder())
 }
 
+/// Where a modpack's or plan's mod goes when a server is built from it.
+///
+/// Half of a big pack exists to make the game look better, and none of that
+/// runs on a server. It is still part of what the pack is to a player, so it is
+/// kept for them in Client mods rather than left out.
+pub(crate) fn folder_for(
+    project: &crate::providers::Project,
+) -> crate::instance::content::ContentKind {
+    use crate::instance::content::ContentKind;
+    if project.runs_on_a_server() {
+        ContentKind::Mod
+    } else {
+        ContentKind::ClientMod
+    }
+}
+
+/// Move one mod between Mods and Client mods, turned off or not.
+///
+/// The file keeps its name, `.disabled` included, so it arrives in the state it
+/// left, and its record moves with it, so it is still tracked for updates and
+/// still travels as a reference. Refused, with nothing changed, when the other
+/// folder already has that mod, on or off, under the same name or as the same
+/// project under another.
+pub async fn move_mod(
+    paths: &Paths,
+    server: &mut Server,
+    file: &str,
+    to_client: bool,
+) -> Result<()> {
+    use crate::instance::content::{is_content_file, strip_disabled, ContentKind};
+
+    let rel = std::path::Path::new(file);
+    if !crate::paths::is_safe_relative(rel)
+        || rel.components().count() != 1
+        || !is_content_file(file, ContentKind::Mod)
+    {
+        return Err(Error::msg("invalid filename"));
+    }
+    let (from, to) = if to_client {
+        (ContentKind::Mod, ContentKind::ClientMod)
+    } else {
+        (ContentKind::ClientMod, ContentKind::Mod)
+    };
+    let from_dir = content_dir(paths, &server.id, from).await;
+    let to_dir = content_dir(paths, &server.id, to).await;
+
+    // The other folder may have this mod under its name, or under another
+    // name as the same project, such as a library a mod there brought in at a
+    // newer version. Either way the loader, or a player's game, would find the
+    // mod twice. Only a file on disk counts, since a record can outlive it.
+    let base = strip_disabled(file).0.to_string();
+    let project = server
+        .content
+        .iter()
+        .find(|r| r.kind == from && r.file_name == base)
+        .filter(|r| !r.provider.is_empty() && !r.project_id.is_empty());
+    let mut taken = vec![base.clone()];
+    taken.extend(
+        server
+            .content
+            .iter()
+            .filter(|r| {
+                r.kind == to
+                    && project
+                        .is_some_and(|p| r.provider == p.provider && r.project_id == p.project_id)
+            })
+            .map(|r| r.file_name.clone()),
+    );
+    for name in taken {
+        let disabled = format!("{name}{}", crate::instance::content::DISABLED_SUFFIX);
+        for on_disk in [&name, &disabled] {
+            if tokio::fs::symlink_metadata(to_dir.join(on_disk))
+                .await
+                .is_ok()
+            {
+                return Err(Error::msg(format!(
+                    "{name} is already in {}",
+                    if to_client { "Client mods" } else { "Mods" }
+                )));
+            }
+        }
+    }
+
+    tokio::fs::create_dir_all(&to_dir).await?;
+    tokio::fs::rename(from_dir.join(file), to_dir.join(file)).await?;
+
+    // A record of the destination's kind under this name belongs to no file,
+    // since the folder had none, and would otherwise sit beside the one moving.
+    server
+        .content
+        .retain(|r| !(r.kind == to && r.file_name == base));
+    for record in &mut server.content {
+        if record.kind == from && record.file_name == base {
+            record.kind = to;
+        }
+    }
+    Ok(())
+}
+
 /// Write `eula.txt`, which Mojang requires before a server will start.
 ///
 /// Only ever called after the user has actually agreed in the UI. Writing it
@@ -752,6 +874,7 @@ mod tests {
             dependency: false,
             origin: Default::default(),
             requires: None,
+            side: None,
         }
     }
 
@@ -1024,6 +1147,197 @@ mod tests {
             vec!["lithium.jar", "sodium.jar"],
             "a removal on a second save was undone"
         );
+
+        std::fs::remove_dir_all(&paths.root).unwrap();
+    }
+
+    /// A Modrinth project with the given server-side listing.
+    fn listed(server_side: Option<&str>) -> crate::providers::Project {
+        serde_json::from_value(serde_json::json!({
+            "provider": "modrinth", "id": "P", "slug": "p", "name": "P",
+            "summary": "", "downloads": 0, "follows": 0, "author": "",
+            "kind": "mod", "pageUrl": "", "clientSide": "required",
+            "serverSide": server_side,
+        }))
+        .unwrap()
+    }
+
+    /// Building a server from a pack keeps the pack's client-only mods for
+    /// players instead of leaving them out, and anything that may run on a
+    /// server — including a platform that says nothing — goes where it loads.
+    #[test]
+    fn a_pack_mod_no_server_runs_is_kept_for_players() {
+        use crate::instance::content::ContentKind;
+
+        assert_eq!(
+            folder_for(&listed(Some("unsupported"))),
+            ContentKind::ClientMod
+        );
+        for server_side in [Some("required"), Some("optional"), None] {
+            assert_eq!(
+                folder_for(&listed(server_side)),
+                ContentKind::Mod,
+                "{server_side:?}"
+            );
+        }
+    }
+
+    /// A move takes the mod's record and its on or off state with it, and
+    /// refuses to land on a mod the other folder already has, or to reach
+    /// outside the folder.
+    #[tokio::test]
+    async fn moving_a_mod_between_folders_takes_its_record_and_its_state() {
+        use crate::instance::content::ContentKind;
+
+        let paths = scratch("move-mod");
+        let mut server = Server::new("Mover".into(), ServerKind::Fabric, "1.21.1".into());
+        let run = paths.server_run(&server.id);
+        tokio::fs::create_dir_all(run.join("mods")).await.unwrap();
+        tokio::fs::write(run.join("mods/x.jar.disabled"), b"x")
+            .await
+            .unwrap();
+        server.content = vec![record("x.jar", "modrinth", "X")];
+
+        move_mod(&paths, &mut server, "x.jar.disabled", true)
+            .await
+            .unwrap();
+        assert!(run.join("client-mods/x.jar.disabled").is_file());
+        assert!(!run.join("mods/x.jar.disabled").exists());
+        assert_eq!(server.content.len(), 1);
+        assert_eq!(server.content[0].kind, ContentKind::ClientMod);
+
+        // Mods has an x.jar of its own now, so moving the other one back would
+        // put two copies of the mod side by side.
+        tokio::fs::write(run.join("mods/x.jar"), b"another")
+            .await
+            .unwrap();
+        let err = move_mod(&paths, &mut server, "x.jar.disabled", false)
+            .await
+            .expect_err("a move onto a mod already there must be refused");
+        assert!(err.to_string().contains("already in Mods"), "{err}");
+        assert!(run.join("client-mods/x.jar.disabled").is_file());
+        assert_eq!(std::fs::read(run.join("mods/x.jar")).unwrap(), b"another");
+        assert_eq!(server.content[0].kind, ContentKind::ClientMod);
+
+        // Refused for its name, before anything is looked at, and not because
+        // the check above happens to find a file where the name leads.
+        tokio::fs::write(run.join("x.jar"), b"outside")
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(run.join("mods/old"))
+            .await
+            .unwrap();
+        tokio::fs::write(run.join("mods/old/y.jar"), b"parked")
+            .await
+            .unwrap();
+        for name in ["../x.jar", "old/y.jar"] {
+            let err = move_mod(&paths, &mut server, name, true)
+                .await
+                .expect_err("a name that is not one file in the folder must be refused");
+            assert_eq!(err.to_string(), "invalid filename", "{name}");
+        }
+        assert!(run.join("x.jar").is_file());
+        assert!(run.join("mods/old/y.jar").is_file());
+        assert_eq!(server.content.len(), 1);
+
+        std::fs::remove_dir_all(&paths.root).unwrap();
+    }
+
+    /// A library a client mod brought into Client mods, and the same library
+    /// at another version that a mod in Mods brought in later. Moving the
+    /// first across would give the loader two copies of one mod, so it is
+    /// refused. A record whose file is gone is no copy, and refuses nothing.
+    #[tokio::test]
+    async fn a_move_onto_the_same_project_under_another_name_is_refused() {
+        use crate::instance::content::ContentKind;
+
+        let paths = scratch("move-same-project");
+        let mut server = Server::new("Mover".into(), ServerKind::Fabric, "1.21.1".into());
+        let run = paths.server_run(&server.id);
+        for rel in ["client-mods/cloth-15.0.jar", "mods/cloth-15.1.jar.disabled"] {
+            let path = run.join(rel);
+            tokio::fs::create_dir_all(path.parent().unwrap())
+                .await
+                .unwrap();
+            tokio::fs::write(path, b"cloth").await.unwrap();
+        }
+        server.content = vec![
+            crate::instance::content::ContentRecord {
+                kind: ContentKind::ClientMod,
+                ..record("cloth-15.0.jar", "modrinth", "CLOTH")
+            },
+            record("cloth-15.1.jar", "modrinth", "CLOTH"),
+        ];
+        let tracked = |server: &Server| {
+            server
+                .content
+                .iter()
+                .map(|r| (r.kind, r.file_name.clone()))
+                .collect::<Vec<_>>()
+        };
+        let before = tracked(&server);
+
+        let err = move_mod(&paths, &mut server, "cloth-15.0.jar", false)
+            .await
+            .expect_err("a second copy of the project in Mods must be refused");
+        assert_eq!(err.to_string(), "cloth-15.1.jar is already in Mods");
+        assert!(run.join("client-mods/cloth-15.0.jar").is_file());
+        assert!(!run.join("mods/cloth-15.0.jar").exists());
+        assert_eq!(tracked(&server), before);
+
+        tokio::fs::remove_file(run.join("mods/cloth-15.1.jar.disabled"))
+            .await
+            .unwrap();
+        move_mod(&paths, &mut server, "cloth-15.0.jar", false)
+            .await
+            .unwrap();
+        assert!(run.join("mods/cloth-15.0.jar").is_file());
+
+        std::fs::remove_dir_all(&paths.root).unwrap();
+    }
+
+    /// A move made while another job waited, in either direction. The waiting
+    /// copy still has the mod's record under the folder it left, and saving it
+    /// beside the moved one would leave the mod tracked in both — where an
+    /// update would put it back in the folder it was just moved out of.
+    #[tokio::test]
+    async fn a_late_save_keeps_a_move_made_while_it_waited() {
+        use crate::instance::content::ContentKind;
+
+        let paths = scratch("late-save-move");
+        let mut server = Server::new("Overlap".into(), ServerKind::Fabric, "1.21.1".into());
+        server.content = vec![record("x.jar", "modrinth", "X")];
+        server.save(&paths).await.unwrap();
+        let run = paths.server_run(&server.id);
+        tokio::fs::create_dir_all(run.join("mods")).await.unwrap();
+        tokio::fs::write(run.join("mods/x.jar"), b"x")
+            .await
+            .unwrap();
+
+        for (to_client, moved_to) in [(true, ContentKind::ClientMod), (false, ContentKind::Mod)] {
+            let mut waiting = load(&paths, &server.id).await.unwrap();
+
+            let mut other = load(&paths, &server.id).await.unwrap();
+            move_mod(&paths, &mut other, "x.jar", to_client)
+                .await
+                .unwrap();
+            other.save(&paths).await.unwrap();
+
+            // The waiting job's own install, which the save keeps as well.
+            let own = format!("own-{to_client}.jar");
+            waiting.content.push(record(&own, "modrinth", "OWN"));
+            waiting.save_if_present(&paths).await.unwrap();
+
+            let after = load(&paths, &server.id).await.unwrap();
+            let x: Vec<ContentKind> = after
+                .content
+                .iter()
+                .filter(|r| r.file_name == "x.jar")
+                .map(|r| r.kind)
+                .collect();
+            assert_eq!(x, vec![moved_to], "the move was undone or doubled");
+            assert!(after.content.iter().any(|r| r.file_name == own), "{own}");
+        }
 
         std::fs::remove_dir_all(&paths.root).unwrap();
     }

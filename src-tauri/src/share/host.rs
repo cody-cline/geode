@@ -164,11 +164,11 @@ const OUTGOING_LIMIT: u64 = 8 << 30;
 
 /// How long a server's description is answered from the one last worked out.
 ///
-/// Working one out reads every jar in the server's `mods/`, which for a few
-/// hundred mods takes a while, and a preview's connection holds its place for
-/// all of it — a connection that showed a code is never dropped for a
-/// newcomer. Worked out one at a time and reused for this long, a flood of
-/// previews costs one read of the mods every few seconds, and is otherwise
+/// Working one out reads every jar in the server's `mods/` and `client-mods/`,
+/// which for a few hundred mods takes a while, and a preview's connection holds
+/// its place for all of it — a connection that showed a code is never dropped
+/// for a newcomer. Worked out one at a time and reused for this long, a flood
+/// of previews costs one read of the mods every few seconds, and is otherwise
 /// answered at once.
 const PREVIEW_FRESH: Duration = Duration::from_secs(5);
 
@@ -225,6 +225,10 @@ pub struct PackInfo {
     pub loader_version: String,
     /// Mods in the pack, counting references as well as bundled jars.
     pub mods: usize,
+    /// Of `mods`, how many only the server needs. A player may keep these
+    /// turned off. Zero from a Geode older than this.
+    #[serde(default)]
+    pub server_mods: usize,
     /// The server software, for display: `paper`, `neoforge`, …
     pub server_kind: String,
 }
@@ -1873,6 +1877,7 @@ pub(super) mod tests {
                         loader: "fabric".into(),
                         loader_version: "0.16.9".into(),
                         mods: 300,
+                        server_mods: 0,
                         server_kind: "fabric".into(),
                     })
                 };

@@ -206,7 +206,8 @@ export default function ShareTab({ server }: { server: Server }) {
       and mods, ready to join. The pack comes straight from this computer:
       nothing is uploaded anywhere. Mods on Modrinth or CurseForge travel as
       references; every other jar in the mods folder, including jars you added
-      by hand, is sent as a copy.
+      by hand, is sent as a copy. Client mods go to players too, but this server
+      never loads them.
     </p>
   );
 

@@ -543,6 +543,7 @@ pub async fn import_into(
                     origin: Default::default(),
                     // Pack manifests carry no dependency graph; the jars do.
                     requires: None,
+                    side: None,
                 });
             }
 
@@ -729,6 +730,7 @@ async fn record_mrpack_provenance(
             dependency: false,
             origin: Default::default(),
             requires: None,
+            side: None,
         });
     }
 }
@@ -919,7 +921,28 @@ pub struct PackInput<'a> {
     pub walk: Walk,
 }
 
+/// Where a file on a server's disk goes in the pack its players get.
+///
+/// A server keeps client mods in `client-mods/`, which no loader reads, and a
+/// player's game has no such folder: there they are ordinary mods. So
+/// `client-mods/x.jar` is written as `mods/x.jar`, and everything else keeps
+/// its path.
+fn pack_rel(rel: &Path) -> PathBuf {
+    let mut parts = rel.components();
+    match parts.next() {
+        Some(first) if first.as_os_str() == ContentKind::ClientMod.folder() => {
+            Path::new(ContentKind::Mod.folder()).join(parts.as_path())
+        }
+        _ => rel.to_path_buf(),
+    }
+}
+
 /// The one pack writer. See [`export_mrpack`] for what goes where.
+///
+/// A pack walked by allowlist is a server's pack for its players, and only
+/// that pack moves client mods into `mods/`. They are indexed there as client
+/// only, or carried under `client-overrides/`, which a launcher installing the
+/// pack on a server leaves out. An instance's pack writes every path as it is.
 pub async fn write_mrpack(
     input: PackInput<'_>,
     dest: PathBuf,
@@ -928,6 +951,7 @@ pub async fn write_mrpack(
     progress: &Progress,
 ) -> Result<()> {
     let game_dir = input.root;
+    let players_pack = matches!(input.walk, Walk::Only { .. });
 
     let mut index = MrIndex {
         format_version: 1,
@@ -963,8 +987,8 @@ pub async fn write_mrpack(
         if record.provider != "modrinth" {
             continue;
         }
-        let rel = PathBuf::from(record.kind.folder()).join(&record.file_name);
-        let full = game_dir.join(&rel);
+        let disk_rel = PathBuf::from(record.kind.folder()).join(&record.file_name);
+        let full = game_dir.join(&disk_rel);
         // Under a walk that follows no links, the index does not either: a
         // link named like a record would otherwise have its target hashed and
         // described, beside a real turned-off twin that is carried anyway.
@@ -989,14 +1013,21 @@ pub async fn write_mrpack(
             continue;
         };
 
-        // What the jar itself says about where it belongs, so a pack installed
-        // on a server does not drag a renderer along with it.
+        // Where it belongs — the folder, then what the jar itself says, then
+        // the listing — so a pack installed on a server does not drag a
+        // renderer along with it.
         let probe = full.clone();
-        let side = tokio::task::spawn_blocking(move || crate::instance::jar::read(&probe))
+        let jar_side = tokio::task::spawn_blocking(move || crate::instance::jar::read(&probe))
             .await
             .ok()
             .flatten()
             .and_then(|meta| meta.side);
+        let side = crate::instance::content::side_of(record.kind, jar_side, record.side);
+        let rel = if players_pack {
+            pack_rel(&disk_rel)
+        } else {
+            disk_rel.clone()
+        };
 
         index.files.push(MrFile {
             path: rel.to_string_lossy().replace('\\', "/"),
@@ -1006,7 +1037,7 @@ pub async fn write_mrpack(
             // Always both sides, never omitted. Prism reads the client value
             // with a default of "unsupported", so a file that leaves it out
             // is a file Prism silently declines to install.
-            env: Some(env_for(side)),
+            env: Some(env_for(Some(side))),
             downloads: vec![format!(
                 "https://cdn.modrinth.com/data/{}/versions/{}/{}",
                 record.project_id,
@@ -1015,7 +1046,7 @@ pub async fn write_mrpack(
             )],
             file_size: Some(meta.len()),
         });
-        indexed.insert(rel);
+        indexed.insert(disk_rel);
     }
 
     progress.stage("Writing pack", 1).await;
@@ -1055,10 +1086,20 @@ pub async fn write_mrpack(
                     }
                     Step::Carry => {}
                 }
-                if indexed.contains(rel) || carried_by_reference(&referenced, rel) {
+                let shown = if players_pack {
+                    pack_rel(rel)
+                } else {
+                    rel.to_path_buf()
+                };
+                if indexed.contains(rel) || carried_by_reference(&referenced, &shown) {
                     continue;
                 }
-                let name = format!("overrides/{}", rel.to_string_lossy().replace('\\', "/"));
+                let root = if players_pack && rel.starts_with(ContentKind::ClientMod.folder()) {
+                    "client-overrides"
+                } else {
+                    "overrides"
+                };
+                let name = format!("{root}/{}", shown.to_string_lossy().replace('\\', "/"));
                 zip.start_file(name, options)?;
                 let mut source = std::fs::File::open(&path)?;
                 std::io::copy(&mut source, &mut zip)?;
@@ -1165,6 +1206,54 @@ mod tests {
             }
             assert_eq!(names, expected, "include_saves={include_saves}");
         }
+    }
+
+    /// Only a server's pack for its players turns `client-mods/` into mods. An
+    /// instance's folder of that name is the player's own, and goes as it is.
+    #[tokio::test]
+    async fn an_instance_export_is_unchanged_by_client_mods() {
+        let paths = Paths {
+            root: std::env::temp_dir()
+                .join(format!("geode-mrpack-client-mods-{}", std::process::id())),
+        };
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+        let mut inst = Instance::new(
+            "Own".into(),
+            "1.21.1".into(),
+            Loader::Fabric,
+            "0.16.0".into(),
+        );
+        inst.id = "own".into();
+        let game = paths.game_dir(&inst.id);
+        tokio::fs::create_dir_all(game.join("client-mods"))
+            .await
+            .unwrap();
+        tokio::fs::write(game.join("client-mods/kept.jar"), b"x")
+            .await
+            .unwrap();
+
+        let dest = paths.root.join("own.mrpack");
+        export_mrpack(
+            &paths,
+            &inst,
+            dest.clone(),
+            false,
+            Vec::new(),
+            &Default::default(),
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+
+        let zip = zip::ZipArchive::new(std::fs::File::open(&dest).unwrap()).unwrap();
+        let mut names: Vec<String> = zip.file_names().map(str::to_string).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["modrinth.index.json", "overrides/client-mods/kept.jar"]
+        );
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     // -----------------------------------------------------------------------

@@ -386,7 +386,7 @@ export default function Browse({
       toast({
         kind: "success",
         title: `Built ${report.serverName}`,
-        body: `${report.installed.length} server-side ${
+        body: `${report.installed.length} ${
           report.installed.length === 1 ? "mod" : "mods"
         } from the pack.`,
       });

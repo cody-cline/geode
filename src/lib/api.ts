@@ -363,6 +363,9 @@ export const api = {
     enabled: boolean,
   ) =>
     invoke<string>("set_server_content_enabled", { id, kind, file, enabled }),
+  /** Move a mod between a server's Mods and Client mods. Refused while it runs. */
+  moveServerMod: (id: string, file: string, toClient: boolean) =>
+    invoke<void>("move_server_mod", { id, file, toClient }),
   /**
    * Install Cardboard, so a Fabric server can load Bukkit plugins. Refused,
    * with the reason, where it would do nothing.

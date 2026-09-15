@@ -1,8 +1,9 @@
 //! Turning a published modpack into a server.
 //!
 //! A modpack is a client thing by default — half of a big pack exists to make
-//! the game look better, and none of that belongs on a server. What is left is
-//! a list of mods and the loader they were built for, which is exactly what a
+//! the game look better, and none of that belongs in a server's mods folder.
+//! That half is kept in its Client mods, for players, and what is left is a
+//! list of mods and the loader they were built for, which is exactly what a
 //! server needs.
 //!
 //! The loader is the pack's to choose, but *which server software* runs it is
@@ -11,7 +12,6 @@
 //! rather than made here.
 
 use crate::error::{Error, Result};
-use crate::instance::content::ContentKind;
 use crate::net::Progress;
 use crate::paths::Paths;
 use crate::plan::pack::PackContents;
@@ -33,7 +33,8 @@ pub fn kinds_for(loader: &str) -> Vec<ServerKind> {
         .collect()
 }
 
-/// Create a server from a pack, installing the mods that belong on one.
+/// Create a server from a pack, installing the mods that run on one and keeping
+/// the rest for its players.
 pub async fn from_modpack(
     client: &reqwest::Client,
     paths: &Paths,
@@ -76,7 +77,6 @@ pub async fn from_modpack(
 
     super::install::install_jar(client, paths, &mut server, progress).await?;
 
-    let dir = super::content_dir(paths, &server.id, ContentKind::Mod).await;
     progress
         .stage("Installing mods", contents.mods.len() as u64)
         .await;
@@ -85,14 +85,10 @@ pub async fn from_modpack(
         progress.check_cancelled()?;
         progress.advance(1, &entry.name).await;
 
-        match install_one(client, &dir, &mut server, entry, loader, &contents.mc_version, curseforge_key)
+        match install_one(client, paths, &mut server, entry, loader, &contents.mc_version, curseforge_key)
             .await
         {
-            Ok(Some(file)) => report.installed.push(file),
-            // Left out deliberately, which is not the same as having failed.
-            Ok(None) => report
-                .skipped
-                .push(format!("{}: does not run on a server", entry.name)),
+            Ok(file) => report.installed.push(file),
             Err(e) => report.skipped.push(format!("{}: {e}", entry.name)),
         }
     }
@@ -103,20 +99,17 @@ pub async fn from_modpack(
 
 async fn install_one(
     client: &reqwest::Client,
-    dir: &std::path::Path,
+    paths: &Paths,
     server: &mut super::Server,
     entry: &crate::plan::PlanMod,
     loader: &str,
     mc_version: &str,
     curseforge_key: Option<&str>,
-) -> Result<Option<String>> {
+) -> Result<String> {
     let provider =
         Provider::parse(&entry.provider).ok_or_else(|| Error::msg("unknown provider"))?;
     let project = providers::project(client, provider, &entry.project_id, curseforge_key).await?;
-
-    if !project.runs_on_a_server() {
-        return Ok(None);
-    }
+    let kind = super::folder_for(&project);
 
     let versions = providers::versions(
         client,
@@ -135,17 +128,18 @@ async fn install_one(
     // anyway, at the cost of a network round trip per mod.
     let file = crate::install::content::install_into(
         client,
-        dir,
+        &super::content_dir(paths, &server.id, kind).await,
         &mut server.content,
         best,
-        ContentKind::Mod,
+        kind,
         &project.name,
         project.icon_url.clone(),
         Some(project.slug.clone()),
         false,
+        project.listed_side(),
     )
     .await?;
-    Ok(Some(file))
+    Ok(file)
 }
 
 #[cfg(test)]

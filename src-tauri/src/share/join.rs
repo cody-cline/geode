@@ -873,6 +873,7 @@ mod tests {
             loader: loader.as_str().into(),
             loader_version: loader_version.into(),
             mods: 1,
+            server_mods: 0,
             server_kind: "fabric".into(),
         }
     }

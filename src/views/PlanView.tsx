@@ -214,9 +214,8 @@ export default function PlanView({ id }: { id: string }) {
         title: `Built ${report.serverName}`,
         body: `${report.installed.length} files installed.`,
       });
-      // Left-out mods are the interesting half: a plan full of client mods
-      // becomes a much smaller server, and saying which ones went missing is
-      // the difference between that and a puzzle.
+      // Left-out mods are the interesting half: saying which ones went
+      // missing is the difference between a smaller server and a puzzle.
       if (report.skipped.length > 0) {
         toast({
           kind: "info",
@@ -570,7 +569,7 @@ export default function PlanView({ id }: { id: string }) {
               className={clsx("btn", styles.buildAlt)}
               onClick={buildServer}
               disabled={buildingServer}
-              title="Create a server at this target and install the mods that run on one"
+              title="Create a server at this target and install the plan's mods, keeping the client-only ones in Client mods for players"
             >
               {buildingServer ? (
                 <Loader2 size={14} className="spin" />
