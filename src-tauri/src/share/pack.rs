@@ -124,7 +124,6 @@ async fn notes_for(
             // side alone would be saying it twice.
             disabled: disabled && source.is_some(),
             source,
-            manual: false,
         });
     }
     out
@@ -135,13 +134,16 @@ async fn notes_for(
 /// Records are keyed by the enabled name, so a mod that has been turned off is
 /// `foo.jar` in the record and `foo.jar.disabled` on disk. Both count as having
 /// the file.
+///
+/// Follows links, unlike [`instance::content::is_regular_file`]: an instance's
+/// own walk does, and a mod the player symlinked in is still theirs to share.
 async fn on_disk(game_dir: &Path, rel: &Path) -> Option<(PathBuf, bool)> {
     let enabled = game_dir.join(rel);
     if tokio::fs::metadata(&enabled).await.is_ok() {
         return Some((enabled, false));
     }
 
-    let disabled = game_dir.join(disabled_name(rel)?);
+    let disabled = game_dir.join(disabled_rel(rel)?);
     tokio::fs::metadata(&disabled)
         .await
         .is_ok()
@@ -149,7 +151,7 @@ async fn on_disk(game_dir: &Path, rel: &Path) -> Option<(PathBuf, bool)> {
 }
 
 /// `mods/foo.jar` → `mods/foo.jar.disabled`.
-fn disabled_name(rel: &Path) -> Option<PathBuf> {
+fn disabled_rel(rel: &Path) -> Option<PathBuf> {
     let mut name = rel.file_name()?.to_os_string();
     name.push(instance::content::DISABLED_SUFFIX);
     Some(rel.with_file_name(name))
@@ -493,9 +495,7 @@ pub async fn update(
     curseforge_key: Option<&str>,
     progress: &Progress,
 ) -> Result<UpdateReport> {
-    use instance::content::{
-        content_dir, is_regular_file, set_enabled_in, Origin, DISABLED_SUFFIX,
-    };
+    use instance::content::content_dir;
 
     let probe = archive.to_path_buf();
     let manifest = tokio::task::spawn_blocking(move || read_manifest(&probe))
@@ -514,27 +514,7 @@ pub async fn update(
             .map_err(|e| Error::msg(format!("reading the pack's files panicked: {e}")))??
     };
 
-    let mut player_off = PlayerOff::default();
-    for record in &instance.content {
-        let not_the_players = record.origin != Origin::Server
-            || record.server_off
-            || (instance.server_side_mods_off && record.side == Some(instance::jar::Side::Server));
-        if not_the_players {
-            continue;
-        }
-        let dir = content_dir(paths, &instance.id, record.kind);
-        if !is_regular_file(&dir.join(format!("{}{DISABLED_SUFFIX}", record.file_name))).await {
-            continue;
-        }
-        player_off
-            .names
-            .insert((record.kind, record.file_name.clone()));
-        if !record.provider.is_empty() {
-            player_off
-                .projects
-                .insert((record.provider.clone(), record.project_id.clone()));
-        }
-    }
+    let player_off = players_own_off(paths, instance).await;
 
     // What the pack's index says each file it names is, so only that very file
     // is moved to the name it will be written under.
@@ -572,14 +552,77 @@ pub async fn update(
     }
     .await;
 
+    // The mrpack half labels every import as the pack its index names, which
+    // for a server is a pack this instance is not — see `import`.
     instance.pack = None;
     settle_server_files(paths, instance, &arrived, &player_off).await?;
+    remove_departed(paths, instance, &arrived, &player_off).await?;
+    let turned_off = turn_off_the_players_duplicates(paths, instance, &arrived).await?;
 
-    // After the import, not before it: a mod the player turned off whose new
-    // version comes under a new file name has nothing but its old file holding
-    // that choice until the new one has landed. Deleted first, an update that
-    // then failed — or finished with that file left to fetch by hand — would
-    // forget it and bring the mod back on next time.
+    // Settled before the outcome is asked for, and not a line sooner: a half
+    // that failed or was cancelled still left the server's files on disk, and
+    // they are the server's however it ended.
+    let missing = outcome?;
+    instance.mc_version = described.mc_version;
+    instance.loader = described.loader;
+    instance.loader_version = described.loader_version;
+    Ok(UpdateReport {
+        missing,
+        turned_off,
+        revision: pack_revision(&manifest),
+    })
+}
+
+/// What the player themselves turned off among the server's files, by name and
+/// by project, read before the pack lands.
+///
+/// A file off because the server has it off, or because the player keeps
+/// server-side mods off, is not their own choice, and is left to the pack to
+/// decide again. Projects as well as names, because the same mod comes back
+/// under a new file name when its version changes.
+async fn players_own_off(paths: &Paths, instance: &Instance) -> PlayerOff {
+    use instance::content::{content_dir, disabled_name, is_regular_file, Origin};
+
+    let mut player_off = PlayerOff::default();
+    for record in &instance.content {
+        let not_the_players = record.origin != Origin::Server
+            || record.server_off
+            || (instance.server_side_mods_off && record.side == Some(instance::jar::Side::Server));
+        if not_the_players {
+            continue;
+        }
+        let dir = content_dir(paths, &instance.id, record.kind);
+        if !is_regular_file(&dir.join(disabled_name(&record.file_name))).await {
+            continue;
+        }
+        player_off
+            .names
+            .insert((record.kind, record.file_name.clone()));
+        if !record.provider.is_empty() {
+            player_off
+                .projects
+                .insert((record.provider.clone(), record.project_id.clone()));
+        }
+    }
+    player_off
+}
+
+/// Delete the server's files the pack no longer brings — step 7 of [`update`],
+/// which states the rule.
+///
+/// After the import, not before it: a mod the player turned off whose new
+/// version comes under a new file name has nothing but its old file holding
+/// that choice until the new one has landed. Deleted first, an update that
+/// then failed — or finished with that file left to fetch by hand — would
+/// forget it and bring the mod back on next time.
+async fn remove_departed(
+    paths: &Paths,
+    instance: &mut Instance,
+    arrived: &HashMap<(instance::content::ContentKind, String), Arrival>,
+    player_off: &PlayerOff,
+) -> Result<()> {
+    use instance::content::{content_dir, disabled_name, either_name_in, Origin};
+
     let departed: Vec<instance::content::ContentRecord> = instance
         .content
         .iter()
@@ -596,14 +639,12 @@ pub async fn update(
                 .contains(&(record.kind, record.file_name.clone()))
         {
             let project = (record.provider.clone(), record.project_id.clone());
-            for ((kind, name), arrival) in &arrived {
+            for ((kind, name), arrival) in arrived {
                 if arrival.project.as_ref() != Some(&project) {
                     continue;
                 }
                 let to = content_dir(paths, &instance.id, *kind);
-                let there = is_regular_file(&to.join(name)).await
-                    || is_regular_file(&to.join(format!("{name}{DISABLED_SUFFIX}"))).await;
-                if !there {
+                if either_name_in(&to, name).await.is_none() {
                     waiting = true;
                     break;
                 }
@@ -616,10 +657,7 @@ pub async fn update(
         // was not written by Geode, and nothing is deleted on its word.
         let one_file = Path::new(&record.file_name);
         if crate::paths::is_safe_relative(one_file) && one_file.components().count() == 1 {
-            for file in [
-                record.file_name.clone(),
-                format!("{}{DISABLED_SUFFIX}", record.file_name),
-            ] {
+            for file in [record.file_name.clone(), disabled_name(&record.file_name)] {
                 match tokio::fs::remove_file(dir.join(file)).await {
                     Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
                     _ => {}
@@ -632,14 +670,26 @@ pub async fn update(
                 && r.file_name == record.file_name)
         });
     }
+    Ok(())
+}
 
-    // Once the server's copies are where they are going to be. Two copies of
-    // one mod is a game that does not start, but only when both are on: a copy
-    // of the server's that is off, or that never landed, leaves the player's
-    // own the one they have. What is reported is what ended up off, so an
-    // update that runs again after a failure says the same thing again.
+/// Turn off the player's own copy of a mod the server now sends under another
+/// name, and name what ended up off.
+///
+/// Once the server's copies are where they are going to be. Two copies of one
+/// mod is a game that does not start, but only when both are on: a copy of the
+/// server's that is off, or that never landed, leaves the player's own the one
+/// they have. What is reported is what ended up off, so an update that runs
+/// again after a failure says the same thing again.
+async fn turn_off_the_players_duplicates(
+    paths: &Paths,
+    instance: &Instance,
+    arrived: &HashMap<(instance::content::ContentKind, String), Arrival>,
+) -> Result<Vec<String>> {
+    use instance::content::{content_dir, either_name_in, is_regular_file, set_enabled_in, Origin};
+
     let mut turned_off = Vec::new();
-    for ((kind, name), arrival) in &arrived {
+    for ((kind, name), arrival) in arrived {
         let Some((provider, project_id)) = &arrival.project else {
             continue;
         };
@@ -656,27 +706,16 @@ pub async fn update(
             if !own_copy {
                 continue;
             }
-            let off = if is_regular_file(&dir.join(&record.file_name)).await {
-                set_enabled_in(&dir, &record.file_name, false).await?;
-                true
-            } else {
-                is_regular_file(&dir.join(format!("{}{DISABLED_SUFFIX}", record.file_name))).await
+            let Some((_, enabled)) = either_name_in(&dir, &record.file_name).await else {
+                continue;
             };
-            if off {
-                turned_off.push(record.name.clone());
+            if enabled {
+                set_enabled_in(&dir, &record.file_name, false).await?;
             }
+            turned_off.push(record.name.clone());
         }
     }
-
-    let missing = outcome?;
-    instance.mc_version = described.mc_version;
-    instance.loader = described.loader;
-    instance.loader_version = described.loader_version;
-    Ok(UpdateReport {
-        missing,
-        turned_off,
-        revision: pack_revision(&manifest),
-    })
+    Ok(turned_off)
 }
 
 /// Move the player's copy of a file a pack brings to the name the pack writes
@@ -697,9 +736,9 @@ pub async fn update(
 /// them by id against a hash of its own, and either lands over whatever is
 /// there.
 async fn take_the_packs_name(dir: &Path, name: &str, off: bool, named: Option<&str>) -> Result<()> {
-    use instance::content::{is_regular_file, set_enabled_in, DISABLED_SUFFIX};
+    use instance::content::{disabled_name, is_regular_file, set_enabled_in};
 
-    let disabled = format!("{name}{DISABLED_SUFFIX}");
+    let disabled = disabled_name(name);
     let (written, other) = if off {
         (disabled.as_str(), name)
     } else {
@@ -867,12 +906,12 @@ pub(crate) async fn settle_server_files(
     player_off: &PlayerOff,
 ) -> Result<()> {
     use instance::content::{
-        content_dir, is_regular_file, set_enabled_in, ContentRecord, Origin, DISABLED_SUFFIX,
+        content_dir, disabled_name, is_regular_file, set_enabled_in, ContentRecord, Origin,
     };
 
     for ((kind, name), arrival) in arrivals {
         let dir = content_dir(paths, &instance.id, *kind);
-        let disabled = format!("{name}{DISABLED_SUFFIX}");
+        let disabled = disabled_name(name);
         let (fresh, stale) = if arrival.off {
             (&disabled, name)
         } else {
@@ -1214,7 +1253,7 @@ async fn resolve_references(
         // Arrives in whichever state the sharer had it. The record stays on the
         // enabled name either way, which is how every record is keyed.
         let dest = if note.disabled {
-            match disabled_name(rel) {
+            match disabled_rel(rel) {
                 Some(off) => game_dir.join(off),
                 None => game_dir.join(rel),
             }
@@ -1369,6 +1408,59 @@ struct ServerMods<'a> {
     sides: HashMap<PathBuf, instance::jar::Side>,
 }
 
+impl<'a> ServerMods<'a> {
+    /// What a carried path is: the folder it comes out of, its name with any
+    /// `.disabled` taken off, whether it is the copy that is on, and the side
+    /// it goes to a player with.
+    ///
+    /// The name is worked out once, here, so a caller that wants both halves of
+    /// it cannot end up asking two different questions.
+    fn about<'p>(
+        &self,
+        rel: &'p Path,
+    ) -> (
+        instance::content::ContentKind,
+        &'p str,
+        bool,
+        instance::jar::Side,
+    ) {
+        use instance::content::{strip_disabled, ContentKind};
+
+        let kind = if rel.starts_with(ContentKind::ClientMod.folder()) {
+            ContentKind::ClientMod
+        } else {
+            ContentKind::Mod
+        };
+        let (base, enabled) = rel
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map_or(("", true), strip_disabled);
+        let side = self
+            .sides
+            .get(rel)
+            .copied()
+            .unwrap_or(instance::jar::Side::Both);
+        (kind, base, enabled, side)
+    }
+
+    /// The record that goes with a carried file, when one does.
+    ///
+    /// Only the records that go are asked. A record whose file is a link, or is
+    /// gone, names nothing the pack sends and is not in `shared` — which is
+    /// what makes this a different question from the lookup [`server_mods`]
+    /// runs over every record.
+    fn shared_record_for(
+        &self,
+        kind: instance::content::ContentKind,
+        base: &str,
+    ) -> Option<&'a instance::content::ContentRecord> {
+        self.shared
+            .iter()
+            .copied()
+            .find(|r| r.kind == kind && r.file_name == base)
+    }
+}
+
 /// List what of a server's `mods/` and `client-mods/` goes to its players:
 /// every jar in either, each mod once.
 ///
@@ -1482,7 +1574,7 @@ async fn server_mods<'a>(
 /// whether the server had it turned off. A mod for both sides that travels in
 /// the index or as bytes has nothing to say.
 fn server_notes(mods: &ServerMods) -> Vec<FileNote> {
-    use instance::content::{strip_disabled, ContentKind};
+    use instance::content::ContentKind;
     use instance::jar::Side;
 
     let mut carried: Vec<&PathBuf> = mods.carried.iter().collect();
@@ -1490,26 +1582,18 @@ fn server_notes(mods: &ServerMods) -> Vec<FileNote> {
 
     let mut out = Vec::new();
     for path in carried {
-        let kind = if path.starts_with(ContentKind::ClientMod.folder()) {
-            ContentKind::ClientMod
-        } else {
-            ContentKind::Mod
-        };
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        let (kind, base, enabled, side) = mods.about(path);
+        // A carried path is a file in a folder, so it always has a name. One
+        // that somehow does not names no mod anyone could be sent.
+        if base.is_empty() {
             continue;
-        };
-        let (base, enabled) = strip_disabled(name);
+        }
         // A mod on disk both on and off is one mod to a player, and is noted
         // once, as the copy that is on.
         if !enabled && mods.carried.contains(&path.with_file_name(base)) {
             continue;
         }
-        let source = mods
-            .shared
-            .iter()
-            .find(|r| r.kind == kind && r.file_name == base)
-            .and_then(|r| source_for(r));
-        let side = mods.sides.get(path).copied().unwrap_or(Side::Both);
+        let source = mods.shared_record_for(kind, base).and_then(source_for);
         if side == Side::Both && source.is_none() {
             continue;
         }
@@ -1522,7 +1606,6 @@ fn server_notes(mods: &ServerMods) -> Vec<FileNote> {
             source,
             // Only a reference needs telling; bytes keep their `.disabled`.
             disabled: !enabled && referenced,
-            manual: false,
         });
     }
     out
@@ -1607,7 +1690,6 @@ async fn server_revision(
     mods: &ServerMods<'_>,
     include_config: bool,
 ) -> Result<String> {
-    use instance::content::{strip_disabled, ContentKind};
     use instance::jar::Side;
     use sha2::{Digest, Sha256};
 
@@ -1617,27 +1699,17 @@ async fn server_revision(
 
     let mut lines = Vec::new();
     for rel in &mods.carried {
-        let kind = if rel.starts_with(ContentKind::ClientMod.folder()) {
-            ContentKind::ClientMod
-        } else {
-            ContentKind::Mod
-        };
-        let base = rel
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map_or("", |name| strip_disabled(name).0);
-        let side = match mods.sides.get(rel).copied().unwrap_or(Side::Both) {
+        let (kind, base, _, side) = mods.about(rel);
+        let side = match side {
             Side::Client => "client",
             Side::Server => "server",
             Side::Both => "both",
         };
         let full = run.join(rel);
-        let record = mods.shared.iter().find(|r| {
-            r.kind == kind
-                && r.file_name == base
-                && !r.provider.is_empty()
-                && !r.project_id.is_empty()
-                && !r.version_id.is_empty()
+        // Only a record that names all three says which build this is; any
+        // other file is hashed instead.
+        let record = mods.shared_record_for(kind, base).filter(|r| {
+            !r.provider.is_empty() && !r.project_id.is_empty() && !r.version_id.is_empty()
         });
         let identity = match record {
             Some(r) => match tokio::fs::symlink_metadata(&full).await {
@@ -2481,7 +2553,7 @@ mod tests {
         let manifest = manifest_for(&paths, &inst).await;
         assert!(manifest.note("mods/crashes.jar").is_some_and(|n| n.disabled), "{:?}", manifest.files);
         assert!(manifest.note("mods/fine.jar").is_some_and(|n| !n.disabled), "{:?}", manifest.files);
-        assert_eq!(disabled_name(Path::new("mods/crashes.jar")), Some(PathBuf::from("mods/crashes.jar.disabled")));
+        assert_eq!(disabled_rel(Path::new("mods/crashes.jar")), Some(PathBuf::from("mods/crashes.jar.disabled")));
     }
 
     /// The name artwork is written under is Geode's, never the pack's. On
@@ -2592,7 +2664,6 @@ mod tests {
                         version_id: "2".into(),
                     }),
                     disabled: false,
-                    manual: false,
                 })
             },
             &[],

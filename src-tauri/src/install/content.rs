@@ -7,7 +7,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::error::{Error, Result};
-use crate::instance::content::{ContentKind, ContentRecord};
+use crate::instance::content::{disabled_name, ContentKind, ContentRecord};
 use crate::instance::Instance;
 use crate::net::{Download, Progress};
 use crate::paths::Paths;
@@ -114,8 +114,7 @@ pub async fn install_into(
             continue;
         }
         let _ = tokio::fs::remove_file(dir.join(&old)).await;
-        // Disabled copies carry the `.disabled` suffix.
-        let _ = tokio::fs::remove_file(dir.join(format!("{old}.disabled"))).await;
+        let _ = tokio::fs::remove_file(dir.join(disabled_name(&old))).await;
         records.retain(|r| !(r.file_name == old && r.kind == kind));
     }
 
@@ -406,7 +405,6 @@ pub struct UpdateCandidate {
     pub kind: ContentKind,
 }
 
-/// Check every tracked item for a newer version compatible with this instance.
 /// Newer versions of whatever is installed.
 ///
 /// Takes the records and the target rather than an instance: a server keeps
@@ -876,12 +874,8 @@ pub async fn link_untracked_in(
         };
         let project = projects.iter().find(|p| p.id == version.project_id);
 
-        // Disabled files carry a `.disabled` suffix; records key off the plain
-        // name so toggling does not orphan them.
-        let base = file_name
-            .strip_suffix(".disabled")
-            .unwrap_or(&file_name)
-            .to_string();
+        // Records key off the plain name, so toggling does not orphan them.
+        let base = content::strip_disabled(&file_name).0.to_string();
 
         records.retain(|r| !(r.file_name == base && r.kind == kind));
         records.push(ContentRecord {

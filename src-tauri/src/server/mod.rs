@@ -678,6 +678,57 @@ pub(crate) fn folder_for(
     }
 }
 
+/// Install one mod into a server, into whichever folder [`folder_for`] gives it.
+///
+/// No dependency walk. A pack already lists its whole closure, so chasing each
+/// mod's dependencies would re-resolve what is about to be installed anyway, at
+/// the cost of a network round trip per mod. A plan does not list one — the
+/// same plan built as an instance walks them in [`crate::plan::build`] — so a
+/// server built from a plan gets the mods the plan names and nothing else.
+#[allow(clippy::too_many_arguments)] // one mod's coordinates, travelling together
+pub(crate) async fn install_one(
+    client: &reqwest::Client,
+    paths: &Paths,
+    server: &mut Server,
+    provider: &str,
+    project_id: &str,
+    loader: &str,
+    game_version: &str,
+    curseforge_key: Option<&str>,
+) -> Result<String> {
+    use crate::providers::{self, Provider};
+
+    let provider = Provider::parse(provider).ok_or_else(|| Error::msg("unknown provider"))?;
+    let project = providers::project(client, provider, project_id, curseforge_key).await?;
+    let kind = folder_for(&project);
+
+    let versions = providers::versions(
+        client,
+        provider,
+        project_id,
+        Some(game_version),
+        Some(loader),
+        curseforge_key,
+    )
+    .await?;
+    let best = crate::install::content::pick_best(&versions)
+        .ok_or_else(|| Error::msg(format!("no build for {loader} {game_version}")))?;
+
+    crate::install::content::install_into(
+        client,
+        &content_dir(paths, &server.id, kind).await,
+        &mut server.content,
+        best,
+        kind,
+        &project.name,
+        project.icon_url.clone(),
+        Some(project.slug.clone()),
+        false,
+        project.listed_side(),
+    )
+    .await
+}
+
 /// Move one mod between Mods and Client mods, turned off or not.
 ///
 /// The file keeps its name, `.disabled` included, so it arrives in the state it
@@ -691,7 +742,7 @@ pub async fn move_mod(
     file: &str,
     to_client: bool,
 ) -> Result<()> {
-    use crate::instance::content::{is_content_file, strip_disabled, ContentKind};
+    use crate::instance::content::{disabled_name, is_content_file, strip_disabled, ContentKind};
 
     let rel = std::path::Path::new(file);
     if !crate::paths::is_safe_relative(rel)
@@ -731,7 +782,7 @@ pub async fn move_mod(
             .map(|r| r.file_name.clone()),
     );
     for name in taken {
-        let disabled = format!("{name}{}", crate::instance::content::DISABLED_SUFFIX);
+        let disabled = disabled_name(&name);
         for on_disk in [&name, &disabled] {
             if tokio::fs::symlink_metadata(to_dir.join(on_disk))
                 .await

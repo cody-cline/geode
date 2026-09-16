@@ -226,6 +226,11 @@ pub(crate) fn strip_disabled(name: &str) -> (&str, bool) {
     }
 }
 
+/// The other name the same file goes by, the inverse of [`strip_disabled`].
+pub(crate) fn disabled_name(name: &str) -> String {
+    format!("{name}{DISABLED_SUFFIX}")
+}
+
 pub(crate) fn is_content_file(name: &str, kind: ContentKind) -> bool {
     let (base, _) = strip_disabled(name);
     let lower = base.to_ascii_lowercase();
@@ -526,7 +531,7 @@ pub async fn set_enabled_in(dir: &Path, file: &str, enabled: bool) -> Result<Str
     let new_name = if enabled {
         base.to_string()
     } else {
-        format!("{base}{DISABLED_SUFFIX}")
+        disabled_name(base)
     };
     let target = resolve_in(dir, &new_name)?;
     tokio::fs::rename(&current, &target).await?;
@@ -590,16 +595,11 @@ pub async fn set_server_side_mods(
         if !servers_side_mod || (on && record.server_off) {
             continue;
         }
-        let disabled = format!("{}{DISABLED_SUFFIX}", record.file_name);
-        let (on_disk, enabled) = if is_regular_file(&dir.join(&record.file_name)).await {
-            (record.file_name.as_str(), true)
-        } else if is_regular_file(&dir.join(&disabled)).await {
-            (disabled.as_str(), false)
-        } else {
+        let Some((on_disk, enabled)) = either_name_in(&dir, &record.file_name).await else {
             continue;
         };
         if enabled != on {
-            set_enabled_in(&dir, on_disk, on).await?;
+            set_enabled_in(&dir, &on_disk, on).await?;
             changed += 1;
         }
     }
@@ -613,6 +613,26 @@ pub(crate) async fn is_regular_file(path: &Path) -> bool {
     tokio::fs::symlink_metadata(path)
         .await
         .is_ok_and(|meta| meta.is_file())
+}
+
+/// Whichever of a file's two names is in this folder, and whether that one is
+/// the enabled name. Takes the enabled name, the one records are keyed by.
+///
+/// Both can be there at once — a mod on disk on and off is two files and one
+/// record — and the enabled copy is the one the game loads, so that is the one
+/// reported.
+///
+/// A link under either name is not a file here, by [`is_regular_file`]. The
+/// sharing code's own `share::pack::on_disk` follows links on purpose and
+/// answers in the opposite sense, so the two are not interchangeable.
+pub(crate) async fn either_name_in(dir: &Path, name: &str) -> Option<(String, bool)> {
+    if is_regular_file(&dir.join(name)).await {
+        return Some((name.to_string(), true));
+    }
+    let disabled = disabled_name(name);
+    is_regular_file(&dir.join(&disabled))
+        .await
+        .then_some((disabled, false))
 }
 
 pub async fn set_enabled(
@@ -1243,6 +1263,44 @@ mod tests {
         );
 
         let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    /// The one place that answers "which of a file's two names is here", for
+    /// everything that turns a mod on or off. A folder can hold both at once,
+    /// and the enabled copy is the one the game loads, so that is the one
+    /// reported — reporting the other would have a caller rename a stale copy
+    /// over the live jar. A link under either name is not a file here.
+    #[tokio::test]
+    async fn the_enabled_name_is_the_one_reported_when_both_are_on_disk() {
+        let dir = std::env::temp_dir().join(format!("geode-either-name-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        tokio::fs::write(dir.join("x.jar"), b"on").await.unwrap();
+        tokio::fs::write(dir.join("x.jar.disabled"), b"off")
+            .await
+            .unwrap();
+        assert_eq!(
+            either_name_in(&dir, "x.jar").await,
+            Some(("x.jar".to_string(), true))
+        );
+
+        tokio::fs::remove_file(dir.join("x.jar")).await.unwrap();
+        assert_eq!(
+            either_name_in(&dir, "x.jar").await,
+            Some(("x.jar.disabled".to_string(), false))
+        );
+
+        assert_eq!(either_name_in(&dir, "gone.jar").await, None);
+
+        #[cfg(unix)]
+        {
+            tokio::fs::write(dir.join("real.jar"), b"x").await.unwrap();
+            std::os::unix::fs::symlink(dir.join("real.jar"), dir.join("link.jar")).unwrap();
+            assert_eq!(either_name_in(&dir, "link.jar").await, None);
+        }
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[test]

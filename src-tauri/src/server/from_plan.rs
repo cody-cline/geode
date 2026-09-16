@@ -18,7 +18,6 @@ use crate::net::Progress;
 use crate::paths::Paths;
 use crate::plan::resolve::{Fit, Target};
 use crate::plan::Plan;
-use crate::providers::{self, Provider};
 
 use super::ServerKind;
 
@@ -103,13 +102,17 @@ pub async fn from_plan(
             continue;
         }
 
-        match install_one(
+        // The version this mod's verdict named, which is the target's own
+        // except where the resolver reached into a neighbouring patch.
+        let game = fit.via_version.as_deref().unwrap_or(&target.game_version);
+        match super::install_one(
             client,
             paths,
             &mut server,
-            fit,
+            &fit.provider,
+            &fit.project_id,
             &target.loader,
-            &target.game_version,
+            game,
             curseforge_key,
         )
         .await
@@ -121,52 +124,6 @@ pub async fn from_plan(
 
     server.save(paths).await?;
     Ok(report)
-}
-
-#[allow(clippy::too_many_arguments)] // one mod's coordinates, travelling together
-async fn install_one(
-    client: &reqwest::Client,
-    paths: &Paths,
-    server: &mut super::Server,
-    fit: &crate::plan::resolve::ModFit,
-    loader: &str,
-    game_version: &str,
-    curseforge_key: Option<&str>,
-) -> Result<String> {
-    let provider = Provider::parse(&fit.provider).ok_or_else(|| Error::msg("unknown provider"))?;
-    let project = providers::project(client, provider, &fit.project_id, curseforge_key).await?;
-    let kind = super::folder_for(&project);
-
-    // The version this mod's verdict named, which is the target's own except
-    // where the resolver reached into a neighbouring patch.
-    let game = fit.via_version.as_deref().unwrap_or(game_version);
-    let versions = providers::versions(
-        client,
-        provider,
-        &fit.project_id,
-        Some(game),
-        Some(loader),
-        curseforge_key,
-    )
-    .await?;
-
-    let best = crate::install::content::pick_best(&versions)
-        .ok_or_else(|| Error::msg(format!("no build for {loader} {game}")))?;
-
-    let file = crate::install::content::install_into(
-        client,
-        &super::content_dir(paths, &server.id, kind).await,
-        &mut server.content,
-        best,
-        kind,
-        &project.name,
-        project.icon_url.clone(),
-        Some(project.slug.clone()),
-        false,
-        project.listed_side(),
-    )
-    .await?;
-    Ok(file)
 }
 
 #[cfg(test)]

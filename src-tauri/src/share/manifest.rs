@@ -144,15 +144,6 @@ pub struct FileNote {
     /// reference and the exporter's skip set go on matching.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disabled: bool,
-    /// The recipient has to fetch this one themselves.
-    ///
-    /// Set when a project's author has turned off third-party downloads. That
-    /// is a decision Geode respects rather than works around, so the file is
-    /// named in the pack and not included in it — an import that says "two of
-    /// these sixteen need fetching, here they are" is a better outcome than a
-    /// pack that quietly redistributes them.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub manual: bool,
 }
 
 impl Manifest {
@@ -192,7 +183,6 @@ mod tests {
                 path: "mods/sodium.jar".into(),
                 side: Some(crate::instance::jar::Side::Client),
                 source: None,
-                manual: false,
                 disabled: false,
             }],
             revision: None,
@@ -216,14 +206,13 @@ mod tests {
             assert!(!json.contains(absent), "{absent} should not be written: {json}");
         }
         // And a file with nothing to say about it carries no flag either.
-        assert!(!json.contains("manual"));
         assert!(!json.contains("disabled"));
         assert!(!json.contains("source"));
     }
 
-    /// A file whose author disabled third-party downloads is named, never
-    /// carried. The recipient gets a list to act on rather than a pack that
-    /// redistributed it for them.
+    /// A file a pack cannot carry travels as a reference instead, and the note
+    /// is the whole of what the recipient has to go on: the provider, project
+    /// and version it survives the round trip with are what they fetch it by.
     #[test]
     fn a_file_that_cannot_be_redistributed_is_referenced_not_embedded() {
         let note = FileNote {
@@ -234,11 +223,9 @@ mod tests {
                 project_id: "12345".into(),
                 version_id: "67890".into(),
             }),
-            manual: true,
             disabled: false,
         };
         let json = serde_json::to_string(&note).unwrap();
-        assert!(json.contains("\"manual\":true"));
         assert!(json.contains("curseforge"));
         let back: FileNote = serde_json::from_str(&json).unwrap();
         assert_eq!(back, note);

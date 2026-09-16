@@ -15,7 +15,6 @@ use crate::error::{Error, Result};
 use crate::net::Progress;
 use crate::paths::Paths;
 use crate::plan::pack::PackContents;
-use crate::providers::{self, Provider};
 
 use super::from_plan::ServerBuildReport;
 use super::ServerKind;
@@ -85,8 +84,17 @@ pub async fn from_modpack(
         progress.check_cancelled()?;
         progress.advance(1, &entry.name).await;
 
-        match install_one(client, paths, &mut server, entry, loader, &contents.mc_version, curseforge_key)
-            .await
+        match super::install_one(
+            client,
+            paths,
+            &mut server,
+            &entry.provider,
+            &entry.project_id,
+            loader,
+            &contents.mc_version,
+            curseforge_key,
+        )
+        .await
         {
             Ok(file) => report.installed.push(file),
             Err(e) => report.skipped.push(format!("{}: {e}", entry.name)),
@@ -95,51 +103,6 @@ pub async fn from_modpack(
 
     server.save(paths).await?;
     Ok(report)
-}
-
-async fn install_one(
-    client: &reqwest::Client,
-    paths: &Paths,
-    server: &mut super::Server,
-    entry: &crate::plan::PlanMod,
-    loader: &str,
-    mc_version: &str,
-    curseforge_key: Option<&str>,
-) -> Result<String> {
-    let provider =
-        Provider::parse(&entry.provider).ok_or_else(|| Error::msg("unknown provider"))?;
-    let project = providers::project(client, provider, &entry.project_id, curseforge_key).await?;
-    let kind = super::folder_for(&project);
-
-    let versions = providers::versions(
-        client,
-        provider,
-        &entry.project_id,
-        Some(mc_version),
-        Some(loader),
-        curseforge_key,
-    )
-    .await?;
-    let best = crate::install::content::pick_best(&versions)
-        .ok_or_else(|| Error::msg(format!("no build for {loader} {mc_version}")))?;
-
-    // No dependency walk: a pack already lists its whole closure, so chasing
-    // each mod's dependencies would re-resolve what is about to be installed
-    // anyway, at the cost of a network round trip per mod.
-    let file = crate::install::content::install_into(
-        client,
-        &super::content_dir(paths, &server.id, kind).await,
-        &mut server.content,
-        best,
-        kind,
-        &project.name,
-        project.icon_url.clone(),
-        Some(project.slug.clone()),
-        false,
-        project.listed_side(),
-    )
-    .await?;
-    Ok(file)
 }
 
 #[cfg(test)]
