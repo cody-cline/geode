@@ -1,4 +1,7 @@
-//! The IPC surface. Every command is thin: validate, delegate, return.
+//! The IPC surface. Most commands validate, delegate and return; the install
+//! commands additionally own the policy that decides which file goes where, and
+//! launch owns the order its steps run in, because neither rule can be enforced
+//! anywhere a caller could go round it.
 
 use std::path::PathBuf;
 
@@ -556,12 +559,53 @@ pub async fn add_local_content(
     files: Vec<String>,
 ) -> Result<usize> {
     let kind = parse_kind(&kind)?;
-    let dir = instance::content::content_dir(&state.paths, &id, kind);
+    add_local_files(&state.paths, &id, kind, &files).await
+}
+
+/// What [`add_local_content`] does, without an IPC handle in the way.
+async fn add_local_files(
+    paths: &crate::paths::Paths,
+    id: &str,
+    kind: ContentKind,
+    files: &[String],
+) -> Result<usize> {
+    let inst = instance::load(paths, id).await?;
+
+    // Copying over a server's mod replaces the jar while the record — and the
+    // server badge on it — stays, which is the one thing every other way into
+    // this folder refuses. Whichever name the file goes by on disk: a pack's
+    // mod turned off is the same mod. Refused before anything is copied, so a
+    // pick holding one leaves the folder exactly as it was.
+    //
+    // Case is folded here and nowhere else, because this is the one route whose
+    // name comes off the player's own disk rather than from a record or a
+    // provider: on macOS and Windows a `Sodium.jar` the player picked lands on
+    // the server's `sodium.jar`, and on Linux it lands beside it, which is a
+    // second copy of the same mod the loader will not start on.
+    let refused = files
+        .iter()
+        .filter_map(|file| std::path::Path::new(file).file_name()?.to_str())
+        .map(|name| instance::content::strip_disabled(name).0)
+        .find(|base| {
+            inst.content.iter().any(|r| {
+                r.file_name.eq_ignore_ascii_case(base)
+                    && r.kind == kind
+                    && r.origin == instance::content::Origin::Server
+            })
+        });
+    if let Some(base) = refused {
+        return Err(Error::msg(format!(
+            "{base} came from the server's pack, so it cannot be replaced here. \
+             Turn it off instead if you do not want it."
+        )));
+    }
+
+    let dir = instance::content::content_dir(paths, id, kind);
     tokio::fs::create_dir_all(&dir).await?;
 
     let mut added = 0;
     for file in files {
-        let source = PathBuf::from(&file);
+        let source = PathBuf::from(file);
         let Some(name) = source.file_name() else {
             continue;
         };
@@ -597,12 +641,10 @@ pub async fn install_content(
     via_connector: Option<bool>,
 ) -> Result<crate::install::content::InstallReport> {
     let provider = Provider::parse(&provider).ok_or_else(|| Error::msg("unknown provider"))?;
-    let config = state.config().await;
-    let cf_key = config.effective_curseforge_key();
-    let cf_key = cf_key.as_deref();
+    let cf_key = state.cf_key().await;
 
     let mut inst = instance::load(&state.paths, &id).await?;
-    let project = providers::project(&state.http, provider, &project_id, cf_key).await?;
+    let project = providers::project(&state.http, provider, &project_id, cf_key.as_deref()).await?;
 
     let via_connector = via_connector.unwrap_or(false);
     if via_connector {
@@ -638,7 +680,7 @@ pub async fn install_content(
         &project_id,
         Some(&inst.mc_version),
         loader,
-        cf_key,
+        cf_key.as_deref(),
     )
     .await?;
 
@@ -694,7 +736,7 @@ pub async fn install_content(
         &project,
         &dep_game_version,
         dep_loader,
-        cf_key,
+        cf_key.as_deref(),
         &progress,
     )
     .await;
@@ -735,18 +777,23 @@ pub async fn install_modpack(
     name: Option<String>,
 ) -> Result<InstanceView> {
     let provider = Provider::parse(&provider).ok_or_else(|| Error::msg("unknown provider"))?;
-    let config = state.config().await;
-    let cf_key = config.effective_curseforge_key();
-    let cf_key = cf_key.as_deref();
+    let cf_key = state.cf_key().await;
 
-    let project = providers::project(&state.http, provider, &project_id, cf_key).await?;
+    let project = providers::project(&state.http, provider, &project_id, cf_key.as_deref()).await?;
     if project.kind != providers::ProjectKind::Modpack {
         return Err(Error::msg(format!("{} is not a modpack", project.name)));
     }
 
     // Packs are not filtered by loader or game version: the pack chooses those.
-    let versions =
-        providers::versions(&state.http, provider, &project_id, None, None, cf_key).await?;
+    let versions = providers::versions(
+        &state.http,
+        provider,
+        &project_id,
+        None,
+        None,
+        cf_key.as_deref(),
+    )
+    .await?;
     let version = match &version_id {
         Some(want) => versions
             .iter()
@@ -814,7 +861,7 @@ pub async fn install_modpack(
         &state.paths,
         &mut inst,
         &archive,
-        cf_key,
+        cf_key.as_deref(),
         &progress,
     )
     .await;
@@ -1078,6 +1125,62 @@ pub async fn resolve_plan(
     }
 }
 
+/// Resolve a plan and find the target that was asked for, as its index into
+/// the resolution.
+///
+/// Re-resolved rather than trusting a target round-tripped through the
+/// frontend: the per-mod verdicts decide which file each mod gets, and they
+/// are cheap to recompute against the session cache.
+///
+/// The index rather than the target itself, because a `PlanTarget` borrows from
+/// the resolution it was found in.
+///
+/// Both callers have already made a progress job and registered its cancel flag
+/// by the time they get here, so a failure is ended here too: the dock drops a
+/// job only when it hears one is done, and a resolve that Modrinth cannot answer
+/// would otherwise leave a bar and a live flag behind for the rest of the
+/// session.
+async fn resolved_target(
+    state: &AppState,
+    plan: &crate::plan::Plan,
+    loader: &str,
+    game_version: &str,
+    cf_key: Option<&str>,
+    progress: &Progress,
+) -> Result<(crate::plan::resolve::Resolution, usize)> {
+    let found: Result<(crate::plan::resolve::Resolution, usize)> = async {
+        let matrix = state.connector.get(&state.http).await.unwrap_or_default();
+        let resolution = crate::plan::resolve::resolve(
+            &state.http,
+            plan,
+            &matrix,
+            &state.plan_support,
+            cf_key,
+            progress,
+        )
+        .await?;
+
+        let chosen = resolution
+            .targets
+            .iter()
+            .position(|t| t.loader == loader && t.game_version == game_version)
+            .ok_or_else(|| {
+                Error::msg(format!(
+                    "{loader} {game_version} is no longer one of this plan's options — \
+                     resolve it again"
+                ))
+            })?;
+        Ok((resolution, chosen))
+    }
+    .await;
+
+    if let Err(e) = &found {
+        state.clear_cancel(progress.id());
+        progress.fail(&e.to_string()).await;
+    }
+    found
+}
+
 /// Create an instance at the chosen target and install the whole plan into it.
 #[tauri::command]
 pub async fn build_plan(
@@ -1089,45 +1192,28 @@ pub async fn build_plan(
     name: Option<String>,
 ) -> Result<crate::plan::build::BuildReport> {
     let plan = crate::plan::load(&state.paths, &id).await?;
-    let config = state.config().await;
-    let cf_key = config.effective_curseforge_key();
-    let cf_key = cf_key.as_deref();
+    let cf_key = state.cf_key().await;
 
     let progress = Progress::new(crate::desktop::sink(app), format!("plan-build:{id}"));
     state.register_cancel(progress.id(), progress.cancel_flag());
 
-    // Re-resolve rather than trusting a target round-tripped through the
-    // frontend: the per-mod verdicts decide which file each mod gets, and they
-    // are cheap to recompute against the session cache.
-    let matrix = state.connector.get(&state.http).await.unwrap_or_default();
-    let resolution = crate::plan::resolve::resolve(
-        &state.http,
+    let (resolution, chosen) = resolved_target(
+        &state,
         &plan,
-        &matrix,
-        &state.plan_support,
-        cf_key,
+        &loader,
+        &game_version,
+        cf_key.as_deref(),
         &progress,
     )
     .await?;
-
-    let target = resolution
-        .targets
-        .iter()
-        .find(|t| t.loader == loader && t.game_version == game_version)
-        .ok_or_else(|| {
-            Error::msg(format!(
-                "{loader} {game_version} is no longer one of this plan's options — \
-                 resolve it again"
-            ))
-        })?;
 
     let result = crate::plan::build::build(
         &state.http,
         &state.paths,
         &plan,
-        target,
+        &resolution.targets[chosen],
         name,
-        cf_key,
+        cf_key.as_deref(),
         &progress,
     )
     .await;
@@ -1276,8 +1362,7 @@ pub async fn server_kinds_for_pack(
     version_id: Option<String>,
 ) -> Result<Vec<ServerKindInfo>> {
     let provider = Provider::parse(&provider).ok_or_else(|| Error::msg("unknown provider"))?;
-    let config = state.config().await;
-    let cf_key = config.effective_curseforge_key();
+    let cf_key = state.cf_key().await;
 
     // Packs are never filtered by loader or version: the pack chose those.
     let versions =
@@ -1314,9 +1399,7 @@ pub async fn create_server_from_modpack(
 ) -> Result<crate::server::from_plan::ServerBuildReport> {
     let provider = Provider::parse(&provider).ok_or_else(|| Error::msg("unknown provider"))?;
     let kind = parse_server_kind(&kind)?;
-    let config = state.config().await;
-    let cf_key = config.effective_curseforge_key();
-    let cf_key = cf_key.as_deref();
+    let cf_key = state.cf_key().await;
 
     let progress = Progress::new(crate::desktop::sink(app), format!("pack-server:{project_id}"));
     state.register_cancel(progress.id(), progress.cancel_flag());
@@ -1328,7 +1411,7 @@ pub async fn create_server_from_modpack(
             provider,
             &project_id,
             version_id.as_deref(),
-            cf_key,
+            cf_key.as_deref(),
             &progress,
         )
         .await?;
@@ -1338,11 +1421,65 @@ pub async fn create_server_from_modpack(
             &contents,
             kind,
             name,
-            cf_key,
+            cf_key.as_deref(),
             &progress,
         )
         .await
     }
+    .await;
+
+    state.clear_cancel(progress.id());
+    match result {
+        Ok(report) => {
+            progress.finish().await;
+            Ok(report)
+        }
+        Err(e) => {
+            progress.fail(&e.to_string()).await;
+            Err(e)
+        }
+    }
+}
+
+/// Build a plan into a server rather than an instance.
+///
+/// The plan resolves exactly as it would for an instance; what differs is that
+/// mods which do not run on a server go into its Client mods, and that most
+/// targets cannot be a server at all.
+#[tauri::command]
+pub async fn create_server_from_plan(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    loader: String,
+    game_version: String,
+    name: Option<String>,
+) -> Result<crate::server::from_plan::ServerBuildReport> {
+    let plan = crate::plan::load(&state.paths, &id).await?;
+    let cf_key = state.cf_key().await;
+
+    let progress = Progress::new(crate::desktop::sink(app), format!("plan-server:{id}"));
+    state.register_cancel(progress.id(), progress.cancel_flag());
+
+    let (resolution, chosen) = resolved_target(
+        &state,
+        &plan,
+        &loader,
+        &game_version,
+        cf_key.as_deref(),
+        &progress,
+    )
+    .await?;
+
+    let result = crate::server::from_plan::from_plan(
+        &state.http,
+        &state.paths,
+        &plan,
+        &resolution.targets[chosen],
+        name,
+        cf_key.as_deref(),
+        &progress,
+    )
     .await;
 
     state.clear_cancel(progress.id());
@@ -1544,6 +1681,10 @@ async fn pick_log(path: Result<std::path::PathBuf>, live: Option<String>) -> Str
     live.unwrap_or_default()
 }
 
+// ---------------------------------------------------------------------------
+// Servers: software and lifecycle
+// ---------------------------------------------------------------------------
+
 /// Every command this server has, as the server itself reported them.
 ///
 /// Written by the probe that rides along on the server's own JVM, so it covers
@@ -1660,12 +1801,12 @@ pub async fn delete_server(app: AppHandle, state: State<'_, AppState>, id: Strin
     if state.servers.is_running(&id) {
         return Err(Error::msg("stop the server before deleting it"));
     }
-    crate::server::delete(&state.paths, &id).await?;
-    // Its share went with its folder. If it was the last one shared, the pack
+    let deleted = crate::server::delete(&state.paths, &id).await;
+    // Whichever way the delete went. If that was the last one shared, the pack
     // server and the router's port go too, rather than staying open for a
     // server that no longer exists.
     reconcile_sharing(&app, &state).await;
-    Ok(())
+    deleted
 }
 
 #[derive(Debug, Deserialize)]
@@ -1760,46 +1901,57 @@ pub async fn add_cardboard(
     let progress = Progress::new(crate::desktop::sink(app), format!("server:{}", server.id));
     progress.stage("Finding Cardboard", 1).await;
 
-    let slug = crate::server::CARDBOARD_SLUG;
-    let project = providers::project(&state.http, Provider::Modrinth, slug, None).await?;
-    // Quilt runs Fabric mods, and Cardboard only publishes for Fabric.
-    let versions = providers::versions(
-        &state.http,
-        Provider::Modrinth,
-        slug,
-        Some(&server.mc_version),
-        Some("fabric"),
-        None,
-    )
-    .await?;
-    let best = crate::install::content::pick_best(&versions).ok_or_else(|| {
-        Error::msg(format!(
-            "Cardboard has no build for Minecraft {}",
-            server.mc_version
-        ))
-    })?;
-    progress.advance(1, &project.name).await;
+    // One block, one failure path: every step below can fail, and the dock
+    // drops a job only when it hears one is done, so a step that returned
+    // straight out would leave its bar there for the rest of the session.
+    let result = async {
+        let slug = crate::server::CARDBOARD_SLUG;
+        let project = providers::project(&state.http, Provider::Modrinth, slug, None).await?;
+        // Quilt runs Fabric mods, and Cardboard only publishes for Fabric.
+        let versions = providers::versions(
+            &state.http,
+            Provider::Modrinth,
+            slug,
+            Some(&server.mc_version),
+            Some("fabric"),
+            None,
+        )
+        .await?;
+        let best = crate::install::content::pick_best(&versions).ok_or_else(|| {
+            Error::msg(format!(
+                "Cardboard has no build for Minecraft {}",
+                server.mc_version
+            ))
+        })?;
+        progress.advance(1, &project.name).await;
 
-    let run = state.paths.server_run(&server.id);
-    progress.stage("Installing Cardboard", 1).await;
-    crate::install::content::install_into(
-        &state.http,
-        &run.join(ContentKind::Mod.folder()),
-        &mut server.content,
-        best,
-        ContentKind::Mod,
-        &project.name,
-        project.icon_url.clone(),
-        Some(project.slug.clone()),
-        false,
-        project.listed_side(),
-    )
-    .await?;
+        let run = state.paths.server_run(&server.id);
+        progress.stage("Installing Cardboard", 1).await;
+        crate::install::content::install_into(
+            &state.http,
+            &run.join(ContentKind::Mod.folder()),
+            &mut server.content,
+            best,
+            ContentKind::Mod,
+            &project.name,
+            project.icon_url.clone(),
+            Some(project.slug.clone()),
+            false,
+            project.listed_side(),
+        )
+        .await?;
 
-    // The folder a plugin gets dropped into should exist before anyone goes
-    // looking for it.
-    tokio::fs::create_dir_all(run.join(ContentKind::Plugin.folder())).await?;
-    server.save_if_present(&state.paths).await?;
+        // The folder a plugin gets dropped into should exist before anyone goes
+        // looking for it.
+        tokio::fs::create_dir_all(run.join(ContentKind::Plugin.folder())).await?;
+        server.save_if_present(&state.paths).await
+    }
+    .await;
+
+    if let Err(e) = result {
+        progress.fail(&e.to_string()).await;
+        return Err(e);
+    }
     progress.finish().await;
 
     Ok(server_view(server, &state))
@@ -1912,6 +2064,10 @@ pub async fn running_servers(state: State<'_, AppState>) -> Result<Vec<String>> 
 pub async fn server_folder(state: State<'_, AppState>, id: String) -> Result<String> {
     Ok(state.paths.server_run(&id).to_string_lossy().to_string())
 }
+
+// ---------------------------------------------------------------------------
+// Servers: content
+// ---------------------------------------------------------------------------
 
 /// Plugins or mods installed in a server, read from the folder itself.
 #[tauri::command]
@@ -2096,12 +2252,10 @@ pub async fn install_server_content(
 ) -> Result<crate::install::content::InstallReport> {
     let provider = Provider::parse(&provider).ok_or_else(|| Error::msg("unknown provider"))?;
     let kind = parse_kind(&kind)?;
-    let config = state.config().await;
-    let cf_key = config.effective_curseforge_key();
-    let cf_key = cf_key.as_deref();
+    let cf_key = state.cf_key().await;
 
     let mut server = crate::server::load(&state.paths, &id).await?;
-    let project = providers::project(&state.http, provider, &project_id, cf_key).await?;
+    let project = providers::project(&state.http, provider, &project_id, cf_key.as_deref()).await?;
     let kind = install_folder(kind, version_id.as_deref(), &project, &server.content);
 
     // SpigotMC lists Bukkit plugins and nothing else. A proxy speaks its own
@@ -2158,7 +2312,7 @@ pub async fn install_server_content(
             &project_id,
             Some(&server.mc_version),
             loader,
-            cf_key,
+            cf_key.as_deref(),
         )
         .await
         .unwrap_or_default();
@@ -2189,6 +2343,7 @@ pub async fn install_server_content(
     })?;
 
     let progress = Progress::new(crate::desktop::sink(app), format!("server-content:{id}:{project_id}"));
+    state.register_cancel(progress.id(), progress.cancel_flag());
     let dir = crate::server::content_dir(&state.paths, &id, kind).await;
 
     // The same walk an instance gets, from the same code: a mod that needs
@@ -2205,7 +2360,7 @@ pub async fn install_server_content(
         kind,
         &mc_version,
         dep_loader,
-        cf_key,
+        cf_key.as_deref(),
         &progress,
     )
     .await;
@@ -2214,6 +2369,7 @@ pub async fn install_server_content(
     // disk, and a record list that does not mention them is worse than none.
     let _ = server.save_if_present(&state.paths).await;
 
+    state.clear_cancel(progress.id());
     match result {
         Ok(report) => {
             progress.finish().await;
@@ -2277,75 +2433,11 @@ pub async fn move_server_mod(
     server.save(&state.paths).await
 }
 
+// ---------------------------------------------------------------------------
+// Servers: logs, backups and properties
+// ---------------------------------------------------------------------------
+
 /// The server's logs: the one it is writing now, and the ones it rotated.
-/// Build a plan into a server rather than an instance.
-///
-/// The plan resolves exactly as it would for an instance; what differs is that
-/// mods which do not run on a server go into its Client mods, and that most
-/// targets cannot be a server at all.
-#[tauri::command]
-pub async fn create_server_from_plan(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    id: String,
-    loader: String,
-    game_version: String,
-    name: Option<String>,
-) -> Result<crate::server::from_plan::ServerBuildReport> {
-    let plan = crate::plan::load(&state.paths, &id).await?;
-    let config = state.config().await;
-    let cf_key = config.effective_curseforge_key();
-    let cf_key = cf_key.as_deref();
-
-    let progress = Progress::new(crate::desktop::sink(app), format!("plan-server:{id}"));
-    state.register_cancel(progress.id(), progress.cancel_flag());
-
-    let matrix = state.connector.get(&state.http).await.unwrap_or_default();
-    let resolution = crate::plan::resolve::resolve(
-        &state.http,
-        &plan,
-        &matrix,
-        &state.plan_support,
-        cf_key,
-        &progress,
-    )
-    .await?;
-
-    let target = resolution
-        .targets
-        .iter()
-        .find(|t| t.loader == loader && t.game_version == game_version)
-        .ok_or_else(|| {
-            Error::msg(format!(
-                "{loader} {game_version} is no longer one of this plan's options — \
-                 resolve it again"
-            ))
-        })?;
-
-    let result = crate::server::from_plan::from_plan(
-        &state.http,
-        &state.paths,
-        &plan,
-        target,
-        name,
-        cf_key,
-        &progress,
-    )
-    .await;
-
-    state.clear_cancel(progress.id());
-    match result {
-        Ok(report) => {
-            progress.finish().await;
-            Ok(report)
-        }
-        Err(e) => {
-            progress.fail(&e.to_string()).await;
-            Err(e)
-        }
-    }
-}
-
 #[tauri::command]
 pub async fn list_server_logs(
     state: State<'_, AppState>,
@@ -2389,6 +2481,11 @@ pub async fn create_server_backup(
 ) -> Result<crate::server::backup::BackupInfo> {
     let server = crate::server::load(&state.paths, &id).await?;
     let progress = Progress::new(crate::desktop::sink(app), format!("server-backup:{id}"));
+    // No cancel flag is registered, so the dock's Cancel does nothing here on
+    // purpose: whether a half-written archive is safe to abandon is undecided.
+    // Registering one would not be enough on its own either — `backup::create`
+    // zips the whole run directory inside one `spawn_blocking` with nowhere to
+    // read the flag.
 
     let result = crate::server::backup::create(&state.paths, &id, &progress).await;
     match result {
@@ -2613,6 +2710,11 @@ pub async fn install_java(
     major: u32,
 ) -> Result<crate::java::JavaInstall> {
     let progress = Progress::new(crate::desktop::sink(app), format!("java:{major}"));
+    // No cancel flag is registered, so the dock's Cancel does nothing here on
+    // purpose: whether a half-extracted JDK is safe to abandon is undecided.
+    // Registering one would not be enough on its own either — `java::provision`
+    // downloads through `net::fetch_one`, which never reads the flag, and
+    // unpacks inside one `spawn_blocking`.
     let result = crate::java::provision(&state.http, &state.paths, major, &progress).await;
     match &result {
         Ok(_) => progress.finish().await,
@@ -3065,7 +3167,15 @@ pub async fn export_geodepack(
     let progress = Progress::new(crate::desktop::sink(app), format!("export:{id}"));
     let dest = PathBuf::from(dest);
 
-    share::pack::export(&state.paths, &inst, dest.clone(), include_saves, &progress).await?;
+    // Failed explicitly rather than returned through `?`: the dock drops a job
+    // only when it hears one is done, so a bar left unfinished stays there for
+    // the rest of the session.
+    let result =
+        share::pack::export(&state.paths, &inst, dest.clone(), include_saves, &progress).await;
+    if let Err(e) = result {
+        progress.fail(&e.to_string()).await;
+        return Err(e);
+    }
     Ok(dest.to_string_lossy().to_string())
 }
 
@@ -3083,7 +3193,7 @@ pub async fn export_modpack(
 
     // Nothing is carried by reference: a plain `.mrpack` has nowhere to record
     // one, so leaving a file out would lose the mod with nothing to say so.
-    instance::modpack::export_mrpack(
+    let result = instance::modpack::export_mrpack(
         &state.paths,
         &inst,
         dest.clone(),
@@ -3092,7 +3202,11 @@ pub async fn export_modpack(
         &Default::default(),
         &progress,
     )
-    .await?;
+    .await;
+    if let Err(e) = result {
+        progress.fail(&e.to_string()).await;
+        return Err(e);
+    }
     Ok(dest.to_string_lossy().to_string())
 }
 
@@ -4587,5 +4701,169 @@ mod tests {
         );
 
         host.stop().await;
+    }
+
+    /// Add files is a way into the mods folder like any other, so it obeys the
+    /// same rule: a server's mod is the server's, by whichever name it is on
+    /// disk. The player is told, and nothing is copied.
+    #[tokio::test]
+    async fn add_files_refuses_to_copy_over_a_servers_mod() {
+        let player = scratch("add-local");
+        let paths = &player.0;
+
+        let mut inst = Instance::new(
+            "Joined".into(),
+            "1.21.1".into(),
+            Loader::Fabric,
+            "0.16.9".into(),
+        );
+        inst.content = vec![serde_json::from_value(serde_json::json!({
+            "fileName": "anticheat.jar", "kind": "mod", "provider": "modrinth",
+            "projectId": "AC", "versionId": "v", "name": "Anti Cheat",
+            "versionNumber": "1", "origin": "server",
+        }))
+        .unwrap()];
+        inst.save(paths).await.unwrap();
+
+        let mods = instance::content::content_dir(paths, &inst.id, ContentKind::Mod);
+        tokio::fs::create_dir_all(&mods).await.unwrap();
+        tokio::fs::write(mods.join("anticheat.jar"), b"the server's")
+            .await
+            .unwrap();
+
+        let source_dir = paths.root.join("picked");
+        tokio::fs::create_dir_all(&source_dir).await.unwrap();
+        // The last two are the same mod as the record, spelled the way the
+        // player's own copy happens to be spelled: on a case-insensitive disk
+        // that name is the server's file.
+        for spelling in [
+            "anticheat.jar",
+            "anticheat.jar.disabled",
+            "AntiCheat.jar",
+            "AntiCheat.JAR.disabled",
+        ] {
+            let source = source_dir.join(spelling);
+            tokio::fs::write(&source, b"the player's").await.unwrap();
+            let picked = vec![source.to_string_lossy().to_string()];
+            let err = add_local_files(paths, &inst.id, ContentKind::Mod, &picked)
+                .await
+                .expect_err(spelling);
+            assert!(
+                err.to_string().contains("came from the server's pack"),
+                "{spelling}: {err}"
+            );
+            assert_eq!(
+                tokio::fs::read(mods.join("anticheat.jar")).await.unwrap(),
+                b"the server's",
+                "{spelling} was copied over the server's mod"
+            );
+            let mut left: Vec<String> = std::fs::read_dir(&mods)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+                .collect();
+            left.sort();
+            assert_eq!(
+                left,
+                ["anticheat.jar"],
+                "{spelling} landed beside the server's mod"
+            );
+        }
+
+        // A mod of the player's own still arrives, so the refusal is about
+        // where the file came from and not about the route.
+        let own = source_dir.join("minimap.jar");
+        tokio::fs::write(&own, b"the player's").await.unwrap();
+        let added = add_local_files(
+            paths,
+            &inst.id,
+            ContentKind::Mod,
+            &[own.to_string_lossy().into()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(added, 1);
+    }
+
+    /// A delete that cannot finish leaves the server visible and not shared,
+    /// rather than gone from the UI with its listener still up.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_server_that_will_not_delete_stops_being_shared() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let admin = scratch("delete-server");
+        let paths = &admin.0;
+        let (server, share) = shared_server(paths).await;
+        // Both files at once — the state `share::load` allows for, where an
+        // older Geode shared this again after this one stopped it — so the
+        // password cannot outlive the server by hiding in the stopped one.
+        crate::server::share::save(
+            paths,
+            &server.id,
+            &ServerShare {
+                shared: false,
+                ..share
+            },
+        )
+        .await
+        .unwrap();
+
+        // A folder the delete cannot get through: `remove_dir_all` has to list
+        // what is inside, and this one refuses to be read. Removing a file by
+        // name still works, which is what makes the order the two happen in
+        // visible at all.
+        let dir = paths.server(&server.id);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o300)).unwrap();
+
+        let failed = crate::server::delete(paths, &server.id).await;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let failed = failed.expect_err("a delete that cannot read the folder it is deleting");
+
+        // What the admin is told has to match what they can see: the server is
+        // still in their list, so "was not found" would send them looking for
+        // something that is right there.
+        let said = failed.to_string();
+        assert!(!said.contains("was not found"), "{said}");
+        assert!(said.contains("no longer shared"), "{said}");
+
+        assert!(
+            !crate::server::share::path(paths, &server.id).exists(),
+            "a share left behind keeps the listener up for a server nobody can see"
+        );
+        assert!(
+            !crate::server::share::stopped_path(paths, &server.id).exists(),
+            "a password left behind for a server that is going away"
+        );
+        assert!(
+            crate::server::share::list(paths)
+                .await
+                .unwrap()
+                .servers
+                .is_empty(),
+            "the share service still wants to share it"
+        );
+    }
+
+    /// The guard on where a delete may reach runs before any of it happens, so
+    /// an id that points outside the servers tree costs nothing — not even the
+    /// two files clearing the share would remove by name.
+    #[tokio::test]
+    async fn a_delete_pointed_outside_the_tree_touches_nothing() {
+        let admin = scratch("delete-escape");
+        let paths = &admin.0;
+
+        let elsewhere = paths.root.join("elsewhere");
+        tokio::fs::create_dir_all(&elsewhere).await.unwrap();
+        let share = elsewhere.join("share.json");
+        tokio::fs::write(&share, b"somebody else's").await.unwrap();
+
+        // Absolute, so `servers/<id>` is just `<id>` — the shape `Path::join`
+        // lets through.
+        let outside = elsewhere.to_string_lossy().to_string();
+        let refused = crate::server::delete(paths, &outside)
+            .await
+            .expect_err("a delete outside the servers tree");
+        assert!(refused.to_string().contains("unexpected path"), "{refused}");
+        assert!(share.exists(), "the guard ran after something was removed");
     }
 }

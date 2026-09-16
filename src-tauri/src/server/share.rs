@@ -66,7 +66,7 @@ pub fn path(paths: &Paths, id: &str) -> std::path::PathBuf {
 
 /// `servers/<id>/share.stopped.json`, the share of a server whose sharing is
 /// stopped.
-fn stopped_path(paths: &Paths, id: &str) -> std::path::PathBuf {
+pub(crate) fn stopped_path(paths: &Paths, id: &str) -> std::path::PathBuf {
     paths.server(id).join("share.stopped.json")
 }
 
@@ -151,6 +151,21 @@ pub async fn stop(paths: &Paths, id: &str) -> Result<()> {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
         _ => Ok(()),
     }
+}
+
+/// Forget a server's sharing entirely, password and all, for a server that is
+/// going away. Unlike [`stop`] there is nothing to come back to.
+///
+/// Removes both files: a delete that stops part-way must not leave a password
+/// behind for a folder nobody can see any more.
+pub async fn clear(paths: &Paths, id: &str) -> Result<()> {
+    for file in [path(paths, id), stopped_path(paths, id)] {
+        match tokio::fs::remove_file(file).await {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Give a server a new password, whether it is shared now or stopped, and leave

@@ -610,15 +610,33 @@ pub async fn create(
     Ok(server)
 }
 
+/// Take a server's sharing away, then its folder.
+///
+/// In that order: `remove_dir_all` stops at the first entry it cannot delete,
+/// and a server whose `server.json` went first is already invisible in the UI
+/// while its `share.json` still brings the listener and the router's mapping
+/// back on every launch. Clearing first leaves a delete that fails as a server
+/// that is present and not shared — visible, and fixable by hand. Both halves
+/// live here so no caller can reach the second without the first.
 pub async fn delete(paths: &Paths, id: &str) -> Result<()> {
     let dir = paths.server(id);
-    // Guard against a malformed id deleting something outside the tree.
+    // Guard against a malformed id deleting something outside the tree. Before
+    // the share is cleared, so an id that escapes costs nothing at all.
     if !dir.starts_with(paths.servers()) || dir == paths.servers() {
         return Err(Error::msg("refusing to delete an unexpected path"));
     }
-    tokio::fs::remove_dir_all(&dir)
-        .await
-        .map_err(|_| Error::msg(format!("server '{id}' was not found")))?;
+    share::clear(paths, id).await?;
+    tokio::fs::remove_dir_all(&dir).await.map_err(|e| {
+        // A folder that would not go is not a folder that was never there, and
+        // the sharing is off either way: saying "not found" would send the
+        // admin looking for a server still sitting in their list.
+        match e.kind() {
+            std::io::ErrorKind::NotFound => Error::msg(format!("server '{id}' was not found")),
+            _ => Error::msg(format!(
+                "server '{id}' could not be deleted ({e}) — it is no longer shared"
+            )),
+        }
+    })?;
     Ok(())
 }
 

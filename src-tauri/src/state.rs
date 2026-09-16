@@ -126,6 +126,13 @@ impl AppState {
         *self.config.write().await = config;
     }
 
+    /// The CurseForge key to search and download with, if there is one. Owned,
+    /// because every caller then lends it out as `as_deref()` for the length of
+    /// a command.
+    pub async fn cf_key(&self) -> Option<String> {
+        self.config().await.effective_curseforge_key()
+    }
+
     pub fn register_cancel(&self, id: &str, flag: Arc<std::sync::atomic::AtomicBool>) {
         if let Ok(mut map) = self.cancels.lock() {
             map.insert(id.to_string(), flag);
