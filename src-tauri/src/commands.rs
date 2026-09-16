@@ -4242,7 +4242,7 @@ mod tests {
     async fn a_typed_address_is_held_to_the_certificate_it_had_when_joined() {
         let admin = Scratch::new("cmd-typed-admin");
         let (_server, share) = shared_server(&admin.paths).await;
-        let host = share::host::Host::start(admin.paths.clone(), 0).await.unwrap();
+        let host = share::host::Host::start(admin.paths.clone(), 0, None).await.unwrap();
         let port = host.local_addr.port();
         let real = share::identity::Identity::load_or_create(&admin.paths).await.unwrap().pin();
         let typed = || JoinInput::Parts { address: format!("127.0.0.1:{port}"), code: share.code.display() };
@@ -4306,7 +4306,7 @@ mod tests {
     async fn a_joined_instance_is_brought_up_to_date_before_it_plays() {
         let admin = Scratch::new("cmd-play-admin");
         let (server, share) = shared_server(&admin.paths).await;
-        let host = share::host::Host::start(admin.paths.clone(), 0).await.unwrap();
+        let host = share::host::Host::start(admin.paths.clone(), 0, None).await.unwrap();
         let link = loopback(&admin.paths, host.local_addr.port(), &share.code).await;
 
         let player = Scratch::new("cmd-play-player");
@@ -4383,7 +4383,7 @@ mod tests {
     async fn an_update_keeps_what_the_player_changed_while_it_ran() {
         let admin = Scratch::new("cmd-meanwhile-admin");
         let (server, share) = shared_server(&admin.paths).await;
-        let host = share::host::Host::start(admin.paths.clone(), 0).await.unwrap();
+        let host = share::host::Host::start(admin.paths.clone(), 0, None).await.unwrap();
         let link = loopback(&admin.paths, host.local_addr.port(), &share.code).await;
 
         let player = Scratch::new("cmd-meanwhile-player");
@@ -4466,7 +4466,7 @@ mod tests {
     async fn a_replaced_password_lets_the_player_play_and_says_how_to_fix_it() {
         let admin = Scratch::new("cmd-refused-admin");
         let (server, share) = shared_server(&admin.paths).await;
-        let host = share::host::Host::start(admin.paths.clone(), 0).await.unwrap();
+        let host = share::host::Host::start(admin.paths.clone(), 0, None).await.unwrap();
         let link = loopback(&admin.paths, host.local_addr.port(), &share.code).await;
 
         let player = Scratch::new("cmd-refused-player");
@@ -4510,7 +4510,7 @@ mod tests {
     async fn an_update_that_cannot_finish_refuses_to_start_and_retries_next_time() {
         let admin = Scratch::new("cmd-unfinished-admin");
         let (server, share) = shared_server(&admin.paths).await;
-        let host = share::host::Host::start(admin.paths.clone(), 0).await.unwrap();
+        let host = share::host::Host::start(admin.paths.clone(), 0, None).await.unwrap();
         let link = loopback(&admin.paths, host.local_addr.port(), &share.code).await;
 
         let player = Scratch::new("cmd-unfinished-player");
@@ -4554,7 +4554,7 @@ mod tests {
         let admin = Scratch::new("cmd-relink-admin");
         let (one, share_one) = shared_server(&admin.paths).await;
         let (_two, share_two) = shared_server_called(&admin.paths, "creative", "Creative").await;
-        let host = share::host::Host::start(admin.paths.clone(), 0).await.unwrap();
+        let host = share::host::Host::start(admin.paths.clone(), 0, None).await.unwrap();
         let port = host.local_addr.port();
 
         let player = Scratch::new("cmd-relink-player");
@@ -4629,7 +4629,7 @@ mod tests {
         let admin = Scratch::new("cmd-copies-admin");
         let (one, share_one) = shared_server(&admin.paths).await;
         let (two, share_two) = shared_server_called(&admin.paths, "creative", "Creative").await;
-        let host = share::host::Host::start(admin.paths.clone(), 0).await.unwrap();
+        let host = share::host::Host::start(admin.paths.clone(), 0, None).await.unwrap();
         let port = host.local_addr.port();
 
         let player = Scratch::new("cmd-copies-player");

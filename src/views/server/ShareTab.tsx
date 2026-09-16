@@ -419,7 +419,10 @@ export default function ShareTab({ server }: { server: Server }) {
               <div className="skeleton" style={{ height: 110 }} />
             ) : (
               <>
-                <StatusNote line={listenLine(status)} />
+                <StatusNote
+                  line={listenLine(status)}
+                  busy={Boolean(status.retry) && !status.retry?.needsYou}
+                />
                 <StatusNote
                   line={routerLine(status, hasPublicAddress)}
                   busy={status.mapping.state === "searching"}

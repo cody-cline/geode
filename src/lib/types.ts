@@ -589,6 +589,16 @@ export type PortMappingStatus =
       detail?: string;
     };
 
+/** A listener that could not start, being tried again on its own. */
+export interface ShareRetry {
+  /** Attempts that have failed so far, the first one included. */
+  attempts: number;
+  /** Roughly how long until the next attempt. */
+  nextInSeconds: number;
+  /** True once it has been failing for about a minute, which is when the admin is told. */
+  needsYou: boolean;
+}
+
 export interface ShareStatus {
   /** Which router setup the admin chose. Not the same as `mapping.state`: a mapper that never started because nothing listens is `off` in either mode. */
   mode: "auto" | "manual";
@@ -601,11 +611,37 @@ export interface ShareStatus {
   port: number;
   /** Why it could not start listening, e.g. the port is already taken. */
   listenError: string | null;
+  /** While something is shared and nothing listens: how trying again is going. Null when nothing is being tried. */
+  retry: ShareRetry | null;
   mapping: PortMappingStatus;
   /** The address links use: the public address if one is set, else the router's external IP, else null. */
   address: string | null;
   /** The certificate fingerprint players' Geode pins, as hex. */
   fingerprint: string;
+}
+
+/**
+ * The pack server going down and coming back, sent once each rather than once
+ * an attempt: the Share tab's own line follows `geode://share-status`.
+ */
+export interface ShareListenNotice {
+  /** True on the recovery; false when retrying has gone on long enough to need the admin. */
+  listening: boolean;
+  port: number;
+  /** Attempts that had failed when this was sent. */
+  attempts: number;
+  /** Why it could not bind; null on the recovery. */
+  error: string | null;
+}
+
+/**
+ * A server whose pack would not build for a player. The player is told only to
+ * ask their admin, so this is the only way the admin hears of it.
+ */
+export interface SharePackFailed {
+  serverId: string;
+  serverName: string;
+  error: string;
 }
 
 export interface ServerShareView {

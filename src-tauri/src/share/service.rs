@@ -6,9 +6,16 @@
 //! asks the router to open it; unsharing the last stops both and gives the
 //! port back. Every change to the running state is announced, so the UI never
 //! has to poll to find out whether players can reach the admin.
+//!
+//! A listener that cannot start is not the end of it either. Something else
+//! holding the port is usually letting go of it — most often a Geode that has
+//! just quit and is still asking the router to close the port — so binding is
+//! tried again on its own until it works, and only once that has gone on long
+//! enough to mean something is really in the way is the admin told.
 
 use std::net::IpAddr;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tokio::sync::{watch, Mutex};
@@ -26,10 +33,58 @@ use super::portmap::{self, PortMapper, Reachability};
 /// Sent with a [`ShareStatus`] whenever the running state changes.
 pub const STATUS_EVENT: &str = "geode://share-status";
 
+/// Sent with a [`ListenNotice`] once when retrying has gone on long enough
+/// that the admin has to do something, and once again if a later retry gets
+/// the port after all. Twice at most per outage, and never the second without
+/// the first: an outage nobody was told of has no coming back to announce,
+/// and "listening again" against a problem the admin never saw reads as a
+/// fault they missed. The Share tab's own line follows [`STATUS_EVENT`] and
+/// says the rest.
+pub const LISTEN_EVENT: &str = "geode://share-listen";
+
 /// How often manual setup asks the router for its public address again, and
 /// how soon it tries again after the router did not answer.
 const DETECT_EVERY: Duration = Duration::from_secs(30 * 60);
 const DETECT_RETRY: Duration = Duration::from_secs(60);
+
+/// How long the listener may go on failing before the admin is told and the
+/// screens stop saying Geode is still trying.
+///
+/// A minute. The likeliest reason the port is taken is a Geode that has just
+/// quit and is still asking the router to close it, which takes ten to fifteen
+/// seconds — well inside the retries at four, twelve and twenty-eight seconds
+/// in, and the minute mark is exactly where the fifth attempt lands. Something
+/// still holding the port then is another program or a firewall, and no amount
+/// of waiting moves either.
+const ESCALATE_AFTER: Duration = Duration::from_secs(60);
+
+/// How soon a listener that could not start is tried again, and how long it
+/// may go on failing before the admin is told. One set for the app; tests
+/// shrink them so a retry takes milliseconds rather than a minute.
+#[derive(Clone, Copy)]
+struct Timings {
+    /// The wait before the first retry, doubled by each further failure in a
+    /// row up to `retry_limit`.
+    retry: Duration,
+    retry_limit: Duration,
+    /// [`ESCALATE_AFTER`].
+    escalate_after: Duration,
+}
+
+/// The same shape [`portmap`] retries a router with, and for the same reason:
+/// whatever is in the way usually goes within seconds, and once it has not,
+/// asking more often than once a minute gains nothing.
+const TIMINGS: Timings = Timings {
+    retry: Duration::from_secs(4),
+    retry_limit: Duration::from_secs(60),
+    escalate_after: ESCALATE_AFTER,
+};
+
+impl Default for Timings {
+    fn default() -> Self {
+        TIMINGS
+    }
+}
 
 /// Everything the UI shows about whether players can reach this machine.
 #[derive(Debug, Clone, Serialize)]
@@ -49,11 +104,43 @@ pub struct ShareStatus {
     pub listening: bool,
     pub port: u16,
     pub listen_error: Option<String>,
+    /// While something is shared and nothing listens: what trying again has
+    /// come to so far. `None` when nothing is being tried, so a listen error
+    /// with no retry beside it is one nobody is working on.
+    pub retry: Option<Retrying>,
     pub mapping: portmap::Status,
     /// The address links are made with, when one is known.
     pub address: Option<String>,
     /// The certificate fingerprint players pin, as hex.
     pub fingerprint: String,
+}
+
+/// A listener that could not start, being tried again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Retrying {
+    /// Attempts that have failed so far, the first one included.
+    pub attempts: u32,
+    /// Roughly how long until the next attempt.
+    pub next_in_seconds: u64,
+    /// Whether it has been failing for [`ESCALATE_AFTER`] — long enough that
+    /// this is not something on its way out of the port, and the admin has
+    /// been told so.
+    pub needs_you: bool,
+}
+
+/// Sent to the admin when the listener has been down too long to keep quiet
+/// about, and again if it comes back on its own.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ListenNotice {
+    /// Whether this is the recovery rather than the failure.
+    listening: bool,
+    port: u16,
+    /// Attempts that had failed when this was sent.
+    attempts: u32,
+    /// Why it could not bind; `None` on the recovery.
+    error: Option<String>,
 }
 
 /// A public address the router reported, without being asked to change.
@@ -88,11 +175,13 @@ impl Detection {
 pub struct ShareService {
     /// Whole reconciles, one at a time — held while the settings are read, so
     /// the last reconcile to run is always the one that saw the latest ones.
+    /// A retry attempt takes it too, and so is never beside one.
     serial: Mutex<()>,
     inner: Mutex<Inner>,
     /// Never contact the router, not even to ask. Only tests set this: they run
     /// on a real network, and asking a real router anything is not theirs to do.
     quiet: bool,
+    timings: Timings,
 }
 
 #[derive(Default)]
@@ -100,8 +189,33 @@ struct Inner {
     running: Option<Running>,
     /// Why the pack server could not start, until it next can.
     listen_error: Option<String>,
+    /// Binding the port again until it works, while something is shared.
+    retry: Option<Retry>,
+    /// Bumped by every reconcile. A retry that comes back from its wait to
+    /// find this changed was superseded while it waited and stops there, so
+    /// two of them can never both be trying to bind.
+    generation: u64,
     /// Loaded once. The identity never changes while the app runs.
     pin: Option<Pin>,
+}
+
+/// What retrying the listener has come to, and the task doing it.
+struct Retry {
+    /// Aborted when a reconcile supersedes this retry, or the app exits.
+    task: tokio::task::JoinHandle<()>,
+    /// The port being bound. A reconcile that still wants this one is the
+    /// same outage going on; one that wants another port is a new problem,
+    /// and everything below starts over.
+    port: u16,
+    /// Attempts that have failed so far, the first one included.
+    attempts: u32,
+    /// When the next attempt is due.
+    next: Instant,
+    /// When the listener first failed, which [`ESCALATE_AFTER`] runs from.
+    since: Instant,
+    /// The admin has been told this needs them. Once is enough: they cannot
+    /// be told it a second time any more usefully.
+    alerted: bool,
 }
 
 struct Running {
@@ -123,19 +237,239 @@ enum Wanted {
     Unknown,
 }
 
+/// What bringing the running state in line left behind, and so what there is
+/// to do next. Four answers rather than "is there something to retry": a
+/// retry that ends because nothing is shared any more has not recovered, and
+/// telling an admin it is listening again then would be a lie.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    /// A listener is up on the port the settings name.
+    Listening,
+    /// Something is shared and nothing is listening: what there is to try
+    /// again.
+    Down,
+    /// Nothing is shared, so nothing should be listening.
+    Idle,
+    /// What is shared could not be read, so nothing was tried either way. A
+    /// retry already running carries on — something was shared a moment ago —
+    /// but none is ever started from here, which would be guessing on exactly
+    /// the reading [`Wanted::Unknown`] exists to refuse.
+    Unknown,
+}
+
 impl ShareService {
     /// Bring the running state in line with what is shared and the settings,
     /// reading the settings only once it is this call's turn.
-    pub async fn reconcile(&self, state: &crate::state::AppState, sink: Option<EventSink>) {
+    pub async fn reconcile(
+        self: &Arc<Self>,
+        state: &crate::state::AppState,
+        sink: Option<EventSink>,
+    ) {
         let _turn = self.serial.lock().await;
         let config = state.config().await.share;
-        self.reconcile_with(&state.paths, &config, sink).await;
+        self.reconcile_taking_turn(&state.paths, &config, sink).await;
     }
 
     /// The same, with the settings given. What tests call; the app goes through
     /// [`ShareService::reconcile`] so concurrent reconciles cannot apply stale
     /// settings last.
-    pub async fn reconcile_with(&self, paths: &Paths, config: &ShareConfig, sink: Option<EventSink>) {
+    pub async fn reconcile_with(
+        self: &Arc<Self>,
+        paths: &Paths,
+        config: &ShareConfig,
+        sink: Option<EventSink>,
+    ) {
+        let _turn = self.serial.lock().await;
+        self.reconcile_taking_turn(paths, config, sink).await;
+    }
+
+    /// A reconcile with its turn already taken.
+    ///
+    /// Whatever was being retried is dropped first: these settings have the
+    /// last word on what should be running, and the port the retry was binding
+    /// may not even be the one wanted now.
+    async fn reconcile_taking_turn(
+        self: &Arc<Self>,
+        paths: &Paths,
+        config: &ShareConfig,
+        sink: Option<EventSink>,
+    ) {
+        let superseded = self.supersede().await;
+        if self.apply(paths, config, &sink).await == Outcome::Down {
+            self.retry_from_now(paths, config, &sink, superseded).await;
+        }
+        self.announce(paths, config, &sink).await;
+    }
+
+    /// Start binding the port again until it works. The attempt that just
+    /// failed is the first one counted.
+    ///
+    /// Unless `superseded` was already failing on this same port, in which
+    /// case its count, its clock and whether the admin has been told go on
+    /// from where they were. A reconcile is not news about the port: saving
+    /// an unrelated setting, or sharing a second server, must not make ten
+    /// minutes of failing read as a first try that usually clears in seconds,
+    /// nor buy a second "this needs you" a minute later.
+    async fn retry_from_now(
+        self: &Arc<Self>,
+        paths: &Paths,
+        config: &ShareConfig,
+        sink: &Option<EventSink>,
+        superseded: Option<Retry>,
+    ) {
+        let carried = superseded.filter(|retry| retry.port == config.port);
+        let attempts = carried.as_ref().map_or(0, |retry| retry.attempts) + 1;
+        let wait = self.backoff(attempts);
+        let now = Instant::now();
+        let mut inner = self.inner.lock().await;
+        let generation = inner.generation;
+        // Spawned before it is recorded, which is safe because the loop waits
+        // before it touches anything.
+        let task = tokio::spawn(Arc::clone(self).retrying(
+            paths.clone(),
+            config.clone(),
+            sink.clone(),
+            generation,
+            wait,
+        ));
+        inner.retry = Some(Retry {
+            task,
+            port: config.port,
+            attempts,
+            next: now + wait,
+            since: carried.as_ref().map_or(now, |retry| retry.since),
+            alerted: carried.is_some_and(|retry| retry.alerted),
+        });
+    }
+
+    /// How long to wait after `attempts` failures in a row: the first wait,
+    /// doubled by each further failure, up to the ceiling.
+    fn backoff(&self, attempts: u32) -> Duration {
+        let doubling = 1u32.checked_shl(attempts.saturating_sub(1)).unwrap_or(u32::MAX);
+        self.timings
+            .retry
+            .saturating_mul(doubling)
+            .min(self.timings.retry_limit)
+    }
+
+    /// Bind the port again until it works, nothing is shared any more, or a
+    /// reconcile supersedes this.
+    ///
+    /// Each attempt takes the turn a reconcile takes and does the same work,
+    /// so one that succeeds leaves the router mapping or detection, the
+    /// announce watcher and the status exactly as a reconcile would.
+    async fn retrying(
+        self: Arc<Self>,
+        paths: Paths,
+        config: ShareConfig,
+        sink: Option<EventSink>,
+        generation: u64,
+        mut wait: Duration,
+    ) {
+        loop {
+            tokio::time::sleep(wait).await;
+            let _turn = self.serial.lock().await;
+            // Superseded while this waited for its turn: a reconcile has
+            // already decided what should be running, and it was not this.
+            if self.inner.lock().await.generation != generation {
+                return;
+            }
+
+            let outcome = self.apply(&paths, &config, &sink).await;
+            let mut notice = None;
+            let mut last = false;
+            {
+                let mut inner = self.inner.lock().await;
+                let Some(retry) = inner.retry.as_mut() else {
+                    return;
+                };
+                match outcome {
+                    Outcome::Down => {
+                        retry.attempts += 1;
+                        wait = self.backoff(retry.attempts);
+                        retry.next = Instant::now() + wait;
+                        // Told once, when waiting has plainly stopped being the
+                        // answer — not once an attempt, which would be a toast a
+                        // minute for as long as sharing is on.
+                        let crossed =
+                            !retry.alerted && retry.since.elapsed() >= self.timings.escalate_after;
+                        retry.alerted |= crossed;
+                        let attempts = retry.attempts;
+                        if crossed {
+                            notice = Some(ListenNotice {
+                                listening: false,
+                                port: config.port,
+                                attempts,
+                                error: inner.listen_error.clone(),
+                            });
+                        }
+                    }
+                    // Nothing was tried, because what is shared could not be
+                    // read. No attempt to count against the port, and no
+                    // reason to give up on a port something was shared on a
+                    // moment ago: look again after the same wait.
+                    Outcome::Unknown => retry.next = Instant::now() + wait,
+                    Outcome::Listening | Outcome::Idle => {
+                        // Only a recovery the admin can place: one from a
+                        // failure they were told about. A port taken for four
+                        // seconds and given back was never their business, and
+                        // an end because nothing is shared any more is not
+                        // sharing coming back at all.
+                        let recovered = outcome == Outcome::Listening && retry.alerted;
+                        let attempts = retry.attempts;
+                        inner.retry = None;
+                        if recovered {
+                            notice = Some(ListenNotice {
+                                listening: true,
+                                port: config.port,
+                                attempts,
+                                error: None,
+                            });
+                        }
+                        last = true;
+                    }
+                }
+            }
+
+            // The status first, so the screens are already right when the
+            // notice arrives to point at them.
+            self.announce(&paths, &config, &sink).await;
+            if let Some(notice) = notice {
+                events::emit(&sink, LISTEN_EVENT, &notice);
+            }
+            if last {
+                return;
+            }
+        }
+    }
+
+    /// Drop whatever was being retried, and make any attempt already on its
+    /// way back from a wait give up its turn. What was dropped is handed back,
+    /// so a reconcile that still wants the same port can go on from where it
+    /// had got to rather than starting the outage over.
+    async fn supersede(&self) -> Option<Retry> {
+        let mut inner = self.inner.lock().await;
+        inner.generation += 1;
+        let retry = inner.retry.take();
+        if let Some(retry) = &retry {
+            retry.task.abort();
+        }
+        retry
+    }
+
+    async fn announce(&self, paths: &Paths, config: &ShareConfig, sink: &Option<EventSink>) {
+        let status = self.status(paths, config).await;
+        events::emit(sink, STATUS_EVENT, &status);
+    }
+
+    /// Bring the running state in line with what is shared and the settings,
+    /// and say what that came to.
+    async fn apply(
+        &self,
+        paths: &Paths,
+        config: &ShareConfig,
+        sink: &Option<EventSink>,
+    ) -> Outcome {
         let wanted = match crate::server::share::list(paths).await {
             Ok(shared) if !shared.servers.is_empty() => Wanted::Share,
             Ok(shared) if shared.unreadable.is_empty() => Wanted::Stop,
@@ -156,7 +490,7 @@ impl ShareService {
         match wanted {
             Wanted::Stop => inner.listen_error = None,
             Wanted::Share if inner.running.is_none() => {
-                match Host::start(paths.clone(), config.port).await {
+                match Host::start(paths.clone(), config.port, sink.clone()).await {
                     Ok(host) => {
                         inner.listen_error = None;
                         inner.running = Some(Running {
@@ -209,9 +543,14 @@ impl ShareService {
             )));
         }
 
-        let status = assemble(&inner, config, pin);
-        drop(inner);
-        events::emit(&sink, STATUS_EVENT, &status);
+        if inner.running.is_some() {
+            return Outcome::Listening;
+        }
+        match wanted {
+            Wanted::Share => Outcome::Down,
+            Wanted::Stop => Outcome::Idle,
+            Wanted::Unknown => Outcome::Unknown,
+        }
     }
 
     pub async fn status(&self, paths: &Paths, config: &ShareConfig) -> ShareStatus {
@@ -259,6 +598,12 @@ impl ShareService {
     /// mapping's removal is bounded, so a router that stops answering cannot
     /// hold the exit up; its lease is the safety net.
     pub async fn shutdown(&self) {
+        // Behind the same turn a reconcile takes, so nothing is halfway
+        // through starting a listener this would then not know to stop; and
+        // anything still trying to bind is dropped before the port is given
+        // back, rather than taking it again on the way out.
+        let _turn = self.serial.lock().await;
+        drop(self.supersede().await);
         let mut inner = self.inner.lock().await;
         if let Some(running) = inner.running.take() {
             stop(running).await;
@@ -351,6 +696,9 @@ async fn announce(
             listening: true,
             port: config.port,
             listen_error: None,
+            // This only runs while the listener is up, which is the one state
+            // there is nothing to try again in.
+            retry: None,
             address: reachable_address(&config, &current, found).map(|a| a.display()),
             mapping: current,
             fingerprint: pin.map(|p| p.to_hex()).unwrap_or_default(),
@@ -379,6 +727,15 @@ fn assemble(inner: &Inner, config: &ShareConfig, pin: Option<Pin>) -> ShareStatu
         listening: running.is_some(),
         port: config.port,
         listen_error: inner.listen_error.clone(),
+        retry: inner.retry.as_ref().map(|retry| Retrying {
+            attempts: retry.attempts,
+            // Rounded up, so a wait still to come never reads as none left.
+            next_in_seconds: {
+                let left = retry.next.saturating_duration_since(Instant::now());
+                (left.as_millis() as u64).div_ceil(1000)
+            },
+            needs_you: retry.alerted,
+        }),
         // Nothing to give players while nothing listens, even with a public
         // address set.
         address: running
@@ -488,11 +845,27 @@ mod tests {
     }
 
     /// The service as the app runs it, minus any contact with the router.
-    fn service() -> ShareService {
-        ShareService {
+    /// Shared, as the app shares it, so a retry has something to run against.
+    fn service() -> Arc<ShareService> {
+        Arc::new(ShareService {
             quiet: true,
             ..Default::default()
-        }
+        })
+    }
+
+    /// The same, retrying a listener in milliseconds rather than a minute:
+    /// the first retry after `retry`, doubling to twice that, and the admin
+    /// told once `escalate_after` of failing has gone by.
+    fn service_retrying(retry: Duration, escalate_after: Duration) -> Arc<ShareService> {
+        Arc::new(ShareService {
+            quiet: true,
+            timings: Timings {
+                retry,
+                retry_limit: retry * 2,
+                escalate_after,
+            },
+            ..Default::default()
+        })
     }
 
     async fn pin_of(paths: &Paths) -> Pin {
@@ -528,7 +901,7 @@ mod tests {
         let admin_scratch = Scratch::new("e2e-join");
         let admin = admin_scratch.paths.clone();
         let (_, share) = shared_server(&admin).await;
-        let host = Host::start(admin.clone(), 0).await.unwrap();
+        let host = Host::start(admin.clone(), 0, None).await.unwrap();
         let link = link(host.local_addr.port(), &share.code, pin_of(&admin).await);
 
         // What the player is shown before deciding.
@@ -626,7 +999,7 @@ mod tests {
         let scratch = Scratch::new("e2e-refuse");
         let admin = scratch.paths.clone();
         let (server, share) = shared_server(&admin).await;
-        let host = Host::start(admin.clone(), 0).await.unwrap();
+        let host = Host::start(admin.clone(), 0, None).await.unwrap();
         let port = host.local_addr.port();
         let pin = pin_of(&admin).await;
         let original = share.code.clone();
@@ -702,7 +1075,7 @@ mod tests {
         let scratch = Scratch::new("e2e-typed");
         let admin = scratch.paths.clone();
         let (_, share) = shared_server(&admin).await;
-        let host = Host::start(admin.clone(), 0).await.unwrap();
+        let host = Host::start(admin.clone(), 0, None).await.unwrap();
         let port = host.local_addr.port();
 
         let typed = join::JoinInput::Parts {
@@ -939,7 +1312,7 @@ mod tests {
             .await
             .unwrap();
 
-        let host = Host::start(admin.clone(), 0).await.unwrap();
+        let host = Host::start(admin.clone(), 0, None).await.unwrap();
         let port = host.local_addr.port();
         let (mapper, _router, removal) = a_mapping_whose_removal_hangs().await;
         let running = Running {
@@ -1134,6 +1507,430 @@ mod tests {
             service.link_for(&admin, &tunnelled, &share).await.is_none(),
             "a link handed out for a dead port"
         );
+        // Reported, and not left at that: the port is being tried again.
+        assert!(status.retry.is_some(), "{status:?}");
+
+        service.shutdown().await;
+        drop(squatter);
+    }
+
+    /// Whether the service is listening within `wait`, asked as the Share tab
+    /// asks. Retries happen on a task of their own, so nothing tells a test
+    /// when one has run.
+    async fn listens_within(
+        service: &ShareService,
+        paths: &Paths,
+        config: &ShareConfig,
+        wait: Duration,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            if service.status(paths, config).await.listening {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// The first retry the status reports that `done` accepts, or a panic
+    /// after five seconds.
+    async fn wait_for_retry(
+        service: &ShareService,
+        paths: &Paths,
+        config: &ShareConfig,
+        done: impl Fn(&Retrying) -> bool,
+    ) -> Retrying {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let status = service.status(paths, config).await;
+            if let Some(retry) = status.retry.filter(&done) {
+                return retry;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the retry never got there: {status:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// A port held by something else, as a Geode that has just quit holds one
+    /// while it asks the router to close it.
+    fn squatted() -> (std::net::TcpListener, u16) {
+        let squatter = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+        let port = squatter.local_addr().unwrap().port();
+        (squatter, port)
+    }
+
+    /// The listener that could not start tries again on its own: whatever held
+    /// the port lets go, and sharing comes up without a reconcile in between —
+    /// nobody restarts Geode, nobody changes the port.
+    #[tokio::test]
+    async fn a_listener_kept_off_its_port_starts_on_its_own_once_the_port_is_free() {
+        let scratch = Scratch::new("e2e-retry");
+        let admin = scratch.paths.clone();
+        let (_, share) = shared_server(&admin).await;
+        let (squatter, taken) = squatted();
+
+        let service = service_retrying(Duration::from_millis(100), Duration::from_secs(60));
+        let config = manual(taken, Some(format!("127.0.0.1:{taken}")));
+        service.reconcile_with(&admin, &config, None).await;
+        let status = service.status(&admin, &config).await;
+        assert!(!status.listening, "{status:?}");
+        assert_eq!(status.retry.map(|r| r.attempts), Some(1), "{status:?}");
+
+        drop(squatter);
+        assert!(
+            listens_within(&service, &admin, &config, Duration::from_secs(5)).await,
+            "the listener never came up on its own"
+        );
+
+        // And it came up the way a reconcile leaves it: nothing to say about
+        // the port any more, and a link players can use.
+        let status = service.status(&admin, &config).await;
+        assert!(status.retry.is_none() && status.listen_error.is_none(), "{status:?}");
+        let link = service
+            .link_for(&admin, &config, &share)
+            .await
+            .expect("an address is set");
+        join::preview(link).await.unwrap();
+
+        service.shutdown().await;
+    }
+
+    /// Unsharing the last shared server ends the retry. There is nothing left
+    /// to listen for, so the port coming free afterwards must not quietly
+    /// bring a listener up behind the admin's back.
+    #[tokio::test]
+    async fn unsharing_the_last_server_ends_the_retry() {
+        let scratch = Scratch::new("e2e-retry-unshare");
+        let admin = scratch.paths.clone();
+        let (server, _) = shared_server(&admin).await;
+        let (squatter, taken) = squatted();
+
+        let service = service_retrying(Duration::from_millis(100), Duration::from_secs(60));
+        let config = manual(taken, None);
+        service.reconcile_with(&admin, &config, None).await;
+        assert!(service.status(&admin, &config).await.retry.is_some());
+
+        server_share::stop(&admin, &server.id).await.unwrap();
+        service.reconcile_with(&admin, &config, None).await;
+        let status = service.status(&admin, &config).await;
+        assert!(status.retry.is_none(), "still trying with nothing shared: {status:?}");
+        assert!(status.listen_error.is_none(), "{status:?}");
+
+        drop(squatter);
+        assert!(
+            !listens_within(&service, &admin, &config, Duration::from_millis(500)).await,
+            "a listener came up for a server nobody shares"
+        );
+        assert!(port_is_free(taken), "the port was taken after unsharing");
+
+        service.shutdown().await;
+    }
+
+    /// A port change while a retry is in flight replaces it: the new port is
+    /// listened on, the old one is left alone however free it becomes, and
+    /// what is running is one listener with the router handled as the settings
+    /// ask — not a second one from the retry that was superseded.
+    #[tokio::test]
+    async fn a_port_change_supersedes_a_retry_in_flight() {
+        let scratch = Scratch::new("e2e-retry-moved");
+        let admin = scratch.paths.clone();
+        let (_, share) = shared_server(&admin).await;
+        let (squatter, taken) = squatted();
+
+        let service = service_retrying(Duration::from_millis(100), Duration::from_secs(60));
+        let stuck = manual(taken, None);
+        service.reconcile_with(&admin, &stuck, None).await;
+        assert!(service.status(&admin, &stuck).await.retry.is_some());
+
+        let second = free_port();
+        let moved = manual(second, Some(format!("127.0.0.1:{second}")));
+        service.reconcile_with(&admin, &moved, None).await;
+        let status = service.status(&admin, &moved).await;
+        assert!(status.listening, "{status:?}");
+        assert!(status.retry.is_none(), "a retry outlived the port change: {status:?}");
+        assert_eq!(
+            status.mapping,
+            portmap::Status::Off,
+            "manual means the router is left alone"
+        );
+
+        // The superseded retry is gone rather than merely asleep: the old port
+        // coming free never gets it a second listener.
+        drop(squatter);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(port_is_free(taken), "the superseded retry took the old port");
+        let link = service.link_for(&admin, &moved, &share).await.unwrap();
+        join::preview(link).await.unwrap();
+
+        service.shutdown().await;
+    }
+
+    /// What the status says while the port stays taken: trying again, with the
+    /// attempt count and the wait the screens read out, and only once it has
+    /// been failing for the threshold does it say this needs the admin.
+    #[tokio::test]
+    async fn the_status_says_trying_again_and_then_that_it_needs_you() {
+        let scratch = Scratch::new("e2e-retry-status");
+        let admin = scratch.paths.clone();
+        shared_server(&admin).await;
+        let (squatter, taken) = squatted();
+
+        let service = service_retrying(Duration::from_millis(300), Duration::from_millis(900));
+        let config = manual(taken, None);
+        service.reconcile_with(&admin, &config, None).await;
+
+        let first = service
+            .status(&admin, &config)
+            .await
+            .retry
+            .expect("the first failure is already being tried again");
+        assert_eq!(first.attempts, 1);
+        assert!(!first.needs_you, "{first:?}");
+        assert_eq!(
+            first.next_in_seconds, 1,
+            "a wait still to come read as none left: {first:?}"
+        );
+
+        // A second attempt, still inside the threshold: more tries, same tone.
+        let trying = wait_for_retry(&service, &admin, &config, |r| r.attempts > 1).await;
+        assert!(!trying.needs_you, "escalated before the threshold: {trying:?}");
+
+        // Past it, and the reason is there to name.
+        let needing = wait_for_retry(&service, &admin, &config, |r| r.needs_you).await;
+        assert!(needing.attempts >= trying.attempts, "{needing:?}");
+        let status = service.status(&admin, &config).await;
+        assert!(
+            status.listen_error.as_deref().is_some_and(|e| e.contains(&taken.to_string())),
+            "{status:?}"
+        );
+
+        service.shutdown().await;
+        drop(squatter);
+    }
+
+    /// Everything the notices say, in the order an admin meets them: nothing
+    /// while the first attempt works, one notice however many attempts fail
+    /// past the threshold, and one more when a retry finally gets the port.
+    #[tokio::test]
+    async fn the_admin_is_told_once_that_it_needs_them_and_once_when_it_comes_back() {
+        let scratch = Scratch::new("e2e-retry-told");
+        let admin = scratch.paths.clone();
+        shared_server(&admin).await;
+        let recorder = std::sync::Arc::new(crate::events::Recorder::default());
+        let sink: Option<EventSink> = Some(recorder.clone());
+        let notices = || -> Vec<serde_json::Value> {
+            recorder
+                .events()
+                .into_iter()
+                .filter(|(topic, _)| topic == LISTEN_EVENT)
+                .map(|(_, payload)| payload)
+                .collect()
+        };
+
+        // A listener that starts first time is not news.
+        let ordinary = service();
+        let free = manual(free_port(), None);
+        ordinary.reconcile_with(&admin, &free, sink.clone()).await;
+        assert!(ordinary.status(&admin, &free).await.listening);
+        assert!(notices().is_empty(), "{:?}", recorder.topics());
+        ordinary.shutdown().await;
+
+        let (squatter, taken) = squatted();
+        let service = service_retrying(Duration::from_millis(100), Duration::from_millis(250));
+        let config = manual(taken, None);
+        service.reconcile_with(&admin, &config, sink.clone()).await;
+
+        // Several attempts past the threshold, and one notice for all of them.
+        wait_for_retry(&service, &admin, &config, |r| r.attempts >= 5).await;
+        let told = notices();
+        assert_eq!(told.len(), 1, "one notice, not one an attempt: {told:?}");
+        assert_eq!(told[0]["listening"], serde_json::json!(false));
+        assert_eq!(told[0]["port"], serde_json::json!(taken));
+        assert!(
+            told[0]["error"]
+                .as_str()
+                .is_some_and(|e| e.contains(&taken.to_string())),
+            "{told:?}"
+        );
+
+        drop(squatter);
+        assert!(listens_within(&service, &admin, &config, Duration::from_secs(5)).await);
+        let told = notices();
+        assert_eq!(told.len(), 2, "{told:?}");
+        assert_eq!(told[1]["listening"], serde_json::json!(true));
+        assert_eq!(told[1]["error"], serde_json::Value::Null);
+        // And the screens were told to follow along, each attempt.
+        assert!(
+            recorder.topics().iter().filter(|t| *t == STATUS_EVENT).count() > 2,
+            "{:?}",
+            recorder.topics()
+        );
+
+        service.shutdown().await;
+    }
+
+    /// Every notice sent so far, newest last.
+    fn listen_notices(recorder: &crate::events::Recorder) -> Vec<serde_json::Value> {
+        recorder
+            .events()
+            .into_iter()
+            .filter(|(topic, _)| topic == LISTEN_EVENT)
+            .map(|(_, payload)| payload)
+            .collect()
+    }
+
+    /// A port that comes free before the admin was ever told it was taken is
+    /// not something to announce the end of. This is the case the retry was
+    /// built for — reopening Geode while the old one still holds the port —
+    /// and an admin who has just opened the app and been told of no problem
+    /// cannot read "listening again" as anything but a fault they missed.
+    #[tokio::test]
+    async fn a_port_that_comes_back_before_the_admin_was_told_says_nothing() {
+        let scratch = Scratch::new("e2e-retry-quiet");
+        let admin = scratch.paths.clone();
+        shared_server(&admin).await;
+        let (squatter, taken) = squatted();
+        let recorder = std::sync::Arc::new(crate::events::Recorder::default());
+        let sink: Option<EventSink> = Some(recorder.clone());
+
+        // A threshold it never reaches: this outage is over in milliseconds.
+        let service = service_retrying(Duration::from_millis(100), Duration::from_secs(60));
+        let config = manual(taken, None);
+        service.reconcile_with(&admin, &config, sink.clone()).await;
+        assert!(service.status(&admin, &config).await.retry.is_some());
+
+        drop(squatter);
+        assert!(listens_within(&service, &admin, &config, Duration::from_secs(5)).await);
+        assert_eq!(
+            listen_notices(&recorder),
+            Vec::<serde_json::Value>::new(),
+            "an admin who was told of no problem was told it was over"
+        );
+
+        service.shutdown().await;
+    }
+
+    /// A retry that comes back to find nothing shared any more has not
+    /// recovered: it has nothing left to do. Unsharing the last server writes
+    /// the share file before it reconciles, so an attempt whose wait ends in
+    /// that gap is the one that reads it — and it must not congratulate the
+    /// admin on a listener that does not exist.
+    #[tokio::test]
+    async fn a_retry_that_finds_nothing_shared_stops_without_saying_it_came_back() {
+        let scratch = Scratch::new("e2e-retry-gone");
+        let admin = scratch.paths.clone();
+        let (server, _) = shared_server(&admin).await;
+        let (squatter, taken) = squatted();
+        let recorder = std::sync::Arc::new(crate::events::Recorder::default());
+        let sink: Option<EventSink> = Some(recorder.clone());
+
+        // Past the threshold first, so the failure notice is already sent and
+        // the only thing left that could speak is the recovery.
+        let service = service_retrying(Duration::from_millis(100), Duration::from_millis(250));
+        let config = manual(taken, None);
+        service.reconcile_with(&admin, &config, sink.clone()).await;
+        wait_for_retry(&service, &admin, &config, |r| r.needs_you).await;
+        assert_eq!(listen_notices(&recorder).len(), 1);
+
+        // The share file alone, as `unshare_server` writes it before taking
+        // the turn a reconcile takes.
+        server_share::stop(&admin, &server.id).await.unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while service.status(&admin, &config).await.retry.is_some() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the retry went on with nothing shared"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let told = listen_notices(&recorder);
+        assert_eq!(told.len(), 1, "sharing was said to be back on: {told:?}");
+        let status = service.status(&admin, &config).await;
+        assert!(!status.listening && status.listen_error.is_none(), "{status:?}");
+
+        service.shutdown().await;
+        drop(squatter);
+    }
+
+    /// A reconcile that leaves the port alone is not news about the port. The
+    /// admin saves a setting, or shares a second server, while the first is
+    /// still failing: the count and the clock go on, so the screens keep
+    /// saying this needs them rather than reverting to a first try that
+    /// usually clears in seconds, and no second toast arrives a minute later.
+    #[tokio::test]
+    async fn a_reconcile_that_keeps_the_port_does_not_start_the_outage_over() {
+        let scratch = Scratch::new("e2e-retry-kept");
+        let admin = scratch.paths.clone();
+        shared_server(&admin).await;
+        let (squatter, taken) = squatted();
+        let recorder = std::sync::Arc::new(crate::events::Recorder::default());
+        let sink: Option<EventSink> = Some(recorder.clone());
+
+        let service = service_retrying(Duration::from_millis(100), Duration::from_millis(250));
+        let config = manual(taken, None);
+        service.reconcile_with(&admin, &config, sink.clone()).await;
+        let stuck = wait_for_retry(&service, &admin, &config, |r| r.needs_you).await;
+        assert_eq!(listen_notices(&recorder).len(), 1);
+
+        // Saving the settings with the port untouched — the admin changing
+        // the mapping mode, or typing a public address.
+        let saved = manual(taken, Some("mc.example.com".into()));
+        service.reconcile_with(&admin, &saved, sink.clone()).await;
+        let after = service
+            .status(&admin, &saved)
+            .await
+            .retry
+            .expect("still failing, so still being tried");
+        assert!(after.needs_you, "the alert was taken back: {after:?}");
+        assert!(
+            after.attempts > stuck.attempts,
+            "the count started over: {stuck:?} then {after:?}"
+        );
+
+        // And long enough past the threshold for a second alert to have been
+        // due, had the clock been restarted.
+        wait_for_retry(&service, &admin, &saved, |r| r.attempts >= after.attempts + 4).await;
+        let told = listen_notices(&recorder);
+        assert_eq!(told.len(), 1, "told a second time: {told:?}");
+
+        service.shutdown().await;
+        drop(squatter);
+    }
+
+    /// The threshold runs from when the listener first failed, not from the
+    /// last reconcile. An admin trying things while the port stays taken —
+    /// saving the settings again, sharing another server — would otherwise
+    /// put the alert off every time they touched anything, and never be told
+    /// at all as long as they kept trying.
+    #[tokio::test]
+    async fn reconciling_while_the_port_stays_taken_does_not_put_the_alert_off() {
+        let scratch = Scratch::new("e2e-retry-clock");
+        let admin = scratch.paths.clone();
+        shared_server(&admin).await;
+        let (squatter, taken) = squatted();
+        let recorder = std::sync::Arc::new(crate::events::Recorder::default());
+        let sink: Option<EventSink> = Some(recorder.clone());
+
+        let service = service_retrying(Duration::from_millis(50), Duration::from_millis(400));
+        let config = manual(taken, None);
+
+        // Reconciled over and over for four times the threshold, and never so
+        // fast that no attempt fits between two of them.
+        let began = std::time::Instant::now();
+        while began.elapsed() < Duration::from_millis(1600) {
+            service.reconcile_with(&admin, &config, sink.clone()).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        let told = listen_notices(&recorder);
+        assert_eq!(told.len(), 1, "the alert was put off by reconciling: {told:?}");
+
+        service.shutdown().await;
         drop(squatter);
     }
 

@@ -157,6 +157,25 @@ connects straight to the admin's machine. Nothing sits in the middle.
   machine shares. A request names no server: the share code in its
   `Authorization` header picks one and is the access secret, so an admin with
   five servers opens one port, once.
+- A listener that cannot take the port is tried again on its own, while
+  anything is shared, until it works — after four seconds, doubling to a
+  minute. The common case is a Geode that has just quit and is still asking
+  the router to close the port, which takes ten to fifteen seconds, so
+  reopening Geode straight away used to leave sharing dead for the rest of the
+  session. The Share tab says which of the three it is — listening, trying
+  again with the attempt and the wait, or failing past a minute — and the
+  admin is told once when it crosses that minute and once more if a later
+  attempt gets the port. Never once an attempt, never at all when the first
+  attempt works, and never the coming back without the going away: an outage
+  that cleared in four seconds was never the admin's, and "listening again"
+  against a problem they were never told of only reads as one they missed.
+  Changing the port would also fix it and is never the first advice: every
+  link already handed out carries the old one, which the wording says. A
+  reconcile — a port change, sharing, unsharing, saving the settings —
+  replaces whatever was being tried rather than running beside it, and one
+  that still wants the same port goes on from the count and the clock it had:
+  a reconcile is not news about the port, so it neither makes a quarter of an
+  hour of failing read as a first try nor buys a second "this needs you".
 - The admin's certificate is self-signed and made once (`identity.rs`). Its
   SHA-256 fingerprint travels in the link, and the player's Geode accepts that
   certificate and no other (`trust.rs`). The handshake signature is always
@@ -217,6 +236,15 @@ connects straight to the admin's machine. Nothing sits in the middle.
   sent, or unsharing cuts every connection that came in before it at once, and
   stopping sharing cuts them all. A pack bigger than 8 GiB by itself is not
   sent, and the reason is logged on the admin's machine.
+- A pack that will not build for any other reason is the same to the player —
+  a 500 that says only to ask the admin, naming nothing about that machine —
+  and the admin is told which server and why, on their own screen as well as
+  the terminal. At most one notice a minute per server: every joined player's
+  Geode asks again each time they press Play, so a server that cannot build
+  its pack fails all of them, and one notice says as much as fifty would — but
+  a notice is a toast that leaves the screen in seconds, so one a listener run
+  would leave an admin who was away from their machine as uninformed as the
+  terminal line left them, which is the failure this exists to end.
 - The share code is the server's **password**, and players are only ever told
   "password"; the link's `code=`, the bearer token and the JSON field names are
   unchanged, so links already sent keep working. Geode generates it the first
@@ -411,7 +439,13 @@ password, a wrong certificate, a replaced password and a server whose sharing
 is stopped are each refused on the next request, and sharing again brings the
 same link back; a typed address is pinned to the machine that
 first answered; the listener runs exactly while something is shared, follows a
-port change and gives the port back. In the real app, with its data and desktop
+port change and gives the port back. A listener kept off its port starts on its
+own once whatever held it lets go, with no reconcile in between, and the retry
+ends when the last shared server is unshared or a port change replaces it; the
+status says trying again before the minute and that it needs the admin after,
+who is told once either way. A pack that will not build reaches the admin
+naming its server, once however many players ask. In the real app, with its
+data and desktop
 configuration redirected to a scratch directory, a `geode://` link opened
 through the operating system reached the running Geode through single-instance
 forwarding and made it connect, and a hostile link was dropped.

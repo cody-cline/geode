@@ -55,6 +55,7 @@ use tokio_rustls::TlsAcceptor;
 use tokio_util::io::ReaderStream;
 
 use crate::error::{Error, Result};
+use crate::events::{self, EventSink};
 use crate::net::Progress;
 use crate::paths::Paths;
 use crate::server::share::{ServerShare, Shared};
@@ -63,6 +64,11 @@ use crate::server::Server;
 /// The request paths, shared with the client in [`super::join`].
 pub const INFO_PATH: &str = "/geode/v1/info";
 pub const PACK_PATH: &str = "/geode/v1/pack";
+
+/// Sent with a [`PackFailed`] when a player's request could not be answered
+/// because the server's pack would not build. What the player is told carries
+/// no reason at all, so without this nobody but a terminal ever learns of it.
+pub const PACK_FAILED_EVENT: &str = "geode://share-pack-failed";
 
 /// Connections one source may hold at once; past this, its new ones are closed
 /// unread. A player makes one at a time — the preview, then the download — so
@@ -291,12 +297,20 @@ impl Host {
     ///
     /// Port 0 binds any free port, which is what tests use; the address actually
     /// bound is in `local_addr`.
-    pub async fn start(paths: Paths, port: u16) -> Result<Self> {
-        Self::start_with(paths, port, Limits::default()).await
+    ///
+    /// `sink` is where what only the admin can put right is reported: a pack
+    /// that would not build. Nothing a player does is announced through it.
+    pub async fn start(paths: Paths, port: u16, sink: Option<EventSink>) -> Result<Self> {
+        Self::start_with(paths, port, Limits::default(), sink).await
     }
 
     /// [`Host::start`], with limits a test can wait out.
-    async fn start_with(paths: Paths, port: u16, limits: Limits) -> Result<Self> {
+    async fn start_with(
+        paths: Paths,
+        port: u16,
+        limits: Limits,
+        sink: Option<EventSink>,
+    ) -> Result<Self> {
         let identity = super::identity::Identity::load_or_create(&paths).await?;
         let acceptor = TlsAcceptor::from(identity.server_config()?);
 
@@ -320,6 +334,10 @@ impl Host {
         });
         let builds = Arc::new(Semaphore::new(MAX_BUILDS));
         let previews = Arc::new(Previews::default());
+        let alerts = Arc::new(Alerts {
+            sink,
+            told: Mutex::default(),
+        });
         let admitted_by = gate.clone();
 
         let task = tokio::spawn(async move {
@@ -343,13 +361,15 @@ impl Host {
                 let admitted = Arc::new(admitted);
                 let acceptor = acceptor.clone();
                 let paths = paths.clone();
-                let (builds, previews) = (builds.clone(), previews.clone());
+                let (builds, previews, alerts) = (builds.clone(), previews.clone(), alerts.clone());
                 tokio::spawn(async move {
                     // Dropping the connection drops the response it was
                     // sending, and with it the pack file that response was
                     // streaming from.
                     tokio::select! {
-                        () = serve(tcp, acceptor, paths, builds, previews, admitted.clone()) => {}
+                        () = serve(
+                            tcp, acceptor, paths, builds, previews, alerts, admitted.clone(),
+                        ) => {}
                         () = admitted.cut.notified() => {}
                         () = admitted.stalled() => {}
                     }
@@ -862,20 +882,22 @@ async fn serve(
     paths: Paths,
     builds: Arc<Semaphore>,
     previews: Arc<Previews>,
+    alerts: Arc<Alerts>,
     admitted: Arc<Admitted>,
 ) {
     let Ok(Ok(tls)) = tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await else {
         return;
     };
     let service = hyper::service::service_fn(move |request| {
-        let (paths, builds, previews, admitted) = (
+        let (paths, builds, previews, alerts, admitted) = (
             paths.clone(),
             builds.clone(),
             previews.clone(),
+            alerts.clone(),
             admitted.clone(),
         );
         async move {
-            let response = respond(&paths, &builds, &previews, &admitted, request).await;
+            let response = respond(&paths, &builds, &previews, &alerts, &admitted, request).await;
             Ok::<_, Infallible>(response.map(|body| watched(body, admitted)))
         }
     });
@@ -915,6 +937,7 @@ async fn respond(
     paths: &Paths,
     builds: &Arc<Semaphore>,
     previews: &Previews,
+    alerts: &Alerts,
     admitted: &Admitted,
     request: Request<Incoming>,
 ) -> Response<Body> {
@@ -996,8 +1019,11 @@ async fn respond(
     };
     outcome.unwrap_or_else(|e| {
         // The real reason stays on this machine. It can name paths under the
-        // admin's home directory, which are nobody else's business.
+        // admin's home directory, which are nobody else's business — so it
+        // goes to the terminal for a headless run, and to the admin's own
+        // screen, and nowhere near the answer below.
         eprintln!("geode: sharing {} failed: {e}", server.id);
+        alerts.failed(&server, &e.to_string());
         message(
             StatusCode::INTERNAL_SERVER_ERROR,
             "the server could not prepare its pack — ask its admin to check Geode",
@@ -1034,6 +1060,66 @@ async fn shared_server(paths: &Paths, code: Option<&str>) -> Option<(String, Ser
         .find(|(_, share)| share.code.matches(code))?;
     let server = crate::server::load(paths, &id).await.ok()?;
     Some((id, share, server))
+}
+
+/// How often one server's failures are worth saying again.
+///
+/// The notice is a toast, which is gone from the screen in seconds; a rule
+/// that said it once a listener run would make an admin who was away from
+/// their machine for those seconds as uninformed as the `eprintln` left them,
+/// which is the silent failure this exists to end. A minute is long enough
+/// that a server failing every player over and over is still one notice they
+/// can read, and short enough that the next player to press Play tells an
+/// admin who has come back.
+const ALERT_AGAIN_AFTER: Duration = Duration::from_secs(60);
+
+/// What the admin is told when a server cannot answer its players.
+///
+/// A player whose pack will not build is told only to ask the admin, so this
+/// is the whole of what the admin gets. Every joined player's Geode asks again
+/// each time they press Play, and a server that cannot build its pack fails
+/// every one of them — so **each server is named at most once every
+/// [`ALERT_AGAIN_AFTER`]**, which is enough to say that it is broken and is
+/// not a toast per player.
+struct Alerts {
+    sink: Option<EventSink>,
+    /// By server id, when each was last reported.
+    told: Mutex<HashMap<String, Instant>>,
+}
+
+/// Why a server could not answer, for the admin's own screen.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PackFailed {
+    server_id: String,
+    server_name: String,
+    /// The reason in full, paths and all: this goes nowhere but here.
+    error: String,
+}
+
+impl Alerts {
+    fn failed(&self, server: &Server, error: &str) {
+        {
+            let mut told = self.told.lock().unwrap_or_else(|p| p.into_inner());
+            let now = Instant::now();
+            if told
+                .get(&server.id)
+                .is_some_and(|last| now.duration_since(*last) < ALERT_AGAIN_AFTER)
+            {
+                return;
+            }
+            told.insert(server.id.clone(), now);
+        }
+        events::emit(
+            &self.sink,
+            PACK_FAILED_EVENT,
+            &PackFailed {
+                server_id: server.id.clone(),
+                server_name: server.name.clone(),
+                error: error.to_string(),
+            },
+        );
+    }
 }
 
 /// Shared servers' descriptions, as last worked out.
@@ -1933,7 +2019,7 @@ pub(super) mod tests {
             outgoing: 6 << 20,
             ..Limits::default()
         };
-        let host = Host::start_with(scratch.paths.clone(), 0, limits)
+        let host = Host::start_with(scratch.paths.clone(), 0, limits, None)
             .await
             .unwrap();
         let port = host.local_addr.port();
@@ -1979,7 +2065,7 @@ pub(super) mod tests {
             outgoing: 1 << 20,
             ..Limits::default()
         };
-        let host = Host::start_with(scratch.paths.clone(), 0, limits)
+        let host = Host::start_with(scratch.paths.clone(), 0, limits, None)
             .await
             .unwrap();
         let port = host.local_addr.port();
@@ -2006,6 +2092,116 @@ pub(super) mod tests {
         );
 
         host.stop().await;
+    }
+
+    /// The player is told nothing but to ask the admin, so the admin has to be
+    /// told something: which server, and why. Once a run, however many players
+    /// ask — every one of them keeps asking each time they press Play.
+    #[tokio::test]
+    async fn a_pack_that_will_not_build_tells_the_admin_which_server_and_says_it_once() {
+        let scratch = Scratch::new("host-build-told");
+        let (_, code) = share_a_server(&scratch.paths, 2 * 1024 * 1024).await;
+        // Room for no pack of this server's at all, which is a failure every
+        // request after the first repeats exactly.
+        let limits = Limits {
+            outgoing: 1 << 20,
+            ..Limits::default()
+        };
+        let recorder = Arc::new(crate::events::Recorder::default());
+        let sink: Option<EventSink> = Some(recorder.clone());
+        let host = Host::start_with(scratch.paths.clone(), 0, limits, sink)
+            .await
+            .unwrap();
+        let port = host.local_addr.port();
+        let pin = pin_of(&scratch.paths).await;
+
+        for asked in 1..=2 {
+            let response = TrustedClient::new(Trust::Pinned(pin))
+                .unwrap()
+                .client
+                .get(format!("https://127.0.0.1:{port}{PACK_PATH}"))
+                .bearer_auth(code.raw())
+                .timeout(Duration::from_secs(10))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                "request {asked}"
+            );
+            // And the player is told exactly as little as before.
+            let said: serde_json::Value = response.json().await.unwrap();
+            assert_eq!(
+                said["error"],
+                "the server could not prepare its pack — ask its admin to check Geode"
+            );
+        }
+
+        let told: Vec<serde_json::Value> = recorder
+            .events()
+            .into_iter()
+            .filter(|(topic, _)| topic == PACK_FAILED_EVENT)
+            .map(|(_, payload)| payload)
+            .collect();
+        assert_eq!(told.len(), 1, "one notice a server a run: {told:?}");
+        assert_eq!(told[0]["serverId"], serde_json::json!("survival"));
+        assert_eq!(told[0]["serverName"], serde_json::json!("Survival"));
+        assert!(
+            told[0]["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("kept on disk")),
+            "{told:?}"
+        );
+
+        host.stop().await;
+    }
+
+    /// The rule that keeps one broken server from being a toast a player, and
+    /// the other half of it: a notice is a toast that leaves the screen in
+    /// seconds, so a server still failing once the interval is up is worth
+    /// telling an admin who was not at their machine for those seconds.
+    #[tokio::test]
+    async fn a_server_that_keeps_failing_is_said_again_once_the_interval_is_up() {
+        let recorder = Arc::new(crate::events::Recorder::default());
+        let alerts = Alerts {
+            sink: Some(recorder.clone()),
+            told: Mutex::default(),
+        };
+        let named = |server: &Server| {
+            recorder
+                .events()
+                .into_iter()
+                .filter(|(topic, payload)| {
+                    topic == PACK_FAILED_EVENT && payload["serverId"] == server.id.as_str()
+                })
+                .count()
+        };
+        let mut survival = Server::new("Survival".into(), ServerKind::Fabric, "1.21.1".into());
+        survival.id = "survival".into();
+        let mut creative = survival.clone();
+        creative.id = "creative".into();
+        creative.name = "Creative".into();
+
+        alerts.failed(&survival, "no room on disk");
+        alerts.failed(&survival, "no room on disk");
+        assert_eq!(named(&survival), 1, "a toast a player");
+        // Another server failing is its own news, whenever it happens.
+        alerts.failed(&creative, "no room on disk");
+        assert_eq!(named(&creative), 1);
+
+        // The interval gone by, wound back rather than waited out.
+        alerts.told.lock().unwrap().insert(
+            survival.id.clone(),
+            tokio::time::Instant::now() - ALERT_AGAIN_AFTER,
+        );
+        alerts.failed(&survival, "no room on disk");
+        assert_eq!(
+            named(&survival),
+            2,
+            "a server still failing said nothing to an admin who missed the first"
+        );
+        assert_eq!(named(&creative), 1, "one server's clock moved another's");
     }
 
     /// What working a server's description out finds, for a test that supplies
@@ -2211,7 +2407,7 @@ pub(super) mod tests {
     async fn a_listener_full_of_idle_connections_still_lets_a_player_in() {
         let scratch = Scratch::new("host-crowd");
         let (_, code) = share_a_server(&scratch.paths, 0).await;
-        let host = Host::start(scratch.paths.clone(), 0).await.unwrap();
+        let host = Host::start(scratch.paths.clone(), 0, None).await.unwrap();
         let port = host.local_addr.port();
         let pin = pin_of(&scratch.paths).await;
 
@@ -2257,7 +2453,7 @@ pub(super) mod tests {
     async fn a_download_under_way_is_never_dropped_to_make_room() {
         let scratch = Scratch::new("host-proven");
         let (_, code) = share_a_server(&scratch.paths, 4 * 1024 * 1024).await;
-        let host = Host::start(scratch.paths.clone(), 0).await.unwrap();
+        let host = Host::start(scratch.paths.clone(), 0, None).await.unwrap();
         let port = host.local_addr.port();
 
         let mut tls = tls_to(port, 4096).await;
@@ -2317,7 +2513,7 @@ pub(super) mod tests {
             window: limit,
             ..Limits::default()
         };
-        let host = Host::start_with(scratch.paths.clone(), 0, limits)
+        let host = Host::start_with(scratch.paths.clone(), 0, limits, None)
             .await
             .unwrap();
 
@@ -2384,7 +2580,7 @@ pub(super) mod tests {
     async fn host_on_a_quiet_port(paths: &Paths, limits: Limits) -> Host {
         let mut refused = None;
         for port in 24700..24710 {
-            match Host::start_with(paths.clone(), port, limits).await {
+            match Host::start_with(paths.clone(), port, limits, None).await {
                 Ok(host) => return host,
                 Err(e) => refused = Some(e.to_string()),
             }
@@ -2482,7 +2678,7 @@ pub(super) mod tests {
     async fn a_new_code_cuts_off_a_download_started_with_the_old_one() {
         let scratch = Scratch::new("host-rotate");
         let (server, code) = share_a_server(&scratch.paths, 4 * 1024 * 1024).await;
-        let host = Host::start(scratch.paths.clone(), 0).await.unwrap();
+        let host = Host::start(scratch.paths.clone(), 0, None).await.unwrap();
 
         let (mut tls, mut received, length) = ask_for_pack(host.local_addr.port(), &code).await;
         // Under way, and slowly: a little is read, and then no more for now.
@@ -2521,7 +2717,7 @@ pub(super) mod tests {
     async fn unsharing_or_stopping_cuts_off_downloads_under_way() {
         let scratch = Scratch::new("host-unshare");
         let (server, code) = share_a_server(&scratch.paths, 4 * 1024 * 1024).await;
-        let host = Host::start(scratch.paths.clone(), 0).await.unwrap();
+        let host = Host::start(scratch.paths.clone(), 0, None).await.unwrap();
         let port = host.local_addr.port();
 
         let (mut tls, received, length) = ask_for_pack(port, &code).await;
@@ -2566,7 +2762,7 @@ pub(super) mod tests {
             downloads: 1,
             ..Limits::default()
         };
-        let host = Host::start_with(scratch.paths.clone(), 0, limits)
+        let host = Host::start_with(scratch.paths.clone(), 0, limits, None)
             .await
             .unwrap();
         let port = host.local_addr.port();
@@ -2622,7 +2818,7 @@ pub(super) mod tests {
             previews: 0,
             ..Limits::default()
         };
-        let host = Host::start_with(scratch.paths.clone(), 0, limits)
+        let host = Host::start_with(scratch.paths.clone(), 0, limits, None)
             .await
             .unwrap();
         let port = host.local_addr.port();
@@ -2656,7 +2852,7 @@ pub(super) mod tests {
             previews: 1,
             ..Limits::default()
         };
-        let host = Host::start_with(scratch.paths.clone(), 0, limits)
+        let host = Host::start_with(scratch.paths.clone(), 0, limits, None)
             .await
             .unwrap();
         let port = host.local_addr.port();
@@ -2686,7 +2882,7 @@ pub(super) mod tests {
     async fn players_are_served_over_ipv4_and_ipv6_alike() {
         let scratch = Scratch::new("host-dual");
         let (_, code) = share_a_server(&scratch.paths, 0).await;
-        let host = Host::start(scratch.paths.clone(), 0).await.unwrap();
+        let host = Host::start(scratch.paths.clone(), 0, None).await.unwrap();
         let port = host.local_addr.port();
         assert_ne!(port, 0, "port 0 asks for any free port, and local_addr says which");
         let pin = pin_of(&scratch.paths).await;

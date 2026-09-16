@@ -139,7 +139,7 @@ export interface StatusLine {
 }
 
 /** Somebody else's words — an OS error, a router's — ended with one full stop. */
-function sentence(text: string): string {
+export function sentence(text: string): string {
   const trimmed = text.trim();
   return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
 }
@@ -156,20 +156,50 @@ function sentence(text: string): string {
 const windowsFirewall =
   " On Windows, allow Geode through the firewall when it asks the first time you share a server: refused, the port still looks open on your router while every player times out.";
 
-/** Whether the pack server itself is up. */
+/**
+ * Changing the port is the one fix that costs something, so it is never the
+ * first thing said: every link already handed out carries the old one.
+ */
+const portCosts =
+  " Changing the port in Settings breaks every link you have already sent, so do that only if you are ready to send everyone a new one.";
+
+/** Whether the pack server itself is up, and what is being done about it. */
 export function listenLine(status: ShareStatus): StatusLine {
-  if (status.listenError) {
-    return {
-      tone: "bad",
-      title: `Not listening on port ${status.port}`,
-      detail: `${sentence(status.listenError)} Nobody can download a pack until this is fixed — if another program already has the port, pick a different one in Settings.`,
-    };
-  }
   if (status.listening) {
     return {
       tone: "ok",
       title: `Listening on port ${status.port}`,
       detail: `Players' Geode connects here to fetch the pack.${windowsFirewall}`,
+    };
+  }
+  const retry = status.retry;
+  const why = status.listenError ? `${sentence(status.listenError)} ` : "";
+  // Still trying is not broken: the usual cause is another Geode that has just
+  // closed and is still giving the port back, which takes a few seconds.
+  if (retry && !retry.needsYou) {
+    // "Within", not "in": the countdown is worked out when the status is sent
+    // and the status is only sent once an attempt, so the number stands still
+    // for the whole wait. A ceiling it never passes stays true as it does.
+    const when =
+      retry.nextInSeconds <= 1 ? "in a moment" : `within ${retry.nextInSeconds} seconds`;
+    return {
+      tone: "warn",
+      title: `Waiting for port ${status.port}`,
+      detail: `${why}Geode is trying again ${when} — attempt ${retry.attempts + 1}. This usually clears on its own within seconds, most often because another Geode has just closed and is still giving the port back. Leave the port as it is while it tries.${portCosts}`,
+    };
+  }
+  if (retry) {
+    return {
+      tone: "bad",
+      title: `Still not listening on port ${status.port}`,
+      detail: `${why}Geode has been trying for over a minute — ${retry.attempts} attempts — and goes on trying, but something is holding the port: close the program that has it, or let Geode through this computer's firewall. Nobody can download a pack until then.${portCosts}`,
+    };
+  }
+  if (status.listenError) {
+    return {
+      tone: "bad",
+      title: `Not listening on port ${status.port}`,
+      detail: `${sentence(status.listenError)} Nobody can download a pack until this is fixed — if another program already has the port, close it, or pick a different port in Settings.${portCosts}`,
     };
   }
   return {
@@ -283,12 +313,18 @@ export function routerLine(status: ShareStatus, hasPublicAddress: boolean): Stat
       // an admin who chose automatic off to forward a port by hand, and away
       // from the listener that is actually what is wrong.
       if (status.mode === "auto") {
+        // A listener Geode is still trying for is Geode's to fix, not the
+        // admin's: the listening note sits directly above this one and says
+        // to leave the port alone while it tries, so "fix that first" here
+        // would give two answers for the same second.
+        const trying = Boolean(status.retry && !status.retry.needsYou);
         return {
           tone: "info",
           title: "Your router has not been asked yet",
-          detail: status.listenError
-            ? `Geode asks your router to open port ${port} once it is listening, and it is not — fix that first.`
-            : `Geode asks your router to open port ${port} as soon as it is listening.`,
+          detail:
+            status.listenError && !trying
+              ? `Geode asks your router to open port ${port} once it is listening, and it is not — fix that first.`
+              : `Geode asks your router to open port ${port} as soon as it is listening.`,
         };
       }
       const detected = status.detected;
@@ -412,7 +448,11 @@ export function linkPendingReason(status: ShareStatus | null, hasPublicAddress: 
   // would be a link to nowhere, and the fix is the port, not Settings'
   // public address.
   if (status.listenError) {
-    return `Geode is not listening on port ${status.port}, so a link would lead nowhere. The note on listening, below, says why.`;
+    // While it is still trying, the link is late rather than impossible, and
+    // the note below says what it is waiting for.
+    return status.retry && !status.retry.needsYou
+      ? `Geode is not listening on port ${status.port} yet, so a link would lead nowhere. It is trying again — the note on listening, below, says what it is waiting for.`
+      : `Geode is not listening on port ${status.port}, so a link would lead nowhere. The note on listening, below, says why.`;
   }
   const mapping = status.mapping;
   if (mapping.state === "searching" || hasPublicAddress) return working;

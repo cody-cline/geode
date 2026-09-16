@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { listen } from "@tauri-apps/api/event";
 
 import { api, errorMessage } from "./api";
-import { nextJoin } from "./share";
+import { nextJoin, sentence } from "./share";
 import type { JoinRequest } from "./share";
 import type {
   Account,
@@ -14,6 +14,8 @@ import type {
   Server,
   ServerExit,
   ServerLine,
+  ShareListenNotice,
+  SharePackFailed,
   ShareStatus,
 } from "./types";
 
@@ -308,6 +310,35 @@ export const useStore = create<State>((set, get) => ({
 
     await listen<ShareStatus>("geode://share-status", ({ payload }) => {
       set({ shareStatus: payload });
+    });
+
+    // Sent once when retrying has stopped being the answer, and once when it
+    // turns out to have been: the Share tab carries the running state, and
+    // this is what reaches an admin who is not looking at it.
+    await listen<ShareListenNotice>("geode://share-listen", ({ payload }) => {
+      get().toast(
+        payload.listening
+          ? {
+              kind: "success",
+              title: `Sharing is listening again on port ${payload.port}`,
+              body: "Players can download packs from this computer again. The links you sent still work.",
+            }
+          : {
+              kind: "error",
+              title: `Sharing cannot listen on port ${payload.port}`,
+              body: `${sentence(payload.error ?? "The port could not be opened")} Geode keeps trying, but this needs you — a server's Share tab says what to do. Do not change the port unless you can send everyone a new link.`,
+            },
+      );
+    });
+
+    // Only the admin can put a pack that will not build right, and the player
+    // who asked for it was told nothing but to ask them.
+    await listen<SharePackFailed>("geode://share-pack-failed", ({ payload }) => {
+      get().toast({
+        kind: "error",
+        title: `${payload.serverName} could not build its pack`,
+        body: `${sentence(payload.error)} A player was told to ask you to check Geode.`,
+      });
     });
 
     // A link opened while Geode runs arrives as an event; one that started

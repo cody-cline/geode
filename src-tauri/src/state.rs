@@ -95,7 +95,9 @@ pub struct AppState {
     /// replaces an older one that was never taken.
     pub pending_join: Mutex<Option<String>>,
     /// The pack server and router mapping, running while anything is shared.
-    pub share: crate::share::service::ShareService,
+    /// Shared so a listener that could not start can keep trying on a task of
+    /// its own.
+    pub share: std::sync::Arc<crate::share::service::ShareService>,
 }
 
 impl AppState {

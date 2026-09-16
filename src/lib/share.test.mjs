@@ -30,6 +30,7 @@ function status(mapping, extra = {}) {
     listening: true,
     port: 25590,
     listenError: null,
+    retry: null,
     mapping,
     address: null,
     fingerprint: "ab".repeat(32),
@@ -323,6 +324,76 @@ test("the listener reports its own failure before anything else", () => {
   const router = routerLine(status({ state: "failed", reason: "other", detail: "Conflict in mapping entry." }), false);
   assert.doesNotMatch(router.detail, /\.\./);
   assert.equal(listenLine(status({ state: "off" }, { listening: false })).tone, "info");
+});
+
+/** A listener that could not start and is being tried again. */
+const retrying = (retry) =>
+  status(
+    { state: "off" },
+    { listening: false, listenError: "Address already in use", retry },
+  );
+
+test("a listener still being tried again is not a listener that is broken", () => {
+  const trying = listenLine(retrying({ attempts: 2, nextInSeconds: 8, needsYou: false }));
+  assert.equal(trying.tone, "warn");
+  // "Within", because the number stands still: it is worked out when the
+  // status is sent, and the status is only sent once an attempt, so a tab
+  // left open reads the same wait for the whole of it.
+  assert.match(trying.detail, /trying again within 8 seconds/);
+  assert.doesNotMatch(trying.detail, /trying again in 8 seconds/);
+  // The attempt named is the one to come, not the ones behind it.
+  assert.match(trying.detail, /attempt 3/);
+  assert.match(trying.detail, /Address already in use/);
+
+  // A wait of no seconds left reads as a moment rather than "in 0 seconds".
+  const imminent = listenLine(retrying({ attempts: 1, nextInSeconds: 1, needsYou: false }));
+  assert.match(imminent.detail, /in a moment/);
+  assert.doesNotMatch(imminent.detail, /in 1 seconds/);
+
+  // Past the threshold it is the admin's to fix, and says what to do.
+  const stuck = listenLine(retrying({ attempts: 5, nextInSeconds: 60, needsYou: true }));
+  assert.equal(stuck.tone, "bad");
+  assert.match(stuck.detail, /5 attempts/);
+  assert.match(stuck.detail, /close the program/);
+  assert.match(stuck.detail, /Address already in use/);
+
+  // Changing the port is never the advice that comes first, and never without
+  // saying what it costs: every link already sent carries the old one.
+  for (const line of [trying, stuck]) {
+    assert.match(line.detail, /breaks every link you have already sent/);
+    const port = line.detail.indexOf("Changing the port");
+    assert.ok(port > line.detail.length / 2, `port advice leads: ${line.detail}`);
+  }
+  // And it is still said for a failure nobody is retrying.
+  assert.match(
+    listenLine(status({ state: "off" }, { listening: false, listenError: "Permission denied" })).detail,
+    /breaks every link you have already sent/,
+  );
+
+  // The missing link follows: late while it tries, and not a dead end.
+  assert.match(
+    linkPendingReason(retrying({ attempts: 2, nextInSeconds: 8, needsYou: false }), false),
+    /trying again/,
+  );
+  assert.doesNotMatch(
+    linkPendingReason(retrying({ attempts: 5, nextInSeconds: 60, needsYou: true }), false),
+    /trying again/,
+  );
+});
+
+test("the router note does not tell the admin to fix what Geode is fixing", () => {
+  // The listening note printed directly above says to leave the port alone
+  // while Geode tries for it; "fix that first" here answers the same second
+  // the other way.
+  const trying = retrying({ attempts: 2, nextInSeconds: 8, needsYou: false });
+  assert.doesNotMatch(routerLine(trying, false).detail, /fix that first/);
+  assert.match(routerLine(trying, false).detail, /as soon as it is listening/);
+
+  // Once nobody expects trying to work, it is the admin's again.
+  const stuck = retrying({ attempts: 5, nextInSeconds: 60, needsYou: true });
+  assert.match(routerLine(stuck, false).detail, /fix that first/);
+  const alone = status({ state: "off" }, { listening: false, listenError: "Address already in use" });
+  assert.match(routerLine(alone, false).detail, /fix that first/);
 });
 
 test("the lines about a working port say a firewall can still stop it", () => {
