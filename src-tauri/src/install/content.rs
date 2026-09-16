@@ -489,6 +489,7 @@ pub async fn check_updates(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paths::Scratch;
     use crate::providers::VersionFile;
 
     fn version(id: &str, release_type: &str, has_file: bool) -> Version {
@@ -544,8 +545,8 @@ mod tests {
     /// It is refused before anything is downloaded or deleted.
     #[tokio::test]
     async fn a_server_mod_cannot_be_replaced_by_an_install_or_update() {
-        let dir = std::env::temp_dir().join(format!("geode-srv-update-{}", std::process::id()));
-        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let scratch = Scratch::new("srv-update");
+        let dir = scratch.paths.root.clone();
         tokio::fs::create_dir_all(&dir).await.unwrap();
         tokio::fs::write(dir.join("anticheat-1.0.jar.disabled"), b"x").await.unwrap();
 
@@ -601,8 +602,8 @@ mod tests {
     async fn install_into_records_the_side_it_is_given() {
         use crate::instance::jar::Side;
 
-        let dir = std::env::temp_dir().join(format!("geode-install-side-{}", std::process::id()));
-        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let scratch = Scratch::new("install-side");
+        let dir = scratch.paths.root.clone();
         tokio::fs::create_dir_all(&dir).await.unwrap();
         // Already on disk with the right hash, so nothing is downloaded, and
         // the client is pointed at a port nothing listens on in case it is.
@@ -632,8 +633,6 @@ mod tests {
 
         assert_eq!(records.len(), 1, "{records:?}");
         assert_eq!(records[0].side, Some(Side::Client));
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     /// A walk into Mods installs a library the server has only in Client mods,

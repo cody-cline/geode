@@ -255,14 +255,15 @@ mod tests {
 #[cfg(test)]
 mod disk_tests {
     use super::*;
+    use crate::paths::Scratch;
     use std::io::Write;
 
     /// A real folder of logs, because the parsing and the gzip path are the
     /// parts most likely to be wrong and neither shows up in a pure test.
     #[tokio::test]
     async fn a_real_folder_is_listed_newest_first_and_archives_decompress() {
-        let dir = std::env::temp_dir().join(format!("geode-logs-{}", std::process::id()));
-        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let scratch = Scratch::new("logs");
+        let dir = scratch.paths.root.clone();
         tokio::fs::create_dir_all(&dir).await.unwrap();
 
         tokio::fs::write(dir.join("latest.log"), "current run\n")
@@ -298,8 +299,6 @@ mod disk_tests {
         assert!(delete(&dir, "latest.log").await.is_err());
         assert!(delete(&dir, "2026-09-12-1.log.gz").await.is_ok());
         assert_eq!(list(&dir).await.unwrap().len(), 1);
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     /// A folder that does not exist yet is not an error — an instance that has

@@ -476,6 +476,7 @@ mod tests {
     use super::super::identity::Identity;
     use super::super::link::Pin;
     use super::*;
+    use crate::paths::Scratch;
 
     /// Plenty for anything a client does against loopback, and far short of
     /// what a client that waited on the server would sit out: half a minute
@@ -552,30 +553,6 @@ mod tests {
         out
     }
 
-    /// A directory of its own for each use, removed when the test ends
-    /// however it ends.
-    struct Scratch(std::path::PathBuf);
-
-    impl Scratch {
-        fn new(name: &str) -> Self {
-            let dir =
-                std::env::temp_dir().join(format!("geode-join-{name}-{}", uuid::Uuid::new_v4()));
-            Self(dir)
-        }
-
-        fn paths(&self) -> crate::paths::Paths {
-            crate::paths::Paths {
-                root: self.0.clone(),
-            }
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
     async fn promptly<T>(what: &str, work: impl std::future::Future<Output = T>) -> T {
         tokio::time::timeout(PROMPTLY, work)
             .await
@@ -613,12 +590,12 @@ mod tests {
         // A refusal that never ends, on the download — which has no deadline
         // of its own to end it. What it said is dropped for the status.
         let link = answering(unending("500 Internal Server Error", &junk)).await;
-        let scratch = Scratch::new("refusal");
+        let scratch = Scratch::new("join-refusal");
         let err = promptly(
             "an endless refusal",
             download(
                 &link,
-                &scratch.0.join("p.geodepack"),
+                &scratch.paths.root.join("p.geodepack"),
                 &Progress::silent("t"),
             ),
         )
@@ -668,12 +645,12 @@ mod tests {
         ];
         for (what, reply, stage) in quiet {
             let link = answering(reply).await;
-            let scratch = Scratch::new(what);
+            let scratch = Scratch::new(&format!("join-{what}"));
             let recorder = std::sync::Arc::new(crate::events::Recorder::default());
             let progress = Progress::new(recorder.clone(), "join:t");
             let join = tokio::spawn({
                 let progress = progress.clone();
-                let dest = scratch.0.join("p.geodepack");
+                let dest = scratch.paths.root.join("p.geodepack");
                 async move { download(&link, &dest, &progress).await }
             });
 
@@ -701,8 +678,8 @@ mod tests {
     /// nothing else sharing keeps beside it is touched.
     #[tokio::test]
     async fn clearing_incoming_removes_leftover_archives_and_only_those() {
-        let scratch = Scratch::new("incoming");
-        let paths = scratch.paths();
+        let scratch = Scratch::new("join-incoming");
+        let paths = scratch.paths.clone();
         let incoming = incoming_dir(&paths);
         std::fs::create_dir_all(&incoming).unwrap();
         std::fs::write(incoming.join("0b1c.geodepack"), b"half a pack").unwrap();
@@ -758,8 +735,8 @@ mod tests {
     /// `https://` one.
     #[tokio::test]
     async fn a_typed_address_remembers_the_certificate_it_was_joined_with() {
-        let scratch = Scratch::new("remembered");
-        let paths = scratch.paths();
+        let scratch = Scratch::new("join-remembered");
+        let paths = scratch.paths.clone();
         let code = Code::generate();
         let (first, replaced, other, tunnel) =
             (Pin([1; 32]), Pin([2; 32]), Pin([3; 32]), Pin([4; 32]));
@@ -836,7 +813,7 @@ mod tests {
         }
         // With no instances at all there is nothing to remember.
         assert_eq!(
-            remembered_pin(&Scratch::new("none").paths(), &typed).await,
+            remembered_pin(&Scratch::new("join-none").paths, &typed).await,
             None
         );
     }
@@ -846,8 +823,8 @@ mod tests {
     /// or not the certificate has changed since — rather than making another.
     #[tokio::test]
     async fn the_instance_already_joined_from_a_server_is_found_again() {
-        let scratch = Scratch::new("existing");
-        let paths = scratch.paths();
+        let scratch = Scratch::new("join-existing");
+        let paths = scratch.paths.clone();
         let (code, other_code) = (Code::generate(), Code::generate());
         let at = |host: &str, code: &Code, pin| Some(direct(host, 25590, code, pin));
 
@@ -926,8 +903,8 @@ mod tests {
     /// instead of joining into a second one.
     #[tokio::test]
     async fn an_instance_is_found_again_under_a_new_password() {
-        let scratch = Scratch::new("relink");
-        let paths = scratch.paths();
+        let scratch = Scratch::new("join-relink");
+        let paths = scratch.paths.clone();
         let (code1, code2) = (Code::generate(), Code::generate());
         let (machine, stranger) = (Pin([1; 32]), Pin([2; 32]));
         instance(

@@ -200,9 +200,53 @@ pub fn is_safe_relative(p: &Path) -> bool {
     })
 }
 
+/// A data directory of its own under the system's temporary directory,
+/// removed when the test ends however it ends.
+///
+/// A `remove_dir_all` at the end of a test does not run when the test panics,
+/// which is exactly when the directory is worth having gone; a drop guard
+/// does. The name carries a uuid rather than the process id so a reused pid
+/// cannot hand a test the previous run's files.
+///
+/// Bind the guard for as long as the test uses its paths. `Scratch::new(..)`
+/// whose `paths` are taken and whose guard is not kept drops at the end of
+/// that statement, and the directory the test then fills is left behind —
+/// which is the leak this exists to stop.
+#[cfg(test)]
+pub struct Scratch {
+    pub paths: Paths,
+}
+
+#[cfg(test)]
+impl Scratch {
+    pub fn new(tag: &str) -> Self {
+        let root = std::env::temp_dir().join(format!("geode-{tag}-{}", uuid::Uuid::new_v4()));
+        Self {
+            paths: Paths { root },
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.paths.root);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_scratch_root_is_gone_once_its_guard_drops() {
+        let root = {
+            let scratch = Scratch::new("drops");
+            std::fs::create_dir_all(scratch.paths.instances()).unwrap();
+            scratch.paths.root.clone()
+        };
+        assert!(!root.exists(), "{} outlived its guard", root.display());
+    }
 
     #[test]
     fn maven_plain() {

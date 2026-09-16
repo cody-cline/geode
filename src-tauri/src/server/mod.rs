@@ -914,6 +914,8 @@ pub async fn accept_eula(paths: &Paths, server: &mut Server) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::instance::jar::tests::fabric_jar;
+    use crate::paths::Scratch;
 
     #[test]
     fn every_kind_round_trips_through_its_name() {
@@ -1097,10 +1099,8 @@ mod tests {
         assert!(!server.takes_plugins());
     }
 
-    fn scratch(tag: &str) -> Paths {
-        let root = std::env::temp_dir().join(format!("geode-server-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        Paths { root }
+    fn scratch(tag: &str) -> Scratch {
+        Scratch::new(&format!("server-{tag}"))
     }
 
     /// A reader of `server.json` used to be able to open it between the
@@ -1113,7 +1113,8 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
 
-        let paths = scratch("atomic");
+        let scratch = scratch("atomic");
+        let paths = scratch.paths.clone();
         let mut server = Server::new("Torn".into(), ServerKind::Fabric, "1.21.1".into());
         server.notes = "a".repeat(4 << 20);
         server.save(&paths).await.unwrap();
@@ -1151,8 +1152,6 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
             .collect();
         assert_eq!(left, vec!["server.json".to_string()]);
-
-        std::fs::remove_dir_all(&paths.root).unwrap();
     }
 
     fn record(
@@ -1175,7 +1174,8 @@ mod tests {
     async fn a_record_left_by_dont_share_is_dropped_on_load() {
         use crate::instance::content::Origin;
 
-        let paths = scratch("left-by-dont-share");
+        let scratch = scratch("left-by-dont-share");
+        let paths = scratch.paths.clone();
         let mut server = Server::new("Old".into(), ServerKind::Fabric, "1.21.1".into());
         let bare = |file: &str| crate::instance::content::ContentRecord {
             project_id: String::new(),
@@ -1203,15 +1203,14 @@ mod tests {
             .map(|r| r.file_name.as_str())
             .collect();
         assert_eq!(files, vec!["from-server.jar", "library.jar", "sodium.jar"]);
-
-        std::fs::remove_dir_all(&paths.root).unwrap();
     }
 
     /// Deleted while the job ran. Writing the copy back would bring the
     /// server back from nothing.
     #[tokio::test]
     async fn a_late_save_does_not_bring_back_a_deleted_server() {
-        let paths = scratch("late-save-deleted");
+        let scratch = scratch("late-save-deleted");
+        let paths = scratch.paths.clone();
         let server = Server::new("Gone".into(), ServerKind::Fabric, "1.21.1".into());
         server.save(&paths).await.unwrap();
 
@@ -1220,8 +1219,6 @@ mod tests {
 
         job.save_if_present(&paths).await.unwrap_err();
         assert!(!paths.server(&server.id).exists(), "the deleted server was written again");
-
-        let _ = std::fs::remove_dir_all(&paths.root);
     }
 
     /// Two installs clicked one after the other, or a start waiting on a Java
@@ -1230,7 +1227,8 @@ mod tests {
     /// from CurseForge goes to players as a copy.
     #[tokio::test]
     async fn a_late_save_keeps_what_another_job_saved_while_it_waited() {
-        let paths = scratch("keep-other-job");
+        let scratch = scratch("keep-other-job");
+        let paths = scratch.paths.clone();
         let mut server = Server::new("Overlap".into(), ServerKind::Fabric, "1.21.1".into());
         server.content = vec![
             record("sodium.jar", "modrinth", "SODIUM"),
@@ -1280,8 +1278,6 @@ mod tests {
             vec!["lithium.jar", "sodium.jar"],
             "a removal on a second save was undone"
         );
-
-        std::fs::remove_dir_all(&paths.root).unwrap();
     }
 
     /// A Modrinth project with the given server-side listing.
@@ -1322,7 +1318,8 @@ mod tests {
     async fn moving_a_mod_between_folders_takes_its_record_and_its_state() {
         use crate::instance::content::ContentKind;
 
-        let paths = scratch("move-mod");
+        let scratch = scratch("move-mod");
+        let paths = scratch.paths.clone();
         let mut server = Server::new("Mover".into(), ServerKind::Fabric, "1.21.1".into());
         let run = paths.server_run(&server.id);
         tokio::fs::create_dir_all(run.join("mods")).await.unwrap();
@@ -1372,8 +1369,6 @@ mod tests {
         assert!(run.join("x.jar").is_file());
         assert!(run.join("mods/old/y.jar").is_file());
         assert_eq!(server.content.len(), 1);
-
-        std::fs::remove_dir_all(&paths.root).unwrap();
     }
 
     /// A library a client mod brought into Client mods, and the same library
@@ -1384,7 +1379,8 @@ mod tests {
     async fn a_move_onto_the_same_project_under_another_name_is_refused() {
         use crate::instance::content::ContentKind;
 
-        let paths = scratch("move-same-project");
+        let scratch = scratch("move-same-project");
+        let paths = scratch.paths.clone();
         let mut server = Server::new("Mover".into(), ServerKind::Fabric, "1.21.1".into());
         let run = paths.server_run(&server.id);
         for rel in ["client-mods/cloth-15.0.jar", "mods/cloth-15.1.jar.disabled"] {
@@ -1425,24 +1421,6 @@ mod tests {
             .await
             .unwrap();
         assert!(run.join("mods/cloth-15.0.jar").is_file());
-
-        std::fs::remove_dir_all(&paths.root).unwrap();
-    }
-
-    /// A jar with a real `fabric.mod.json`, so reading it finds its side.
-    fn fabric_jar(id: &str, environment: &str) -> Vec<u8> {
-        use std::io::Write;
-        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
-        zip.start_file("fabric.mod.json", options).unwrap();
-        zip.write_all(
-            format!(
-                r#"{{"schemaVersion":1,"id":"{id}","version":"1.0","environment":"{environment}"}}"#
-            )
-            .as_bytes(),
-        )
-        .unwrap();
-        zip.finish().unwrap().into_inner()
     }
 
     /// Starting a server takes out of Mods what its own jar says only a player's
@@ -1454,7 +1432,8 @@ mod tests {
         use crate::instance::content::ContentKind;
         use crate::instance::jar::Side;
 
-        let paths = scratch("start-moves-client-mods");
+        let scratch = scratch("start-moves-client-mods");
+        let paths = scratch.paths.clone();
         let mut server = Server::new("Starter".into(), ServerKind::Fabric, "1.21.1".into());
         let run = paths.server_run(&server.id);
         tokio::fs::create_dir_all(run.join("mods")).await.unwrap();
@@ -1497,8 +1476,6 @@ mod tests {
         };
         assert_eq!(kind("minimap.jar"), Some(ContentKind::ClientMod));
         assert_eq!(kind("listed.jar"), Some(ContentKind::Mod));
-
-        std::fs::remove_dir_all(&paths.root).unwrap();
     }
 
     /// A `client-mods/` that is a link is somewhere else, and a pack sends
@@ -1510,7 +1487,8 @@ mod tests {
     async fn starting_moves_nothing_into_a_linked_client_mods_folder() {
         use crate::instance::content::ContentKind;
 
-        let paths = scratch("start-linked-client-mods");
+        let scratch = scratch("start-linked-client-mods");
+        let paths = scratch.paths.clone();
         let mut server = Server::new("Linked".into(), ServerKind::Fabric, "1.21.1".into());
         let run = paths.server_run(&server.id);
         let elsewhere = paths.root.join("elsewhere");
@@ -1536,8 +1514,6 @@ mod tests {
             vec!["minimap.jar"]
         );
         assert!(run.join("client-mods/minimap.jar").is_file());
-
-        std::fs::remove_dir_all(&paths.root).unwrap();
     }
 
     /// A move made while another job waited, in either direction. The waiting
@@ -1548,7 +1524,8 @@ mod tests {
     async fn a_late_save_keeps_a_move_made_while_it_waited() {
         use crate::instance::content::ContentKind;
 
-        let paths = scratch("late-save-move");
+        let scratch = scratch("late-save-move");
+        let paths = scratch.paths.clone();
         let mut server = Server::new("Overlap".into(), ServerKind::Fabric, "1.21.1".into());
         server.content = vec![record("x.jar", "modrinth", "X")];
         server.save(&paths).await.unwrap();
@@ -1582,8 +1559,6 @@ mod tests {
             assert_eq!(x, vec![moved_to], "the move was undone or doubled");
             assert!(after.content.iter().any(|r| r.file_name == own), "{own}");
         }
-
-        std::fs::remove_dir_all(&paths.root).unwrap();
     }
 
     #[test]

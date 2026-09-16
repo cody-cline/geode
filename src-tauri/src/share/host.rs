@@ -1182,30 +1182,12 @@ pub(super) mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
+    use crate::paths::Scratch;
     use crate::server::ServerKind;
     use crate::share::code::Code;
     use crate::share::identity::Identity;
     use crate::share::link::Pin;
     use crate::share::trust::{Trust, TrustedClient};
-
-    /// A data directory of its own under the system's temporary directory,
-    /// removed when the test ends however it ends.
-    struct Scratch {
-        paths: Paths,
-    }
-
-    impl Scratch {
-        fn new(tag: &str) -> Self {
-            let root = std::env::temp_dir().join(format!("geode-host-{tag}-{}", uuid::Uuid::new_v4()));
-            Self { paths: Paths { root } }
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.paths.root);
-        }
-    }
 
     /// A shared Fabric server on disk, with `filler` bytes of a jar that does
     /// not compress.
@@ -1945,7 +1927,7 @@ pub(super) mod tests {
     /// runs to its end.
     #[tokio::test]
     async fn a_pack_with_no_room_on_disk_is_not_sent() {
-        let scratch = Scratch::new("outgoing");
+        let scratch = Scratch::new("host-outgoing");
         let (_, code) = share_a_server(&scratch.paths, 4 * 1024 * 1024).await;
         let limits = Limits {
             outgoing: 6 << 20,
@@ -1991,7 +1973,7 @@ pub(super) mod tests {
     /// why.
     #[tokio::test]
     async fn a_pack_bigger_than_the_room_for_every_download_is_not_sent() {
-        let scratch = Scratch::new("too-large");
+        let scratch = Scratch::new("host-too-large");
         let (_, code) = share_a_server(&scratch.paths, 2 * 1024 * 1024).await;
         let limits = Limits {
             outgoing: 1 << 20,
@@ -2227,7 +2209,7 @@ pub(super) mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_listener_full_of_idle_connections_still_lets_a_player_in() {
-        let scratch = Scratch::new("crowd");
+        let scratch = Scratch::new("host-crowd");
         let (_, code) = share_a_server(&scratch.paths, 0).await;
         let host = Host::start(scratch.paths.clone(), 0).await.unwrap();
         let port = host.local_addr.port();
@@ -2273,7 +2255,7 @@ pub(super) mod tests {
     /// is what keeps its download going.
     #[tokio::test]
     async fn a_download_under_way_is_never_dropped_to_make_room() {
-        let scratch = Scratch::new("proven");
+        let scratch = Scratch::new("host-proven");
         let (_, code) = share_a_server(&scratch.paths, 4 * 1024 * 1024).await;
         let host = Host::start(scratch.paths.clone(), 0).await.unwrap();
         let port = host.local_addr.port();
@@ -2325,7 +2307,7 @@ pub(super) mod tests {
     /// after, with nothing read, is.
     #[tokio::test]
     async fn a_download_nobody_reads_is_cut_off_once_it_stalls() {
-        let scratch = Scratch::new("stall");
+        let scratch = Scratch::new("host-stall");
         // Megabytes that do not compress, so the pack outlasts every buffer
         // between the two ends — a little under two, measured on loopback —
         // and the host really is left waiting to send.
@@ -2444,7 +2426,7 @@ pub(super) mod tests {
     /// about a real download's pacing, not about frames a test hands it.
     #[tokio::test]
     async fn a_download_read_slowly_but_steadily_is_not_cut_off() {
-        let scratch = Scratch::new("steady");
+        let scratch = Scratch::new("host-steady");
         // More than every buffer between the two ends holds, so most of the
         // pack is handed on at the pace the reader sets, window after window.
         let (_, code) = share_a_server(&scratch.paths, 8 * 1024 * 1024).await;
@@ -2472,7 +2454,7 @@ pub(super) mod tests {
     /// which is the reader's own pace, does not.
     #[tokio::test]
     async fn a_download_read_below_the_floor_is_cut_off() {
-        let scratch = Scratch::new("below");
+        let scratch = Scratch::new("host-below");
         let (_, code) = share_a_server(&scratch.paths, 8 * 1024 * 1024).await;
         let window = Duration::from_secs(1);
         let limits = Limits {
@@ -2498,7 +2480,7 @@ pub(super) mod tests {
     /// request, but in the middle of a download they already started.
     #[tokio::test]
     async fn a_new_code_cuts_off_a_download_started_with_the_old_one() {
-        let scratch = Scratch::new("rotate");
+        let scratch = Scratch::new("host-rotate");
         let (server, code) = share_a_server(&scratch.paths, 4 * 1024 * 1024).await;
         let host = Host::start(scratch.paths.clone(), 0).await.unwrap();
 
@@ -2537,7 +2519,7 @@ pub(super) mod tests {
     /// listened next.
     #[tokio::test]
     async fn unsharing_or_stopping_cuts_off_downloads_under_way() {
-        let scratch = Scratch::new("unshare");
+        let scratch = Scratch::new("host-unshare");
         let (server, code) = share_a_server(&scratch.paths, 4 * 1024 * 1024).await;
         let host = Host::start(scratch.paths.clone(), 0).await.unwrap();
         let port = host.local_addr.port();
@@ -2578,7 +2560,7 @@ pub(super) mod tests {
     /// that was there first runs to its end.
     #[tokio::test]
     async fn a_busy_server_says_so_and_still_answers_a_preview() {
-        let scratch = Scratch::new("busy");
+        let scratch = Scratch::new("host-busy");
         let (_, code) = share_a_server(&scratch.paths, 4 * 1024 * 1024).await;
         let limits = Limits {
             downloads: 1,
@@ -2634,7 +2616,7 @@ pub(super) mod tests {
     /// once and in words of its own — not the ones about sending a pack.
     #[tokio::test]
     async fn a_preview_past_the_ceiling_is_told_the_server_is_answering_others() {
-        let scratch = Scratch::new("describing");
+        let scratch = Scratch::new("host-describing");
         let (_, code) = share_a_server(&scratch.paths, 0).await;
         let limits = Limits {
             previews: 0,
@@ -2668,7 +2650,7 @@ pub(super) mod tests {
     /// than refused for a queue it would never join.
     #[tokio::test]
     async fn a_description_already_worked_out_is_answered_past_the_ceiling() {
-        let scratch = Scratch::new("inhand");
+        let scratch = Scratch::new("host-inhand");
         let (_, code) = share_a_server(&scratch.paths, 0).await;
         let limits = Limits {
             previews: 1,
@@ -2702,7 +2684,7 @@ pub(super) mod tests {
     /// and on IPv4 still, from the same port.
     #[tokio::test]
     async fn players_are_served_over_ipv4_and_ipv6_alike() {
-        let scratch = Scratch::new("dual");
+        let scratch = Scratch::new("host-dual");
         let (_, code) = share_a_server(&scratch.paths, 0).await;
         let host = Host::start(scratch.paths.clone(), 0).await.unwrap();
         let port = host.local_addr.port();
@@ -2725,7 +2707,7 @@ pub(super) mod tests {
     /// turns are all taken, a request builds nothing.
     #[tokio::test]
     async fn a_pack_is_not_built_until_it_has_a_turn() {
-        let scratch = Scratch::new("queue");
+        let scratch = Scratch::new("host-queue");
         let (server, _) = share_a_server(&scratch.paths, 0).await;
         let builds = Arc::new(Semaphore::new(1));
         let taken = builds.clone().acquire_owned().await.unwrap();
@@ -2756,7 +2738,7 @@ pub(super) mod tests {
     /// its file goes once it is.
     #[tokio::test]
     async fn a_build_whose_player_hung_up_keeps_its_turn_until_it_is_done() {
-        let scratch = Scratch::new("hangup");
+        let scratch = Scratch::new("host-hangup");
         // Enough that the writer is still compressing when the player leaves.
         let (server, _) = share_a_server(&scratch.paths, 4 * 1024 * 1024).await;
         let builds = Arc::new(Semaphore::new(1));

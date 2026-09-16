@@ -3713,37 +3713,14 @@ mod tests {
     //! a typed address to the certificate it had before.
 
     use super::*;
-    use crate::paths::Paths;
+    use crate::instance::jar::tests::fabric_jar;
+    use crate::paths::{Paths, Scratch};
     use crate::server::share::ServerShare;
     use crate::server::{Server, ServerKind};
     use crate::share::code::Code;
     use crate::share::join::{JoinInput, Verified};
     use crate::share::link::{Address, Link, Pin};
     use std::io::{Read, Write};
-
-    struct Scratch(Paths);
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0.root);
-        }
-    }
-    fn scratch(tag: &str) -> Scratch {
-        let root = std::env::temp_dir().join(format!("geode-cmd-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        Scratch(Paths { root })
-    }
-
-    fn fabric_jar(id: &str, environment: &str) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        {
-            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
-            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
-            zip.start_file("fabric.mod.json", options).unwrap();
-            write!(zip, r#"{{"schemaVersion":1,"id":"{id}","version":"1.0.0","environment":"{environment}"}}"#).unwrap();
-            zip.finish().unwrap();
-        }
-        bytes
-    }
 
     async fn shared_server(paths: &Paths) -> (Server, ServerShare) {
         shared_server_called(paths, "survival", "Survival").await
@@ -3953,19 +3930,19 @@ mod tests {
     /// nothing behind to retry into a duplicate.
     #[tokio::test]
     async fn a_joined_pack_installs_only_if_it_is_the_servers_and_what_was_approved() {
-        let admin = scratch("install-admin");
-        let (server, share) = shared_server(&admin.0).await;
-        let archive = admin.0.root.join("pack.geodepack");
-        share::pack::export_server(&admin.0, &server, archive.clone(), &Progress::silent("t")).await.unwrap();
-        let approved = share::pack::server_pack_info(&admin.0, &server).await.unwrap();
+        let admin = Scratch::new("cmd-install-admin");
+        let (server, share) = shared_server(&admin.paths).await;
+        let archive = admin.paths.root.join("pack.geodepack");
+        share::pack::export_server(&admin.paths, &server, archive.clone(), &Progress::silent("t")).await.unwrap();
+        let approved = share::pack::server_pack_info(&admin.paths, &server).await.unwrap();
         let link = Link {
             address: Address::Direct { host: "127.0.0.1".into(), port: 25590 },
             code: share.code.clone(),
             pin: Some(Pin([1; 32])),
         };
 
-        let player = scratch("install-player");
-        let state = AppState::new(player.0.clone(), crate::config::Config::default());
+        let player = Scratch::new("cmd-install-player");
+        let state = AppState::new(player.paths.clone(), crate::config::Config::default());
 
         // Not what was approved: refused, and nothing created.
         let changed = share::host::PackInfo { loader: "forge".into(), ..approved.clone() };
@@ -3980,7 +3957,7 @@ mod tests {
         )
         .await
         .expect_err("a pack that is not what the player approved");
-        assert_eq!(instance_count(&player.0).await, 0, "a refused join left an instance behind");
+        assert_eq!(instance_count(&player.paths).await, 0, "a refused join left an instance behind");
 
         // What was approved: installed, remembered as joined, and the server's.
         let (inst, problems) = install_joined(
@@ -3995,7 +3972,7 @@ mod tests {
         .await
         .unwrap();
         assert!(problems.is_empty(), "{problems:?}");
-        let saved = instance::load(&player.0, &inst.id).await.unwrap();
+        let saved = instance::load(&player.paths, &inst.id).await.unwrap();
         assert_eq!(saved.joined.as_ref().map(|l| &l.code), Some(&share.code));
         assert!(saved
             .content
@@ -4003,7 +3980,7 @@ mod tests {
             .any(|r| r.file_name == "homemade.jar" && r.origin == instance::content::Origin::Server));
         assert!(saved.pack.is_none(), "a joined server is not a published modpack");
         assert!(!saved.server_side_mods_off);
-        let mods = player.0.game_dir(&inst.id).join("mods");
+        let mods = player.paths.game_dir(&inst.id).join("mods");
         assert!(
             mods.join("server-side.jar").is_file(),
             "a server-side mod the player kept is off"
@@ -4022,16 +3999,16 @@ mod tests {
         )
         .await
         .unwrap();
-        let saved = instance::load(&player.0, &inst.id).await.unwrap();
+        let saved = instance::load(&player.paths, &inst.id).await.unwrap();
         assert!(saved.server_side_mods_off);
-        let mods = player.0.game_dir(&inst.id).join("mods");
+        let mods = player.paths.game_dir(&inst.id).join("mods");
         assert!(mods.join("server-side.jar.disabled").is_file());
         assert!(!mods.join("server-side.jar").exists());
         assert!(mods.join("homemade.jar").is_file());
 
         // A personal pack at that address: refused, and nothing more created.
         make_personal(&archive);
-        let before = instance_count(&player.0).await;
+        let before = instance_count(&player.paths).await;
         let err = install_joined(
             &state,
             &link,
@@ -4044,7 +4021,7 @@ mod tests {
         .await
         .expect_err("a personal pack is not a server's");
         assert!(err.to_string().contains("server's pack"), "{err}");
-        assert_eq!(instance_count(&player.0).await, before);
+        assert_eq!(instance_count(&player.paths).await, before);
     }
 
     /// A joined instance remembers which server it came from, and which of
@@ -4052,13 +4029,13 @@ mod tests {
     /// one that stopped partway is updated next time.
     #[tokio::test]
     async fn a_joined_instance_records_the_revision_it_installed() {
-        let admin = scratch("revision-admin");
-        let (mut server, share) = shared_server(&admin.0).await;
-        let archive = admin.0.root.join("pack.geodepack");
-        share::pack::export_server(&admin.0, &server, archive.clone(), &Progress::silent("t"))
+        let admin = Scratch::new("cmd-revision-admin");
+        let (mut server, share) = shared_server(&admin.paths).await;
+        let archive = admin.paths.root.join("pack.geodepack");
+        share::pack::export_server(&admin.paths, &server, archive.clone(), &Progress::silent("t"))
             .await
             .unwrap();
-        let approved = share::pack::server_pack_info(&admin.0, &server)
+        let approved = share::pack::server_pack_info(&admin.paths, &server)
             .await
             .unwrap();
         assert!(!approved.revision.is_empty());
@@ -4071,8 +4048,8 @@ mod tests {
             pin: Some(Pin([1; 32])),
         };
 
-        let player = scratch("revision-player");
-        let state = AppState::new(player.0.clone(), crate::config::Config::default());
+        let player = Scratch::new("cmd-revision-player");
+        let state = AppState::new(player.paths.clone(), crate::config::Config::default());
         let (inst, problems) = install_joined(
             &state,
             &link,
@@ -4085,7 +4062,7 @@ mod tests {
         .await
         .unwrap();
         assert!(problems.is_empty(), "{problems:?}");
-        let saved = instance::load(&player.0, &inst.id).await.unwrap();
+        let saved = instance::load(&player.paths, &inst.id).await.unwrap();
         assert_eq!(
             saved.joined_revision.as_deref(),
             Some(approved.revision.as_str())
@@ -4112,7 +4089,7 @@ mod tests {
         .await
         .unwrap();
         assert!(problems.is_empty(), "{problems:?}");
-        let saved = instance::load(&player.0, &from_stale.id).await.unwrap();
+        let saved = instance::load(&player.paths, &from_stale.id).await.unwrap();
         assert_eq!(
             saved.joined_revision.as_deref(),
             Some(approved.revision.as_str())
@@ -4121,7 +4098,7 @@ mod tests {
         // A reference, which the import resolves one at a time, looking for a
         // cancel before it asks anyone for anything.
         tokio::fs::write(
-            admin.0.server_run(&server.id).join("mods/create.jar"),
+            admin.paths.server_run(&server.id).join("mods/create.jar"),
             b"from curseforge",
         )
         .await
@@ -4133,10 +4110,10 @@ mod tests {
             }))
             .unwrap(),
         );
-        share::pack::export_server(&admin.0, &server, archive.clone(), &Progress::silent("t"))
+        share::pack::export_server(&admin.paths, &server, archive.clone(), &Progress::silent("t"))
             .await
             .unwrap();
-        let approved = share::pack::server_pack_info(&admin.0, &server)
+        let approved = share::pack::server_pack_info(&admin.paths, &server)
             .await
             .unwrap();
         let cancelled = Progress::silent("t");
@@ -4151,7 +4128,7 @@ mod tests {
             problems.iter().any(|p| p.contains("stopped partway")),
             "{problems:?}"
         );
-        let saved = instance::load(&player.0, &inst.id).await.unwrap();
+        let saved = instance::load(&player.paths, &inst.id).await.unwrap();
         assert_eq!(saved.joined_revision, None);
         assert_eq!(saved.joined_server_id.as_deref(), Some(server.id.as_str()));
     }
@@ -4161,13 +4138,13 @@ mod tests {
     /// arrives by joining or as a file.
     #[tokio::test]
     async fn a_server_pack_that_would_download_from_elsewhere_fetches_nothing() {
-        let admin = scratch("elsewhere-admin");
-        let (server, share) = shared_server(&admin.0).await;
-        let archive = admin.0.root.join("pack.geodepack");
-        share::pack::export_server(&admin.0, &server, archive.clone(), &Progress::silent("t"))
+        let admin = Scratch::new("cmd-elsewhere-admin");
+        let (server, share) = shared_server(&admin.paths).await;
+        let archive = admin.paths.root.join("pack.geodepack");
+        share::pack::export_server(&admin.paths, &server, archive.clone(), &Progress::silent("t"))
             .await
             .unwrap();
-        let approved = share::pack::server_pack_info(&admin.0, &server)
+        let approved = share::pack::server_pack_info(&admin.paths, &server)
             .await
             .unwrap();
         let link = Link {
@@ -4198,8 +4175,8 @@ mod tests {
                 }));
         });
 
-        let player = scratch("elsewhere-player");
-        let state = AppState::new(player.0.clone(), crate::config::Config::default());
+        let player = Scratch::new("cmd-elsewhere-player");
+        let state = AppState::new(player.paths.clone(), crate::config::Config::default());
         let err = install_joined(
             &state,
             &link,
@@ -4216,13 +4193,13 @@ mod tests {
             "{err}"
         );
         assert_eq!(
-            instance_count(&player.0).await,
+            instance_count(&player.paths).await,
             0,
             "a refused join left an instance behind"
         );
 
         let mut inst = instance::create(
-            &player.0,
+            &player.paths,
             "File".into(),
             "1.21.1".into(),
             crate::meta::Loader::Fabric,
@@ -4238,7 +4215,7 @@ mod tests {
             .unwrap();
         let err = share::pack::import(
             &impatient,
-            &player.0,
+            &player.paths,
             &mut inst,
             &archive,
             None,
@@ -4263,16 +4240,16 @@ mod tests {
     /// answering there is refused.
     #[tokio::test]
     async fn a_typed_address_is_held_to_the_certificate_it_had_when_joined() {
-        let admin = scratch("typed-admin");
-        let (_server, share) = shared_server(&admin.0).await;
-        let host = share::host::Host::start(admin.0.clone(), 0).await.unwrap();
+        let admin = Scratch::new("cmd-typed-admin");
+        let (_server, share) = shared_server(&admin.paths).await;
+        let host = share::host::Host::start(admin.paths.clone(), 0).await.unwrap();
         let port = host.local_addr.port();
-        let real = share::identity::Identity::load_or_create(&admin.0).await.unwrap().pin();
+        let real = share::identity::Identity::load_or_create(&admin.paths).await.unwrap().pin();
         let typed = || JoinInput::Parts { address: format!("127.0.0.1:{port}"), code: share.code.display() };
 
-        let player = scratch("typed-player");
+        let player = Scratch::new("cmd-typed-player");
         let remember = |pin: Pin| {
-            let paths = player.0.clone();
+            let paths = player.paths.clone();
             let code = share.code.clone();
             async move {
                 let mut inst = Instance::new("Joined".into(), "1.21.1".into(), crate::meta::Loader::Fabric, "0.16.9".into());
@@ -4287,20 +4264,20 @@ mod tests {
         };
 
         // Never joined: the first certificate is trusted, and nothing exists yet.
-        let first = preview_join_at(&player.0, typed()).await.unwrap();
+        let first = preview_join_at(&player.paths, typed()).await.unwrap();
         assert_eq!(first.verified, Verified::FirstUse);
         assert!(first.existing.is_none());
 
         // Joined before, and the same machine answers: verified, and the earlier
         // instance is offered instead of a second one.
         remember(real).await;
-        let again = preview_join_at(&player.0, typed()).await.unwrap();
+        let again = preview_join_at(&player.paths, typed()).await.unwrap();
         assert_eq!(again.verified, Verified::Pinned);
         assert_eq!(again.existing.as_ref().map(|e| e.id.as_str()), Some("joined"));
 
         // Joined before, and a different machine answers there now: refused.
         remember(Pin([9; 32])).await;
-        let err = preview_join_at(&player.0, typed()).await.expect_err("a different certificate at a remembered address");
+        let err = preview_join_at(&player.paths, typed()).await.expect_err("a different certificate at a remembered address");
         assert!(err.to_string().contains("joined there before"), "{err}");
 
         host.stop().await;
@@ -4327,19 +4304,19 @@ mod tests {
     /// server that cannot be reached is a notice rather than a refusal.
     #[tokio::test]
     async fn a_joined_instance_is_brought_up_to_date_before_it_plays() {
-        let admin = scratch("play-admin");
-        let (server, share) = shared_server(&admin.0).await;
-        let host = share::host::Host::start(admin.0.clone(), 0).await.unwrap();
-        let link = loopback(&admin.0, host.local_addr.port(), &share.code).await;
+        let admin = Scratch::new("cmd-play-admin");
+        let (server, share) = shared_server(&admin.paths).await;
+        let host = share::host::Host::start(admin.paths.clone(), 0).await.unwrap();
+        let link = loopback(&admin.paths, host.local_addr.port(), &share.code).await;
 
-        let player = scratch("play-player");
-        let state = AppState::new(player.0.clone(), crate::config::Config::default());
-        let id = join_over(&state, &admin.0, &server, &link).await;
-        let mods = player.0.game_dir(&id).join("mods");
+        let player = Scratch::new("cmd-play-player");
+        let state = AppState::new(player.paths.clone(), crate::config::Config::default());
+        let id = join_over(&state, &admin.paths, &server, &link).await;
+        let mods = player.paths.game_dir(&id).join("mods");
 
         // The server has moved on since that join.
-        add_jar(&admin.0, &server, "new.jar").await;
-        let mut inst = instance::load(&player.0, &id).await.unwrap();
+        add_jar(&admin.paths, &server, "new.jar").await;
+        let mut inst = instance::load(&player.paths, &id).await.unwrap();
         let notices = bring_up_to_date(&state, &mut inst, &Progress::silent("t"))
             .await
             .unwrap();
@@ -4352,18 +4329,18 @@ mod tests {
             .content
             .iter()
             .any(|r| r.file_name == "new.jar" && r.origin == instance::content::Origin::Server));
-        let now = share::pack::server_pack_info(&admin.0, &server)
+        let now = share::pack::server_pack_info(&admin.paths, &server)
             .await
             .unwrap()
             .revision;
-        let saved = instance::load(&player.0, &id).await.unwrap();
+        let saved = instance::load(&player.paths, &id).await.unwrap();
         assert_eq!(saved.joined_revision.as_deref(), Some(now.as_str()));
 
         // And now there is nothing to do: the check happens, and no pack is
         // asked for.
         let recorder = std::sync::Arc::new(crate::events::Recorder::default());
         let progress = Progress::new(recorder.clone(), "launch:t");
-        let mut inst = instance::load(&player.0, &id).await.unwrap();
+        let mut inst = instance::load(&player.paths, &id).await.unwrap();
         let notices = bring_up_to_date(&state, &mut inst, &progress)
             .await
             .unwrap();
@@ -4386,13 +4363,13 @@ mod tests {
 
         // The admin's machine is off: the player still plays what they have.
         host.stop().await;
-        let mut inst = instance::load(&player.0, &id).await.unwrap();
+        let mut inst = instance::load(&player.paths, &id).await.unwrap();
         let notices = bring_up_to_date(&state, &mut inst, &Progress::silent("t"))
             .await
             .unwrap();
         assert_eq!(notices.len(), 1, "{notices:?}");
         assert!(notices[0].contains("could not reach"), "{}", notices[0]);
-        let saved = instance::load(&player.0, &id).await.unwrap();
+        let saved = instance::load(&player.paths, &id).await.unwrap();
         assert_eq!(saved.joined_revision.as_deref(), Some(now.as_str()));
         assert!(mods.join("new.jar").is_file());
     }
@@ -4404,60 +4381,60 @@ mod tests {
     /// while they waited is still there afterwards.
     #[tokio::test]
     async fn an_update_keeps_what_the_player_changed_while_it_ran() {
-        let admin = scratch("meanwhile-admin");
-        let (server, share) = shared_server(&admin.0).await;
-        let host = share::host::Host::start(admin.0.clone(), 0).await.unwrap();
-        let link = loopback(&admin.0, host.local_addr.port(), &share.code).await;
+        let admin = Scratch::new("cmd-meanwhile-admin");
+        let (server, share) = shared_server(&admin.paths).await;
+        let host = share::host::Host::start(admin.paths.clone(), 0).await.unwrap();
+        let link = loopback(&admin.paths, host.local_addr.port(), &share.code).await;
 
-        let player = scratch("meanwhile-player");
-        let state = AppState::new(player.0.clone(), crate::config::Config::default());
-        let id = join_over(&state, &admin.0, &server, &link).await;
+        let player = Scratch::new("cmd-meanwhile-player");
+        let state = AppState::new(player.paths.clone(), crate::config::Config::default());
+        let id = join_over(&state, &admin.paths, &server, &link).await;
 
         // The copy a launch is holding, read before the server was asked.
-        add_jar(&admin.0, &server, "new.jar").await;
-        let mut launching = instance::load(&player.0, &id).await.unwrap();
+        add_jar(&admin.paths, &server, "new.jar").await;
+        let mut launching = instance::load(&player.paths, &id).await.unwrap();
 
         // The player, waiting for it, changes the instance on its own page.
-        let mut meanwhile = instance::load(&player.0, &id).await.unwrap();
+        let mut meanwhile = instance::load(&player.paths, &id).await.unwrap();
         meanwhile.name = "Survival with Dad".into();
         meanwhile.overrides.memory_mb = Some(6144);
-        meanwhile.save(&player.0).await.unwrap();
+        meanwhile.save(&player.paths).await.unwrap();
 
         let notices = bring_up_to_date(&state, &mut launching, &Progress::silent("t"))
             .await
             .unwrap();
         assert!(notices.is_empty(), "{notices:?}");
 
-        let saved = instance::load(&player.0, &id).await.unwrap();
+        let saved = instance::load(&player.paths, &id).await.unwrap();
         assert_eq!(
             saved.name, "Survival with Dad",
             "the update put back the name from before it"
         );
         assert_eq!(saved.overrides.memory_mb, Some(6144));
         // And what the update decided is all there.
-        let now = share::pack::server_pack_info(&admin.0, &server)
+        let now = share::pack::server_pack_info(&admin.paths, &server)
             .await
             .unwrap()
             .revision;
         assert_eq!(saved.joined_revision.as_deref(), Some(now.as_str()));
         assert!(saved.content.iter().any(|r| r.file_name == "new.jar"));
-        assert!(player.0.game_dir(&id).join("mods/new.jar").is_file());
+        assert!(player.paths.game_dir(&id).join("mods/new.jar").is_file());
 
         // Nothing to download, and the server's id learned for the first time:
         // a save with no update behind it writes that id and nothing else.
-        let mut older = instance::load(&player.0, &id).await.unwrap();
+        let mut older = instance::load(&player.paths, &id).await.unwrap();
         older.joined_server_id = None;
-        older.save(&player.0).await.unwrap();
-        let mut launching = instance::load(&player.0, &id).await.unwrap();
-        let mut meanwhile = instance::load(&player.0, &id).await.unwrap();
+        older.save(&player.paths).await.unwrap();
+        let mut launching = instance::load(&player.paths, &id).await.unwrap();
+        let mut meanwhile = instance::load(&player.paths, &id).await.unwrap();
         meanwhile.notes = "Dad's seed: 12345".into();
-        meanwhile.save(&player.0).await.unwrap();
+        meanwhile.save(&player.paths).await.unwrap();
 
         let notices = bring_up_to_date(&state, &mut launching, &Progress::silent("t"))
             .await
             .unwrap();
         assert!(notices.is_empty(), "{notices:?}");
-        let saved = instance::load(&player.0, &id).await.unwrap();
+        let saved = instance::load(&player.paths, &id).await.unwrap();
         assert_eq!(
             saved.notes, "Dad's seed: 12345",
             "a note written while the server was being asked"
@@ -4487,22 +4464,22 @@ mod tests {
     /// still starts, and nothing is touched.
     #[tokio::test]
     async fn a_replaced_password_lets_the_player_play_and_says_how_to_fix_it() {
-        let admin = scratch("refused-admin");
-        let (server, share) = shared_server(&admin.0).await;
-        let host = share::host::Host::start(admin.0.clone(), 0).await.unwrap();
-        let link = loopback(&admin.0, host.local_addr.port(), &share.code).await;
+        let admin = Scratch::new("cmd-refused-admin");
+        let (server, share) = shared_server(&admin.paths).await;
+        let host = share::host::Host::start(admin.paths.clone(), 0).await.unwrap();
+        let link = loopback(&admin.paths, host.local_addr.port(), &share.code).await;
 
-        let player = scratch("refused-player");
-        let state = AppState::new(player.0.clone(), crate::config::Config::default());
-        let id = join_over(&state, &admin.0, &server, &link).await;
+        let player = Scratch::new("cmd-refused-player");
+        let state = AppState::new(player.paths.clone(), crate::config::Config::default());
+        let id = join_over(&state, &admin.paths, &server, &link).await;
 
         // Something to update to, so nothing but the password stands in the way.
-        add_jar(&admin.0, &server, "new.jar").await;
-        crate::server::share::replace_password(&admin.0, &server.id)
+        add_jar(&admin.paths, &server, "new.jar").await;
+        crate::server::share::replace_password(&admin.paths, &server.id)
             .await
             .unwrap();
 
-        let mut inst = instance::load(&player.0, &id).await.unwrap();
+        let mut inst = instance::load(&player.paths, &id).await.unwrap();
         let held = inst.joined_revision.clone();
         let notices = bring_up_to_date(&state, &mut inst, &Progress::silent("t"))
             .await
@@ -4520,9 +4497,9 @@ mod tests {
             "{}",
             notices[0]
         );
-        let saved = instance::load(&player.0, &id).await.unwrap();
+        let saved = instance::load(&player.paths, &id).await.unwrap();
         assert_eq!(saved.joined_revision, held);
-        assert!(!player.0.game_dir(&id).join("mods/new.jar").exists());
+        assert!(!player.paths.game_dir(&id).join("mods/new.jar").exists());
 
         host.stop().await;
     }
@@ -4531,17 +4508,17 @@ mod tests {
     /// the launch, leaves the revision it had, and runs again next time.
     #[tokio::test]
     async fn an_update_that_cannot_finish_refuses_to_start_and_retries_next_time() {
-        let admin = scratch("unfinished-admin");
-        let (server, share) = shared_server(&admin.0).await;
-        let host = share::host::Host::start(admin.0.clone(), 0).await.unwrap();
-        let link = loopback(&admin.0, host.local_addr.port(), &share.code).await;
+        let admin = Scratch::new("cmd-unfinished-admin");
+        let (server, share) = shared_server(&admin.paths).await;
+        let host = share::host::Host::start(admin.paths.clone(), 0).await.unwrap();
+        let link = loopback(&admin.paths, host.local_addr.port(), &share.code).await;
 
-        let player = scratch("unfinished-player");
-        let state = AppState::new(player.0.clone(), crate::config::Config::default());
-        let id = join_over(&state, &admin.0, &server, &link).await;
-        add_jar(&admin.0, &server, "new.jar").await;
+        let player = Scratch::new("cmd-unfinished-player");
+        let state = AppState::new(player.paths.clone(), crate::config::Config::default());
+        let id = join_over(&state, &admin.paths, &server, &link).await;
+        add_jar(&admin.paths, &server, "new.jar").await;
 
-        let mut inst = instance::load(&player.0, &id).await.unwrap();
+        let mut inst = instance::load(&player.paths, &id).await.unwrap();
         let held = inst.joined_revision.clone();
         let cancelled = Progress::silent("t");
         cancelled
@@ -4551,20 +4528,20 @@ mod tests {
             .await
             .expect_err("an update the player cancelled");
         assert!(matches!(err, Error::Cancelled), "{err}");
-        let saved = instance::load(&player.0, &id).await.unwrap();
+        let saved = instance::load(&player.paths, &id).await.unwrap();
         assert_eq!(
             saved.joined_revision, held,
             "a cancelled update recorded a revision it did not install"
         );
 
-        let mut inst = instance::load(&player.0, &id).await.unwrap();
+        let mut inst = instance::load(&player.paths, &id).await.unwrap();
         let notices = bring_up_to_date(&state, &mut inst, &Progress::silent("t"))
             .await
             .unwrap();
         assert!(notices.is_empty(), "{notices:?}");
-        let saved = instance::load(&player.0, &id).await.unwrap();
+        let saved = instance::load(&player.paths, &id).await.unwrap();
         assert_ne!(saved.joined_revision, held);
-        assert!(player.0.game_dir(&id).join("mods/new.jar").is_file());
+        assert!(player.paths.game_dir(&id).join("mods/new.jar").is_file());
 
         host.stop().await;
     }
@@ -4574,24 +4551,24 @@ mod tests {
     /// much of the link matches.
     #[tokio::test]
     async fn a_new_password_is_saved_only_for_the_same_server() {
-        let admin = scratch("relink-admin");
-        let (one, share_one) = shared_server(&admin.0).await;
-        let (_two, share_two) = shared_server_called(&admin.0, "creative", "Creative").await;
-        let host = share::host::Host::start(admin.0.clone(), 0).await.unwrap();
+        let admin = Scratch::new("cmd-relink-admin");
+        let (one, share_one) = shared_server(&admin.paths).await;
+        let (_two, share_two) = shared_server_called(&admin.paths, "creative", "Creative").await;
+        let host = share::host::Host::start(admin.paths.clone(), 0).await.unwrap();
         let port = host.local_addr.port();
 
-        let player = scratch("relink-player");
-        let state = AppState::new(player.0.clone(), crate::config::Config::default());
-        let joined = loopback(&admin.0, port, &share_one.code).await;
-        let id = join_over(&state, &admin.0, &one, &joined).await;
+        let player = Scratch::new("cmd-relink-player");
+        let state = AppState::new(player.paths.clone(), crate::config::Config::default());
+        let joined = loopback(&admin.paths, port, &share_one.code).await;
+        let id = join_over(&state, &admin.paths, &one, &joined).await;
 
-        let replaced = crate::server::share::replace_password(&admin.0, &one.id)
+        let replaced = crate::server::share::replace_password(&admin.paths, &one.id)
             .await
             .unwrap();
         let relinked = relink(
-            &player.0,
+            &player.paths,
             &id,
-            loopback(&admin.0, port, &replaced.code).await,
+            loopback(&admin.paths, port, &replaced.code).await,
         )
         .await
         .unwrap();
@@ -4600,7 +4577,7 @@ mod tests {
             Some(&replaced.code)
         );
         assert_eq!(
-            instance::load(&player.0, &id)
+            instance::load(&player.paths, &id)
                 .await
                 .unwrap()
                 .joined
@@ -4611,9 +4588,9 @@ mod tests {
 
         // The machine's other server, sharing the same address and certificate.
         let err = relink(
-            &player.0,
+            &player.paths,
             &id,
-            loopback(&admin.0, port, &share_two.code).await,
+            loopback(&admin.paths, port, &share_two.code).await,
         )
         .await
         .expect_err("another server on the same machine");
@@ -4621,16 +4598,16 @@ mod tests {
 
         // The right password, somewhere this instance was never joined from.
         let err = relink(
-            &player.0,
+            &player.paths,
             &id,
-            loopback(&admin.0, 25591, &replaced.code).await,
+            loopback(&admin.paths, 25591, &replaced.code).await,
         )
         .await
         .expect_err("another address");
         assert!(err.to_string().contains("different address"), "{err}");
 
         assert_eq!(
-            instance::load(&player.0, &id)
+            instance::load(&player.paths, &id)
                 .await
                 .unwrap()
                 .joined
@@ -4649,36 +4626,36 @@ mod tests {
     /// password nothing can put right, and it is saved the new one too.
     #[tokio::test]
     async fn a_new_password_reaches_every_copy_joined_from_that_server() {
-        let admin = scratch("copies-admin");
-        let (one, share_one) = shared_server(&admin.0).await;
-        let (two, share_two) = shared_server_called(&admin.0, "creative", "Creative").await;
-        let host = share::host::Host::start(admin.0.clone(), 0).await.unwrap();
+        let admin = Scratch::new("cmd-copies-admin");
+        let (one, share_one) = shared_server(&admin.paths).await;
+        let (two, share_two) = shared_server_called(&admin.paths, "creative", "Creative").await;
+        let host = share::host::Host::start(admin.paths.clone(), 0).await.unwrap();
         let port = host.local_addr.port();
 
-        let player = scratch("copies-player");
-        let state = AppState::new(player.0.clone(), crate::config::Config::default());
-        let joined = loopback(&admin.0, port, &share_one.code).await;
-        let first = join_over(&state, &admin.0, &one, &joined).await;
-        let second = join_over(&state, &admin.0, &one, &joined).await;
+        let player = Scratch::new("cmd-copies-player");
+        let state = AppState::new(player.paths.clone(), crate::config::Config::default());
+        let joined = loopback(&admin.paths, port, &share_one.code).await;
+        let first = join_over(&state, &admin.paths, &one, &joined).await;
+        let second = join_over(&state, &admin.paths, &one, &joined).await;
         let elsewhere = {
-            let link = loopback(&admin.0, port, &share_two.code).await;
-            join_over(&state, &admin.0, &two, &link).await
+            let link = loopback(&admin.paths, port, &share_two.code).await;
+            join_over(&state, &admin.paths, &two, &link).await
         };
         assert_ne!(first, second, "a second copy is a second instance");
 
-        let replaced = crate::server::share::replace_password(&admin.0, &one.id)
+        let replaced = crate::server::share::replace_password(&admin.paths, &one.id)
             .await
             .unwrap();
         relink(
-            &player.0,
+            &player.paths,
             &first,
-            loopback(&admin.0, port, &replaced.code).await,
+            loopback(&admin.paths, port, &replaced.code).await,
         )
         .await
         .unwrap();
 
         let code_of = |id: &str| {
-            let (paths, id) = (player.0.clone(), id.to_string());
+            let (paths, id) = (player.paths.clone(), id.to_string());
             async move {
                 instance::load(&paths, &id)
                     .await
@@ -4708,8 +4685,8 @@ mod tests {
     /// disk. The player is told, and nothing is copied.
     #[tokio::test]
     async fn add_files_refuses_to_copy_over_a_servers_mod() {
-        let player = scratch("add-local");
-        let paths = &player.0;
+        let player = Scratch::new("cmd-add-local");
+        let paths = &player.paths;
 
         let mut inst = Instance::new(
             "Joined".into(),
@@ -4791,8 +4768,8 @@ mod tests {
     async fn a_server_that_will_not_delete_stops_being_shared() {
         use std::os::unix::fs::PermissionsExt;
 
-        let admin = scratch("delete-server");
-        let paths = &admin.0;
+        let admin = Scratch::new("cmd-delete-server");
+        let paths = &admin.paths;
         let (server, share) = shared_server(paths).await;
         // Both files at once — the state `share::load` allows for, where an
         // older Geode shared this again after this one stopped it — so the
@@ -4849,8 +4826,8 @@ mod tests {
     /// two files clearing the share would remove by name.
     #[tokio::test]
     async fn a_delete_pointed_outside_the_tree_touches_nothing() {
-        let admin = scratch("delete-escape");
-        let paths = &admin.0;
+        let admin = Scratch::new("cmd-delete-escape");
+        let paths = &admin.paths;
 
         let elsewhere = paths.root.join("elsewhere");
         tokio::fs::create_dir_all(&elsewhere).await.unwrap();

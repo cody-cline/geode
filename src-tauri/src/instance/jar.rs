@@ -673,8 +673,32 @@ fn from_mods_toml(text: &str) -> Option<JarMeta> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use crate::paths::Scratch;
+
+    /// A jar with a real `fabric.mod.json`, so `read` finds its id and side.
+    ///
+    /// It lives here, beside the code that parses the format, because five
+    /// test modules across `instance`, `server`, `share` and the command layer
+    /// need one. Copied per module, a change to the shape a test needs — a
+    /// `depends` block to exercise dependency edges, say — reaches one copy,
+    /// that module's tests pass, and the rest quietly keep asserting against
+    /// the old shape.
+    pub(crate) fn fabric_jar(id: &str, environment: &str) -> Vec<u8> {
+        use std::io::Write;
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        zip.start_file("fabric.mod.json", options).unwrap();
+        zip.write_all(
+            format!(
+                r#"{{"schemaVersion":1,"id":"{id}","version":"1.0","environment":"{environment}"}}"#
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        zip.finish().unwrap().into_inner()
+    }
 
     fn parse_fabric(json: &str) -> JarMeta {
         let mut meta = from_fabric(&serde_json::from_str(json).unwrap());
@@ -949,11 +973,10 @@ dependencies:
     // Reading a jar off disk
     // -----------------------------------------------------------------
 
-    fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("geode-jar-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch_dir(tag: &str) -> Scratch {
+        let scratch = Scratch::new(&format!("jar-{tag}"));
+        std::fs::create_dir_all(&scratch.paths.root).unwrap();
+        scratch
     }
 
     fn write_jar(dest: &Path, entries: &[(&str, &[u8])]) {
@@ -975,7 +998,8 @@ dependencies:
     /// keeps the JSON valid: only its size refuses it.
     #[test]
     fn a_manifest_too_large_to_be_real_is_not_read() {
-        let dir = scratch("bigmanifest");
+        let scratch = scratch_dir("bigmanifest");
+        let dir = scratch.paths.root.clone();
         let path = dir.join("bloated.jar");
         let declaration = br#"{"schemaVersion":1,"id":"bloated","version":"1.0"}"#;
         let padded = [declaration.as_slice(), &vec![b' '; 9 * 1024 * 1024]].concat();
@@ -986,8 +1010,6 @@ dependencies:
         );
 
         assert_eq!(read(&path), None);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The other side of the same caps: a jar shaped like the ones the rest of
@@ -997,7 +1019,8 @@ dependencies:
     /// kilobytes" fails here instead of quietly reading real mods as untracked.
     #[test]
     fn a_real_jars_ids_and_side_are_still_found() {
-        let dir = scratch("realjar");
+        let scratch = scratch_dir("realjar");
+        let dir = scratch.paths.root.clone();
         let nested = dir.join("nested.jar");
         write_jar(
             &nested,
@@ -1022,7 +1045,5 @@ dependencies:
         assert_eq!(meta.primary, vec!["sodium"]);
         assert_eq!(meta.bundled, vec!["packed-lib"]);
         assert_eq!(meta.side, Some(Side::Client));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

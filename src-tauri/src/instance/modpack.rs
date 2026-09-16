@@ -1192,6 +1192,7 @@ mod tests {
         }
     }
     use super::*;
+    use crate::paths::Scratch;
 
     /// What an instance's pack leaves behind: the game's logs and caches, and
     /// its worlds unless asked for. Pinned because the same writer walks a
@@ -1199,10 +1200,8 @@ mod tests {
     /// instance's walk must not drift along with it.
     #[tokio::test]
     async fn an_instance_pack_leaves_out_the_games_own_clutter() {
-        let paths = Paths {
-            root: std::env::temp_dir().join(format!("geode-mrpack-walk-{}", std::process::id())),
-        };
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+        let scratch = Scratch::new("mrpack-walk");
+        let paths = scratch.paths.clone();
         let mut inst = Instance::new("Walk".into(), "1.21.1".into(), Loader::Fabric, "0.16.0".into());
         inst.id = "walk".into();
 
@@ -1259,11 +1258,8 @@ mod tests {
     /// instance's folder of that name is the player's own, and goes as it is.
     #[tokio::test]
     async fn an_instance_export_is_unchanged_by_client_mods() {
-        let paths = Paths {
-            root: std::env::temp_dir()
-                .join(format!("geode-mrpack-client-mods-{}", std::process::id())),
-        };
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+        let scratch = Scratch::new("mrpack-client-mods");
+        let paths = scratch.paths.clone();
         let mut inst = Instance::new(
             "Own".into(),
             "1.21.1".into(),
@@ -1299,8 +1295,6 @@ mod tests {
             names,
             vec!["modrinth.index.json", "overrides/client-mods/kept.jar"]
         );
-
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     // -----------------------------------------------------------------------
@@ -1319,11 +1313,10 @@ mod tests {
         zip.finish().unwrap();
     }
 
-    fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("geode-modpack-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch_dir(tag: &str) -> Scratch {
+        let scratch = Scratch::new(&format!("modpack-{tag}"));
+        std::fs::create_dir_all(&scratch.paths.root).unwrap();
+        scratch
     }
 
     const INDEX: &str = r#"{"formatVersion":1,"game":"minecraft","versionId":"1","name":"P","files":[],"dependencies":{"minecraft":"1.21.1"}}"#;
@@ -1336,7 +1329,8 @@ mod tests {
     #[tokio::test]
     async fn an_index_too_large_to_be_real_is_refused() {
         use zip::CompressionMethod::Deflated;
-        let dir = scratch("bigindex");
+        let scratch = scratch_dir("bigindex");
+        let dir = scratch.paths.root.clone();
 
         for (entry, json) in [("modrinth.index.json", INDEX), ("manifest.json", CURSEFORGE)] {
             let small = dir.join("small.mrpack");
@@ -1351,8 +1345,6 @@ mod tests {
             assert!(err.to_string().contains(entry), "{err}");
             assert!(err.to_string().contains("not read"), "{err}");
         }
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn unpacking(dir: &Path) -> (Paths, Instance) {
@@ -1369,7 +1361,8 @@ mod tests {
     #[tokio::test]
     async fn an_override_bomb_is_stopped_before_it_fills_the_disk() {
         use zip::CompressionMethod::Deflated;
-        let dir = scratch("bomb");
+        let scratch = scratch_dir("bomb");
+        let dir = scratch.paths.root.clone();
         let archive = dir.join("bomb.mrpack");
         write_zip(
             &archive,
@@ -1390,8 +1383,6 @@ mod tests {
         let game = paths.game_dir(&inst.id);
         assert!(!game.join("config/ok.toml").exists(), "what came before the bomb stayed");
         assert!(!game.join("mods/filler.jar").exists(), "the half-written file was left behind");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The other half of that clean-up: an update extracts over a game
@@ -1400,7 +1391,8 @@ mod tests {
     #[tokio::test]
     async fn a_refused_pack_takes_back_only_what_it_wrote() {
         use zip::CompressionMethod::Deflated;
-        let dir = scratch("refused");
+        let scratch = scratch_dir("refused");
+        let dir = scratch.paths.root.clone();
         let archive = dir.join("bomb.mrpack");
         write_zip(
             &archive,
@@ -1442,8 +1434,6 @@ mod tests {
             game.join("mods/filler.jar").exists(),
             "the file the budget stopped on was the player's, and it was deleted"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Unpacking a joined server's pack is the longest step of an update the
@@ -1452,7 +1442,8 @@ mod tests {
     #[tokio::test]
     async fn a_cancelled_extraction_stops_where_it_is() {
         use zip::CompressionMethod::Deflated;
-        let dir = scratch("cancelled");
+        let scratch = scratch_dir("cancelled");
+        let dir = scratch.paths.root.clone();
         let archive = dir.join("pack.mrpack");
         write_zip(
             &archive,
@@ -1476,8 +1467,6 @@ mod tests {
             !paths.game_dir(&inst.id).join("config/ok.toml").exists(),
             "the cancelled run wrote anyway"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The ratio is measured against the pack, so a pack the size of the
@@ -1498,7 +1487,8 @@ mod tests {
     #[tokio::test]
     async fn a_large_pack_that_does_not_inflate_still_unpacks() {
         use zip::CompressionMethod::{Deflated, Stored};
-        let dir = scratch("large");
+        let scratch = scratch_dir("large");
+        let dir = scratch.paths.root.clone();
         let archive = dir.join("large.mrpack");
         write_zip(
             &archive,
@@ -1514,8 +1504,6 @@ mod tests {
             .unwrap();
         let written = std::fs::metadata(paths.game_dir(&inst.id).join("mods/large.jar")).unwrap();
         assert_eq!(written.len(), 17 * MIB as u64);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A zip of `files` empty entries with `name_len`-byte names, written by
@@ -1565,7 +1553,8 @@ mod tests {
     /// is refused while they are being read, not after they are all in memory.
     #[tokio::test]
     async fn a_pack_listing_too_many_files_is_refused_while_they_are_read() {
-        let dir = scratch("listing");
+        let scratch = scratch_dir("listing");
+        let dir = scratch.paths.root.clone();
 
         // Over the real limit, through the first thing a join does with a pack.
         let crowded = dir.join("crowded.mrpack");
@@ -1599,8 +1588,6 @@ mod tests {
                 .contains("far more files than any real pack"),
             "{err}"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

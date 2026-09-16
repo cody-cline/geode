@@ -206,6 +206,7 @@ mod tests {
         let _loop = ticker(sink, paths, ServerRegistry::default());
     }
     use super::*;
+    use crate::paths::Scratch;
 
     fn every(minutes: u32, last_run: Option<i64>) -> Schedule {
         Schedule {
@@ -295,10 +296,8 @@ mod tests {
 
         use crate::server::{Server, ServerKind};
 
-        let paths = Paths {
-            root: std::env::temp_dir().join(format!("geode-schedule-stale-{}", std::process::id())),
-        };
-        let _ = std::fs::remove_dir_all(&paths.root);
+        let scratch = Scratch::new("schedule-stale");
+        let paths = scratch.paths.clone();
 
         let mut server = Server::new("Nightly".into(), ServerKind::Fabric, "1.21.1".into());
         server.schedules = vec![every(60, None)];
@@ -340,7 +339,5 @@ mod tests {
             1,
             "no backup was taken, so nothing was raced"
         );
-
-        std::fs::remove_dir_all(&paths.root).unwrap();
     }
 }

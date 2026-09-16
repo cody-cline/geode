@@ -348,6 +348,7 @@ pub async fn copy_dir(from: &std::path::Path, to: &std::path::Path) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paths::Scratch;
 
     #[test]
     fn slugify_normalizes() {
@@ -363,9 +364,8 @@ mod tests {
     /// Duplicating a joined instance makes a copy that is not itself a join.
     #[tokio::test]
     async fn a_copy_of_a_joined_instance_is_not_a_join() {
-        let paths = Paths {
-            root: std::env::temp_dir().join(format!("geode-dup-{}", uuid::Uuid::new_v4())),
-        };
+        let scratch = Scratch::new("dup");
+        let paths = scratch.paths.clone();
         let mut original = create(&paths, "Survival".into(), "1.21.1".into(), Loader::Fabric, "0.16.9".into())
             .await
             .unwrap();
@@ -389,8 +389,6 @@ mod tests {
         assert!(!saved.server_side_mods_off);
         assert!(saved.joined_revision.is_none() && saved.joined_server_id.is_none());
         assert!(load(&paths, &original.id).await.unwrap().joined.is_some());
-
-        let _ = std::fs::remove_dir_all(&paths.root);
     }
 
     #[test]

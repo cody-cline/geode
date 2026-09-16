@@ -195,6 +195,7 @@ fn argument_names(node: &serde_json::Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paths::Scratch;
 
     /// The agent is committed, so the thing most likely to go wrong is it being
     /// absent or truncated — which would stop servers booting rather than
@@ -240,9 +241,8 @@ mod tests {
     /// open.
     #[tokio::test]
     async fn a_damaged_agent_on_disk_is_replaced_rather_than_passed_to_a_server() {
-        let paths = Paths {
-            root: std::env::temp_dir().join(format!("geode-probe-test-{}", std::process::id())),
-        };
+        let scratch = Scratch::new("probe-test");
+        let paths = scratch.paths.clone();
         let jar = agent_jar(&paths);
         tokio::fs::create_dir_all(jar.parent().unwrap()).await.unwrap();
         tokio::fs::write(&jar, b"not a zip, and half-written at that")
@@ -258,8 +258,6 @@ mod tests {
             "the agent left on disk must be one the JVM can open"
         );
         assert_eq!(tokio::fs::read(&jar).await.unwrap(), AGENT);
-
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     /// A data directory whose name would corrupt the flag gets no probe rather
@@ -272,25 +270,20 @@ mod tests {
     #[tokio::test]
     async fn a_path_that_would_break_the_flag_is_declined() {
         for awkward in ["comma,dir", "equals=dir"] {
-            let paths = Paths {
-                root: std::env::temp_dir()
-                    .join(format!("geode-probe-{awkward}-{}", std::process::id())),
-            };
+            let scratch = Scratch::new(&format!("probe-{awkward}"));
+            let paths = scratch.paths.clone();
             assert_eq!(
                 agent_arg(&paths, "server").await,
                 None,
                 "a path containing the delimiter should be refused: {awkward}"
             );
-            let _ = tokio::fs::remove_dir_all(&paths.root).await;
         }
 
         // The ordinary case still works, so the check is not simply refusing
         // everything.
-        let fine = Paths {
-            root: std::env::temp_dir().join(format!("geode-probe-plain-{}", std::process::id())),
-        };
+        let scratch = Scratch::new("probe-plain");
+        let fine = scratch.paths.clone();
         assert!(agent_arg(&fine, "server").await.is_some());
-        let _ = tokio::fs::remove_dir_all(&fine.root).await;
     }
 
     fn parse(json: &str) -> Vec<CommandNode> {

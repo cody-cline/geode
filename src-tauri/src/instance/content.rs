@@ -657,6 +657,7 @@ pub async fn remove(
 
 #[cfg(test)]
 mod tests {
+    use crate::instance::jar::tests::fabric_jar;
 
     /// A record written before origins existed is the player's own. Reading it
     /// back as the server's would lock somebody out of deleting their own mods.
@@ -674,8 +675,8 @@ mod tests {
     /// than silently undone later.
     #[tokio::test]
     async fn a_server_mod_can_be_turned_off_but_not_removed() {
-        let dir = std::env::temp_dir().join(format!("geode-origin-{}", std::process::id()));
-        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let scratch = Scratch::new("origin");
+        let dir = scratch.paths.root.clone();
         tokio::fs::create_dir_all(&dir).await.unwrap();
         tokio::fs::write(dir.join("anticheat.jar"), b"x").await.unwrap();
         tokio::fs::write(dir.join("minimap.jar"), b"x").await.unwrap();
@@ -765,6 +766,7 @@ mod tests {
     }
     use super::*;
     use crate::instance::jar::JarMeta;
+    use crate::paths::Scratch;
 
     fn item(file: &str, dependency: bool) -> ContentItem {
         ContentItem {
@@ -995,9 +997,8 @@ mod tests {
     /// which is why this one goes through the folder.
     #[tokio::test]
     async fn a_plugins_folder_comes_back_with_its_edges() {
-        let dir = std::env::temp_dir()
-            .join(format!("geode-plugin-link-{}", std::process::id()));
-        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let scratch = Scratch::new("plugin-link");
+        let dir = scratch.paths.root.clone();
         tokio::fs::create_dir_all(&dir).await.expect("create");
 
         // The bytes do not matter: a plugin jar is never opened, because there
@@ -1035,8 +1036,6 @@ mod tests {
             "a plugin's recorded dependency should become an edge"
         );
         assert_eq!(vault.required_by, vec!["essentials.jar"]);
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     /// The folder outranks the jar, and the jar outranks the listing. A
@@ -1070,31 +1069,13 @@ mod tests {
         }
     }
 
-    /// A jar with a real `fabric.mod.json`, so reading it finds a side.
-    fn fabric_jar(id: &str, environment: &str) -> Vec<u8> {
-        use std::io::Write;
-        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
-        zip.start_file("fabric.mod.json", options).unwrap();
-        zip.write_all(
-            format!(
-                r#"{{"schemaVersion":1,"id":"{id}","version":"1.0","environment":"{environment}"}}"#
-            )
-            .as_bytes(),
-        )
-        .unwrap();
-        zip.finish().unwrap().into_inner()
-    }
-
     /// Client mods are read like mods — the jar opened, the record found — and
     /// never borrow the record of a mod in the other folder with the same file
     /// name.
     #[tokio::test]
     async fn a_client_mods_folder_lists_like_mods() {
-        let dir = std::env::temp_dir()
-            .join(format!("geode-client-mods-{}", std::process::id()))
-            .join("client-mods");
-        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let scratch = Scratch::new("client-mods");
+        let dir = scratch.paths.root.join("client-mods");
         tokio::fs::create_dir_all(&dir).await.unwrap();
         // Declares both sides, so only the folder can make it a client mod.
         tokio::fs::write(dir.join("minimap.jar"), fabric_jar("minimap", "*"))
@@ -1119,8 +1100,6 @@ mod tests {
         assert_eq!(items[0].project_id.as_deref(), Some("IN-CLIENT-MODS"));
         assert_eq!(items[0].mod_ids, vec!["minimap"], "the jar was not read");
         assert_eq!(items[0].side, Some(crate::instance::jar::Side::Client));
-
-        let _ = tokio::fs::remove_dir_all(dir.parent().unwrap()).await;
     }
 
     /// Each mod row says where it belongs. A file that came from a server
@@ -1129,8 +1108,8 @@ mod tests {
     async fn the_list_says_which_side_each_mod_is_on() {
         use crate::instance::jar::Side;
 
-        let dir = std::env::temp_dir().join(format!("geode-list-sides-{}", std::process::id()));
-        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let scratch = Scratch::new("list-sides");
+        let dir = scratch.paths.root.clone();
         tokio::fs::create_dir_all(&dir).await.unwrap();
         for (file, environment) in [
             ("tick-profiler.jar", "server"),
@@ -1173,8 +1152,6 @@ mod tests {
         assert_eq!(side("tick-profiler.jar"), Some(Side::Server));
         assert_eq!(side("zoom.jar"), Some(Side::Client));
         assert_eq!(side("from-server.jar"), None);
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     /// The switch reaches only the server's own server-side mods. Turning them
@@ -1185,10 +1162,8 @@ mod tests {
     async fn turning_server_side_mods_off_and_on_touches_only_the_servers_server_side_mods() {
         use crate::instance::jar::Side;
 
-        let paths = Paths {
-            root: std::env::temp_dir().join(format!("geode-server-side-{}", std::process::id())),
-        };
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+        let scratch = Scratch::new("server-side");
+        let paths = scratch.paths.clone();
         let mut instance = super::super::Instance::new(
             "Joined".into(),
             "1.21.1".into(),
@@ -1261,8 +1236,6 @@ mod tests {
                 "profiler.jar"
             ]
         );
-
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     /// The one place that answers "which of a file's two names is here", for
@@ -1272,8 +1245,8 @@ mod tests {
     /// over the live jar. A link under either name is not a file here.
     #[tokio::test]
     async fn the_enabled_name_is_the_one_reported_when_both_are_on_disk() {
-        let dir = std::env::temp_dir().join(format!("geode-either-name-{}", std::process::id()));
-        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let scratch = Scratch::new("either-name");
+        let dir = scratch.paths.root.clone();
         tokio::fs::create_dir_all(&dir).await.unwrap();
 
         tokio::fs::write(dir.join("x.jar"), b"on").await.unwrap();
@@ -1299,8 +1272,6 @@ mod tests {
             std::os::unix::fs::symlink(dir.join("real.jar"), dir.join("link.jar")).unwrap();
             assert_eq!(either_name_in(&dir, "link.jar").await, None);
         }
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[test]

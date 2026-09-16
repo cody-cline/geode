@@ -182,25 +182,7 @@ fn half_missing(missing: &Path, remaining: &Path) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A data directory of its own for each test, removed when the test ends
-    /// however it ends.
-    struct TempRoot(Paths);
-
-    impl TempRoot {
-        fn new(name: &str) -> Self {
-            let root =
-                std::env::temp_dir().join(format!("geode-identity-{name}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&root);
-            Self(Paths { root })
-        }
-    }
-
-    impl Drop for TempRoot {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0.root);
-        }
-    }
+    use crate::paths::Scratch;
 
     fn files(paths: &Paths) -> Vec<(String, Vec<u8>)> {
         let mut out: Vec<_> = std::fs::read_dir(paths.share_dir())
@@ -220,8 +202,8 @@ mod tests {
     /// match today.
     #[tokio::test]
     async fn an_identity_is_made_once_and_read_back_unchanged() {
-        let temp = TempRoot::new("reload");
-        let paths = &temp.0;
+        let temp = Scratch::new("identity-reload");
+        let paths = &temp.paths;
 
         let first = Identity::load_or_create(paths).await.unwrap();
         let second = Identity::load_or_create(paths).await.unwrap();
@@ -241,8 +223,8 @@ mod tests {
     /// replacement would break every link already out there.
     #[tokio::test]
     async fn a_damaged_identity_is_an_error_and_left_alone() {
-        let donor = TempRoot::new("donor");
-        let other_key = Identity::load_or_create(&donor.0).await.unwrap().key_der;
+        let donor = Scratch::new("identity-donor");
+        let other_key = Identity::load_or_create(&donor.paths).await.unwrap().key_der;
 
         // Which file, and what it now holds — `None` for gone.
         let damages: [(&str, &str, Option<&[u8]>); 6] = [
@@ -255,8 +237,8 @@ mod tests {
         ];
 
         for (i, (what, file, now)) in damages.into_iter().enumerate() {
-            let temp = TempRoot::new(&format!("damaged-{i}"));
-            let paths = &temp.0;
+            let temp = Scratch::new(&format!("identity-damaged-{i}"));
+            let paths = &temp.paths;
             Identity::load_or_create(paths).await.unwrap();
             let damaged = paths.share_dir().join(file);
             match now {
@@ -281,10 +263,10 @@ mod tests {
     async fn the_key_is_readable_only_by_its_owner() {
         use std::os::unix::fs::PermissionsExt;
 
-        let temp = TempRoot::new("mode");
-        Identity::load_or_create(&temp.0).await.unwrap();
+        let temp = Scratch::new("identity-mode");
+        Identity::load_or_create(&temp.paths).await.unwrap();
 
-        let mode = std::fs::metadata(temp.0.share_dir().join(KEY_FILE))
+        let mode = std::fs::metadata(temp.paths.share_dir().join(KEY_FILE))
             .unwrap()
             .permissions()
             .mode();
@@ -296,10 +278,10 @@ mod tests {
     /// files that belong to different keys.
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn simultaneous_first_calls_agree_on_one_identity() {
-        let temp = TempRoot::new("race");
+        let temp = Scratch::new("identity-race");
         let calls: Vec<_> = (0..8)
             .map(|_| {
-                let paths = temp.0.clone();
+                let paths = temp.paths.clone();
                 tokio::spawn(async move { Identity::load_or_create(&paths).await })
             })
             .collect();
@@ -314,7 +296,7 @@ mod tests {
             );
         }
 
-        let saved = Identity::load_or_create(&temp.0).await.unwrap().pin();
+        let saved = Identity::load_or_create(&temp.paths).await.unwrap().pin();
         assert!(
             pins.iter().all(|pin| *pin == saved),
             "all callers must see the saved identity"

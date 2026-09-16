@@ -447,42 +447,20 @@ mod tests {
     use super::*;
     use crate::config::{PortMapping, ShareConfig};
     use crate::instance::content::{ContentKind, Origin};
+    use crate::instance::jar::tests::fabric_jar;
     use crate::net::Progress;
+    use crate::paths::Scratch;
     use crate::server::share::{self as server_share, ServerShare};
     use crate::server::{Server, ServerKind};
     use crate::share::code::Code;
     use crate::share::join;
     use crate::share::link::{Address, Link, Pin};
-    use std::io::{Read, Write};
+    use std::io::Read;
     use std::path::Path;
-
-    fn paths(tag: &str) -> Paths {
-        Paths {
-            root: std::env::temp_dir().join(format!("geode-e2e-{tag}-{}", std::process::id())),
-        }
-    }
-
-    /// A Fabric mod jar declaring which side it runs on.
-    fn fabric_jar(id: &str, environment: &str) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        {
-            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
-            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
-            zip.start_file("fabric.mod.json", options).unwrap();
-            write!(
-                zip,
-                r#"{{"schemaVersion":1,"id":"{id}","version":"1.0.0","environment":"{environment}"}}"#
-            )
-            .unwrap();
-            zip.finish().unwrap();
-        }
-        bytes
-    }
 
     /// A shared Fabric server on disk, with things that must reach a player and
     /// things that must never leave the admin's machine.
     async fn shared_server(paths: &Paths) -> (Server, ServerShare) {
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
         let mut server = Server::new("Survival".into(), ServerKind::Fabric, "1.21.1".into());
         server.id = "survival".into();
         server.build = "0.16.9".into();
@@ -547,7 +525,8 @@ mod tests {
     /// The whole feature, as a player meets it: preview, download, import.
     #[tokio::test]
     async fn a_player_joins_a_shared_server_end_to_end() {
-        let admin = paths("join");
+        let admin_scratch = Scratch::new("e2e-join");
+        let admin = admin_scratch.paths.clone();
         let (_, share) = shared_server(&admin).await;
         let host = Host::start(admin.clone(), 0).await.unwrap();
         let link = link(host.local_addr.port(), &share.code, pin_of(&admin).await);
@@ -567,8 +546,8 @@ mod tests {
         assert_eq!(preview.verified, join::Verified::Pinned);
 
         // What actually crosses the network.
-        let player = paths("join-player");
-        let _ = tokio::fs::remove_dir_all(&player.root).await;
+        let player_scratch = Scratch::new("e2e-join-player");
+        let player = player_scratch.paths.clone();
         let archive = player.root.join("incoming.geodepack");
         join::download(&preview.link, &archive, &Progress::silent("t")).await.unwrap();
 
@@ -644,7 +623,8 @@ mod tests {
     /// Everything that should turn a player away does, and says why.
     #[tokio::test]
     async fn a_wrong_password_the_wrong_machine_and_a_replaced_password_are_refused() {
-        let admin = paths("refuse");
+        let scratch = Scratch::new("e2e-refuse");
+        let admin = scratch.paths.clone();
         let (server, share) = shared_server(&admin).await;
         let host = Host::start(admin.clone(), 0).await.unwrap();
         let port = host.local_addr.port();
@@ -719,7 +699,8 @@ mod tests {
     /// that follows is pinned to exactly that one.
     #[tokio::test]
     async fn a_typed_address_is_pinned_to_the_machine_that_first_answered() {
-        let admin = paths("typed");
+        let scratch = Scratch::new("e2e-typed");
+        let admin = scratch.paths.clone();
         let (_, share) = shared_server(&admin).await;
         let host = Host::start(admin.clone(), 0).await.unwrap();
         let port = host.local_addr.port();
@@ -733,7 +714,8 @@ mod tests {
         assert!(typed.pin.is_none());
 
         // Unverified links do not get a download.
-        let archive = paths("typed-player").root.join("p.geodepack");
+        let player = Scratch::new("e2e-typed-player");
+        let archive = player.paths.root.join("p.geodepack");
         join::download(&typed, &archive, &Progress::silent("t"))
             .await
             .expect_err("a direct address with no fingerprint must preview first");
@@ -757,19 +739,73 @@ mod tests {
         config
     }
 
+    /// A port for the service to be told to listen on.
+    ///
+    /// Deliberately not a `:0` bind read back and dropped: that number comes
+    /// from the range the kernel hands out for every other `:0` bind, so one
+    /// of `host.rs`'s listeners could be given it in the moment between this
+    /// call and the service binding it, and the service would come up on a
+    /// port already taken. Numbers below that range are only ever taken by
+    /// something that asked for them by name — 24_000 is below the 32768 the
+    /// default `net.ipv4.ip_local_port_range` starts at, so a machine tuned
+    /// lower needs these numbers lowered with it.
+    ///
+    /// Two things keep callers apart, because the gap between this check and
+    /// the service's own bind is still a gap. The counter separates tests in
+    /// one run; the process id separates runs, which matters because two
+    /// `cargo test` processes on one machine would otherwise both start at the
+    /// same number, both be told it is free, and the second service to bind
+    /// would fail on a port already in use.
     fn free_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+        static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+        let base = first_port(std::process::id());
+        loop {
+            let port = base + NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            assert!(port < 32_000, "no port left below the ephemeral range");
+            if port_is_free(port) {
+                return port;
+            }
+        }
+    }
+
+    /// Where this process's candidates start: a stretch of the range picked by
+    /// process id, wide enough for every `free_port` call one run makes.
+    fn first_port(pid: u32) -> u16 {
+        24_000 + (pid % 200) as u16 * 32
     }
 
     fn port_is_free(port: u16) -> bool {
         std::net::TcpListener::bind(("0.0.0.0", port)).is_ok()
     }
 
+    /// Two `cargo test` runs at once — one worktree each, which is how this
+    /// repo gets worked on — have to be handed different candidates, since the
+    /// counter inside `free_port` is per process and cannot tell them apart.
+    /// Every start also has to stay below the ephemeral range, whatever the
+    /// pid.
+    #[test]
+    fn two_runs_on_one_machine_do_not_start_at_the_same_port() {
+        let starts: std::collections::HashSet<u16> = (1..=400u32).map(first_port).collect();
+        assert!(
+            starts.len() > 100,
+            "400 pids share only {} starting ports",
+            starts.len()
+        );
+        for pid in [1, 4_194_304, u32::MAX] {
+            let start = first_port(pid);
+            assert!(
+                (24_000..31_000).contains(&start),
+                "pid {pid} starts at {start}"
+            );
+        }
+    }
+
     /// The service listens exactly while something is shared, follows a port
     /// change, gives the port back, and builds working links.
     #[tokio::test]
     async fn sharing_listens_only_while_something_is_shared() {
-        let admin = paths("service");
+        let scratch = Scratch::new("e2e-service");
+        let admin = scratch.paths.clone();
         let (server, share) = shared_server(&admin).await;
         let service = service();
 
@@ -830,7 +866,6 @@ mod tests {
         join::preview(link).await.unwrap();
 
         service.shutdown().await;
-        let _ = tokio::fs::remove_dir_all(&admin.root).await;
     }
 
     /// Unsharing one server while another stays shared keeps the listener up
@@ -840,7 +875,8 @@ mod tests {
     async fn unsharing_a_server_cuts_off_its_downloads_while_another_stays_shared() {
         use crate::share::host::tests::{ask_for_pack, read_rest};
 
-        let admin = paths("unshare-cut");
+        let scratch = Scratch::new("e2e-unshare-cut");
+        let admin = scratch.paths.clone();
         let (server, share) = shared_server(&admin).await;
         // Megabytes that do not compress, so the download outlasts every buffer
         // between the two ends and is still under way when the server is unshared.
@@ -882,7 +918,6 @@ mod tests {
         );
 
         service.shutdown().await;
-        let _ = tokio::fs::remove_dir_all(&admin.root).await;
     }
 
     /// Unsharing the last shared server stops the listener, and removing the
@@ -893,7 +928,8 @@ mod tests {
         use crate::share::host::tests::{ask_for_pack, outgoing_files, read_rest};
         use crate::share::portmap::tests::a_mapping_whose_removal_hangs;
 
-        let admin = paths("stop-cut");
+        let scratch = Scratch::new("e2e-stop-cut");
+        let admin = scratch.paths.clone();
         let (server, share) = shared_server(&admin).await;
         // Megabytes that do not compress, so the download outlasts every buffer
         // between the two ends and is still under way when sharing stops.
@@ -933,8 +969,6 @@ mod tests {
             "a download ran to its end as sharing stopped"
         );
         stopping.await.unwrap();
-
-        let _ = tokio::fs::remove_dir_all(&admin.root).await;
     }
 
     /// A new code needs no reconcile, so what cuts off a download started with
@@ -944,7 +978,8 @@ mod tests {
     async fn a_new_code_cuts_off_downloads_through_the_service() {
         use crate::share::host::tests::{ask_for_pack, read_rest};
 
-        let admin = paths("rotate-cut");
+        let scratch = Scratch::new("e2e-rotate-cut");
+        let admin = scratch.paths.clone();
         let (server, mut share) = shared_server(&admin).await;
         // Megabytes that do not compress, so the download outlasts every buffer
         // between the two ends and is still under way when the code changes.
@@ -973,7 +1008,6 @@ mod tests {
         );
 
         service.shutdown().await;
-        let _ = tokio::fs::remove_dir_all(&admin.root).await;
     }
 
     /// A link is only ever built from an address players can actually reach.
@@ -1067,7 +1101,8 @@ mod tests {
     /// A port something else holds is reported, not a crash.
     #[tokio::test]
     async fn a_port_already_in_use_is_reported() {
-        let admin = paths("busy");
+        let scratch = Scratch::new("e2e-busy");
+        let admin = scratch.paths.clone();
         let (_, share) = shared_server(&admin).await;
         let squatter = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
         let taken = squatter.local_addr().unwrap().port();

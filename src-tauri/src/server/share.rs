@@ -213,12 +213,11 @@ pub async fn list(paths: &Paths) -> Result<Shared> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paths::Scratch;
     use crate::share::code::Code;
 
-    fn scratch(tag: &str) -> Paths {
-        let root = std::env::temp_dir().join(format!("geode-server-share-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        Paths { root }
+    fn scratch(tag: &str) -> Scratch {
+        Scratch::new(&format!("server-share-{tag}"))
     }
 
     fn files_in(dir: &std::path::Path) -> Vec<String> {
@@ -232,7 +231,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_share_is_saved_read_back_and_stopped() {
-        let paths = scratch("round-trip");
+        let scratch = scratch("round-trip");
+        let paths = scratch.paths.clone();
         std::fs::create_dir_all(paths.server("survival")).unwrap();
 
         assert_eq!(load(&paths, "survival").await.unwrap(), None);
@@ -277,15 +277,14 @@ mod tests {
         // Stopping twice is not an error, and changes nothing.
         stop(&paths, "survival").await.unwrap();
         assert_eq!(load(&paths, "survival").await.unwrap(), Some(stopped));
-
-        std::fs::remove_dir_all(&paths.root).unwrap();
     }
 
     /// The password is the server's, not one sharing's. Links already sent
     /// stop working while sharing is stopped, and work again when it starts.
     #[tokio::test]
     async fn stopping_keeps_the_password_and_sharing_again_brings_it_back() {
-        let paths = scratch("keep-password");
+        let scratch = scratch("keep-password");
+        let paths = scratch.paths.clone();
         std::fs::create_dir_all(paths.server("survival")).unwrap();
         let listed = |shared: &Shared| {
             shared
@@ -316,8 +315,6 @@ mod tests {
         assert!(again.shared);
         assert_eq!(load(&paths, "survival").await.unwrap(), Some(again));
         assert_eq!(listed(&list(&paths).await.unwrap()), vec!["survival"]);
-
-        std::fs::remove_dir_all(&paths.root).unwrap();
     }
 
     /// A Geode from before passwords were kept reads `share.json` and nothing
@@ -326,7 +323,8 @@ mod tests {
     /// again — router, `config/` and all — with nobody asking.
     #[tokio::test]
     async fn a_stopped_share_is_not_where_an_older_geode_looks() {
-        let paths = scratch("older-geode");
+        let scratch = scratch("older-geode");
+        let paths = scratch.paths.clone();
         let dir = paths.server("survival");
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -354,8 +352,6 @@ mod tests {
         assert_eq!(files_in(&dir), vec!["share.stopped.json"]);
         let stopped = load(&paths, "survival").await.unwrap().unwrap();
         assert_eq!((stopped.code, stopped.shared), (older, false));
-
-        std::fs::remove_dir_all(&paths.root).unwrap();
     }
 
     /// Every share file written before stopping kept the file was for a server
@@ -363,7 +359,8 @@ mod tests {
     /// so every link already sent keeps working.
     #[tokio::test]
     async fn a_share_file_from_before_passwords_were_kept_reads_as_shared() {
-        let paths = scratch("older-file");
+        let scratch = scratch("older-file");
+        let paths = scratch.paths.clone();
         std::fs::create_dir_all(paths.server("survival")).unwrap();
         let code = Code::generate();
         let json = format!(r#"{{"code":"{}","includeConfig":false}}"#, code.raw());
@@ -374,8 +371,6 @@ mod tests {
         assert_eq!(share.code, code);
         let shared = list(&paths).await.unwrap();
         assert_eq!(shared.servers, vec![("survival".to_string(), share)]);
-
-        std::fs::remove_dir_all(&paths.root).unwrap();
     }
 
     /// The reason this file exists. A job that loaded the server before the
@@ -385,7 +380,8 @@ mod tests {
     async fn a_stale_server_save_leaves_the_share_alone() {
         use crate::server::{Server, ServerKind};
 
-        let paths = scratch("stale-server");
+        let scratch = scratch("stale-server");
+        let paths = scratch.paths.clone();
         let server = Server::new("Leaky".into(), ServerKind::Fabric, "1.21.1".into());
         server.save(&paths).await.unwrap();
         let leaked = ServerShare {
@@ -422,15 +418,14 @@ mod tests {
                 ..replaced
             })
         );
-
-        std::fs::remove_dir_all(&paths.root).unwrap();
     }
 
     /// A password that reached the wrong person is replaced before sharing
     /// starts again, so it must not take sharing again to replace it.
     #[tokio::test]
     async fn replacing_the_password_works_while_stopped_and_keeps_it_stopped() {
-        let paths = scratch("replace-stopped");
+        let scratch = scratch("replace-stopped");
+        let paths = scratch.paths.clone();
         std::fs::create_dir_all(paths.server("survival")).unwrap();
 
         let err = replace_password(&paths, "survival")
@@ -448,14 +443,13 @@ mod tests {
             "replacing the password shared the server again"
         );
         assert_eq!(load(&paths, "survival").await.unwrap(), Some(replaced));
-
-        std::fs::remove_dir_all(&paths.root).unwrap();
     }
 
     /// A share with no server behind it would be a password that opens nothing.
     #[tokio::test]
     async fn a_server_that_is_not_there_cannot_be_shared() {
-        let paths = scratch("missing");
+        let scratch = scratch("missing");
+        let paths = scratch.paths.clone();
         let share = ServerShare {
             code: Code::generate(),
             include_config: false,
@@ -464,14 +458,14 @@ mod tests {
         save(&paths, "nowhere", &share).await.unwrap_err();
         start(&paths, "nowhere").await.unwrap_err();
         assert!(!paths.server("nowhere").exists());
-        let _ = std::fs::remove_dir_all(&paths.root);
     }
 
     /// Something that cannot read a share file must not take it for "not
     /// shared": that is how a server still shared gets its listener stopped.
     #[tokio::test]
     async fn a_share_file_that_cannot_be_read_is_counted_not_skipped() {
-        let paths = scratch("list");
+        let scratch = scratch("list");
+        let paths = scratch.paths.clone();
         assert_eq!(list(&paths).await.unwrap().servers, vec![], "no servers folder at all");
 
         for id in ["b-shared", "a-shared", "not-shared", "torn"] {
@@ -501,7 +495,5 @@ mod tests {
             vec![("a-shared".to_string(), a), ("b-shared".to_string(), b)]
         );
         assert_eq!(shared.unreadable, vec!["torn".to_string()]);
-
-        std::fs::remove_dir_all(&paths.root).unwrap();
     }
 }

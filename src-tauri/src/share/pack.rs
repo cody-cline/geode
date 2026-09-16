@@ -1888,7 +1888,9 @@ pub fn file_name(stem: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::instance::jar::tests::fabric_jar;
     use crate::instance::InstanceOverrides;
+    use crate::paths::Scratch;
 
     fn manifest() -> Manifest {
         Manifest {
@@ -2007,9 +2009,8 @@ mod tests {
     /// modpack the moment it gained a Geode feature.
     #[tokio::test]
     async fn everything_geode_adds_stays_inside_its_own_directory() {
-        let paths = Paths {
-            root: std::env::temp_dir().join(format!("geode-extras-{}", std::process::id())),
-        };
+        let scratch = Scratch::new("extras");
+        let paths = scratch.paths.clone();
         let mut inst = instance();
         inst.icon = Some("icon.png".into());
         inst.banner = Some("banner.jpg".into());
@@ -2063,13 +2064,11 @@ mod tests {
     }
 
     /// An instance on disk, with each named file actually written.
-    async fn fixture(tag: &str, files: &[(&str, &str)]) -> (Paths, Instance) {
-        let paths = Paths {
-            root: std::env::temp_dir().join(format!("geode-ref-{tag}-{}", std::process::id())),
-        };
+    async fn fixture(tag: &str, files: &[(&str, &str)]) -> (Scratch, Instance) {
+        let scratch = Scratch::new(&format!("ref-{tag}"));
         let mut inst = instance();
         inst.id = format!("inst-{tag}");
-        let game = paths.game_dir(&inst.id);
+        let game = scratch.paths.game_dir(&inst.id);
         let _ = tokio::fs::remove_dir_all(&game).await;
         for (dir, name) in files {
             let d = game.join(dir);
@@ -2078,7 +2077,7 @@ mod tests {
             // here, because every assertion below is about paths, not sides.
             tokio::fs::write(d.join(name), b"not really a jar").await.unwrap();
         }
-        (paths, inst)
+        (scratch, inst)
     }
 
     /// Everything inside an exported pack, by entry name.
@@ -2095,8 +2094,9 @@ mod tests {
     /// redistribution rather than a description of one.
     #[tokio::test]
     async fn a_provider_backed_jar_is_referenced_instead_of_embedded() {
-        let (paths, mut inst) =
+        let (scratch, mut inst) =
             fixture("cf", &[("mods", "create.jar"), ("config", "create.toml")]).await;
+        let paths = scratch.paths.clone();
         inst.content = vec![record("curseforge", "create.jar", ContentKind::Mod)];
 
         let manifest = manifest_for(&paths, &inst).await;
@@ -2131,7 +2131,8 @@ mod tests {
     /// manifest says it was left out. Both halves wrong at once.
     #[tokio::test]
     async fn a_disabled_provider_backed_jar_is_not_embedded_either() {
-        let (paths, mut inst) = fixture("cfoff", &[("mods", "create.jar.disabled")]).await;
+        let (scratch, mut inst) = fixture("cfoff", &[("mods", "create.jar.disabled")]).await;
+        let paths = scratch.paths.clone();
         inst.content = vec![record("curseforge", "create.jar", ContentKind::Mod)];
 
         let manifest = manifest_for(&paths, &inst).await;
@@ -2157,11 +2158,12 @@ mod tests {
     /// wrote themselves, with nothing anywhere saying where it went.
     #[tokio::test]
     async fn a_jar_with_no_provenance_is_still_embedded() {
-        let (paths, mut inst) = fixture(
+        let (scratch, mut inst) = fixture(
             "hand",
             &[("mods", "homemade.jar"), ("mods", "no-record-at-all.jar")],
         )
         .await;
+        let paths = scratch.paths.clone();
         // Two ways a jar has no link to give: a record with nothing in it, and
         // — the ordinary case — a file somebody dropped in, which Geode never
         // writes a record for at all.
@@ -2192,7 +2194,8 @@ mod tests {
     /// mod the sharer does not have.
     #[tokio::test]
     async fn a_record_whose_file_is_gone_is_not_referenced() {
-        let (paths, mut inst) = fixture("stale", &[("mods", "present.jar")]).await;
+        let (scratch, mut inst) = fixture("stale", &[("mods", "present.jar")]).await;
+        let paths = scratch.paths.clone();
         inst.content = vec![
             record("curseforge", "present.jar", ContentKind::Mod),
             record("curseforge", "deleted-by-hand.jar", ContentKind::Mod),
@@ -2211,7 +2214,8 @@ mod tests {
     /// here is how the two halves come to disagree.
     #[tokio::test]
     async fn modrinth_content_is_never_given_a_source() {
-        let (paths, mut inst) = fixture("mr", &[("mods", "sodium.jar")]).await;
+        let (scratch, mut inst) = fixture("mr", &[("mods", "sodium.jar")]).await;
+        let paths = scratch.paths.clone();
         inst.content = vec![record("modrinth", "sodium.jar", ContentKind::Mod)];
 
         let manifest = manifest_for(&paths, &inst).await;
@@ -2224,7 +2228,7 @@ mod tests {
     /// not to, or omit one nothing tells the recipient how to get.
     #[tokio::test]
     async fn nothing_is_omitted_without_the_manifest_saying_where_to_get_it() {
-        let (paths, mut inst) = fixture(
+        let (scratch, mut inst) = fixture(
             "inv",
             &[
                 ("mods", "from-cf.jar"),
@@ -2234,6 +2238,7 @@ mod tests {
             ],
         )
         .await;
+        let paths = scratch.paths.clone();
         inst.content = vec![
             record("curseforge", "from-cf.jar", ContentKind::Mod),
             record("modrinth", "from-mr.jar", ContentKind::Mod),
@@ -2270,7 +2275,8 @@ mod tests {
     /// nothing anywhere to say so.
     #[tokio::test]
     async fn a_plain_mrpack_still_embeds_what_it_cannot_reference() {
-        let (paths, mut inst) = fixture("plain", &[("mods", "create.jar")]).await;
+        let (scratch, mut inst) = fixture("plain", &[("mods", "create.jar")]).await;
+        let paths = scratch.paths.clone();
         inst.content = vec![record("curseforge", "create.jar", ContentKind::Mod)];
 
         let dest = paths.root.join("plain.mrpack");
@@ -2304,8 +2310,9 @@ mod tests {
     /// notes, memory and artwork on the way back in.
     #[tokio::test]
     async fn a_pack_carries_the_instance_back_to_another_machine() {
-        let (paths, mut inst) =
+        let (scratch, mut inst) =
             fixture("round", &[("mods", "create.jar"), ("config", "x.toml")]).await;
+        let paths = scratch.paths.clone();
         inst.name = "My Pack".into();
         inst.notes = "read me".into();
         inst.overrides.memory_mb = Some(6144);
@@ -2349,11 +2356,12 @@ mod tests {
     /// author wrote actually arrives.
     #[tokio::test]
     async fn a_pack_imports_through_the_same_path_the_app_uses() {
-        let (paths, mut inst) = fixture(
+        let (scratch, mut inst) = fixture(
             "full",
             &[("mods", "homemade.jar"), ("config", "author.toml")],
         )
         .await;
+        let paths = scratch.paths.clone();
         inst.name = "Full Round".into();
         inst.overrides.java_args = Some("-XX:+UseG1GC".into());
         inst.content = vec![record("", "homemade.jar", ContentKind::Mod)];
@@ -2382,7 +2390,8 @@ mod tests {
     /// only ones a player could delete.
     #[tokio::test]
     async fn a_server_pack_owns_even_the_jars_that_arrive_with_no_record() {
-        let (paths, mut inst) = fixture("srv", &[("mods", "private-anticheat.jar")]).await;
+        let (scratch, mut inst) = fixture("srv", &[("mods", "private-anticheat.jar")]).await;
+        let paths = scratch.paths.clone();
         inst.content = vec![record("", "private-anticheat.jar", ContentKind::Mod)];
 
         let dest = paths.root.join("server.geodepack");
@@ -2419,7 +2428,8 @@ mod tests {
     /// of it lands, while the same pack from a person still carries all three.
     #[tokio::test]
     async fn a_server_pack_cannot_set_the_jvm_or_claim_to_be_a_modpack() {
-        let (paths, mut inst) = fixture("jvm", &[("mods", "agent.jar")]).await;
+        let (scratch, mut inst) = fixture("jvm", &[("mods", "agent.jar")]).await;
+        let paths = scratch.paths.clone();
         inst.overrides.java_args = Some("-javaagent:mods/agent.jar".into());
         inst.overrides.memory_mb = Some(256);
         inst.pack = Some(crate::instance::PackSource::local(
@@ -2445,8 +2455,6 @@ mod tests {
         assert_eq!(shared.overrides.java_args.as_deref(), Some("-javaagent:mods/agent.jar"));
         assert_eq!(shared.overrides.memory_mb, Some(256));
         assert_eq!(shared.pack.as_ref().map(|p| p.version.as_str()), Some("4.2.0"));
-
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     /// A server pack that stops halfway is still the server's. The caller saves
@@ -2454,10 +2462,8 @@ mod tests {
     /// settled before the failure is reported — not only when all went well.
     #[tokio::test]
     async fn a_cancelled_server_import_still_belongs_to_the_server() {
-        let paths = Paths {
-            root: std::env::temp_dir().join(format!("geode-cancel-{}", std::process::id())),
-        };
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+        let scratch = Scratch::new("cancel");
+        let paths = scratch.paths.clone();
         tokio::fs::create_dir_all(&paths.root).await.unwrap();
 
         // Both of the pack's files already on the recipient's disk, standing
@@ -2514,7 +2520,8 @@ mod tests {
     /// their own mods — they can delete any of them.
     #[tokio::test]
     async fn a_personal_pack_leaves_its_content_the_recipients_own() {
-        let (paths, mut inst) = fixture("pers", &[("mods", "homemade.jar")]).await;
+        let (scratch, mut inst) = fixture("pers", &[("mods", "homemade.jar")]).await;
+        let paths = scratch.paths.clone();
         inst.content = vec![record("", "homemade.jar", ContentKind::Mod)];
 
         let dest = paths.root.join("personal.geodepack");
@@ -2540,11 +2547,12 @@ mod tests {
     /// crashed, now crashing for somebody else.
     #[tokio::test]
     async fn a_disabled_reference_carries_its_state() {
-        let (paths, mut inst) = fixture(
+        let (scratch, mut inst) = fixture(
             "offref",
             &[("mods", "crashes.jar.disabled"), ("mods", "fine.jar")],
         )
         .await;
+        let paths = scratch.paths.clone();
         inst.content = vec![
             record("curseforge", "crashes.jar", ContentKind::Mod),
             record("curseforge", "fine.jar", ContentKind::Mod),
@@ -2562,7 +2570,8 @@ mod tests {
     /// but it does pin that the pack's chosen name never reaches the disk.
     #[tokio::test]
     async fn a_pack_cannot_choose_where_its_artwork_is_written() {
-        let (paths, inst) = fixture("art", &[("config", "x.toml")]).await;
+        let (scratch, inst) = fixture("art", &[("config", "x.toml")]).await;
+        let paths = scratch.paths.clone();
         let dest = paths.root.join("art.geodepack");
         export(&paths, &inst, dest.clone(), false, &Progress::silent("t"))
             .await
@@ -2595,7 +2604,8 @@ mod tests {
     /// megabytes as a picture chosen by hand.
     #[tokio::test]
     async fn oversized_artwork_is_refused() {
-        let (paths, inst) = fixture("big", &[("config", "x.toml")]).await;
+        let (scratch, inst) = fixture("big", &[("config", "x.toml")]).await;
+        let paths = scratch.paths.clone();
         let dest = paths.root.join("big.geodepack");
         export(&paths, &inst, dest.clone(), false, &Progress::silent("t"))
             .await
@@ -2618,8 +2628,8 @@ mod tests {
     #[test]
     fn an_oversized_geode_manifest_is_refused() {
         use std::io::Write;
-        let dir = std::env::temp_dir().join(format!("geode-bigmanifest-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = Scratch::new("bigmanifest");
+        let dir = scratch.paths.root.clone();
         std::fs::create_dir_all(&dir).unwrap();
 
         let json = serde_json::to_vec(&manifest()).unwrap();
@@ -2638,8 +2648,6 @@ mod tests {
                 (got, _) => panic!("{spaces} spaces of padding: {got:?}"),
             }
         }
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Refusing a path is not enough on its own; the refusal has to be said.
@@ -2647,7 +2655,8 @@ mod tests {
     /// names `../../` is exactly the one somebody most needs to hear about.
     #[tokio::test]
     async fn an_unsafe_reference_is_reported_rather_than_skipped() {
-        let (paths, inst) = fixture("unsafe", &[("config", "x.toml")]).await;
+        let (scratch, inst) = fixture("unsafe", &[("config", "x.toml")]).await;
+        let paths = scratch.paths.clone();
         let dest = paths.root.join("unsafe.geodepack");
         export(&paths, &inst, dest.clone(), false, &Progress::silent("t"))
             .await
@@ -2751,37 +2760,52 @@ mod tests {
     use crate::server::share::ServerShare;
     use crate::server::{Server, ServerKind};
 
-    /// A jar with a real `fabric.mod.json`, so `jar::read` finds its side.
-    fn fabric_jar(id: &str, environment: &str) -> Vec<u8> {
-        use std::io::Write;
-        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
-        zip.start_file("fabric.mod.json", options).unwrap();
-        zip.write_all(
-            format!(r#"{{"schemaVersion":1,"id":"{id}","version":"1.0","environment":"{environment}"}}"#)
-                .as_bytes(),
+    /// A shared Fabric server holding nothing but the files named.
+    async fn small_server(
+        tag: &str,
+        files: &[(&str, Vec<u8>)],
+        include_config: bool,
+    ) -> (Scratch, Server) {
+        let scratch = Scratch::new(&format!("srv-{tag}"));
+        let paths = scratch.paths.clone();
+        let mut server = Server::new("Survival Club".into(), ServerKind::Fabric, "1.21.1".into());
+        server.id = format!("srv-{tag}");
+        server.build = "0.16.9".into();
+
+        let run = paths.server_run(&server.id);
+        tokio::fs::create_dir_all(run.join("mods")).await.unwrap();
+        for (rel, bytes) in files {
+            let path = run.join(rel);
+            tokio::fs::create_dir_all(path.parent().unwrap())
+                .await
+                .unwrap();
+            tokio::fs::write(path, bytes).await.unwrap();
+        }
+        let media = paths.server_media(&server.id);
+        tokio::fs::create_dir_all(&media).await.unwrap();
+        tokio::fs::write(media.join("icon.png"), b"PNG")
+            .await
+            .unwrap();
+        server.icon = Some("icon.png".into());
+
+        crate::server::share::save(
+            &paths,
+            &server.id,
+            &ServerShare {
+                code: crate::share::code::Code::generate(),
+                include_config,
+                shared: true,
+            },
         )
+        .await
         .unwrap();
-        zip.finish().unwrap().into_inner()
+        (scratch, server)
     }
 
     /// A Fabric server laid out the way a real one is after it has run: the
     /// secrets, the player lists, the world and the libraries sitting beside
     /// the mods, which is exactly what its pack must not pick up.
-    async fn server_fixture(tag: &str, include_config: bool) -> (Paths, Server) {
-        let paths = Paths {
-            root: std::env::temp_dir().join(format!("geode-srvpack-{tag}-{}", std::process::id())),
-        };
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
-
-        let mut server = Server::new("Survival Club".into(), ServerKind::Fabric, "1.21.1".into());
-        server.id = format!("srv-{tag}");
-        server.build = "0.16.9".into();
-        server.notes = "be nice".into();
-        server.settings.memory_mb = 8192;
-        server.settings.java_args = Some("-XX:+UseZGC".into());
-
-        let run = paths.server_run(&server.id);
+    async fn server_fixture(tag: &str, include_config: bool) -> (Scratch, Server) {
         let files: Vec<(&str, Vec<u8>)> = vec![
             ("server.properties", b"enable-rcon=true\nrcon.password=secret\n".to_vec()),
             ("ops.json", br#"[{"name":"admin","level":4}]"#.to_vec()),
@@ -2812,17 +2836,10 @@ mod tests {
             // Declares itself server-side, with a Modrinth record.
             ("mods/srv-mr.jar", fabric_jar("srvmr", "server")),
         ];
-        for (rel, bytes) in files {
-            let path = run.join(rel);
-            tokio::fs::create_dir_all(path.parent().unwrap()).await.unwrap();
-            tokio::fs::write(path, bytes).await.unwrap();
-        }
-
-        let media = paths.server_media(&server.id);
-        tokio::fs::create_dir_all(&media).await.unwrap();
-        tokio::fs::write(media.join("icon.png"), b"PNG").await.unwrap();
-        server.icon = Some("icon.png".into());
-
+        let (scratch, mut server) = small_server(tag, &files, include_config).await;
+        server.notes = "be nice".into();
+        server.settings.memory_mb = 8192;
+        server.settings.java_args = Some("-XX:+UseZGC".into());
         server.content = vec![
             record("modrinth", "sodium-mr.jar", ContentKind::Mod),
             record("curseforge", "create-cf.jar", ContentKind::Mod),
@@ -2832,18 +2849,7 @@ mod tests {
             // A plugin the index could point at, if the pack looked past mods/.
             record("modrinth", "p.jar", ContentKind::Plugin),
         ];
-        crate::server::share::save(
-            &paths,
-            &server.id,
-            &ServerShare {
-                code: crate::share::code::Code::generate(),
-                include_config,
-                shared: true,
-            },
-        )
-        .await
-        .unwrap();
-        (paths, server)
+        (scratch, server)
     }
 
     fn read_entry(archive: &Path, name: &str) -> Vec<u8> {
@@ -2865,7 +2871,8 @@ mod tests {
     /// lists, the world, the libraries, the plugins and the configs.
     #[tokio::test]
     async fn a_server_pack_carries_every_mod_and_nothing_else() {
-        let (paths, server) = server_fixture("only", false).await;
+        let (scratch, server) = server_fixture("only", false).await;
+        let paths = scratch.paths.clone();
         let dest = paths.root.join("server.geodepack");
         export_server(&paths, &server, dest.clone(), &Progress::silent("t")).await.unwrap();
 
@@ -2943,7 +2950,8 @@ mod tests {
     /// now. Its record still says so in `server.json`, and still reads.
     #[tokio::test]
     async fn a_mod_once_held_back_is_shared_now() {
-        let (paths, server) = server_fixture("held-back", false).await;
+        let (scratch, server) = server_fixture("held-back", false).await;
+        let paths = scratch.paths.clone();
         server.save(&paths).await.unwrap();
         let file = paths.server(&server.id).join("server.json");
         let mut json: serde_json::Value =
@@ -2971,15 +2979,14 @@ mod tests {
         let info = server_pack_info(&paths, &server).await.unwrap();
         assert_eq!(info.mods, 8);
         assert_eq!(info.mods, mods_in(&dest));
-
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     /// `config/` is the one thing beyond mods a server may send, and only when
     /// its admin said so.
     #[tokio::test]
     async fn a_server_sends_its_config_only_when_asked() {
-        let (paths, server) = server_fixture("config", true).await;
+        let (scratch, server) = server_fixture("config", true).await;
+        let paths = scratch.paths.clone();
         let dest = paths.root.join("server.geodepack");
         export_server(&paths, &server, dest.clone(), &Progress::silent("t")).await.unwrap();
 
@@ -3015,7 +3022,8 @@ mod tests {
     /// bytes with no record, is claimed for the server on the player's side.
     #[tokio::test]
     async fn a_server_pack_arrives_as_the_servers_own() {
-        let (paths, mut server) = server_fixture("round", false).await;
+        let (scratch, mut server) = server_fixture("round", false).await;
+        let paths = scratch.paths.clone();
         // Built from a published pack, whose version the index carries.
         server.pack = Some(crate::instance::PackSource::local(
             "Upstream Pack".into(),
@@ -3081,7 +3089,6 @@ mod tests {
                 "mods/srv-mr.jar",
             ]
         );
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     /// A client that tries to reach the network reaches a port nothing
@@ -3111,7 +3118,8 @@ mod tests {
     /// index, and it is the server's like everything else the pack brings.
     #[tokio::test]
     async fn a_server_side_jar_reaches_the_player() {
-        let (paths, server) = server_fixture("server-side", false).await;
+        let (scratch, server) = server_fixture("server-side", false).await;
+        let paths = scratch.paths.clone();
         let dest = paths.root.join("server.geodepack");
         export_server(&paths, &server, dest.clone(), &Progress::silent("t"))
             .await
@@ -3156,15 +3164,14 @@ mod tests {
                 .unwrap_or_else(|| panic!("{jar} has no record: {:?}", arrived.content));
             assert_eq!(record.origin, Origin::Server, "{jar}");
         }
-
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     /// The preview and the pack must agree, or a player is promised a number of
     /// mods that is not what they get.
     #[tokio::test]
     async fn the_preview_counts_the_mods_the_pack_actually_carries() {
-        let (paths, server) = server_fixture("info", false).await;
+        let (scratch, server) = server_fixture("info", false).await;
+        let paths = scratch.paths.clone();
         let info = server_pack_info(&paths, &server).await.unwrap();
 
         assert_eq!(
@@ -3225,7 +3232,8 @@ mod tests {
     async fn a_server_pack_takes_no_strays_and_follows_no_links() {
         use std::os::unix::fs::symlink;
 
-        let (paths, mut server) = server_fixture("strays", true).await;
+        let (scratch, mut server) = server_fixture("strays", true).await;
+        let paths = scratch.paths.clone();
         let run = paths.server_run(&server.id);
 
         // Outside the run directory: secrets, and jars that would pass every
@@ -3317,8 +3325,6 @@ mod tests {
         let info = server_pack_info(&paths, &server).await.unwrap();
         assert_eq!(info.mods, 8);
         assert_eq!(info.mods, mods_in(&dest));
-
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     /// A link named like a record, beside a real turned-off copy of that mod:
@@ -3329,7 +3335,8 @@ mod tests {
     async fn a_link_beside_a_turned_off_twin_is_not_read_through() {
         use std::os::unix::fs::symlink;
 
-        let (paths, mut server) = server_fixture("twin", false).await;
+        let (scratch, mut server) = server_fixture("twin", false).await;
+        let paths = scratch.paths.clone();
         let mods = paths.server_run(&server.id).join("mods");
         let elsewhere = paths.root.join("elsewhere");
         tokio::fs::create_dir_all(&elsewhere).await.unwrap();
@@ -3380,8 +3387,6 @@ mod tests {
 
         let info = server_pack_info(&paths, &server).await.unwrap();
         assert_eq!(info.mods, mods_in(&dest), "the count and the pack disagree");
-
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     /// The same rule one level up: a `mods/`, `client-mods/` or `config/` that
@@ -3392,7 +3397,8 @@ mod tests {
     async fn a_server_pack_does_not_follow_a_linked_folder() {
         use std::os::unix::fs::symlink;
 
-        let (paths, server) = server_fixture("linkdir", true).await;
+        let (scratch, server) = server_fixture("linkdir", true).await;
+        let paths = scratch.paths.clone();
         let run = paths.server_run(&server.id);
         let elsewhere = paths.root.join("elsewhere");
         tokio::fs::create_dir_all(&elsewhere).await.unwrap();
@@ -3419,8 +3425,6 @@ mod tests {
         );
         assert_eq!(mods_in(&dest), 0);
         assert_eq!(server_pack_info(&paths, &server).await.unwrap().mods, 0);
-
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     // -----------------------------------------------------------------------
@@ -3461,7 +3465,8 @@ mod tests {
     /// names the server's folder.
     #[tokio::test]
     async fn a_server_pack_hands_client_mods_to_players_as_mods() {
-        let (paths, mut server) = server_fixture("client-mods", false).await;
+        let (scratch, mut server) = server_fixture("client-mods", false).await;
+        let paths = scratch.paths.clone();
         add_client_mods(&paths, &mut server).await;
         let dest = paths.root.join("server.geodepack");
         export_server(&paths, &server, dest.clone(), &Progress::silent("t"))
@@ -3510,8 +3515,6 @@ mod tests {
         assert_eq!(info.mods, mods_in(&dest));
         // A client mod is not one only the server needs.
         assert_eq!(info.server_mods, 2);
-
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     /// One mods folder on the player's side means one copy of each mod. The
@@ -3519,7 +3522,8 @@ mod tests {
     /// name nor its project is already going from there.
     #[tokio::test]
     async fn a_mod_in_both_folders_is_sent_once() {
-        let (paths, mut server) = server_fixture("both-folders", false).await;
+        let (scratch, mut server) = server_fixture("both-folders", false).await;
+        let paths = scratch.paths.clone();
         let run = paths.server_run(&server.id);
         tokio::fs::create_dir_all(run.join("client-mods"))
             .await
@@ -3568,8 +3572,6 @@ mod tests {
         let info = server_pack_info(&paths, &server).await.unwrap();
         assert_eq!(info.mods, 9);
         assert_eq!(info.mods, mods_in(&dest));
-
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     /// Updating a mod whose file name stays the same, after turning it off,
@@ -3577,7 +3579,8 @@ mod tests {
     /// referenced once, and noted once, as the copy that is on.
     #[tokio::test]
     async fn a_mod_on_disk_both_on_and_off_is_named_once() {
-        let (paths, server) = server_fixture("on-and-off", false).await;
+        let (scratch, server) = server_fixture("on-and-off", false).await;
+        let paths = scratch.paths.clone();
         let mods = paths.server_run(&server.id).join("mods");
         for (name, bytes) in [
             ("sodium-mr.jar.disabled", b"older from modrinth".to_vec()),
@@ -3613,8 +3616,6 @@ mod tests {
                 "{path} was noted as the copy that is off"
             );
         }
-
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     /// Whatever carries a mod only the server needs, the manifest says so: a
@@ -3623,7 +3624,8 @@ mod tests {
     /// count of them is the same number.
     #[tokio::test]
     async fn a_server_pack_marks_what_only_the_server_needs() {
-        let (paths, mut server) = server_fixture("server-notes", false).await;
+        let (scratch, mut server) = server_fixture("server-notes", false).await;
+        let paths = scratch.paths.clone();
         let run = paths.server_run(&server.id);
         tokio::fs::write(
             run.join("mods/listed-srv.jar"),
@@ -3679,15 +3681,14 @@ mod tests {
             server_pack_info(&paths, &server).await.unwrap().server_mods,
             noted
         );
-
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     /// On the player's side a client mod is simply one of the server's mods,
     /// owned like the rest; one the player has to fetch is named.
     #[tokio::test]
     async fn a_player_gets_client_mods_as_the_servers_own_mods() {
-        let (paths, mut server) = server_fixture("client-mods-arrive", false).await;
+        let (scratch, mut server) = server_fixture("client-mods-arrive", false).await;
+        let paths = scratch.paths.clone();
         add_client_mods(&paths, &mut server).await;
         let dest = paths.root.join("server.geodepack");
         export_server(&paths, &server, dest.clone(), &Progress::silent("t"))
@@ -3738,8 +3739,6 @@ mod tests {
             );
         }
         assert!(!game.join("client-mods").exists());
-
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     // -----------------------------------------------------------------------
@@ -3753,7 +3752,8 @@ mod tests {
     /// outside a content folder, counts.
     #[tokio::test]
     async fn what_a_server_pack_brings_is_read_from_the_pack() {
-        let (paths, mut server) = server_fixture("arrivals", false).await;
+        let (scratch, mut server) = server_fixture("arrivals", false).await;
+        let paths = scratch.paths.clone();
         add_client_mods(&paths, &mut server).await;
         let mods = paths.server_run(&server.id).join("mods");
         tokio::fs::rename(
@@ -3877,8 +3877,6 @@ mod tests {
             found[&(ContentKind::Mod, "installed.jar".to_string())].project,
             Some(("modrinth".into(), "Q".into()))
         );
-
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     /// A joined instance can hold the player's own mods beside the server's.
@@ -3887,7 +3885,8 @@ mod tests {
     /// theirs to delete.
     #[tokio::test]
     async fn a_server_pack_claims_only_what_it_brought() {
-        let (paths, server) = server_fixture("claims-only", false).await;
+        let (scratch, server) = server_fixture("claims-only", false).await;
+        let paths = scratch.paths.clone();
         let dest = paths.root.join("server.geodepack");
         export_server(&paths, &server, dest.clone(), &Progress::silent("t"))
             .await
@@ -3938,14 +3937,13 @@ mod tests {
         )
         .await
         .expect("the player's own mod stays theirs to delete");
-
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     /// Import a server fixture's pack into a fresh instance, offline, with
     /// server-side mods on or off.
-    async fn import_choosing(tag: &str, server_side_mods_off: bool) -> (Paths, Instance) {
-        let (paths, server) = server_fixture(tag, false).await;
+    async fn import_choosing(tag: &str, server_side_mods_off: bool) -> (Scratch, Instance) {
+        let (scratch, server) = server_fixture(tag, false).await;
+        let paths = scratch.paths.clone();
         let dest = paths.root.join("server.geodepack");
         export_server(&paths, &server, dest.clone(), &Progress::silent("t"))
             .await
@@ -3966,7 +3964,7 @@ mod tests {
         )
         .await
         .unwrap();
-        (paths, arrived)
+        (scratch, arrived)
     }
 
     /// A player who keeps server-side mods off still gets them, turned off,
@@ -3975,7 +3973,8 @@ mod tests {
     #[tokio::test]
     async fn a_player_who_turned_server_side_mods_off_gets_them_off() {
         for off in [true, false] {
-            let (paths, arrived) = import_choosing(&format!("side-off-{off}"), off).await;
+            let (scratch, arrived) = import_choosing(&format!("side-off-{off}"), off).await;
+            let paths = scratch.paths.clone();
             let mods = paths.game_dir(&arrived.id).join("mods");
 
             for jar in ["server-side.jar", "srv-mr.jar"] {
@@ -3998,8 +3997,6 @@ mod tests {
             }
             assert!(mods.join("homemade.jar").is_file(), "off: {off}");
             assert!(mods.join("sodium-mr.jar").is_file(), "off: {off}");
-
-            let _ = tokio::fs::remove_dir_all(&paths.root).await;
         }
     }
 
@@ -4008,7 +4005,8 @@ mod tests {
     /// undo the admin's choice.
     #[tokio::test]
     async fn a_mod_the_server_turned_off_arrives_off_and_says_so() {
-        let (paths, arrived) = import_choosing("server-off", false).await;
+        let (scratch, arrived) = import_choosing("server-off", false).await;
+        let paths = scratch.paths.clone();
         let mods = paths.game_dir(&arrived.id).join("mods");
 
         assert!(mods.join("private-tools.jar.disabled").is_file());
@@ -4028,8 +4026,6 @@ mod tests {
             "{:?}",
             arrived.content
         );
-
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     // -----------------------------------------------------------------------
@@ -4045,7 +4041,8 @@ mod tests {
     /// players miss an admin's change, or download the same pack on every Play.
     #[tokio::test]
     async fn the_revision_moves_only_when_what_players_get_changes() {
-        let (paths, mut server) = server_fixture("revision", false).await;
+        let (scratch, mut server) = server_fixture("revision", false).await;
+        let paths = scratch.paths.clone();
         let run = paths.server_run(&server.id);
         let share = |include_config| ServerShare {
             code: crate::share::code::Code::generate(),
@@ -4163,8 +4160,6 @@ mod tests {
             unsent,
             "a config file that is not sent moved the revision"
         );
-
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     /// Resolving a server's references again keeps one record for each file,
@@ -4176,8 +4171,9 @@ mod tests {
     /// the server could not be reached.
     #[tokio::test]
     async fn a_file_that_goes_while_the_revision_is_read_is_left_out() {
-        let (paths, server) =
+        let (scratch, server) =
             small_server("ghost", &[("mods/there.jar", b"there".to_vec())], false).await;
+        let paths = scratch.paths.clone();
         let run = paths.server_run(&server.id);
         let present = server_mods(&run, &server.content).await.unwrap();
         let steady = server_revision(&paths, &server, &present, false)
@@ -4221,8 +4217,6 @@ mod tests {
             .await
             .unwrap()
             .is_some());
-
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     #[test]
@@ -4251,50 +4245,6 @@ mod tests {
         assert_eq!(create.len(), 1, "{content:?}");
         assert_eq!(create[0].version_id, "new");
         assert_eq!(content.len(), 3, "{content:?}");
-    }
-
-    /// A shared Fabric server holding nothing but the files named.
-    async fn small_server(
-        tag: &str,
-        files: &[(&str, Vec<u8>)],
-        include_config: bool,
-    ) -> (Paths, Server) {
-        let paths = Paths {
-            root: std::env::temp_dir().join(format!("geode-update-{tag}-{}", std::process::id())),
-        };
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
-        let mut server = Server::new("Survival Club".into(), ServerKind::Fabric, "1.21.1".into());
-        server.id = format!("srv-{tag}");
-        server.build = "0.16.9".into();
-
-        let run = paths.server_run(&server.id);
-        tokio::fs::create_dir_all(run.join("mods")).await.unwrap();
-        for (rel, bytes) in files {
-            let path = run.join(rel);
-            tokio::fs::create_dir_all(path.parent().unwrap())
-                .await
-                .unwrap();
-            tokio::fs::write(path, bytes).await.unwrap();
-        }
-        let media = paths.server_media(&server.id);
-        tokio::fs::create_dir_all(&media).await.unwrap();
-        tokio::fs::write(media.join("icon.png"), b"PNG")
-            .await
-            .unwrap();
-        server.icon = Some("icon.png".into());
-
-        crate::server::share::save(
-            &paths,
-            &server.id,
-            &ServerShare {
-                code: crate::share::code::Code::generate(),
-                include_config,
-                shared: true,
-            },
-        )
-        .await
-        .unwrap();
-        (paths, server)
     }
 
     /// The server's pack as it is now.
@@ -4363,7 +4313,7 @@ mod tests {
     /// and what they called the instance and the picture it has.
     #[tokio::test]
     async fn updating_brings_the_servers_changes_and_keeps_the_players_own() {
-        let (paths, mut server) = small_server(
+        let (scratch, mut server) = small_server(
             "keeps",
             &[
                 ("mods/a.jar", b"a".to_vec()),
@@ -4374,6 +4324,7 @@ mod tests {
             true,
         )
         .await;
+        let paths = scratch.paths.clone();
         let mut player = join_now(&paths, &server, "update-keeps", &[]).await;
         let game = paths.game_dir(&player.id);
         let mods = game.join("mods");
@@ -4501,16 +4452,15 @@ mod tests {
         assert_eq!(files.len(), player.content.len(), "{:?}", player.content);
         assert!(player.pack.is_none(), "{:?}", player.pack);
         assert_eq!(player.loader_version, "0.17.0");
-
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     /// A new version of a server's mod usually has a new file name. The player
     /// who turned the old one off keeps it off, because it is the same project.
     #[tokio::test]
     async fn a_renamed_server_mod_stays_off_for_a_player_who_turned_it_off() {
-        let (paths, mut server) =
+        let (scratch, mut server) =
             small_server("renamed", &[("mods/p-1.jar", b"p one".to_vec())], false).await;
+        let paths = scratch.paths.clone();
         server.content.push(ContentRecord {
             project_id: "P".into(),
             version_id: "v1".into(),
@@ -4552,8 +4502,6 @@ mod tests {
             record_of(&player, "p-2.jar").map(|r| r.origin),
             Some(Origin::Server)
         );
-
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     /// A mod the player keeps turned off is already on their disk, under the
@@ -4563,12 +4511,13 @@ mod tests {
     /// at all.
     #[tokio::test]
     async fn a_mod_the_player_keeps_off_is_not_fetched_again() {
-        let (paths, mut server) = small_server(
+        let (scratch, mut server) = small_server(
             "kept-off",
             &[("mods/idx.jar", b"from modrinth".to_vec())],
             false,
         )
         .await;
+        let paths = scratch.paths.clone();
         server.content.push(ContentRecord {
             project_id: "I".into(),
             ..record("modrinth", "idx.jar", ContentKind::Mod)
@@ -4600,8 +4549,6 @@ mod tests {
             Some(Origin::Server)
         );
         assert!(mods.join("new.jar").is_file());
-
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     /// Only the player's copy of the very file the pack names takes its name.
@@ -4610,8 +4557,8 @@ mod tests {
     /// version's name.
     #[tokio::test]
     async fn only_the_file_the_pack_names_takes_its_name() {
-        let dir = std::env::temp_dir().join(format!("geode-packs-name-{}", std::process::id()));
-        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let scratch = Scratch::new("packs-name");
+        let dir = scratch.paths.root.clone();
         tokio::fs::create_dir_all(&dir).await.unwrap();
         tokio::fs::write(dir.join("x.jar.disabled"), b"one")
             .await
@@ -4644,8 +4591,6 @@ mod tests {
             .unwrap();
         assert_eq!(std::fs::read(dir.join("x.jar")).unwrap(), b"two");
         assert!(dir.join("x.jar.disabled").is_file());
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     /// A player's setting applies to what the server sends later, and a
@@ -4653,12 +4598,13 @@ mod tests {
     #[tokio::test]
     async fn new_server_side_mods_follow_the_players_setting() {
         // Kept off: a server-side mod the server adds arrives off.
-        let (paths, server) = small_server(
+        let (scratch, server) = small_server(
             "side-off",
             &[("mods/homemade.jar", fabric_jar("homemade", "*"))],
             false,
         )
         .await;
+        let paths = scratch.paths.clone();
         let mut player = fresh("update-side-off");
         let _ = tokio::fs::remove_dir_all(paths.instance(&player.id)).await;
         player.server_side_mods_off = true;
@@ -4696,12 +4642,13 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(&paths.root).await;
 
         // Kept on: the one the player turned off stays off.
-        let (paths, server) = small_server(
+        let (scratch, server) = small_server(
             "side-on",
             &[("mods/side.jar", fabric_jar("side", "server"))],
             false,
         )
         .await;
+        let paths = scratch.paths.clone();
         let mut player = join_now(&paths, &server, "update-side-on", &[]).await;
         let mods = paths.game_dir(&player.id).join("mods");
         assert!(mods.join("side.jar").is_file());
@@ -4718,7 +4665,6 @@ mod tests {
 
         assert!(mods.join("side.jar.disabled").is_file() && !mods.join("side.jar").exists());
         assert!(mods.join("other.jar").is_file());
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     /// Two copies of one mod is a game that does not start. When the server
@@ -4726,12 +4672,13 @@ mod tests {
     /// copy is turned off, not deleted, stays theirs, and they are told.
     #[tokio::test]
     async fn the_players_own_copy_of_a_mod_the_server_now_ships_is_turned_off() {
-        let (paths, mut server) = small_server(
+        let (scratch, mut server) = small_server(
             "own-copy",
             &[("mods/homemade.jar", b"homemade".to_vec())],
             false,
         )
         .await;
+        let paths = scratch.paths.clone();
         let mut player = join_now(&paths, &server, "update-own-copy", &[]).await;
         let mods = paths.game_dir(&player.id).join("mods");
         tokio::fs::write(mods.join("mine-p.jar"), b"the player's P")
@@ -4775,8 +4722,6 @@ mod tests {
         // happened to switch.
         let again = update_offline(&paths, &mut player, &pack).await.unwrap();
         assert_eq!(again.turned_off, vec!["My P".to_string()]);
-
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     /// A player's own copy is only turned off for a copy of the server's that
@@ -4784,12 +4729,13 @@ mod tests {
     /// the one they play with, and nothing is reported.
     #[tokio::test]
     async fn a_players_own_copy_stays_on_when_the_servers_is_off() {
-        let (paths, mut server) = small_server(
+        let (scratch, mut server) = small_server(
             "own-copy-off",
             &[("mods/homemade.jar", b"homemade".to_vec())],
             false,
         )
         .await;
+        let paths = scratch.paths.clone();
         let mut player = fresh("update-own-copy-off");
         let _ = tokio::fs::remove_dir_all(paths.instance(&player.id)).await;
         player.server_side_mods_off = true;
@@ -4838,8 +4784,6 @@ mod tests {
             mods.join("mine-s.jar").is_file(),
             "the player's own copy is the only one they have"
         );
-
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     /// An update that fails partway is saved as far as it got, so what it did
@@ -4848,7 +4792,7 @@ mod tests {
     /// instance starts stays the one it had until an update finishes.
     #[tokio::test]
     async fn a_failed_update_leaves_ownership_right_and_versions_alone() {
-        let (paths, mut server) = small_server(
+        let (scratch, mut server) = small_server(
             "failed",
             &[
                 ("mods/gone.jar", b"gone".to_vec()),
@@ -4857,6 +4801,7 @@ mod tests {
             false,
         )
         .await;
+        let paths = scratch.paths.clone();
         let mut player = join_now(&paths, &server, "update-failed", &[]).await;
         let mods = paths.game_dir(&player.id).join("mods");
         tokio::fs::write(mods.join("own.jar"), b"the player's own")
@@ -4915,8 +4860,6 @@ mod tests {
             ("1.21.1", "0.16.9")
         );
         assert!(player.pack.is_none(), "{:?}", player.pack);
-
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     /// The same when the update finishes but the new version is one of the
@@ -4924,12 +4867,13 @@ mod tests {
     /// here. Nothing has landed to hold the choice, so the old file stays.
     #[tokio::test]
     async fn a_mod_kept_off_survives_an_update_that_could_not_fetch_it() {
-        let (paths, mut server) = small_server(
+        let (scratch, mut server) = small_server(
             "kept-off-missing",
             &[("mods/hand.jar", b"hand".to_vec())],
             false,
         )
         .await;
+        let paths = scratch.paths.clone();
         let mut player = join_now(&paths, &server, "update-kept-off-missing", &[]).await;
         let mods = paths.game_dir(&player.id).join("mods");
 
@@ -4972,8 +4916,6 @@ mod tests {
             "{:?}",
             player.content
         );
-
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     /// An update that fails before the new version of a mod lands does not
@@ -4982,12 +4924,13 @@ mod tests {
     /// not bring the mod back on.
     #[tokio::test]
     async fn a_mod_kept_off_is_not_forgotten_by_an_update_that_failed() {
-        let (paths, mut server) = small_server(
+        let (scratch, mut server) = small_server(
             "kept-off-fail",
             &[("mods/p-1.jar", b"p one".to_vec())],
             false,
         )
         .await;
+        let paths = scratch.paths.clone();
         server.content.push(ContentRecord {
             project_id: "P".into(),
             version_id: "v1".into(),
@@ -5042,15 +4985,13 @@ mod tests {
             "{:?}",
             player.content
         );
-
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     /// A cancelled update still leaves every file the pack brought in one state,
     /// on or off as it should be, and the versions as they were.
     #[tokio::test]
     async fn a_cancelled_update_still_settles_what_landed() {
-        let (paths, mut server) = small_server(
+        let (scratch, mut server) = small_server(
             "cancelled",
             &[
                 ("mods/stays.jar", b"stays".to_vec()),
@@ -5059,6 +5000,7 @@ mod tests {
             false,
         )
         .await;
+        let paths = scratch.paths.clone();
         server.content.push(ContentRecord {
             project_id: "I".into(),
             ..record("modrinth", "idx.jar", ContentKind::Mod)
@@ -5121,8 +5063,6 @@ mod tests {
             ),
             ("1.21.1", crate::meta::Loader::Fabric, "0.16.9")
         );
-
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     /// A pack says which revision it is, worked out from the very files it
@@ -5132,8 +5072,9 @@ mod tests {
     /// another's content, with nothing left to notice it.
     #[tokio::test]
     async fn an_update_keeps_the_revision_the_pack_carries() {
-        let (paths, server) =
+        let (scratch, server) =
             small_server("pack-revision", &[("mods/a.jar", b"a".to_vec())], false).await;
+        let paths = scratch.paths.clone();
         let mut player = join_now(&paths, &server, "update-pack-revision", &[]).await;
 
         let described = server_pack_info(&paths, &server).await.unwrap();
@@ -5162,15 +5103,14 @@ mod tests {
         assert_eq!(pack_revision(&older), None);
         older.revision = Some("  ".into());
         assert_eq!(pack_revision(&older), None);
-
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     /// Only a server's pack updates a joined instance. Anything else is refused
     /// before a single file or record is touched.
     #[tokio::test]
     async fn an_update_refuses_a_personal_pack() {
-        let (paths, inst) = fixture("personal-update", &[("mods", "homemade.jar")]).await;
+        let (scratch, inst) = fixture("personal-update", &[("mods", "homemade.jar")]).await;
+        let paths = scratch.paths.clone();
         let pack = paths.root.join("personal.geodepack");
         export(&paths, &inst, pack.clone(), false, &Progress::silent("t"))
             .await
@@ -5199,8 +5139,6 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
             .collect();
         assert_eq!(names, vec!["srv.jar".to_string()]);
-
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
     /// Every kind has an answer, and the ones that cannot give an honest one
@@ -5331,8 +5269,8 @@ mod tests {
     #[tokio::test]
     async fn a_curseforge_format_server_pack_is_refused() {
         use std::io::Write;
-        let dir = std::env::temp_dir().join(format!("geode-cfpack-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = Scratch::new("cfpack");
+        let dir = scratch.paths.root.clone();
         std::fs::create_dir_all(&dir).unwrap();
 
         let archive = dir.join("theirs.geodepack");
@@ -5349,8 +5287,6 @@ mod tests {
             .await
             .expect_err("a pack with no Modrinth index");
         assert!(err.to_string().contains("CurseForge's format"), "{err}");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

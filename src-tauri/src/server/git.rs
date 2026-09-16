@@ -429,6 +429,7 @@ fn is_mingit(name: &str, arch_suffix: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paths::Scratch;
 
     /// Every MinGit-ish name a real release carries, against both architectures
     /// — one asset should match, and it should be a different one each time.
@@ -502,9 +503,8 @@ mod tests {
     /// present Git names its version, and a missing one says what to do.
     #[tokio::test]
     async fn the_status_is_always_actionable() {
-        let paths = Paths {
-            root: std::env::temp_dir().join(format!("geode-git-status-{}", std::process::id())),
-        };
+        let scratch = Scratch::new("git-status");
+        let paths = scratch.paths.clone();
         let status = status(&paths).await;
         if status.present {
             let version = status.version.expect("a present Git reports its version");
@@ -521,9 +521,8 @@ mod tests {
 
     #[tokio::test]
     async fn no_portable_git_contributes_no_path() {
-        let paths = Paths {
-            root: std::env::temp_dir().join(format!("geode-git-path-{}", std::process::id())),
-        };
+        let scratch = Scratch::new("git-path");
+        let paths = scratch.paths.clone();
         assert!(path_entries(&paths).is_empty());
     }
 }
