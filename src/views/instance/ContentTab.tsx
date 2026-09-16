@@ -71,9 +71,15 @@ export default function ContentTab({
       : items;
   }, [items, filter]);
 
+  // The folder as well as the project: the check spans every folder while this
+  // list shows one, so a row takes only a candidate from its own folder — the
+  // same rule the server tab keeps.
   const updateFor = (item: ContentItem) =>
     updates.find(
-      (u) => u.projectId === item.projectId && u.provider === item.provider,
+      (u) =>
+        u.projectId === item.projectId &&
+        u.provider === item.provider &&
+        u.kind === kind,
     );
 
   async function toggle(item: ContentItem) {
@@ -116,7 +122,10 @@ export default function ContentTab({
         title: `Added ${added} file${added === 1 ? "" : "s"}`,
       });
     } catch (e) {
-      reportError("Could not add those files", e);
+      // A pick holding one file that would land on the server's own mod is
+      // refused whole, before anything is copied, so the title says what the
+      // reason under it cannot: the rest did not go in either.
+      reportError("Nothing was added", e);
     }
   }
 
@@ -171,7 +180,14 @@ export default function ContentTab({
         candidate.projectId,
         candidate.newVersionId,
       );
-      setUpdates((prev) => prev.filter((u) => u.projectId !== candidate.projectId));
+      setUpdates((prev) =>
+        prev.filter(
+          (u) =>
+            u.provider !== candidate.provider ||
+            u.projectId !== candidate.projectId ||
+            u.kind !== candidate.kind,
+        ),
+      );
       await Promise.all([load(), refreshInstances()]);
       toast({
         kind: "success",

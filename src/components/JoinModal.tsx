@@ -350,7 +350,8 @@ export default function JoinModal({
               Type the port too, unless it is {DEFAULT_SHARE_PORT}. Without a
               link there is nothing to check a first connection against, so
               Geode trusts it, and holds this address to that certificate once
-              you import. Ask the admin for the link if you can.
+              you import, for as long as an instance you joined from it is
+              still there. Ask the admin for the link if you can.
             </p>
           )}
         </div>
@@ -364,10 +365,23 @@ export default function JoinModal({
       )}
 
       {error && (
-        <div className={styles.error} role="alert">
-          <AlertTriangle size={15} />
-          <span>{error}</span>
-        </div>
+        <>
+          <div className={styles.error} role="alert">
+            <AlertTriangle size={15} />
+            <span>{error}</span>
+          </div>
+          {/* Every refusal lands here — a wrong password, an address nothing
+              answered, a pack that changed under an import — so this has to be
+              true of all of them: none of them keeps anything, and looking the
+              server up again is the whole of the retry. A server with no room
+              for another preview or download is the one worth waiting out, and
+              says so in its own words. */}
+          <p className="hint">
+            Nothing here was kept, so looking the server up again is the whole
+            of the retry. A server that says it is busy is answering other
+            players, and a moment later usually works.
+          </p>
+        </>
       )}
 
       {preview && info && (

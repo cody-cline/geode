@@ -1,7 +1,7 @@
-// Run with `node --test src/lib/share.test.mjs` (Node 22.18 or newer, which
-// strips the types from share.ts itself). Plain JavaScript on purpose: the
-// project has no test runner and no Node typings, and TypeScript leaves .mjs
-// files out of its check.
+// Run with `npm test` (Node 22.18 or newer, which strips the types from
+// share.ts itself). Plain JavaScript on purpose: the project has no test
+// runner and no Node typings, and TypeScript leaves .mjs files out of its
+// check.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -161,7 +161,7 @@ test("a finished import's problems are counted, and not offered as a retry", () 
 });
 
 test("a public mapping is the only one that promises a connection", () => {
-  const promise = /should be able to connect/i;
+  const promise = /can download this server's pack/i;
   const ok = routerLine(status(mapped("public")), false);
   assert.equal(ok.tone, "ok");
   assert.match(ok.detail, promise);
@@ -193,6 +193,16 @@ test("double NAT names the other router and the port to forward on it", () => {
   assert.match(line.title, /another router/i);
   assert.match(line.detail, /192\.168\.1\.20/);
   assert.match(line.detail, /25590/);
+});
+
+test("double NAT says how long a change out there takes to show up", () => {
+  // The mapper reads the external address again at half the lease, and manual
+  // detection asks again on the same half hour, so an admin who has bridged
+  // the modem waits rather than going back through Settings.
+  const opened = routerLine(status(mapped("doubleNat", { externalIp: "192.168.1.20" })), false);
+  assert.match(opened.detail, /half an hour/);
+  const byHand = routerLine(manual({ detected: { ip: "192.168.1.2", reachability: "doubleNat" } }), false);
+  assert.match(byHand.detail, /half an hour/);
 });
 
 test("double NAT does not promise that forwarding alone makes a link", () => {
@@ -238,12 +248,13 @@ test("a router that reported an unreachable address is not said to have reported
   assert.match(linkPendingReason(status(mapped("public")), false), /still working out/);
 });
 
-test("a router that picked another port says so", () => {
-  const line = routerLine(status(mapped("public", { port: 40123 })), false);
-  assert.match(line.detail, /40123/);
-  assert.match(line.detail, /already taken/);
-  const same = routerLine(status(mapped("public")), false);
-  assert.doesNotMatch(same.detail, /already taken/);
+test("the open port is the one packs come down, not the one Minecraft uses", () => {
+  // Geode maps the pack port and nothing else, so a line about connecting
+  // would be read as the game address and handed out as one.
+  const line = routerLine(status(mapped("public")), false);
+  assert.doesNotMatch(line.detail, /connect at/);
+  assert.match(line.detail, /download this server's pack/);
+  assert.match(line.detail, /203\.0\.113\.7:25590/);
 });
 
 test("every failure and manual setup shows the port to forward by hand", () => {
@@ -314,6 +325,20 @@ test("the listener reports its own failure before anything else", () => {
   assert.equal(listenLine(status({ state: "off" }, { listening: false })).tone, "info");
 });
 
+test("the lines about a working port say a firewall can still stop it", () => {
+  // The listener binds every interface, which is what raises Windows' prompt;
+  // denying it leaves the router showing the port open and every player
+  // timing out, with nothing else on the page pointing at it.
+  const listening = listenLine(status({ state: "off" }));
+  assert.equal(listening.tone, "ok");
+  assert.match(listening.detail, /firewall/);
+  assert.match(listening.detail, /Windows/);
+
+  // Once on the panel: the router line is printed directly beneath this one,
+  // and it is the listener Windows asks about.
+  assert.doesNotMatch(routerLine(manual(), false).detail, /firewall/);
+});
+
 test("a missing link explains what is missing", () => {
   assert.match(linkPendingReason(status({ state: "searching" }), false), /still working out/);
   const byHand = linkPendingReason(manual(), false);
@@ -362,11 +387,42 @@ test("manual setup says nothing about the router's answer before it has one", ()
   assert.match(linkPendingReason(idle, false), /still working out/);
 });
 
-test("a router that answered but would not open the port points at manual setup, which reads its address", () => {
+test("every router failure says Geode keeps asking on its own", () => {
+  // The mapper retries ten seconds on, at most a minute apart after that, and
+  // the page follows. Without saying so, an admin who has just switched UPnP
+  // on restarts Geode or changes the port — the one change that breaks links
+  // already handed out.
+  for (const reason of ["noGateway", "refused", "portInUse", "permanentOnly", "other"]) {
+    const line = routerLine(status({ state: "failed", reason, detail: "Conflict" }), false);
+    assert.match(line.detail, /keeps asking/, reason);
+    assert.match(line.detail, /within a minute/, reason);
+  }
+});
+
+test("a public address already set is not asked for by a router that refused", () => {
+  // Links use the Settings address whatever the router says, so switching to
+  // manual detection could not change theirs: it would only ask them to expose
+  // a port for nothing.
   for (const [reason, extra] of [["refused", {}], ["permanentOnly", {}], ["other", { detail: "Conflict" }]]) {
     const failed = status({ state: "failed", reason, ...extra });
     assert.match(routerLine(failed, false).detail, /Set it up myself/, reason);
+    assert.doesNotMatch(routerLine(failed, true).detail, /Set it up myself/, reason);
+    assert.doesNotMatch(routerLine(failed, true).detail, /reads your public address/, reason);
+    // Still the failure and still the port to forward, only without the aside.
+    assert.match(routerLine(failed, true).detail, /by hand|yourself/, reason);
+  }
+});
+
+test("a router that answered but would not open the port points at manual setup, which reads its address", () => {
+  for (const [reason, extra] of [["refused", {}], ["permanentOnly", {}], ["other", { detail: "Conflict" }]]) {
+    const failed = status({ state: "failed", reason, ...extra });
+    const detail = routerLine(failed, false).detail;
+    assert.match(detail, /Set it up myself/, reason);
     assert.match(linkPendingReason(failed, false), /Set it up myself/, reason);
+    // The retry comes before that aside, never after it: manual setup stops
+    // the mapper, so a minute read as what follows switching to it would be
+    // wrong — detection asks the router again every half hour.
+    assert.ok(detail.indexOf("keeps asking") < detail.indexOf("Set it up myself"), reason);
   }
   // No router answered, or the port is someone else's: manual setup would learn nothing more.
   for (const reason of ["noGateway", "portInUse"]) {
@@ -396,21 +452,24 @@ test("manual setup behind carrier-grade NAT or a second router says so before an
   assert.equal(routerLine(manual({ detected: { ip: "0.0.0.0", reachability: "noIpv4" } }), false).tone, "bad");
 });
 
+/** A shared server whose address players are given, as the read-out sees it. */
+const readOutAt = (address) => readOutHint(status(mapped("public"), { address }));
+
 test("an address read out off the default port says the port has to be typed", () => {
   // A player's Geode looks a bare host up on 25590, not on the admin's port.
   for (const address of ["127.0.0.1:38033", "host.playit.gg:12345", "[2001:db8::1]:40000"]) {
-    const hint = readOutHint(address);
+    const hint = readOutAt(address);
     assert.match(hint, /port included/, address);
     assert.match(hint, /25590/, address);
   }
   for (const address of ["203.0.113.7:25590", "play.example.com:25590", "[2001:db8::1]:25590"]) {
-    const hint = readOutHint(address);
+    const hint = readOutAt(address);
     assert.doesNotMatch(hint, /port included/, address);
     assert.match(hint, /leave the port off/, address);
   }
 
   // An https:// address has no port to add, but does need its scheme.
-  const https = readOutHint("https://pack.example.com");
+  const https = readOutAt("https://pack.example.com");
   assert.match(https, /https:\/\/ included/);
   assert.doesNotMatch(https, /port/);
   // And a link to one is checked no better than typing it, so do not say so.
@@ -420,6 +479,28 @@ test("an address read out off the default port says the port has to be typed", (
   const none = readOutHint(null);
   assert.match(none, /Join a server/);
   assert.doesNotMatch(none, /port/);
+});
+
+test("an address that is never coming is not read out as one on its way", () => {
+  // Behind carrier-grade NAT, a second router or with no IPv4 the address
+  // stays null for good, so "once Geode knows it" would be a promise nothing
+  // can keep. What a player does with the password is still said here, where
+  // nothing else says it; where to set an address that works is not, because
+  // the notes above and below this block already do.
+  for (const reachability of ["cgnat", "doubleNat", "noIpv4"]) {
+    const hint = readOutHint(status(mapped(reachability)));
+    assert.doesNotMatch(hint, /once Geode knows it/, reachability);
+    assert.match(hint, /Join a server/, reachability);
+    assert.doesNotMatch(hint, /Public address in Settings/, reachability);
+  }
+  const detected = readOutHint(manual({ detected: { ip: "100.64.1.2", reachability: "cgnat" } }));
+  assert.doesNotMatch(detected, /once Geode knows it/);
+  assert.match(detected, /Join a server/);
+
+  // An address still being worked out is still worth waiting for.
+  for (const pending of [status({ state: "searching" }), status(mapped("public")), manual()]) {
+    assert.match(readOutHint(pending), /once Geode knows it/);
+  }
 });
 
 test("first use is the one verification that is not a plain yes", () => {
@@ -441,6 +522,9 @@ test("first use promises only what importing remembers", () => {
   assert.doesNotMatch(first.detail, /from here on/);
   assert.match(first.detail, /Importing remembers it/);
   assert.match(first.detail, /different certificate is refused/);
+  // The pin is derived from instances and nothing else, so the memory ends
+  // with the last instance joined from that address.
+  assert.match(first.detail, /as long as an instance joined from it is still there/);
 });
 
 test("a typed address pinned by an earlier join is not credited to a link", () => {

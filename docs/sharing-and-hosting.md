@@ -168,8 +168,10 @@ connects straight to the admin's machine. Nothing sits in the middle.
   no fingerprint. A player may type an address and code instead of opening a
   link: that is trusted the first time, and a later join of the same address is
   held to the certificate it had — a different machine answering there is
-  refused. The first time is still the weaker case, which is why the link is
-  what admins copy.
+  refused. The fingerprint is remembered on the instance the import made and
+  nowhere else, so that holds while an instance joined from the address exists;
+  delete the last one and the next typed join is a first use again. The first
+  time is still the weaker case, which is why the link is what admins copy.
 - The router is asked to open the port over UPnP (`portmap.rs`): leased for an
   hour, renewed at half, removed on exit, and retried after ten seconds —
   doubling to a minute — whenever an attempt fails. A router that only grants
@@ -181,29 +183,40 @@ connects straight to the admin's machine. Nothing sits in the middle.
   address — never from a carrier-grade NAT or second-router address, which
   would be a link handed out as if it worked.
 - The listener takes IPv4 and IPv6 on one socket, so an admin behind
-  carrier-grade NAT with working IPv6 can hand out an IPv6 address. One
-  address — one IPv6 /56 — may hold eight connections; this machine and the
-  local network are not limited that way, because a tunnel's agent, a reverse
-  proxy or a router looping players back in makes every player one address.
+  carrier-grade NAT with working IPv6 can hand out an IPv6 address — typed
+  under Public address in Settings themselves, because Geode reads no IPv6
+  address from the router and opens no pinhole for one: their router or host
+  firewall has to allow inbound TCP on the share port. One address — one IPv6
+  /56 — may hold eight connections; this machine and the local network are not
+  limited that way, because a tunnel's agent, a reverse proxy or a router
+  looping players back in makes every player one address. That exemption goes
+  by range, not by who is on the LAN: IPv4 private and link-local addresses,
+  loopback, and IPv6 unique-local and link-local ones — so players on a LAN
+  whose addresses are global IPv6 are one source of eight like anyone else.
   When all 128 places are taken, a newcomer takes the place of the oldest
   connection that has not shown a code, from whichever address holds the most,
-  so filling it to keep players out takes 128 addresses rather than a few. A
-  code does not let anyone hold it either: a download is cut once it hands on
-  less than 256 KiB in any two minutes, at most 32 run at once and four from
-  any one address, and the packs they send take at most 8 GiB of disk
-  together. Each download holds room for its pack from the start, as big as
-  that server's pack was last built, so one there is no room for is refused
-  before a pack is built for it. Past any limit a new download is told the
-  server is busy, and nobody is dropped for it: players sharing a narrow
-  upload are slow together, and dropping the slowest cut one of them at every
-  click. So someone with the code who keeps asking can keep the download
-  places busy — from eight addresses, or from fewer for a pack of several
-  GiB, or from one through a tunnel — but not a player's preview, which is
-  answered from a description at most five seconds old, so a flood of them
-  reads the mods once. The remedy is a new code: that, a change to whether
-  config is sent, or unsharing cuts every connection that came in before it
-  at once, and stopping sharing cuts them all. A pack bigger than 8 GiB by
-  itself is not sent, and the reason is logged on the admin's machine.
+  so filling it to keep players out takes 128 addresses rather than a few —
+  though 128 /56s come out of a single /48, and everyone behind one tunnel is
+  one address, where age alone decides which of its connections goes. A code
+  does not let anyone hold it either: a download is cut once it hands on less
+  than 256 KiB in any two minutes, at most 32 run at once and four from any
+  one address, and the packs they send take at most 8 GiB of disk together.
+  Each download holds room for its pack from the start, as big as that
+  server's pack was last built, so one there is no room for is refused before
+  a pack is built for it. Past any limit a new download is told the server is
+  busy, and nobody is dropped for it: players sharing a narrow upload are slow
+  together, and dropping the slowest cut one of them at every click. So
+  someone with the code who keeps asking can keep the download places busy —
+  from eight addresses, or from fewer for a pack of several GiB, or from one
+  through a tunnel — but not a player's preview: a description is worked out
+  one at a time and reused for five seconds, so a flood of them reads the mods
+  once, and at most sixteen wait on one — past that a preview is told the
+  server is busy answering others rather than joining the queue. Each holds
+  its place until its description has been handed on, not only while the mods
+  are read. The remedy is a new code: that, a change to whether config is
+  sent, or unsharing cuts every connection that came in before it at once, and
+  stopping sharing cuts them all. A pack bigger than 8 GiB by itself is not
+  sent, and the reason is logged on the admin's machine.
 - The share code is the server's **password**, and players are only ever told
   "password"; the link's `code=`, the bearer token and the JSON field names are
   unchanged, so links already sent keep working. Geode generates it the first
@@ -408,7 +421,13 @@ forwarding and made it connect, and a hostile link was dropped.
 - Automatic router setup is UPnP-IGD over IPv4 only — no NAT-PMP or PCP, and no
   IPv6 pinholes. The listener itself accepts IPv6.
 - Geode cannot test its own reachability from outside; the first player to join
-  is the real test.
+  is the real test. A router without NAT loopback cannot reach its own public
+  address from inside, so an admin trying their own link on their own machine
+  can be told the server could not be reached and its port may not be open to
+  the internet, for a link that works for everyone else.
+- Windows may ask to allow Geode through its firewall the first time a server
+  is shared. Refused, the router goes on showing the port open while every
+  player times out, and only the hints on the Share tab point at it.
 - Fabric, Forge, NeoForge, plugin and vanilla servers can be shared. Quilt,
   Mohist, Arclight and Banner are refused with a reason — Geode does not record
   their client loader version — and proxies have nothing to share.

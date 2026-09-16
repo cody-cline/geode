@@ -331,7 +331,8 @@ export const PROPERTY_INFO: Record<string, PropertyInfo> = {
   "server-port": {
     group: "Network",
     label: "Port",
-    description: "The port players connect to.",
+    description:
+      "The port players connect to. Sharing a server does not open it: forward this one on your router yourself, or point a tunnel at it.",
     control: int(1, 65535),
     danger: "Changes the address players connect to.",
   },

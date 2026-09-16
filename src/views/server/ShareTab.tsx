@@ -360,7 +360,7 @@ export default function ShareTab({ server }: { server: Server }) {
                   <CopyButton text={share.code} what="password" />
                 </div>
               </div>
-              <p className="hint">{readOutHint(status?.address ?? null)}</p>
+              <p className="hint">{readOutHint(status)}</p>
             </div>
 
             <label className={viewStyles.settingToggle}>
@@ -427,8 +427,14 @@ export default function ShareTab({ server }: { server: Server }) {
               </>
             )}
             <div className={styles.actions}>
+              {/* The port above is the one packs come down, and the only one
+                  Geode ever opens — an admin who reads it as the game address
+                  hands out a port nothing is listening on. */}
               <p className={clsx(viewStyles.pending, styles.grow)}>
-                Every server you share uses the same port and router setup.
+                Every server you share uses the same port and router setup. It
+                is the port packs are downloaded on, not the one Minecraft
+                connects to: forward this server&apos;s server-port yourself,
+                or point a tunnel at it.
               </p>
               {settingsButton}
             </div>

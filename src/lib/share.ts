@@ -144,6 +144,18 @@ function sentence(text: string): string {
   return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
 }
 
+/**
+ * Windows asks before it lets a program take connections from outside, and the
+ * router never hears that answer: a prompt that was dismissed leaves the port
+ * open on the router with nothing reachable behind it.
+ *
+ * Said on the listening line alone, which is what Windows prompts about: the
+ * router line sits directly beneath it on the same panel, so a copy there
+ * would print the same forty words twice.
+ */
+const windowsFirewall =
+  " On Windows, allow Geode through the firewall when it asks the first time you share a server: refused, the port still looks open on your router while every player times out.";
+
 /** Whether the pack server itself is up. */
 export function listenLine(status: ShareStatus): StatusLine {
   if (status.listenError) {
@@ -157,7 +169,7 @@ export function listenLine(status: ShareStatus): StatusLine {
     return {
       tone: "ok",
       title: `Listening on port ${status.port}`,
-      detail: "Players' Geode connects here to fetch the pack.",
+      detail: `Players' Geode connects here to fetch the pack.${windowsFirewall}`,
     };
   }
   return {
@@ -215,7 +227,10 @@ function unreachableLine(
       return {
         tone: "warn",
         title: "Another router is in front of this one",
-        detail: `${reported} is a private one, so there is a second router — often your provider's modem — between it and the internet. ${then}${workaround}`,
+        // Bridging the outer router changes nothing here until Geode asks
+        // again, which it does on its own — so saying when saves an admin who
+        // has just done it from going back through Settings to no effect.
+        detail: `${reported} is a private one, so there is a second router — often your provider's modem — between it and the internet. ${then} Geode asks your router again within half an hour, so a change out there shows up here on its own.${workaround}`,
       };
     }
     case "noIpv4":
@@ -234,6 +249,20 @@ function unreachableLine(
  */
 const readsAddressOnceManual =
   " Then choose Set it up myself under Router in Settings, and Geode reads your public address from the router for the link.";
+
+/**
+ * Said in every failure because none of them is the end of it: the mapper tries
+ * again ten seconds later and at most a minute apart after that, and the page
+ * follows on its own. Without it an admin who has just switched UPnP on has no
+ * sign that anything is happening, and restarts Geode or changes the port —
+ * the one change that breaks links already handed out.
+ *
+ * Kept ahead of the switch-to-manual aside below, because manual setup stops
+ * the mapper: last, the minute would read as a promise about the setup the
+ * sentence before it advises, where the router is asked again every half hour.
+ */
+const keepsAsking =
+  " Geode keeps asking on its own, so a change on your router is picked up within a minute.";
 
 /**
  * What the router said, in terms of whether players can actually connect.
@@ -299,50 +328,53 @@ export function routerLine(status: ShareStatus, hasPublicAddress: boolean): Stat
       );
       if (unreachable) return unreachable;
       const where = `${mapping.externalIp}:${mapping.port}`;
-      // A router can hand out a different port when the asked-for one is taken.
-      const moved =
-        mapping.port !== port
-          ? ` Your router gave port ${mapping.port}, because ${port} was already taken there.`
-          : "";
+      // The pack port and nothing else: read as the address players put into
+      // Minecraft, this would send an admin off to hand out a port no game
+      // server listens on.
       return {
         tone: "ok",
         title: `Port ${mapping.port} is open on your router`,
-        detail: `Players should be able to connect at ${where}.${moved} If they cannot, check that a firewall on this computer is not blocking Geode.`,
+        detail: `Players' Geode can download this server's pack at ${where}. If they cannot, check that a firewall on this computer is not blocking Geode.`,
       };
     }
-    case "failed":
+    case "failed": {
+      // Links already use the address from Settings, and always would: manual
+      // detection could not change theirs, so pointing them at it would ask
+      // them to expose a port for nothing.
+      const thenManual = hasPublicAddress ? "" : readsAddressOnceManual;
       switch (mapping.reason) {
         case "noGateway":
           return {
             tone: "warn",
             title: "No router answered",
-            detail: `Nothing answered Geode's request to open the port. UPnP may be turned off on your router, or a VPN or firewall on this computer is in the way. Turn UPnP on, or forward TCP port ${port} to this computer by hand.`,
+            detail: `Nothing answered Geode's request to open the port. UPnP may be turned off on your router, or a VPN or firewall on this computer is in the way. Turn UPnP on, or forward TCP port ${port} to this computer by hand.${keepsAsking}`,
           };
         case "refused":
           return {
             tone: "warn",
             title: "Your router refused",
-            detail: `Your router answered but would not open the port — UPnP is on, but restricted. Forward TCP port ${port} to this computer by hand.${readsAddressOnceManual}`,
+            detail: `Your router answered but would not open the port — UPnP is on, but restricted. Forward TCP port ${port} to this computer by hand.${keepsAsking}${thenManual}`,
           };
         case "portInUse":
           return {
             tone: "warn",
             title: `Port ${port} is taken on your router`,
-            detail: `Another device on your network already has port ${port} forwarded to it. Pick a different port in Settings, or forward one to this computer by hand.`,
+            detail: `Another device on your network already has port ${port} forwarded to it. Pick a different port in Settings, or forward one to this computer by hand.${keepsAsking}`,
           };
         case "permanentOnly":
           return {
             tone: "warn",
             title: "Your router only opens ports for good",
-            detail: `Your router would open the port only permanently, with no expiry. Geode will not ask for that: if Geode ever stopped without closing it, the port would stay open to this computer until someone removed it by hand. Forward TCP port ${port} to this computer yourself instead.${readsAddressOnceManual}`,
+            detail: `Your router would open the port only permanently, with no expiry. Geode will not ask for that: if Geode ever stopped without closing it, the port would stay open to this computer until someone removed it by hand. Forward TCP port ${port} to this computer yourself instead.${keepsAsking}${thenManual}`,
           };
         case "other":
           return {
             tone: "warn",
             title: "Your router could not open the port",
-            detail: `${mapping.detail ? `It said: ${sentence(mapping.detail)} ` : ""}Forward TCP port ${port} to this computer by hand.${readsAddressOnceManual}`,
+            detail: `${mapping.detail ? `It said: ${sentence(mapping.detail)} ` : ""}Forward TCP port ${port} to this computer by hand.${keepsAsking}${thenManual}`,
           };
       }
+    }
   }
   // Unreachable while the union above is covered; a new state from a newer
   // backend should read as unknown rather than crash the page.
@@ -351,6 +383,24 @@ export function routerLine(status: ShareStatus, hasPublicAddress: boolean): Stat
     title: "Router status unknown",
     detail: `Forward TCP port ${port} to this computer if players cannot connect.`,
   };
+}
+
+/**
+ * An address the router reported, whether it opened the port or was only asked,
+ * or null before it has said one. Shared so the missing link and the read-out
+ * hint agree about whether an address is on its way or will never come.
+ */
+function reportedAddress(
+  status: ShareStatus,
+): { ip: string; reachability: Reachability; port: number } | null {
+  const mapping = status.mapping;
+  if (mapping.state === "mapped") {
+    return { ip: mapping.externalIp, reachability: mapping.reachability, port: mapping.port };
+  }
+  if (mapping.state === "off" && status.mode === "manual" && status.detected) {
+    return { ...status.detected, port: status.port };
+  }
+  return null;
 }
 
 /** Why a shared server has no link to copy yet. */
@@ -370,15 +420,9 @@ export function linkPendingReason(status: ShareStatus | null, hasPublicAddress: 
   // to explain.
   if (!status.listening || (status.mode === "manual" && status.asking)) return working;
 
-  // An address the router did report, whether it opened the port or was only
-  // asked. Saying it reported nothing would contradict the note below that
+  // Saying the router reported nothing would contradict the note below that
   // names it, and "your public IP" is no answer behind carrier-grade NAT.
-  const reported =
-    mapping.state === "mapped"
-      ? { ip: mapping.externalIp, reachability: mapping.reachability, port: mapping.port }
-      : mapping.state === "off" && status.mode === "manual" && status.detected
-        ? { ...status.detected, port: status.port }
-        : null;
+  const reported = reportedAddress(status);
   if (reported) {
     const tunnel = "A link needs a tunnel's address instead: put it under Public address in Settings.";
     switch (reported.reachability) {
@@ -440,9 +484,18 @@ export function replacedPasswordBody(shared: boolean): string {
  * without the port is looked up on 25590 whatever this machine listens on —
  * and told the server could not be reached.
  */
-export function readOutHint(address: string | null): string {
+export function readOutHint(status: ShareStatus | null): string {
+  const address = status?.address ?? null;
   if (!address) {
-    return "For reading out, with this computer's address once Geode knows it: a player types both under Join a server.";
+    // Behind carrier-grade NAT, a second router or an IPv6-only connection the
+    // router has already answered, and its answer is not one players can
+    // reach: there is no address on the way to promise. What to do about it is
+    // already on the missing-link note above and the router note below, so this
+    // one keeps to what a player does with what is here.
+    const reported = status && reportedAddress(status);
+    return reported && reported.reachability !== "public"
+      ? "For reading out: a player types the address and password under Join a server, but the address your router reports is not one they can reach, so there is none to read out."
+      : "For reading out, with this computer's address once Geode knows it: a player types both under Join a server.";
   }
   if (/^https:\/\//i.test(address)) {
     return "For reading out when a link will not do: a player types both under Join a server, https:// included. The link saves them the typing, and is checked the same way.";
@@ -494,7 +547,7 @@ export function verificationLine(verified: JoinPreview["verified"], typed: boole
         tone: "warn",
         title: "First connection to this address",
         detail:
-          "There was nothing to check this server against, so Geode trusts the certificate it saw. Importing remembers it with the instance, and typing this address again is checked against it: a different certificate is refused. A link from the server's admin is checked from the very first connection, so prefer one when you can.",
+          "There was nothing to check this server against, so Geode trusts the certificate it saw. Importing remembers it with the instance, and typing this address again is checked against it for as long as an instance joined from it is still there: a different certificate is refused. A link from the server's admin is checked from the very first connection, so prefer one when you can.",
       };
   }
 }
