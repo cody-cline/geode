@@ -336,6 +336,13 @@ export default function ShareTab({ server }: { server: Server }) {
               )}
             </div>
 
+            <p className="hint" style={{ marginTop: 0 }}>
+              Players who joined get your changes to mods, client mods and,
+              while it is included, the config folder the next time they press
+              Play. Their Geode checks with this computer first, so keep Geode
+              open and this server shared.
+            </p>
+
             {/* The address as well as the password: typed by hand, a player
                 needs both, and outside a link the address — its port above
                 all — is shown nowhere else. */}

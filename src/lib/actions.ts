@@ -19,9 +19,18 @@ export async function launchInstance(instance: Instance) {
   }
 
   try {
-    await api.launchInstance(instance.id);
+    const result = await api.launchInstance(instance.id);
     await refreshInstances();
     toast({ kind: "success", title: `Launching ${instance.name}` });
+    // After the launch toast, not instead of it: the game is on its way either
+    // way, and these are about what its server did or could not be asked.
+    if (result.notices.length > 0) {
+      toast({
+        kind: "info",
+        title: `About ${instance.name}`,
+        body: result.notices.join(" "),
+      });
+    }
   } catch (e) {
     reportError(`Could not launch ${instance.name}`, e);
     await refreshInstances();

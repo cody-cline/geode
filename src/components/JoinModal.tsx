@@ -7,6 +7,7 @@ import StatusNote from "./StatusNote";
 import { api, errorMessage } from "../lib/api";
 import {
   DEFAULT_SHARE_PORT,
+  existingLine,
   joinInput,
   joinStep,
   outcomeLine,
@@ -53,6 +54,8 @@ export default function JoinModal({
   const [preview, setPreview] = useState<JoinPreview | null>(null);
   const [looking, setLooking] = useState(false);
   const [importing, setImporting] = useState(false);
+  /** Saving a replaced password onto the instance already joined from this server. */
+  const [relinking, setRelinking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   /** Whether the server's server-side mods arrive turned on. Asked afresh for each server looked up. */
   const [includeServerSide, setIncludeServerSide] = useState(true);
@@ -69,9 +72,13 @@ export default function JoinModal({
   // was looked up.
   const typed = input !== null && "address" in input;
   const step = joinStep(preview, outcome);
+  // Work this dialog started and has not finished. The spinner goes on the
+  // button that was pressed; everything else only locks, because a form edited
+  // under a running import or relink would be describing another server.
+  const busy = importing || relinking;
 
   async function lookUp() {
-    if (!input || importing) return;
+    if (!input || busy) return;
     const id = ++lookups.current;
     setLooking(true);
     setError(null);
@@ -107,7 +114,7 @@ export default function JoinModal({
   }
 
   async function importPack() {
-    if (!preview || importing) return;
+    if (!preview || busy) return;
     const { navigate, refreshInstances, reportError, toast } = useStore.getState();
     // Whether this is still the dialog on screen. It may have been closed, or
     // replaced by a newer link, while the download ran — the import finishes
@@ -160,9 +167,26 @@ export default function JoinModal({
     }
   }
 
-  function openExisting() {
-    if (!preview?.existing) return;
-    useStore.getState().navigate({ view: "instance", id: preview.existing.id });
+  async function openExisting() {
+    if (!preview?.existing || busy) return;
+    const { navigate, refreshInstances, reportError } = useStore.getState();
+    // A link for a server whose password was replaced is the only way the
+    // player gets the new one, so it is saved before the instance is opened —
+    // and if it cannot be, the dialog stays put rather than sending them to an
+    // instance that will never hear from its server again.
+    if (preview.existing.passwordChanged) {
+      setRelinking(true);
+      try {
+        await api.relinkJoinedInstance(preview.existing.id, preview.link);
+        await refreshInstances();
+      } catch (e) {
+        reportError("Could not save the new password", e);
+        setRelinking(false);
+        return;
+      }
+      setRelinking(false);
+    }
+    navigate({ view: "instance", id: preview.existing.id });
     onClose();
   }
 
@@ -221,7 +245,7 @@ export default function JoinModal({
             <button
               className="btn btn-primary"
               onClick={() => void importPack()}
-              disabled={importing}
+              disabled={busy}
             >
               {importing && <Loader2 size={14} className="spin" />}
               Import
@@ -229,12 +253,16 @@ export default function JoinModal({
           )}
           {step === "openExisting" && (
             <>
-              <button className="btn" onClick={() => void importPack()} disabled={importing}>
+              <button className="btn" onClick={() => void importPack()} disabled={busy}>
                 {importing && <Loader2 size={14} className="spin" />}
                 Import a second copy
               </button>
-              <button className="btn btn-primary" onClick={openExisting} disabled={importing}>
-                <ArrowRight size={14} />
+              <button
+                className="btn btn-primary"
+                onClick={() => void openExisting()}
+                disabled={busy}
+              >
+                {relinking ? <Loader2 size={14} className="spin" /> : <ArrowRight size={14} />}
                 Open instance
               </button>
             </>
@@ -255,7 +283,7 @@ export default function JoinModal({
             aria-selected={form.mode === mode}
             className={clsx(styles.mode, form.mode === mode && styles.modeActive)}
             onClick={() => edit({ mode })}
-            disabled={importing}
+            disabled={busy}
           >
             {label}
           </button>
@@ -274,7 +302,7 @@ export default function JoinModal({
             placeholder="geode://join?…"
             spellCheck={false}
             autoComplete="off"
-            disabled={importing}
+            disabled={busy}
             onChange={(e) => edit({ link: e.target.value })}
             onKeyDown={(e) => e.key === "Enter" && void lookUp()}
           />
@@ -294,7 +322,7 @@ export default function JoinModal({
                 placeholder="play.example.com:25590"
                 spellCheck={false}
                 autoComplete="off"
-                disabled={importing}
+                disabled={busy}
                 onChange={(e) => edit({ address: e.target.value })}
                 onKeyDown={(e) => e.key === "Enter" && void lookUp()}
               />
@@ -310,7 +338,7 @@ export default function JoinModal({
                 placeholder="GEODE-XXXXX-XXXXX"
                 spellCheck={false}
                 autoComplete="off"
-                disabled={importing}
+                disabled={busy}
                 onChange={(e) => edit({ code: e.target.value })}
                 onKeyDown={(e) => e.key === "Enter" && void lookUp()}
               />
@@ -373,7 +401,7 @@ export default function JoinModal({
               <input
                 type="checkbox"
                 checked={includeServerSide}
-                disabled={importing}
+                disabled={busy}
                 onChange={(e) => setIncludeServerSide(e.target.checked)}
               />
               <span>
@@ -389,16 +417,7 @@ export default function JoinModal({
 
           <StatusNote line={verificationLine(preview.verified, typed)} />
 
-          {preview.existing && (
-            <StatusNote
-              line={{
-                tone: "info",
-                title: `Already joined as ${preview.existing.name}`,
-                detail:
-                  "This server's pack is already in that instance, so open it to play. Importing again makes a second, separate instance: Geode cannot update the first one from the server yet, so a copy is only worth making if the server's pack has changed.",
-              }}
-            />
-          )}
+          {preview.existing && <StatusNote line={existingLine(preview.existing)} />}
 
           <p className="hint" style={{ marginTop: 0 }}>
             Importing makes a new instance and downloads this server&apos;s mods,

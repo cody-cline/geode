@@ -3,7 +3,13 @@
 // the tests load this file straight into Node, which has no bundler to resolve
 // the app's extensionless imports.
 
-import type { JoinInput, JoinOutcome, JoinPreview, ShareStatus } from "./types";
+import type {
+  ExistingInstance,
+  JoinInput,
+  JoinOutcome,
+  JoinPreview,
+  ShareStatus,
+} from "./types";
 
 /**
  * The port a typed address is looked up on when it has none. The backend's
@@ -87,6 +93,30 @@ export function joinStep(
   if (outcome) return "done";
   if (!preview) return "lookUp";
   return preview.existing ? "openExisting" : "import";
+}
+
+/**
+ * What the join dialog says about the instance this server was already joined
+ * into, and what opening it does.
+ *
+ * A link that carries a new password is saved onto that instance when it is
+ * opened, which is the one place a link decides where an instance takes its
+ * updates from ever after. So when it also carries a fingerprint the instance
+ * does not know, the player is told: that is an admin who reinstalled Geode,
+ * and it is equally what someone else answering at that address looks like.
+ * With the same password there is nothing to save and nothing to weigh.
+ */
+export function existingLine(existing: ExistingInstance): StatusLine {
+  const detail = !existing.passwordChanged
+    ? "This server's pack is already in that instance, so open it to play — Geode brings it up to date from the server whenever you press Play. Importing again makes a second, separate instance."
+    : existing.certificateChanged
+      ? "The server's password has changed since you joined, and this link is for a different certificate than that machine had then. Opening the instance saves both to it, and its updates come from whoever answers there from now on — so open it only if this link came from the admin, who would see the same after reinstalling Geode."
+      : "The server's password has changed since you joined. Opening the instance saves the new password to it, so it keeps getting the server's updates.";
+  return {
+    tone: existing.passwordChanged && existing.certificateChanged ? "warn" : "info",
+    title: `Already joined as ${existing.name}`,
+    detail,
+  };
 }
 
 /** A finished import's problems, headed the way the join dialog shows them. */

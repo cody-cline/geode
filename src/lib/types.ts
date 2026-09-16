@@ -645,14 +645,21 @@ export interface JoinLink {
 
 export type JoinInput = { link: string } | { address: string; code: string };
 
+export interface ExistingInstance {
+  id: string;
+  name: string;
+  passwordChanged: boolean;
+  certificateChanged: boolean;
+}
+
 export interface JoinPreview {
   info: PackInfo;
   address: string;
   /** `pinned`: matched the link. `domain`: checked by its certificate authority. `firstUse`: typed by hand, trusted now and pinned from here on. */
   verified: "pinned" | "domain" | "firstUse";
   link: JoinLink;
-  /** An instance already joined from this server with this password: offer to open it rather than make a second. */
-  existing: { id: string; name: string } | null;
+  /** An instance already joined from this server: offer to open it rather than make a second. `passwordChanged` means it was recognised by the server rather than by its password, so opening it saves the new one; `certificateChanged` means this link is for a different certificate than the instance holds. */
+  existing: ExistingInstance | null;
 }
 
 /** A join that got as far as creating the instance. Anything that went wrong after that is a problem to show, not a failure to retry — retrying would make a second instance. */

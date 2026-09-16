@@ -220,6 +220,7 @@ pub fn run() {
             commands::rotate_server_share_code,
             commands::preview_join,
             commands::join_server,
+            commands::relink_joined_instance,
             deeplink::take_pending_join,
         ])
         .build(tauri::generate_context!())

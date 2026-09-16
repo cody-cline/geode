@@ -518,6 +518,11 @@ pub async fn set_server_side_mods(
     if state.games.is_running(&id) {
         return Err(Error::msg("Stop the game before changing server-side mods"));
     }
+    // A launch preparing may be updating from the server, renaming the very
+    // jars this would rename, and it settles them from the setting as it saw it.
+    if state.is_launching(&id) {
+        return Err(Error::msg("Wait for the game to finish starting"));
+    }
     let mut inst = instance::load(&state.paths, &id).await?;
     if inst.joined.is_none() {
         return Err(Error::msg(
@@ -2625,6 +2630,184 @@ pub async fn install_java(
 pub struct LaunchResult {
     pub pid: u32,
     pub instance_id: String,
+    /// What the player should hear about once the game is on its way: an
+    /// update that could not be checked for, or one that changed something
+    /// they had a say in.
+    pub notices: Vec<String>,
+}
+
+/// Whether the server is offering a revision this instance does not hold.
+///
+/// A server that names none — an admin on a Geode from before revisions — is
+/// never behind, because there is nothing to compare it with.
+fn update_due(stored: Option<&str>, offered: &str) -> bool {
+    !offered.is_empty() && stored != Some(offered)
+}
+
+/// Bring a joined instance up to its server's current pack, before it plays.
+///
+/// Returned notices are for after the game starts; an error means it must not.
+/// The difference is what the player can do about it. A server that cannot be
+/// reached, or that no longer takes this instance's password, leaves them with
+/// a working instance that may be a little behind, and telling them to wait
+/// would be telling them not to play a single-player world either. An update
+/// the server does say is due is different: a client that does not match its
+/// server cannot join it, so a download or an import that does not finish
+/// stops the launch, and the next Play runs it again.
+async fn bring_up_to_date(
+    state: &AppState,
+    inst: &mut Instance,
+    progress: &Progress,
+) -> Result<Vec<String>> {
+    let Some(link) = inst.joined.clone() else {
+        return Ok(Vec::new());
+    };
+    let address = link.address.display();
+    progress.stage("Checking the server for changes", 1).await;
+
+    let info = match share::join::preview(link.clone()).await {
+        Ok(preview) => preview.info,
+        // Nothing was touched in either case, so the instance is as playable as
+        // it was a moment ago.
+        //
+        // The refusal names both of its causes, because they read the same from
+        // here: a server whose sharing is stopped knows none of its passwords
+        // either, and answering a stranger differently for a server that exists
+        // would be telling them it exists.
+        Err(Error::PasswordRefused) => {
+            return Ok(vec![format!(
+                "{address} did not accept this instance's password, so Geode could not check it for changes: the password may have been replaced, or that server may not be shared right now. If the admin sends you a new link, open it — Geode will save the new password to this instance."
+            )])
+        }
+        Err(e) => {
+            return Ok(vec![format!(
+                "Geode could not reach {address} to check for changes, so this instance may be out of date: {e}"
+            )])
+        }
+    };
+
+    // Learned from the first description a server new enough to send one gives,
+    // so an instance joined before this can be found again under a new
+    // password from here on.
+    let learned_id = !info.server_id.is_empty()
+        && inst.joined_server_id.as_deref() != Some(info.server_id.as_str());
+    if learned_id {
+        inst.joined_server_id = Some(info.server_id.clone());
+    }
+    if !update_due(inst.joined_revision.as_deref(), &info.revision) {
+        if learned_id {
+            save_learned_id(&state.paths, &inst.id, &info.server_id).await?;
+        }
+        return Ok(Vec::new());
+    }
+
+    let archive =
+        share::join::incoming_dir(&state.paths).join(format!("{}.geodepack", uuid::Uuid::new_v4()));
+    let config = state.config().await;
+    if let Err(e) = share::join::download(&link, &archive, progress).await {
+        let _ = tokio::fs::remove_file(&archive).await;
+        // A pack that never arrived reached nothing of the instance, so there
+        // is nothing of the update to write — only the server's id, when this
+        // was the first description to name one.
+        if learned_id {
+            save_learned_id(&state.paths, &inst.id, &info.server_id).await?;
+        }
+        return Err(e);
+    }
+    let updated = share::pack::update(
+        &state.http,
+        &state.paths,
+        inst,
+        &archive,
+        config.effective_curseforge_key().as_deref(),
+        progress,
+    )
+    .await;
+    let _ = tokio::fs::remove_file(&archive).await;
+
+    let report = match updated {
+        Ok(report) => report,
+        Err(e) => {
+            // As far as it got is saved: what landed is the server's, and the
+            // revision is untouched, so the next Play finishes the job. A save
+            // that fails as well is not what to say here — what stopped the
+            // update is, and a cancel has its own wording downstream.
+            let _ = save_update(&state.paths, inst).await;
+            return Err(e);
+        }
+    };
+    // What the pack itself carried, when it carried anything: the description
+    // was worked out before the pack was built, so its revision can name a
+    // moment this instance does not hold.
+    inst.joined_revision = Some(report.revision.clone().unwrap_or(info.revision));
+    save_update(&state.paths, inst).await?;
+
+    let mut notices = Vec::new();
+    if !report.turned_off.is_empty() {
+        notices.push(own_copies_off(&report.turned_off));
+    }
+    if !report.missing.is_empty() {
+        notices.push(fetch_by_hand(&report.missing));
+    }
+    Ok(notices)
+}
+
+/// Write what an update decided onto the instance as it stands on disk now.
+///
+/// The launch loaded its copy before any of this ran, and an update takes as
+/// long as a download and an import take, which on a big pack is minutes.
+/// Saving that copy whole would put back a name, notes or a memory setting the
+/// player changed while they waited — the same reason the launch reads the
+/// instance again before recording it as played. Only what the update decides
+/// crosses over; the rest of an instance is the player's, and theirs is the
+/// newer copy.
+async fn save_update(paths: &crate::paths::Paths, updated: &Instance) -> Result<()> {
+    let mut inst = instance::load(paths, &updated.id).await?;
+    inst.mc_version = updated.mc_version.clone();
+    inst.loader = updated.loader;
+    inst.loader_version = updated.loader_version.clone();
+    inst.content = updated.content.clone();
+    inst.pack = updated.pack.clone();
+    inst.joined_server_id = updated.joined_server_id.clone();
+    inst.joined_revision = updated.joined_revision.clone();
+    inst.save(paths).await
+}
+
+/// Record the server's id on an instance joined before servers sent one, and
+/// nothing else: no files were touched, so no other field of the launch's copy
+/// has any business being written over what is on disk.
+async fn save_learned_id(paths: &crate::paths::Paths, id: &str, server_id: &str) -> Result<()> {
+    let mut inst = instance::load(paths, id).await?;
+    inst.joined_server_id = Some(server_id.to_string());
+    inst.save(paths).await
+}
+
+/// What to say about a player's own mods that are off because the server has
+/// the same mod.
+///
+/// A state rather than something just done: some of these were already off
+/// before this update, and an update that runs again after a failure says the
+/// same thing again.
+fn own_copies_off(names: &[String]) -> String {
+    let (verb, it) = if names.len() == 1 {
+        ("stays", "it")
+    } else {
+        ("stay", "them")
+    };
+    format!(
+        "Your own {} {verb} off: the server provides {it}.",
+        names.join(", ")
+    )
+}
+
+/// What to say about the files a server's pack pointed at that could not be
+/// fetched — the same on an update as on the join that made the instance.
+fn fetch_by_hand(missing: &[String]) -> String {
+    format!(
+        "{} file(s) in this server's pack have to be fetched by hand: {}",
+        missing.len(),
+        missing.join(", ")
+    )
 }
 
 #[tauri::command]
@@ -2637,9 +2820,14 @@ pub async fn launch_instance(
     if state.games.is_running(&id) {
         return Err(Error::msg("that instance is already running"));
     }
+    // Held until this returns. Two launches preparing at once would update the
+    // instance from its server twice over, each rewriting the other's files.
+    let Some(_claim) = state.claim_launch(&id) else {
+        return Err(Error::msg("that instance is already starting"));
+    };
 
     let config = state.config().await;
-    let inst = instance::load(&state.paths, &id).await?;
+    let mut inst = instance::load(&state.paths, &id).await?;
     let progress = Progress::new(crate::desktop::sink(app.clone()), format!("launch:{id}"));
     state.register_cancel(progress.id(), progress.cancel_flag());
 
@@ -2657,6 +2845,22 @@ pub async fn launch_instance(
         let msg = e.to_string();
         tauri::async_runtime::spawn(async move { progress.fail(&msg).await });
     })?;
+
+    // Before the Java and version work: an update can move the instance to
+    // another Minecraft or loader version, and that is the one to install.
+    let notices = match bring_up_to_date(&state, &mut inst, &progress).await {
+        Ok(notices) => notices,
+        Err(e) => {
+            state.clear_cancel(progress.id());
+            let msg = if matches!(e, Error::Cancelled) {
+                "the update from its server was cancelled. It has to match its server before it can start — press Play to update it again.".to_string()
+            } else {
+                format!("updating from its server did not finish: {e}. It has to match its server before it can start — press Play to try again.")
+            };
+            progress.fail(&msg).await;
+            return Err(Error::msg(msg));
+        }
+    };
 
     let java_override = inst
         .overrides
@@ -2707,6 +2911,7 @@ pub async fn launch_instance(
     Ok(LaunchResult {
         pid,
         instance_id: id,
+        notices,
     })
 }
 
@@ -3131,10 +3336,83 @@ async fn preview_join_at(
             e
         }
     })?;
-    preview.existing = share::join::existing_instance(paths, &preview.link)
-        .await
-        .map(|(id, name)| share::join::ExistingInstance { id, name });
+    preview.existing =
+        share::join::existing_instance(paths, &preview.link, &preview.info.server_id).await;
     Ok(preview)
+}
+
+/// Save a link onto the instances already joined from the server it names.
+///
+/// This is how a player given a new link after their server's password was
+/// replaced keeps their instance updating, instead of joining again into a
+/// second one. It is only ever a new password for the same server: the address
+/// has to be the one the instance was joined at, and the server answering
+/// there has to be the same server it was joined from, which is why this asks
+/// it rather than believing the link.
+async fn relink(
+    paths: &crate::paths::Paths,
+    id: &str,
+    link: share::link::Link,
+) -> Result<Instance> {
+    // Back from the webview, so checked again by the same strict parser as a
+    // link off the internet.
+    let link = share::link::Link::parse(&link.to_url())?;
+    let inst = instance::load(paths, id).await?;
+    let Some(joined) = inst.joined.as_ref() else {
+        return Err(Error::msg("this instance was not joined from a server"));
+    };
+    if joined.address != link.address {
+        return Err(Error::msg(
+            "that link is for a different address than this instance was joined from",
+        ));
+    }
+    let server_id = inst.joined_server_id.clone();
+    let preview = share::join::preview(link).await?;
+    if preview.info.server_id.is_empty()
+        || Some(preview.info.server_id.as_str()) != server_id.as_deref()
+    {
+        return Err(Error::msg(
+            "that link is for a different server than this instance was joined from",
+        ));
+    }
+    // The preview's link, not the one handed in: a typed address has the
+    // fingerprint it just saw filled in.
+    let link = preview.link;
+
+    // Every copy joined from this server, and read again rather than saved
+    // from the copy loaded before the server was asked — that answer takes up
+    // to half a minute, and a name or a setting changed meanwhile is not this
+    // command's to put back. A player who imported a second copy gets both:
+    // the copy relinked here is the one every later link finds, so one left
+    // behind would never be handed a password that works again.
+    let mut relinked = Vec::new();
+    for mut copy in instance::list(paths).await? {
+        let same_server = copy
+            .joined
+            .as_ref()
+            .is_some_and(|joined| joined.address == link.address)
+            && copy.joined_server_id == server_id;
+        if !same_server {
+            continue;
+        }
+        copy.joined = Some(link.clone());
+        copy.save(paths).await?;
+        relinked.push(copy);
+    }
+    relinked
+        .into_iter()
+        .find(|copy| copy.id == id)
+        .ok_or_else(|| Error::msg("that instance is no longer joined from this server"))
+}
+
+#[tauri::command]
+pub async fn relink_joined_instance(
+    state: State<'_, AppState>,
+    id: String,
+    link: share::link::Link,
+) -> Result<InstanceView> {
+    let inst = relink(&state.paths, &id, link).await?;
+    Ok(view(inst, &state))
 }
 
 /// A join that got as far as creating the instance.
@@ -3308,11 +3586,7 @@ async fn install_joined(
 
     let problems = match imported {
         Ok(missing) if missing.is_empty() => Vec::new(),
-        Ok(missing) => vec![format!(
-            "{} file(s) in this server's pack have to be fetched by hand: {}",
-            missing.len(),
-            missing.join(", ")
-        )],
+        Ok(missing) => vec![fetch_by_hand(&missing)],
         Err(e) => vec![format!("the import stopped partway: {e}")],
     };
     Ok((inst, problems))
@@ -3358,8 +3632,14 @@ mod tests {
     }
 
     async fn shared_server(paths: &Paths) -> (Server, ServerShare) {
-        let mut server = Server::new("Survival".into(), ServerKind::Fabric, "1.21.1".into());
-        server.id = "survival".into();
+        shared_server_called(paths, "survival", "Survival").await
+    }
+
+    /// A shared server with an id and name of its own, for a machine sharing
+    /// more than one.
+    async fn shared_server_called(paths: &Paths, id: &str, name: &str) -> (Server, ServerShare) {
+        let mut server = Server::new(name.into(), ServerKind::Fabric, "1.21.1".into());
+        server.id = id.into();
         server.build = "0.16.9".into();
         server.save(paths).await.unwrap();
         let mods = paths.server_run(&server.id).join("mods");
@@ -3414,6 +3694,57 @@ mod tests {
             zip.write_all(&bytes).unwrap();
         }
         zip.finish().unwrap();
+    }
+
+    /// A link to a server shared on this machine, pinned to the certificate it
+    /// actually presents.
+    async fn loopback(paths: &Paths, port: u16, code: &Code) -> Link {
+        let pin = share::identity::Identity::load_or_create(paths)
+            .await
+            .unwrap()
+            .pin();
+        Link {
+            address: Address::Direct {
+                host: "127.0.0.1".into(),
+                port,
+            },
+            code: code.clone(),
+            pin: Some(pin),
+        }
+    }
+
+    /// Export `server` and install it as a joined instance, as a join does,
+    /// and say which instance that made.
+    async fn join_over(state: &AppState, admin: &Paths, server: &Server, link: &Link) -> String {
+        let archive = admin.root.join(format!("join-{}.geodepack", server.id));
+        share::pack::export_server(admin, server, archive.clone(), &Progress::silent("t"))
+            .await
+            .unwrap();
+        let approved = share::pack::server_pack_info(admin, server).await.unwrap();
+        let (inst, problems) = install_joined(
+            state,
+            link,
+            &approved,
+            true,
+            None,
+            &archive,
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        inst.id
+    }
+
+    /// Put a jar in a shared server's mods folder, so it has something new to
+    /// send.
+    async fn add_jar(paths: &Paths, server: &Server, name: &str) {
+        tokio::fs::write(
+            paths.server_run(&server.id).join("mods").join(name),
+            fabric_jar("new", "*"),
+        )
+        .await
+        .unwrap();
     }
 
     async fn instance_count(paths: &Paths) -> usize {
@@ -3857,6 +4188,403 @@ mod tests {
         remember(Pin([9; 32])).await;
         let err = preview_join_at(&player.0, typed()).await.expect_err("a different certificate at a remembered address");
         assert!(err.to_string().contains("joined there before"), "{err}");
+
+        host.stop().await;
+    }
+
+    /// Every Play asks the server what it holds, and only a revision this
+    /// instance does not have is worth downloading for. A server that names
+    /// none — an admin on a Geode from before revisions — never asks for one.
+    #[test]
+    fn an_update_is_due_only_when_the_server_names_a_different_revision() {
+        assert!(update_due(None, "a"), "an instance that has installed none");
+        assert!(update_due(Some("a"), "b"), "a server that has moved on");
+        assert!(!update_due(Some("a"), "a"), "the revision already held");
+        assert!(!update_due(None, ""), "a server that names no revision");
+        assert!(
+            !update_due(Some("a"), ""),
+            "an admin's Geode from before this"
+        );
+    }
+
+    /// Play on a joined instance brings it up to its server first: what the
+    /// server added arrives as the server's, the revision it now holds is
+    /// recorded, a server with nothing new is not downloaded from, and a
+    /// server that cannot be reached is a notice rather than a refusal.
+    #[tokio::test]
+    async fn a_joined_instance_is_brought_up_to_date_before_it_plays() {
+        let admin = scratch("play-admin");
+        let (server, share) = shared_server(&admin.0).await;
+        let host = share::host::Host::start(admin.0.clone(), 0).await.unwrap();
+        let link = loopback(&admin.0, host.local_addr.port(), &share.code).await;
+
+        let player = scratch("play-player");
+        let state = AppState::new(player.0.clone(), crate::config::Config::default());
+        let id = join_over(&state, &admin.0, &server, &link).await;
+        let mods = player.0.game_dir(&id).join("mods");
+
+        // The server has moved on since that join.
+        add_jar(&admin.0, &server, "new.jar").await;
+        let mut inst = instance::load(&player.0, &id).await.unwrap();
+        let notices = bring_up_to_date(&state, &mut inst, &Progress::silent("t"))
+            .await
+            .unwrap();
+        assert!(notices.is_empty(), "{notices:?}");
+        assert!(
+            mods.join("new.jar").is_file(),
+            "the server's new mod did not arrive"
+        );
+        assert!(inst
+            .content
+            .iter()
+            .any(|r| r.file_name == "new.jar" && r.origin == instance::content::Origin::Server));
+        let now = share::pack::server_pack_info(&admin.0, &server)
+            .await
+            .unwrap()
+            .revision;
+        let saved = instance::load(&player.0, &id).await.unwrap();
+        assert_eq!(saved.joined_revision.as_deref(), Some(now.as_str()));
+
+        // And now there is nothing to do: the check happens, and no pack is
+        // asked for.
+        let recorder = std::sync::Arc::new(crate::events::Recorder::default());
+        let progress = Progress::new(recorder.clone(), "launch:t");
+        let mut inst = instance::load(&player.0, &id).await.unwrap();
+        let notices = bring_up_to_date(&state, &mut inst, &progress)
+            .await
+            .unwrap();
+        assert!(notices.is_empty(), "{notices:?}");
+        let stages: Vec<String> = recorder
+            .events()
+            .into_iter()
+            .filter_map(|(_, e)| e["stage"].as_str().map(str::to_string))
+            .collect();
+        assert!(
+            stages
+                .iter()
+                .any(|s| s == "Checking the server for changes"),
+            "{stages:?}"
+        );
+        assert!(
+            !stages.iter().any(|s| s == "Downloading the server's pack"),
+            "a server with nothing new was downloaded from: {stages:?}"
+        );
+
+        // The admin's machine is off: the player still plays what they have.
+        host.stop().await;
+        let mut inst = instance::load(&player.0, &id).await.unwrap();
+        let notices = bring_up_to_date(&state, &mut inst, &Progress::silent("t"))
+            .await
+            .unwrap();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("could not reach"), "{}", notices[0]);
+        let saved = instance::load(&player.0, &id).await.unwrap();
+        assert_eq!(saved.joined_revision.as_deref(), Some(now.as_str()));
+        assert!(mods.join("new.jar").is_file());
+    }
+
+    /// A launch loads the instance before it asks the server anything, and the
+    /// update that follows runs for as long as a download and an import take.
+    /// What it writes back is what it decided, over the instance as it stands
+    /// on disk — so a name, a memory setting or a note the player changed
+    /// while they waited is still there afterwards.
+    #[tokio::test]
+    async fn an_update_keeps_what_the_player_changed_while_it_ran() {
+        let admin = scratch("meanwhile-admin");
+        let (server, share) = shared_server(&admin.0).await;
+        let host = share::host::Host::start(admin.0.clone(), 0).await.unwrap();
+        let link = loopback(&admin.0, host.local_addr.port(), &share.code).await;
+
+        let player = scratch("meanwhile-player");
+        let state = AppState::new(player.0.clone(), crate::config::Config::default());
+        let id = join_over(&state, &admin.0, &server, &link).await;
+
+        // The copy a launch is holding, read before the server was asked.
+        add_jar(&admin.0, &server, "new.jar").await;
+        let mut launching = instance::load(&player.0, &id).await.unwrap();
+
+        // The player, waiting for it, changes the instance on its own page.
+        let mut meanwhile = instance::load(&player.0, &id).await.unwrap();
+        meanwhile.name = "Survival with Dad".into();
+        meanwhile.overrides.memory_mb = Some(6144);
+        meanwhile.save(&player.0).await.unwrap();
+
+        let notices = bring_up_to_date(&state, &mut launching, &Progress::silent("t"))
+            .await
+            .unwrap();
+        assert!(notices.is_empty(), "{notices:?}");
+
+        let saved = instance::load(&player.0, &id).await.unwrap();
+        assert_eq!(
+            saved.name, "Survival with Dad",
+            "the update put back the name from before it"
+        );
+        assert_eq!(saved.overrides.memory_mb, Some(6144));
+        // And what the update decided is all there.
+        let now = share::pack::server_pack_info(&admin.0, &server)
+            .await
+            .unwrap()
+            .revision;
+        assert_eq!(saved.joined_revision.as_deref(), Some(now.as_str()));
+        assert!(saved.content.iter().any(|r| r.file_name == "new.jar"));
+        assert!(player.0.game_dir(&id).join("mods/new.jar").is_file());
+
+        // Nothing to download, and the server's id learned for the first time:
+        // a save with no update behind it writes that id and nothing else.
+        let mut older = instance::load(&player.0, &id).await.unwrap();
+        older.joined_server_id = None;
+        older.save(&player.0).await.unwrap();
+        let mut launching = instance::load(&player.0, &id).await.unwrap();
+        let mut meanwhile = instance::load(&player.0, &id).await.unwrap();
+        meanwhile.notes = "Dad's seed: 12345".into();
+        meanwhile.save(&player.0).await.unwrap();
+
+        let notices = bring_up_to_date(&state, &mut launching, &Progress::silent("t"))
+            .await
+            .unwrap();
+        assert!(notices.is_empty(), "{notices:?}");
+        let saved = instance::load(&player.0, &id).await.unwrap();
+        assert_eq!(
+            saved.notes, "Dad's seed: 12345",
+            "a note written while the server was being asked"
+        );
+        assert_eq!(saved.joined_server_id.as_deref(), Some(server.id.as_str()));
+
+        host.stop().await;
+    }
+
+    /// A player's own copy of a mod the server also has is off, and may well
+    /// have been off before this update: the notice says what is so, and reads
+    /// for one mod as well as for several.
+    #[test]
+    fn the_notice_about_a_players_own_copies_reads_for_one_and_for_several() {
+        assert_eq!(
+            own_copies_off(&["Sodium".to_string()]),
+            "Your own Sodium stays off: the server provides it."
+        );
+        assert_eq!(
+            own_copies_off(&["Sodium".to_string(), "Lithium".to_string()]),
+            "Your own Sodium, Lithium stay off: the server provides them."
+        );
+    }
+
+    /// A password replaced while a player was away stops Geode checking for
+    /// changes, and the player is told how to put it right — but the game
+    /// still starts, and nothing is touched.
+    #[tokio::test]
+    async fn a_replaced_password_lets_the_player_play_and_says_how_to_fix_it() {
+        let admin = scratch("refused-admin");
+        let (server, share) = shared_server(&admin.0).await;
+        let host = share::host::Host::start(admin.0.clone(), 0).await.unwrap();
+        let link = loopback(&admin.0, host.local_addr.port(), &share.code).await;
+
+        let player = scratch("refused-player");
+        let state = AppState::new(player.0.clone(), crate::config::Config::default());
+        let id = join_over(&state, &admin.0, &server, &link).await;
+
+        // Something to update to, so nothing but the password stands in the way.
+        add_jar(&admin.0, &server, "new.jar").await;
+        crate::server::share::replace_password(&admin.0, &server.id)
+            .await
+            .unwrap();
+
+        let mut inst = instance::load(&player.0, &id).await.unwrap();
+        let held = inst.joined_revision.clone();
+        let notices = bring_up_to_date(&state, &mut inst, &Progress::silent("t"))
+            .await
+            .unwrap();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(
+            notices[0].contains("did not accept this instance's password"),
+            "{}",
+            notices[0]
+        );
+        // Sharing a server that is stopped right now answers the same way, and
+        // a player told only about a password would ask for a link they have.
+        assert!(
+            notices[0].contains("may not be shared right now"),
+            "{}",
+            notices[0]
+        );
+        let saved = instance::load(&player.0, &id).await.unwrap();
+        assert_eq!(saved.joined_revision, held);
+        assert!(!player.0.game_dir(&id).join("mods/new.jar").exists());
+
+        host.stop().await;
+    }
+
+    /// An update the server says is due has to finish: one that does not stops
+    /// the launch, leaves the revision it had, and runs again next time.
+    #[tokio::test]
+    async fn an_update_that_cannot_finish_refuses_to_start_and_retries_next_time() {
+        let admin = scratch("unfinished-admin");
+        let (server, share) = shared_server(&admin.0).await;
+        let host = share::host::Host::start(admin.0.clone(), 0).await.unwrap();
+        let link = loopback(&admin.0, host.local_addr.port(), &share.code).await;
+
+        let player = scratch("unfinished-player");
+        let state = AppState::new(player.0.clone(), crate::config::Config::default());
+        let id = join_over(&state, &admin.0, &server, &link).await;
+        add_jar(&admin.0, &server, "new.jar").await;
+
+        let mut inst = instance::load(&player.0, &id).await.unwrap();
+        let held = inst.joined_revision.clone();
+        let cancelled = Progress::silent("t");
+        cancelled
+            .cancel_flag()
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let err = bring_up_to_date(&state, &mut inst, &cancelled)
+            .await
+            .expect_err("an update the player cancelled");
+        assert!(matches!(err, Error::Cancelled), "{err}");
+        let saved = instance::load(&player.0, &id).await.unwrap();
+        assert_eq!(
+            saved.joined_revision, held,
+            "a cancelled update recorded a revision it did not install"
+        );
+
+        let mut inst = instance::load(&player.0, &id).await.unwrap();
+        let notices = bring_up_to_date(&state, &mut inst, &Progress::silent("t"))
+            .await
+            .unwrap();
+        assert!(notices.is_empty(), "{notices:?}");
+        let saved = instance::load(&player.0, &id).await.unwrap();
+        assert_ne!(saved.joined_revision, held);
+        assert!(player.0.game_dir(&id).join("mods/new.jar").is_file());
+
+        host.stop().await;
+    }
+
+    /// The link an admin hands out after replacing a password saves it onto
+    /// the instance joined from that very server — and onto no other, however
+    /// much of the link matches.
+    #[tokio::test]
+    async fn a_new_password_is_saved_only_for_the_same_server() {
+        let admin = scratch("relink-admin");
+        let (one, share_one) = shared_server(&admin.0).await;
+        let (_two, share_two) = shared_server_called(&admin.0, "creative", "Creative").await;
+        let host = share::host::Host::start(admin.0.clone(), 0).await.unwrap();
+        let port = host.local_addr.port();
+
+        let player = scratch("relink-player");
+        let state = AppState::new(player.0.clone(), crate::config::Config::default());
+        let joined = loopback(&admin.0, port, &share_one.code).await;
+        let id = join_over(&state, &admin.0, &one, &joined).await;
+
+        let replaced = crate::server::share::replace_password(&admin.0, &one.id)
+            .await
+            .unwrap();
+        let relinked = relink(
+            &player.0,
+            &id,
+            loopback(&admin.0, port, &replaced.code).await,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            relinked.joined.as_ref().map(|l| &l.code),
+            Some(&replaced.code)
+        );
+        assert_eq!(
+            instance::load(&player.0, &id)
+                .await
+                .unwrap()
+                .joined
+                .unwrap()
+                .code,
+            replaced.code
+        );
+
+        // The machine's other server, sharing the same address and certificate.
+        let err = relink(
+            &player.0,
+            &id,
+            loopback(&admin.0, port, &share_two.code).await,
+        )
+        .await
+        .expect_err("another server on the same machine");
+        assert!(err.to_string().contains("different server"), "{err}");
+
+        // The right password, somewhere this instance was never joined from.
+        let err = relink(
+            &player.0,
+            &id,
+            loopback(&admin.0, 25591, &replaced.code).await,
+        )
+        .await
+        .expect_err("another address");
+        assert!(err.to_string().contains("different address"), "{err}");
+
+        assert_eq!(
+            instance::load(&player.0, &id)
+                .await
+                .unwrap()
+                .joined
+                .unwrap()
+                .code,
+            replaced.code,
+            "a refused link changed the instance"
+        );
+
+        host.stop().await;
+    }
+
+    /// A player who imported a second copy of a server keeps both when its
+    /// password is replaced. A link names one instance, and that one is what
+    /// every later link finds — so a copy left behind would be holding a
+    /// password nothing can put right, and it is saved the new one too.
+    #[tokio::test]
+    async fn a_new_password_reaches_every_copy_joined_from_that_server() {
+        let admin = scratch("copies-admin");
+        let (one, share_one) = shared_server(&admin.0).await;
+        let (two, share_two) = shared_server_called(&admin.0, "creative", "Creative").await;
+        let host = share::host::Host::start(admin.0.clone(), 0).await.unwrap();
+        let port = host.local_addr.port();
+
+        let player = scratch("copies-player");
+        let state = AppState::new(player.0.clone(), crate::config::Config::default());
+        let joined = loopback(&admin.0, port, &share_one.code).await;
+        let first = join_over(&state, &admin.0, &one, &joined).await;
+        let second = join_over(&state, &admin.0, &one, &joined).await;
+        let elsewhere = {
+            let link = loopback(&admin.0, port, &share_two.code).await;
+            join_over(&state, &admin.0, &two, &link).await
+        };
+        assert_ne!(first, second, "a second copy is a second instance");
+
+        let replaced = crate::server::share::replace_password(&admin.0, &one.id)
+            .await
+            .unwrap();
+        relink(
+            &player.0,
+            &first,
+            loopback(&admin.0, port, &replaced.code).await,
+        )
+        .await
+        .unwrap();
+
+        let code_of = |id: &str| {
+            let (paths, id) = (player.0.clone(), id.to_string());
+            async move {
+                instance::load(&paths, &id)
+                    .await
+                    .unwrap()
+                    .joined
+                    .unwrap()
+                    .code
+            }
+        };
+        assert_eq!(code_of(&first).await, replaced.code);
+        assert_eq!(
+            code_of(&second).await,
+            replaced.code,
+            "the copy the link did not name was left unreachable"
+        );
+        assert_eq!(
+            code_of(&elsewhere).await,
+            share_two.code,
+            "another server's instance took this server's password"
+        );
 
         host.stop().await;
     }

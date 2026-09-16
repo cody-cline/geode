@@ -7,6 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  existingLine,
   joinInput,
   joinStep,
   linkPendingReason,
@@ -117,6 +118,38 @@ test("a server already joined offers its instance before another import", () => 
   assert.equal(joinStep(preview({ id: "survival", name: "Survival" }), null), "openExisting");
   assert.equal(joinStep(preview(), null), "import");
   assert.equal(joinStep(null, null), "lookUp");
+});
+
+/** An instance a lookup matched, with the two facts that decide what is said about it. */
+const already = (passwordChanged, certificateChanged) => ({
+  id: "survival",
+  name: "Survival",
+  passwordChanged,
+  certificateChanged,
+});
+
+test("an instance offered instead of a second import says what opening it does", () => {
+  const same = existingLine(already(false, false));
+  assert.equal(same.tone, "info");
+  assert.equal(same.title, "Already joined as Survival");
+  assert.match(same.detail, /already in that instance/);
+
+  // A new password to save, from the machine the instance already knows.
+  const newPassword = existingLine(already(true, false));
+  assert.equal(newPassword.tone, "info");
+  assert.match(newPassword.detail, /password has changed/);
+  assert.doesNotMatch(newPassword.detail, /certificate/);
+
+  // And from a machine holding a certificate it has never seen: the same
+  // offer, with the fact that tells an admin's reinstall from someone else
+  // answering at that address.
+  const stranger = existingLine(already(true, true));
+  assert.equal(stranger.tone, "warn");
+  assert.match(stranger.detail, /different certificate/);
+  assert.match(stranger.detail, /only if this link came from the admin/);
+
+  // A certificate is worth nothing to weigh where opening saves no link.
+  assert.deepEqual(existingLine(already(false, true)), same);
 });
 
 test("a finished import's problems are counted, and not offered as a retry", () => {

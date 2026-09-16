@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use crate::config::Config;
@@ -78,6 +78,12 @@ pub struct AppState {
     config: tokio::sync::RwLock<Config>,
     /// Cancellation flags for in-flight installs, keyed by progress id.
     cancels: Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
+    /// Instances whose launch has begun and has not yet spawned a game.
+    ///
+    /// The game registry only knows an instance once there is a process, and a
+    /// launch spends the time before that updating from the server and
+    /// downloading — rewriting the very files a second launch would read.
+    launching: Mutex<HashSet<String>>,
     /// The latest `geode://join` link, validated and normalised, until the
     /// window takes it.
     ///
@@ -106,6 +112,7 @@ impl AppState {
             servers: crate::server::run::ServerRegistry::default(),
             config: tokio::sync::RwLock::new(config),
             cancels: Mutex::new(HashMap::new()),
+            launching: Mutex::new(HashSet::new()),
             pending_join: Mutex::new(None),
             share: Default::default(),
         }
@@ -139,5 +146,82 @@ impl AppState {
         if let Ok(mut map) = self.cancels.lock() {
             map.remove(id);
         }
+    }
+
+    /// Take the launch of `id`, or `None` when one is already under way.
+    ///
+    /// The claim lasts as long as the returned guard, which the launch holds
+    /// until the game is spawned or it gives up.
+    pub fn claim_launch(&self, id: &str) -> Option<LaunchClaim<'_>> {
+        let mut launching = self.launching.lock().ok()?;
+        if !launching.insert(id.to_string()) {
+            return None;
+        }
+        Some(LaunchClaim {
+            state: self,
+            id: id.to_string(),
+        })
+    }
+
+    /// Whether a launch of `id` is preparing right now. What it is doing —
+    /// updating from the server, renaming mods — is not to be changed under it.
+    pub fn is_launching(&self, id: &str) -> bool {
+        self.launching
+            .lock()
+            .map(|launching| launching.contains(id))
+            .unwrap_or(false)
+    }
+}
+
+/// One instance's launch, held from [`AppState::claim_launch`] until dropped.
+///
+/// A guard rather than a pair of calls, so a launch that returns early — an
+/// account problem, a failed update, a panic — still frees the instance.
+pub struct LaunchClaim<'a> {
+    state: &'a AppState,
+    id: String,
+}
+
+impl Drop for LaunchClaim<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut launching) = self.state.launching.lock() {
+            launching.remove(&self.id);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two launches of one instance would update it from its server twice at
+    /// once, each over the other's files. The second is turned away until the
+    /// first has the game running, or has given up.
+    #[test]
+    fn a_second_launch_of_the_same_instance_waits_for_the_first() {
+        let state = AppState::new(
+            crate::paths::Paths {
+                root: std::env::temp_dir().join("geode-claim-launch"),
+            },
+            crate::config::Config::default(),
+        );
+
+        let first = state
+            .claim_launch("survival")
+            .expect("nothing holds it yet");
+        assert!(state.is_launching("survival"));
+        assert!(state.claim_launch("survival").is_none());
+
+        // Another instance is nobody else's business.
+        let other = state
+            .claim_launch("creative")
+            .expect("a different instance");
+        assert!(state.is_launching("creative"));
+        drop(other);
+        assert!(!state.is_launching("creative"));
+
+        drop(first);
+        assert!(!state.is_launching("survival"));
+        assert!(state.claim_launch("survival").is_some());
     }
 }

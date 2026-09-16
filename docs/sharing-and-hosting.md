@@ -41,6 +41,7 @@ is more actionable than a silently incomplete instance would be.
 | Geode pack round trip | `src-tauri/src/share/pack.rs` (`export`, `apply_pack`) | Done, tested end to end |
 | Server vs user mods | `src-tauri/src/instance/content.rs` (`Origin`) | Done, tested — server mods can be disabled, not removed |
 | Sharing a server directly with players | `src-tauri/src/share/{host,service,portmap,identity,trust,link,join}.rs` | Done, tested end to end over real TLS |
+| Updating a joined instance from its server | `src-tauri/src/share/pack.rs` (`update`), `src-tauri/src/commands.rs` (`bring_up_to_date`) | Done, tested — Play brings it up to date before the game starts |
 | `geode://join` links | `src-tauri/src/deeplink.rs`, `src-tauri/geode.desktop.hbs` | Done; delivery verified on Linux through the OS handler |
 | Container image | `container/` | Written, **not built** |
 | Event decoupling | `src-tauri/src/events.rs` | Done — the server half no longer needs a window |
@@ -303,6 +304,68 @@ connects straight to the admin's machine. Nothing sits in the middle.
   changed. A pack whose `revision` is missing falls back to the description's,
   and an admin on a Geode from before revisions sends neither, so nothing is
   kept and that instance is never updated from them.
+- A joined instance is brought up to date **when Play is pressed**, and at no
+  other time: no background polling, no check when its page opens, and none in
+  Prepare. The launch asks the server for its description, and only a revision
+  the instance does not hold makes it download the pack and apply it with
+  `pack::update`, before the Java and version work — so a server that moved to
+  another Minecraft version is followed by the very launch that notices. While
+  it does that the launch holds the instance (`AppState::claim_launch`), since
+  two preparing at once would update it twice over each other's files; a second
+  Play is told the instance is already starting, and the server-side mods
+  switch is refused for the same reason.
+- What stops the game and what does not. An update the server says is due has
+  to finish: a client that does not match its server cannot join it, so a
+  download or an import that fails or is cancelled stops the launch, and the
+  next Play runs it again from wherever the last one got to. A server that
+  cannot be reached, or that does not take this instance's password, does not
+  stop it: the player plays what they have, and an info toast says why nothing
+  was checked — telling them to wait would be telling them not to play a
+  single-player world either. That refusal names both of its causes, because a
+  server whose sharing is merely stopped answers exactly as a replaced password
+  does (its share file is moved aside, so `shared_server` matches nothing), and
+  a player told only about a password would go asking for a link they already
+  have. Files that have to be fetched by hand do not stop it either; the
+  revision is recorded and they are listed.
+- What an update writes is what it decided — the server's files and records,
+  the pack's Minecraft and loader versions, the revision and the server's id —
+  onto the instance **as it stands on disk**, read again at that moment
+  (`save_update`), never the copy the launch loaded minutes earlier. A name,
+  notes, memory or a Java override the player changed while they waited for the
+  download is theirs, and survives; the same rule the launch already follows
+  before it records `last_played`.
+- The check waits on the server for up to `PREVIEW_DEADLINE`, thirty seconds,
+  and cancelling the launch does not interrupt that wait — a preview is ended
+  by its deadline and nothing else. So Play against a machine that is off, but
+  still answering at the network level, can sit on "Checking the server for
+  changes" for half a minute before the game starts anyway.
+- A password replaced while a player was away leaves them a link that matches
+  nothing they hold. Opening it finds their instance by the server's id rather
+  than by the password (`join::existing_instance`), the dialog says the
+  password has changed, and Open instance saves the new link onto that instance
+  (`relink`) instead of joining into a second copy. Only for the same server,
+  and only at the same address: the link is asked who is answering there, and a
+  different `serverId` — the machine's other server, say — or an address the
+  instance was not joined at is refused, with the instance untouched. One
+  joined before servers sent their id has none recorded until its first
+  successful update, and until then is found only by its password. The new link
+  is saved onto **every** instance joined from that server at that address, not
+  only the one the dialog names: the named one is what every later link finds,
+  so a second copy left behind would be holding a password nothing could ever
+  put right.
+- A link whose fingerprint is not the one the instance holds says so in that
+  dialog (`ExistingInstance::certificate_changed`), because opening it saves
+  the link and hands this instance's updates to whoever answers there from then
+  on. It is not refused: an admin who reinstalled Geode has a new certificate
+  and a new password both, and that is the case this flow exists for. It is
+  also what someone else answering at that address looks like, which is why the
+  player is told before they open it.
+- Both sides have to be new enough. An admin on a Geode from before revisions
+  sends none, so nothing is ever due and their players stay where they are; a
+  player on an older Geode never checks at all. An instance joined before this
+  gets its first update — which also fills in its server id, each server file's
+  side, and what the server had turned off — on its first Play against an
+  upgraded admin.
 
 **Why direct, and what was tried first.** Players already need a server's
 address to join it, so routing its pack anywhere else hides nothing from them.
@@ -349,9 +412,18 @@ forwarding and made it connect, and a hostile link was dropped.
 - Fabric, Forge, NeoForge, plugin and vanilla servers can be shared. Quilt,
   Mohist, Arclight and Banner are refused with a reason — Geode does not record
   their client loader version — and proxies have nothing to share.
-- A joined instance keeps its link, and opening the link again offers that
-  instance rather than making a second — but there is no "update from server"
-  yet, so a changed server pack means joining again.
+- An update in place is not atomic. Geode killed partway leaves the instance
+  partly updated, possibly with both `x.jar` and `x.jar.disabled`, and the next
+  Play settles it — unless the server cannot be reached by then.
+- Updates depend on the admin's Geode being open with the server shared. While
+  that machine is down, players play the version they have.
+- Only a second launch and the server-side mods switch are held off while a
+  launch updates an instance. Installing, removing or turning content on and
+  off in the same instance meanwhile is not: the update writes the content
+  records it decided on, so a mod installed or removed in that window can end
+  up with its record and its file out of step. The instance's own settings —
+  name, group, notes, artwork, memory, Java, window — are safe, because an
+  update writes nothing of them.
 - `geode://` delivery is verified on Linux only. Windows and macOS are unbuilt
   and unrun.
 - Forge 1.12.2 and older also loads jars from `mods/<version>/`. A server's
@@ -486,14 +558,13 @@ server's own mods whose side is server, and the rule is:
 
 Existing joined instances read the setting as on. Their server files were
 recorded before sides were, with no `side` and no `server_off`, so the switch
-finds no server-side mods in them and changes nothing. Nothing records those
-for an instance that already exists, since there is no update from the server
-yet (item 3's known limits): joining the server again makes a new instance
-that has them.
+finds no server-side mods in them and changes nothing until their first update
+from the server records those, which the next Play does (item 3).
 
 **Updating in place.** `share::pack::update` brings a joined instance up to a
-newer pack from its server without making a new instance. Nothing in the app
-runs it yet. In order:
+newer pack from its server without making a new instance. Pressing Play runs
+it, when the server names a revision the instance does not hold (item 3). In
+order:
 
 1. The pack must be a server's, and download from nowhere but Modrinth, or
    nothing is touched. The pack's Minecraft and loader versions are read, and

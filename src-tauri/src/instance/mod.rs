@@ -67,8 +67,8 @@ pub struct Instance {
     #[serde(default)]
     pub pack: Option<PackSource>,
     /// The server this was joined from. Read to recognise a link opened again,
-    /// and to hold a typed address to the certificate it had; nothing updates
-    /// an instance from its server yet.
+    /// to hold a typed address to the certificate it had, and to bring the
+    /// instance up to that server's pack whenever Play is pressed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub joined: Option<crate::share::link::Link>,
     /// This joined instance keeps its server's server-side mods turned off,

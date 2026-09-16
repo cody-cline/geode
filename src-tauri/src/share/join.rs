@@ -63,17 +63,28 @@ pub struct JoinPreview {
     /// The link as it will be stored and reused: for a typed address, now
     /// carrying the fingerprint that was seen.
     pub link: Link,
-    /// An instance already joined from this server with this code, so the
-    /// player is offered that rather than a second copy. [`preview`] only
-    /// talks to the server and leaves this empty; see [`existing_instance`].
+    /// An instance already joined from this server, so the player is offered
+    /// that rather than a second copy. [`preview`] only talks to the server
+    /// and leaves this empty; see [`existing_instance`].
     pub existing: Option<ExistingInstance>,
 }
 
 /// An instance that was joined from the server being looked at.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ExistingInstance {
     pub id: String,
     pub name: String,
+    /// The instance was recognised by the server it was joined from rather
+    /// than by its password, so this link carries a newer one: opening the
+    /// instance saves it, and its updates keep coming.
+    pub password_changed: bool,
+    /// This link's fingerprint is not the one the instance holds. A machine
+    /// keeps its certificate, so that is an admin who reinstalled Geode — and
+    /// it is also what someone else answering at the same address looks like.
+    /// It is worth saying wherever opening the link saves it, because from
+    /// then on this instance takes its updates from whoever that is.
+    pub certificate_changed: bool,
 }
 
 /// What a player gave to join: a link, or an address and a code typed apart.
@@ -136,23 +147,63 @@ pub async fn remembered_pin(paths: &crate::paths::Paths, address: &Address) -> O
         .map(|(_, pin)| pin)
 }
 
-/// An instance already joined from this same server and code, if there is one.
+/// An instance already joined from this same server, if there is one.
 ///
 /// The same address and the same code, and not the same fingerprint: a
 /// machine whose certificate was replaced is still sharing the same pack. When
 /// several instances were joined from it, the one played most recently — the
 /// order instances are listed in, and the one the player most likely means.
-pub async fn existing_instance(paths: &crate::paths::Paths, link: &Link) -> Option<(String, String)> {
-    crate::instance::list(paths)
-        .await
-        .ok()?
-        .into_iter()
-        .find(|instance| {
-            instance.joined.as_ref().is_some_and(|joined| {
-                joined.address == link.address && joined.code.matches(link.code.raw())
-            })
-        })
-        .map(|instance| (instance.id, instance.name))
+///
+/// A link with a replaced password matches none of them by code, so the
+/// server's own id is tried next: the admin handing out a new link is the one
+/// way a player gets one, and joining again would leave them a second instance
+/// and the first one never updated again. An instance joined before servers
+/// sent their id has none recorded until its first update, and is only found
+/// by its password until then.
+pub async fn existing_instance(
+    paths: &crate::paths::Paths,
+    link: &Link,
+    server_id: &str,
+) -> Option<ExistingInstance> {
+    let instances = crate::instance::list(paths).await.ok()?;
+    let at_address = |instance: &&crate::instance::Instance| {
+        instance
+            .joined
+            .as_ref()
+            .is_some_and(|joined| joined.address == link.address)
+    };
+    let by_password = instances.iter().filter(at_address).find(|instance| {
+        instance
+            .joined
+            .as_ref()
+            .is_some_and(|joined| joined.code.matches(link.code.raw()))
+    });
+    let (instance, password_changed) = match by_password {
+        Some(instance) => (instance, false),
+        None if server_id.is_empty() => return None,
+        None => (
+            instances
+                .iter()
+                .filter(at_address)
+                .find(|instance| instance.joined_server_id.as_deref() == Some(server_id))?,
+            true,
+        ),
+    };
+    Some(ExistingInstance {
+        id: instance.id.clone(),
+        name: instance.name.clone(),
+        password_changed,
+        // Only a link that names a fingerprint disagrees with the one the
+        // instance holds. A typed address carries none until the preview has
+        // seen one, and an `https://` one never does.
+        certificate_changed: link.pin.is_some_and(|offered| {
+            instance
+                .joined
+                .as_ref()
+                .and_then(|joined| joined.pin)
+                .is_some_and(|held| held != offered)
+        }),
+    })
 }
 
 /// Refuse a pack that is not what the player approved: a different Minecraft
@@ -323,9 +374,7 @@ async fn request(
 
     match response.status() {
         s if s.is_success() => Ok(response),
-        reqwest::StatusCode::UNAUTHORIZED => Err(Error::msg(
-            "the server did not accept this password — it may have been replaced; ask the admin for the current link",
-        )),
+        reqwest::StatusCode::UNAUTHORIZED => Err(Error::PasswordRefused),
         reqwest::StatusCode::NOT_FOUND => Err(Error::msg(
             "something answered at that address, but it is not a Geode server sharing a pack",
         )),
@@ -843,16 +892,21 @@ mod tests {
         }
         .into_link(25590)
         .unwrap();
-        let found = existing_instance(&paths, &typed).await;
+        let found = existing_instance(&paths, &typed, "").await;
         assert_eq!(
             found,
-            Some(("survival-2".into(), "Joined survival-2".into())),
+            Some(ExistingInstance {
+                id: "survival-2".into(),
+                name: "Joined survival-2".into(),
+                password_changed: false,
+                certificate_changed: false,
+            }),
             "the one played last"
         );
 
         let found =
-            existing_instance(&paths, &direct("203.0.113.7", 25590, &other_code, None)).await;
-        assert_eq!(found.map(|(id, _)| id).as_deref(), Some("creative"));
+            existing_instance(&paths, &direct("203.0.113.7", 25590, &other_code, None), "").await;
+        assert_eq!(found.map(|e| e.id).as_deref(), Some("creative"));
 
         for (what, link) in [
             (
@@ -862,8 +916,69 @@ mod tests {
             ("another address", direct("203.0.113.9", 25590, &code, None)),
             ("another port", direct("203.0.113.7", 25591, &code, None)),
         ] {
-            assert_eq!(existing_instance(&paths, &link).await, None, "{what}");
+            assert_eq!(existing_instance(&paths, &link, "").await, None, "{what}");
         }
+    }
+
+    /// An admin who replaces a server's password hands out a new link, and
+    /// nothing in it matches what the instance holds. The server it names is
+    /// what finds that instance again, so the player saves the new password
+    /// instead of joining into a second one.
+    #[tokio::test]
+    async fn an_instance_is_found_again_under_a_new_password() {
+        let scratch = Scratch::new("relink");
+        let paths = scratch.paths();
+        let (code1, code2) = (Code::generate(), Code::generate());
+        let (machine, stranger) = (Pin([1; 32]), Pin([2; 32]));
+        instance(
+            &paths,
+            "a",
+            Some(direct("203.0.113.7", 25590, &code1, Some(machine))),
+            100,
+            Some(10),
+        )
+        .await;
+        let mut joined = crate::instance::load(&paths, "a").await.unwrap();
+        joined.joined_server_id = Some("s1".into());
+        joined.save(&paths).await.unwrap();
+
+        let found = |link: Link, server_id: &'static str| {
+            let paths = paths.clone();
+            async move {
+                existing_instance(&paths, &link, server_id)
+                    .await
+                    .map(|e| (e.id, e.password_changed, e.certificate_changed))
+            }
+        };
+
+        // The password it was joined with: found, with nothing to save.
+        assert_eq!(
+            found(direct("203.0.113.7", 25590, &code1, Some(machine)), "s1").await,
+            Some(("a".into(), false, false))
+        );
+        // A password it has never seen, from the server it was joined from.
+        assert_eq!(
+            found(direct("203.0.113.7", 25590, &code2, Some(machine)), "s1").await,
+            Some(("a".into(), true, false))
+        );
+        // The same, from a machine holding a certificate this instance has
+        // never seen. Still the instance to offer — an admin who reinstalled
+        // Geode has a new one — but the dialog says so, because opening it
+        // hands this instance's updates to whoever that is.
+        assert_eq!(
+            found(direct("203.0.113.7", 25590, &code2, Some(stranger)), "s1").await,
+            Some(("a".into(), true, true))
+        );
+        // Another server on the same machine is another server, and so is the
+        // same server's id at an address this instance never joined.
+        assert_eq!(
+            found(direct("203.0.113.7", 25590, &code2, Some(machine)), "s2").await,
+            None
+        );
+        assert_eq!(
+            found(direct("203.0.113.9", 25590, &code2, Some(machine)), "s1").await,
+            None
+        );
     }
 
     fn described(mc_version: &str, loader: Loader, loader_version: &str) -> PackInfo {
@@ -979,10 +1094,17 @@ mod tests {
         preview.existing = Some(ExistingInstance {
             id: "survival".into(),
             name: "Survival".into(),
+            password_changed: true,
+            certificate_changed: true,
         });
         assert_eq!(
             serde_json::to_value(&preview).unwrap()["existing"],
-            serde_json::json!({ "id": "survival", "name": "Survival" })
+            serde_json::json!({
+                "id": "survival",
+                "name": "Survival",
+                "passwordChanged": true,
+                "certificateChanged": true,
+            })
         );
     }
 

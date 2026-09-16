@@ -438,8 +438,9 @@ export const api = {
     invoke<JavaInstall>("install_java", { major }),
 
   // Launch
+  /** `notices` are for after the game is on its way: what an update from the server changed, or why it could not be checked for. */
   launchInstance: (id: string, accountId?: string) =>
-    invoke<{ pid: number; instanceId: string }>("launch_instance", {
+    invoke<{ pid: number; instanceId: string; notices: string[] }>("launch_instance", {
       id,
       accountId: accountId ?? null,
     }),
@@ -479,5 +480,8 @@ export const api = {
   /** `info` is what the player approved; the import is refused if the downloaded pack describes something else. */
   joinServer: (link: JoinLink, info: PackInfo, serverSideMods: boolean, name?: string) =>
     invoke<JoinOutcome>("join_server", { link, info, serverSideMods, name: name ?? null }),
+  /** Save a link with a replaced password onto the instance already joined from that server. */
+  relinkJoinedInstance: (id: string, link: JoinLink) =>
+    invoke<Instance>("relink_joined_instance", { id, link }),
   takePendingJoin: () => invoke<string | null>("take_pending_join"),
 };

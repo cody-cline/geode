@@ -46,6 +46,12 @@ pub enum Error {
     #[error("no usable Java runtime found for Java {0}")]
     NoJava(u32),
 
+    /// A shared server turned a request away. Its own variant because pressing
+    /// Play has to tell this apart from a server that is simply not there: one
+    /// is fixed by opening a new link, the other by waiting.
+    #[error("the server did not accept this password — it may have been replaced; ask the admin for the current link")]
+    PasswordRefused,
+
     #[error("cancelled")]
     Cancelled,
 }
