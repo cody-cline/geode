@@ -165,11 +165,19 @@ const OUTGOING_LIMIT: u64 = 8 << 30;
 /// How long a server's description is answered from the one last worked out.
 ///
 /// Working one out reads every jar in the server's `mods/` and `client-mods/`,
+/// and hashes the ones added by hand and any config sent for its revision,
 /// which for a few hundred mods takes a while, and a preview's connection holds
 /// its place for all of it — a connection that showed a code is never dropped
 /// for a newcomer. Worked out one at a time and reused for this long, a flood
 /// of previews costs one read of the mods every few seconds, and is otherwise
 /// answered at once.
+///
+/// A revision answered from here can be a few seconds older than the server,
+/// so a check made inside that window can be told nothing has changed when
+/// something just did. Nothing is missed by it: what a player keeps is the
+/// revision carried by the pack they actually received, never the one a
+/// description named, so the next check — seconds later — compares against the
+/// server as it is now and updates then.
 const PREVIEW_FRESH: Duration = Duration::from_secs(5);
 
 /// Packs being built at once. Building one hashes and compresses a server's
@@ -231,6 +239,16 @@ pub struct PackInfo {
     pub server_mods: usize,
     /// The server software, for display: `paper`, `neoforge`, …
     pub server_kind: String,
+    /// Changes exactly when what a player receives changes, so a joined
+    /// instance can tell whether it is behind. Empty from a Geode older than
+    /// this.
+    #[serde(default)]
+    pub revision: String,
+    /// The server's id on the admin's machine, so a player's Geode recognises
+    /// the same server under a new password. Empty from a Geode older than
+    /// this.
+    #[serde(default)]
+    pub server_id: String,
 }
 
 /// A running pack server.
@@ -1879,6 +1897,8 @@ pub(super) mod tests {
                         mods: 300,
                         server_mods: 0,
                         server_kind: "fabric".into(),
+                        revision: "r".into(),
+                        server_id: "survival".into(),
                     })
                 };
                 previews.describe("survival", work).await

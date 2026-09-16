@@ -875,7 +875,25 @@ mod tests {
             mods: 1,
             server_mods: 0,
             server_kind: "fabric".into(),
+            revision: String::new(),
+            server_id: String::new(),
         }
+    }
+
+    /// An admin on an older Geode sends a description without a revision, a
+    /// server id or a count of server-side mods. It still reads, as a server
+    /// that says nothing about any of them.
+    #[test]
+    fn a_pack_info_from_an_older_geode_still_reads() {
+        let info: PackInfo = serde_json::from_value(serde_json::json!({
+            "name": "Survival", "mcVersion": "1.21.1", "loader": "fabric",
+            "loaderVersion": "0.16.9", "mods": 3, "serverKind": "fabric",
+        }))
+        .unwrap();
+        assert_eq!(info.revision, "");
+        assert_eq!(info.server_id, "");
+        assert_eq!(info.server_mods, 0);
+        assert_eq!(info.mods, 3);
     }
 
     fn pack(

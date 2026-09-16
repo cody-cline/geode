@@ -92,6 +92,10 @@ export interface Instance {
   joined?: JoinLink | null;
   /** A joined instance keeps its server's server-side mods turned off. */
   serverSideModsOff?: boolean;
+  /** The server revision this joined instance last installed completely. */
+  joinedRevision?: string | null;
+  /** The joined server's id on the admin's machine, kept apart from its password. */
+  joinedServerId?: string | null;
   /** Added by the backend view layer. */
   running: boolean;
   modCount: number;
@@ -626,6 +630,10 @@ export interface PackInfo {
   /** Of `mods`, how many only the server needs. */
   serverMods: number;
   serverKind: string;
+  /** Changes exactly when what a player receives changes; empty from an older Geode. */
+  revision: string;
+  /** The server's id on the admin's machine; empty from an older Geode. */
+  serverId: string;
 }
 
 /** A parsed join link. Opaque to the UI: take it from a preview and pass it back to `joinServer`. */

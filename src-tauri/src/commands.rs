@@ -3250,12 +3250,11 @@ async fn install_joined(
     let probe = archive.to_path_buf();
     let manifest = tokio::task::spawn_blocking(move || share::pack::read_manifest(&probe))
         .await
-        .map_err(|e| Error::msg(format!("reading the pack's manifest panicked: {e}")))??;
-    if !manifest.is_some_and(|m| m.kind == share::manifest::Kind::Server) {
-        return Err(Error::msg(
-            "that address did not send a server's pack, so nothing was installed",
-        ));
-    }
+        .map_err(|e| Error::msg(format!("reading the pack's manifest panicked: {e}")))??
+        .filter(|m| m.kind == share::manifest::Kind::Server)
+        .ok_or_else(|| {
+            Error::msg("that address did not send a server's pack, so nothing was installed")
+        })?;
     // The import checks this too; checked here as well so a refusal leaves no
     // empty instance behind.
     share::pack::check_server_downloads(archive).await?;
@@ -3269,6 +3268,9 @@ async fn install_joined(
     )
     .await?;
     inst.joined = Some(link.clone());
+    if !approved.server_id.is_empty() {
+        inst.joined_server_id = Some(approved.server_id.clone());
+    }
     // Before the import, which turns them off as they land.
     inst.server_side_mods_off = !server_side_mods;
     inst.save(&state.paths).await?;
@@ -3288,6 +3290,19 @@ async fn install_joined(
     // goes on after, so it wins.
     if let Some(chosen) = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()) {
         inst.name = chosen;
+    }
+    // Only an import that finished has installed a revision; files left to
+    // fetch by hand do not change what the server sent. What is kept is the
+    // revision the pack itself carries, so it describes what this instance
+    // actually holds: a server changed and changed back between the
+    // description and the pack would otherwise leave the instance holding one
+    // revision's content under another's name, and the next check would see
+    // nothing to do. A pack from an admin's Geode that carries none falls back
+    // to the description's, which is never newer than the pack built after it.
+    let revision =
+        share::pack::pack_revision(&manifest).unwrap_or_else(|| approved.revision.clone());
+    if imported.is_ok() && !revision.is_empty() {
+        inst.joined_revision = Some(revision);
     }
     inst.save(&state.paths).await?;
 
@@ -3585,6 +3600,115 @@ mod tests {
         .expect_err("a personal pack is not a server's");
         assert!(err.to_string().contains("server's pack"), "{err}");
         assert_eq!(instance_count(&player.0).await, before);
+    }
+
+    /// A joined instance remembers which server it came from, and which of
+    /// that server's revisions it has — but only once the import finished, so
+    /// one that stopped partway is updated next time.
+    #[tokio::test]
+    async fn a_joined_instance_records_the_revision_it_installed() {
+        let admin = scratch("revision-admin");
+        let (mut server, share) = shared_server(&admin.0).await;
+        let archive = admin.0.root.join("pack.geodepack");
+        share::pack::export_server(&admin.0, &server, archive.clone(), &Progress::silent("t"))
+            .await
+            .unwrap();
+        let approved = share::pack::server_pack_info(&admin.0, &server)
+            .await
+            .unwrap();
+        assert!(!approved.revision.is_empty());
+        let link = Link {
+            address: Address::Direct {
+                host: "127.0.0.1".into(),
+                port: 25590,
+            },
+            code: share.code.clone(),
+            pin: Some(Pin([1; 32])),
+        };
+
+        let player = scratch("revision-player");
+        let state = AppState::new(player.0.clone(), crate::config::Config::default());
+        let (inst, problems) = install_joined(
+            &state,
+            &link,
+            &approved,
+            true,
+            None,
+            &archive,
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        let saved = instance::load(&player.0, &inst.id).await.unwrap();
+        assert_eq!(
+            saved.joined_revision.as_deref(),
+            Some(approved.revision.as_str())
+        );
+        assert_eq!(saved.joined_server_id.as_deref(), Some(server.id.as_str()));
+
+        // The description a player was shown is worked out before the pack is
+        // built, and the server can change — or change and change back — in
+        // between. What is kept is the revision of the pack that was actually
+        // installed, so it describes what this instance holds.
+        let stale = share::host::PackInfo {
+            revision: "a revision this pack is not".into(),
+            ..approved.clone()
+        };
+        let (from_stale, problems) = install_joined(
+            &state,
+            &link,
+            &stale,
+            true,
+            None,
+            &archive,
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        let saved = instance::load(&player.0, &from_stale.id).await.unwrap();
+        assert_eq!(
+            saved.joined_revision.as_deref(),
+            Some(approved.revision.as_str())
+        );
+
+        // A reference, which the import resolves one at a time, looking for a
+        // cancel before it asks anyone for anything.
+        tokio::fs::write(
+            admin.0.server_run(&server.id).join("mods/create.jar"),
+            b"from curseforge",
+        )
+        .await
+        .unwrap();
+        server.content.push(
+            serde_json::from_value(serde_json::json!({
+                "fileName": "create.jar", "kind": "mod", "provider": "curseforge",
+                "projectId": "1", "versionId": "2", "name": "Create", "versionNumber": "1",
+            }))
+            .unwrap(),
+        );
+        share::pack::export_server(&admin.0, &server, archive.clone(), &Progress::silent("t"))
+            .await
+            .unwrap();
+        let approved = share::pack::server_pack_info(&admin.0, &server)
+            .await
+            .unwrap();
+        let cancelled = Progress::silent("t");
+        cancelled
+            .cancel_flag()
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let (inst, problems) =
+            install_joined(&state, &link, &approved, true, None, &archive, &cancelled)
+                .await
+                .unwrap();
+        assert!(
+            problems.iter().any(|p| p.contains("stopped partway")),
+            "{problems:?}"
+        );
+        let saved = instance::load(&player.0, &inst.id).await.unwrap();
+        assert_eq!(saved.joined_revision, None);
+        assert_eq!(saved.joined_server_id.as_deref(), Some(server.id.as_str()));
     }
 
     /// A server's pack names Modrinth for the mods it does not carry. One that

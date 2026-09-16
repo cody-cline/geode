@@ -42,6 +42,9 @@ pub async fn manifest_for(paths: &Paths, instance: &Instance) -> Manifest {
             &instance.content.iter().collect::<Vec<_>>(),
         )
         .await,
+        // An instance's pack has no revision: only a server's is checked for
+        // changes.
+        revision: None,
     }
 }
 
@@ -404,6 +407,302 @@ pub async fn import(
         settle_server_files(paths, instance, arrived, &PlayerOff::default()).await?;
     }
     outcome
+}
+
+/// What an update from a server did that the player should hear about.
+#[derive(Debug, Default)]
+pub struct UpdateReport {
+    /// Files the pack pointed at that the player has to fetch themselves, as
+    /// [`import`] returns them.
+    pub missing: Vec<String>,
+    /// The player's own mods that are off because the server sends the same
+    /// project, by name.
+    pub turned_off: Vec<String>,
+    /// The revision the pack itself carried, when it carried one: what the
+    /// instance now holds, to keep instead of the revision of a description
+    /// read before the pack was built. A pack from an admin's Geode older
+    /// than this has none, and the caller keeps the description's.
+    pub revision: Option<String>,
+}
+
+/// The revision a pack says it holds, when it says one.
+pub fn pack_revision(manifest: &Manifest) -> Option<String> {
+    manifest
+        .revision
+        .clone()
+        .filter(|revision| !revision.trim().is_empty())
+}
+
+/// Bring an instance joined from a server up to a newer pack from that server,
+/// in place.
+///
+/// The instance is the player's, and only the server's part of it changes. In
+/// order:
+///
+/// 1. The pack must be a server's, and may download from nowhere but Modrinth.
+///    Either refusal comes before anything is touched.
+/// 2. What the pack brings is read off it, as [`import`] reads it.
+/// 3. What the player turned off among the server's files is noted, by name and
+///    by project. A file off because the server had it off, or because the
+///    player keeps server-side mods off, is not the player's own choice and is
+///    applied again from the pack instead.
+/// 4. Each file the player already has moves to the name the pack writes it
+///    under, so a mod they keep off is not fetched all over again — see
+///    [`take_the_packs_name`].
+/// 5. The mrpack half runs, and the references are resolved again. The rest of
+///    the Geode half does not: the instance's name, group, notes, window
+///    settings, icon and banner stay the player's.
+/// 6. On every exit, including an error or a cancel, what landed is settled as
+///    the server's, with each file the player turned off kept off — under a new
+///    file name too, when it is the same project.
+/// 7. The server's files the pack no longer brings are deleted, turned off or
+///    not: the server decides what it has. One the player had turned off waits
+///    instead, when the update failed before the new version of that project
+///    landed to hold the choice in its place.
+/// 8. A mod of the player's own that is the same Modrinth or CurseForge project
+///    as one the server now has on, under another name, is turned off — two
+///    copies of one mod is a game that does not start — but not deleted, and it
+///    stays the player's. Its name is reported, on this update and on any that
+///    follows while it is off.
+/// 9. Only once all of that finished does the instance take the pack's
+///    Minecraft version, loader and loader version. A failed update is saved by
+///    the caller as far as it got, and runs again next time; until then the
+///    game it starts is the one it had.
+///
+/// Everything else in the instance is left alone: the player's own records and
+/// untracked files, worlds, options, resource packs, shaders, memory, Java, and
+/// whether server-side mods are on. Config files the server sends overwrite the
+/// player's; config files it stopped sending stay.
+pub async fn update(
+    client: &reqwest::Client,
+    paths: &Paths,
+    instance: &mut Instance,
+    archive: &Path,
+    curseforge_key: Option<&str>,
+    progress: &Progress,
+) -> Result<UpdateReport> {
+    use instance::content::{
+        content_dir, is_regular_file, set_enabled_in, Origin, DISABLED_SUFFIX,
+    };
+
+    let probe = archive.to_path_buf();
+    let manifest = tokio::task::spawn_blocking(move || read_manifest(&probe))
+        .await
+        .map_err(|e| Error::msg(format!("reading the pack's manifest panicked: {e}")))??
+        .filter(|manifest| manifest.kind == Kind::Server)
+        .ok_or_else(|| {
+            Error::msg("that address did not send a server's pack, so nothing was changed")
+        })?;
+    check_server_downloads(archive).await?;
+    let described = instance::modpack::preview(archive.to_path_buf()).await?;
+    let arrived = {
+        let (probe, manifest) = (archive.to_path_buf(), manifest.clone());
+        tokio::task::spawn_blocking(move || arrivals(&probe, &manifest))
+            .await
+            .map_err(|e| Error::msg(format!("reading the pack's files panicked: {e}")))??
+    };
+
+    let mut player_off = PlayerOff::default();
+    for record in &instance.content {
+        let not_the_players = record.origin != Origin::Server
+            || record.server_off
+            || (instance.server_side_mods_off && record.side == Some(instance::jar::Side::Server));
+        if not_the_players {
+            continue;
+        }
+        let dir = content_dir(paths, &instance.id, record.kind);
+        if !is_regular_file(&dir.join(format!("{}{DISABLED_SUFFIX}", record.file_name))).await {
+            continue;
+        }
+        player_off
+            .names
+            .insert((record.kind, record.file_name.clone()));
+        if !record.provider.is_empty() {
+            player_off
+                .projects
+                .insert((record.provider.clone(), record.project_id.clone()));
+        }
+    }
+
+    // What the pack's index says each file it names is, so only that very file
+    // is moved to the name it will be written under.
+    let indexed = {
+        let probe = archive.to_path_buf();
+        let index = tokio::task::spawn_blocking(move || instance::modpack::read_index(&probe))
+            .await
+            .map_err(|e| Error::msg(format!("reading the pack's index panicked: {e}")))??;
+        index
+            .into_iter()
+            .flat_map(|index| index.files)
+            .filter_map(|file| {
+                let (kind, base, _) = content_file(&file.path)?;
+                Some(((kind, base), file.hashes.get("sha1").cloned()))
+            })
+            .collect::<HashMap<_, _>>()
+    };
+
+    let outcome = async {
+        for ((kind, name), arrival) in &arrived {
+            let dir = content_dir(paths, &instance.id, *kind);
+            let named = indexed
+                .get(&(*kind, name.clone()))
+                .and_then(|sha1| sha1.as_deref());
+            take_the_packs_name(&dir, name, arrival.off, named).await?;
+        }
+
+        instance::modpack::import_into(client, paths, instance, archive, curseforge_key, progress)
+            .await?;
+        resolve_references(client, paths, instance, &manifest, curseforge_key, progress).await
+    }
+    .await;
+
+    instance.pack = None;
+    settle_server_files(paths, instance, &arrived, &player_off).await?;
+
+    // After the import, not before it: a mod the player turned off whose new
+    // version comes under a new file name has nothing but its old file holding
+    // that choice until the new one has landed. Deleted first, an update that
+    // then failed — or finished with that file left to fetch by hand — would
+    // forget it and bring the mod back on next time.
+    let departed: Vec<instance::content::ContentRecord> = instance
+        .content
+        .iter()
+        .filter(|r| r.origin == Origin::Server)
+        .filter(|r| !arrived.contains_key(&(r.kind, r.file_name.clone())))
+        .cloned()
+        .collect();
+    for record in departed {
+        let dir = content_dir(paths, &instance.id, record.kind);
+        let mut waiting = false;
+        if !record.provider.is_empty()
+            && player_off
+                .names
+                .contains(&(record.kind, record.file_name.clone()))
+        {
+            let project = (record.provider.clone(), record.project_id.clone());
+            for ((kind, name), arrival) in &arrived {
+                if arrival.project.as_ref() != Some(&project) {
+                    continue;
+                }
+                let to = content_dir(paths, &instance.id, *kind);
+                let there = is_regular_file(&to.join(name)).await
+                    || is_regular_file(&to.join(format!("{name}{DISABLED_SUFFIX}"))).await;
+                if !there {
+                    waiting = true;
+                    break;
+                }
+            }
+        }
+        if waiting {
+            continue;
+        }
+        // A record names one file in its folder. One naming anything else
+        // was not written by Geode, and nothing is deleted on its word.
+        let one_file = Path::new(&record.file_name);
+        if crate::paths::is_safe_relative(one_file) && one_file.components().count() == 1 {
+            for file in [
+                record.file_name.clone(),
+                format!("{}{DISABLED_SUFFIX}", record.file_name),
+            ] {
+                match tokio::fs::remove_file(dir.join(file)).await {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+                    _ => {}
+                }
+            }
+        }
+        instance.content.retain(|r| {
+            !(r.origin == Origin::Server
+                && r.kind == record.kind
+                && r.file_name == record.file_name)
+        });
+    }
+
+    // Once the server's copies are where they are going to be. Two copies of
+    // one mod is a game that does not start, but only when both are on: a copy
+    // of the server's that is off, or that never landed, leaves the player's
+    // own the one they have. What is reported is what ended up off, so an
+    // update that runs again after a failure says the same thing again.
+    let mut turned_off = Vec::new();
+    for ((kind, name), arrival) in &arrived {
+        let Some((provider, project_id)) = &arrival.project else {
+            continue;
+        };
+        let dir = content_dir(paths, &instance.id, *kind);
+        if !is_regular_file(&dir.join(name)).await {
+            continue;
+        }
+        for record in &instance.content {
+            let own_copy = record.origin == Origin::User
+                && record.kind == *kind
+                && &record.provider == provider
+                && &record.project_id == project_id
+                && &record.file_name != name;
+            if !own_copy {
+                continue;
+            }
+            let off = if is_regular_file(&dir.join(&record.file_name)).await {
+                set_enabled_in(&dir, &record.file_name, false).await?;
+                true
+            } else {
+                is_regular_file(&dir.join(format!("{}{DISABLED_SUFFIX}", record.file_name))).await
+            };
+            if off {
+                turned_off.push(record.name.clone());
+            }
+        }
+    }
+
+    let missing = outcome?;
+    instance.mc_version = described.mc_version;
+    instance.loader = described.loader;
+    instance.loader_version = described.loader_version;
+    Ok(UpdateReport {
+        missing,
+        turned_off,
+        revision: pack_revision(&manifest),
+    })
+}
+
+/// Move the player's copy of a file a pack brings to the name the pack writes
+/// it under, when their copy is under the other one.
+///
+/// A pack writes each file under the name the server has it by: a mod the
+/// server has on as `x.jar`, one it has off as `x.jar.disabled`. A player who
+/// keeps a mod off has it under the other name, where the import does not look
+/// — so it is fetched all over again, and a Modrinth that cannot be reached, or
+/// a version taken down since, fails the whole update over a file the player
+/// already has. Moved first it is found, and [`settle_server_files`] puts the
+/// player's choice back afterwards, because what they turned off was read
+/// before any of this.
+///
+/// Only their copy of the very file the pack names is moved: where the index
+/// says which file that is, it has to be that one, or it stays where it is and
+/// is fetched. A pack that names no hash carries the bytes itself, or fetches
+/// them by id against a hash of its own, and either lands over whatever is
+/// there.
+async fn take_the_packs_name(dir: &Path, name: &str, off: bool, named: Option<&str>) -> Result<()> {
+    use instance::content::{is_regular_file, set_enabled_in, DISABLED_SUFFIX};
+
+    let disabled = format!("{name}{DISABLED_SUFFIX}");
+    let (written, other) = if off {
+        (disabled.as_str(), name)
+    } else {
+        (name, disabled.as_str())
+    };
+    if is_regular_file(&dir.join(written)).await || !is_regular_file(&dir.join(other)).await {
+        return Ok(());
+    }
+    if let Some(sha1) = named {
+        let same = matches!(
+            crate::net::sha1_file(&dir.join(other)).await,
+            Ok(actual) if actual.eq_ignore_ascii_case(sha1)
+        );
+        if !same {
+            return Ok(());
+        }
+    }
+    set_enabled_in(dir, other, !off).await?;
+    Ok(())
 }
 
 /// One content file a server's pack brings, however it brings it.
@@ -872,12 +1171,32 @@ async fn resolve_references(
     // is one that completed. Dropping every record because one of five failed
     // would leave four working jars as untracked files — and a CurseForge jar
     // cannot be re-identified by hash later, so they would stay that way.
-    instance
-        .content
-        .extend(records.into_iter().filter(|(dest, _)| dest.is_file()).map(|(_, r)| r));
+    put_records(
+        &mut instance.content,
+        records
+            .into_iter()
+            .filter(|(dest, _)| dest.is_file())
+            .map(|(_, r)| r),
+    );
     fetched?;
 
     Ok(missing)
+}
+
+/// Keep a record for each file that arrived, in place of any the instance
+/// already had for the same file.
+///
+/// An update resolves a server's references again into an instance that has
+/// records for them from last time, and two records for one file disagree
+/// about which version it is.
+fn put_records(
+    content: &mut Vec<instance::content::ContentRecord>,
+    arrived: impl IntoIterator<Item = instance::content::ContentRecord>,
+) {
+    for record in arrived {
+        content.retain(|r| !(r.kind == record.kind && r.file_name == record.file_name));
+        content.push(record);
+    }
 }
 
 /// Which content folder a manifest path names, if any.
@@ -1131,6 +1450,8 @@ pub async fn server_pack_info(
 ) -> Result<super::host::PackInfo> {
     let (loader, loader_version) = client_loader(server)?;
     let mods = server_mods(&paths.server_run(&server.id), &server.content).await?;
+    let include_config = sends_config(paths, &server.id).await?;
+    let revision = server_revision(paths, server, &mods, include_config).await?;
     Ok(super::host::PackInfo {
         name: server.name.clone(),
         mc_version: server.mc_version.clone(),
@@ -1143,7 +1464,160 @@ pub async fn server_pack_info(
             .filter(|side| **side == instance::jar::Side::Server)
             .count(),
         server_kind: server.kind.as_str().to_string(),
+        revision,
+        server_id: server.id.clone(),
     })
+}
+
+/// Whether a server's pack sends its `config/` folder.
+///
+/// From the share file, read now: an admin who just stopped sending config is
+/// not second-guessed by a copy of anything loaded earlier. A server that is
+/// not shared, now or ever, sends none.
+async fn sends_config(paths: &Paths, id: &str) -> Result<bool> {
+    Ok(crate::server::share::load(paths, id)
+        .await?
+        .is_some_and(|share| share.shared && share.include_config))
+}
+
+/// The SHA-1 of a file, or nothing when it is no longer there to read.
+///
+/// A running server rewrites files under it while it runs — a mod saving its
+/// config, a database writing and renaming its own files — so one listed a
+/// moment ago can be gone by the time it is hashed. Leaving it out of the
+/// revision costs at most one extra update later; failing instead would make
+/// the server's description unreadable, and a player pressing Play would be
+/// told it could not be reached.
+async fn sha1_if_there(path: &Path) -> Result<Option<String>> {
+    match crate::net::sha1_file(path).await {
+        Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        other => other.map(Some),
+    }
+}
+
+/// One value for everything a server's players receive, which changes exactly
+/// when that does.
+///
+/// Worked out from what the files hold, never from when they were written. The
+/// setup comes first — the Minecraft version, the client loader and its
+/// version, and whether config is sent — and then a line for each mod the pack
+/// carries: its path as it is on disk, `.disabled` and all, the side it is sent
+/// with, and what it is. A mod with a record naming its provider, project and
+/// version is that and its size, so a pack of a few hundred Modrinth mods is
+/// described without hashing one of them; any other is the SHA-1 of its bytes,
+/// since nothing else says which build of a jar added by hand it is. When
+/// config is sent, every regular file under `config/` is its path and SHA-1,
+/// found the way the pack's own walk finds them, through no link.
+///
+/// Left out on purpose: the server's name, notes and artwork, which an update
+/// does not apply to a player's instance; its worlds, logs and properties,
+/// which never travel; and every modification time, so a restart that writes
+/// the same configs again does not send every player an update.
+///
+/// A file that is gone by the time it is read is left out rather than failing
+/// the whole description — see [`sha1_if_there`].
+async fn server_revision(
+    paths: &Paths,
+    server: &crate::server::Server,
+    mods: &ServerMods<'_>,
+    include_config: bool,
+) -> Result<String> {
+    use instance::content::{strip_disabled, ContentKind};
+    use instance::jar::Side;
+    use sha2::{Digest, Sha256};
+
+    let (loader, loader_version) = client_loader(server)?;
+    let run = paths.server_run(&server.id);
+    let shown = |rel: &Path| rel.to_string_lossy().replace('\\', "/");
+
+    let mut lines = Vec::new();
+    for rel in &mods.carried {
+        let kind = if rel.starts_with(ContentKind::ClientMod.folder()) {
+            ContentKind::ClientMod
+        } else {
+            ContentKind::Mod
+        };
+        let base = rel
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map_or("", |name| strip_disabled(name).0);
+        let side = match mods.sides.get(rel).copied().unwrap_or(Side::Both) {
+            Side::Client => "client",
+            Side::Server => "server",
+            Side::Both => "both",
+        };
+        let full = run.join(rel);
+        let record = mods.shared.iter().find(|r| {
+            r.kind == kind
+                && r.file_name == base
+                && !r.provider.is_empty()
+                && !r.project_id.is_empty()
+                && !r.version_id.is_empty()
+        });
+        let identity = match record {
+            Some(r) => match tokio::fs::symlink_metadata(&full).await {
+                Ok(meta) => format!(
+                    "{}:{}:{}:{}",
+                    r.provider,
+                    r.project_id,
+                    r.version_id,
+                    meta.len()
+                ),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            },
+            None => match sha1_if_there(&full).await? {
+                Some(hash) => format!("sha1:{hash}"),
+                None => continue,
+            },
+        };
+        lines.push(format!("mod {} {side} {identity}", shown(rel)));
+    }
+
+    if include_config {
+        let config = run.join("config");
+        let files = tokio::task::spawn_blocking(move || {
+            let mut files = Vec::new();
+            // A `config/` that is itself a link is not sent, so it is nothing
+            // here either.
+            if !std::fs::symlink_metadata(&config).is_ok_and(|meta| meta.is_dir()) {
+                return files;
+            }
+            let mut stack = vec![config];
+            while let Some(dir) = stack.pop() {
+                let Ok(entries) = std::fs::read_dir(&dir) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    match entry.file_type() {
+                        Ok(kind) if kind.is_dir() => stack.push(entry.path()),
+                        Ok(kind) if kind.is_file() => files.push(entry.path()),
+                        _ => {}
+                    }
+                }
+            }
+            files
+        })
+        .await
+        .map_err(|e| Error::msg(format!("reading the server's config panicked: {e}")))?;
+        for full in files {
+            let Some(hash) = sha1_if_there(&full).await? else {
+                continue;
+            };
+            let rel = full.strip_prefix(&run).unwrap_or(&full);
+            lines.push(format!("config-file {} sha1:{hash}", shown(rel)));
+        }
+    }
+    lines.sort();
+
+    let header = [
+        "geode-revision 1".to_string(),
+        format!("minecraft {}", server.mc_version),
+        format!("loader {} {loader_version}", loader.as_str()),
+        format!("config {include_config}"),
+    ];
+    let all: Vec<String> = header.into_iter().chain(lines).collect();
+    Ok(hex::encode(Sha256::digest(all.join("\n").as_bytes())))
 }
 
 /// Write the pack a server hands to its players.
@@ -1166,7 +1640,8 @@ pub async fn server_pack_info(
 /// copies. Client mods go the same way, as mods in the player's `mods/`, and
 /// each mod's side goes with it. Only links, subfolders and files that are not
 /// jars stay. The manifest is `Kind::Server`, so importing it claims every file
-/// for the server.
+/// for the server, and it carries the revision of what this very pack holds, so
+/// a player keeps the revision of what they received.
 pub async fn export_server(
     paths: &Paths,
     server: &crate::server::Server,
@@ -1176,6 +1651,12 @@ pub async fn export_server(
     let (loader, loader_version) = client_loader(server)?;
     let run = paths.server_run(&server.id);
     let mods = server_mods(&run, &server.content).await?;
+    let include_config = sends_config(paths, &server.id).await?;
+    // Worked out from the very files this pack is about to be written from,
+    // and before it is written: a file that changes while the pack is built
+    // makes the revision it carries the older of the two, which the next check
+    // finds changed. The other way round would be a change nobody ever sees.
+    let revision = server_revision(paths, server, &mods, include_config).await?;
 
     let media = paths.server_media(&server.id);
     let manifest = Manifest {
@@ -1198,6 +1679,7 @@ pub async fn export_server(
         // it came from through `joined` instead.
         source: None,
         files: server_notes(&mods),
+        revision: Some(revision),
     };
     let extras = extras_from(
         &media,
@@ -1210,12 +1692,6 @@ pub async fn export_server(
     // Mods and client mods by name, exactly the files `server_mods` read and
     // counted, and `config/` whole when asked for. Neither follows a link.
     let mut trees = Vec::new();
-    // From the share file, read now: an admin who just stopped sending config
-    // is not second-guessed by a copy of anything loaded earlier. A server that
-    // is not shared, now or ever, sends none.
-    let include_config = crate::server::share::load(paths, &server.id)
-        .await?
-        .is_some_and(|share| share.shared && share.include_config);
     if include_config {
         trees.push("config");
     }
@@ -1277,6 +1753,7 @@ mod tests {
             banner: None,
             source: None,
             files: Vec::new(),
+            revision: None,
         }
     }
 
@@ -1854,6 +2331,7 @@ mod tests {
             banner: None,
             source: None,
             files: Vec::new(),
+            revision: None,
         };
         let dest = paths.root.join("cancel.geodepack");
         write_pack(&dest, &index, &manifest, &[("overrides/mods/private.jar", b"private")]);
@@ -2541,8 +3019,11 @@ mod tests {
                 mods: 8,
                 server_mods: 2,
                 server_kind: "fabric".into(),
+                revision: info.revision.clone(),
+                server_id: "srv-info".into(),
             }
         );
+        assert_eq!(info.revision.len(), 64, "{}", info.revision);
         assert!(
             !paths.root.join("server.geodepack").exists(),
             "a preview must not build the pack"
@@ -3389,6 +3870,1171 @@ mod tests {
             "{:?}",
             arrived.content
         );
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Revisions, and updating from a server
+    // -----------------------------------------------------------------------
+
+    async fn revision_of(paths: &Paths, server: &Server) -> String {
+        server_pack_info(paths, server).await.unwrap().revision
+    }
+
+    /// A player's Geode updates when the revision changes, so it has to change
+    /// for everything that reaches a player's game and for nothing else — or
+    /// players miss an admin's change, or download the same pack on every Play.
+    #[tokio::test]
+    async fn the_revision_moves_only_when_what_players_get_changes() {
+        let (paths, mut server) = server_fixture("revision", false).await;
+        let run = paths.server_run(&server.id);
+        let share = |include_config| ServerShare {
+            code: crate::share::code::Code::generate(),
+            include_config,
+            shared: true,
+        };
+
+        let mut last = revision_of(&paths, &server).await;
+        assert_eq!(
+            revision_of(&paths, &server).await,
+            last,
+            "the same server twice"
+        );
+        let mut moved = |now: String, what: &str| {
+            assert_ne!(now, last, "{what} left the revision alone");
+            last = now;
+        };
+
+        tokio::fs::write(run.join("mods/added.jar"), b"version one")
+            .await
+            .unwrap();
+        moved(revision_of(&paths, &server).await, "adding a jar by hand");
+
+        tokio::fs::write(run.join("mods/added.jar"), b"version two")
+            .await
+            .unwrap();
+        moved(
+            revision_of(&paths, &server).await,
+            "new bytes of the same size",
+        );
+
+        tokio::fs::rename(
+            run.join("mods/homemade.jar"),
+            run.join("mods/homemade.jar.disabled"),
+        )
+        .await
+        .unwrap();
+        moved(revision_of(&paths, &server).await, "turning a mod off");
+
+        let sodium = server
+            .content
+            .iter_mut()
+            .find(|r| r.file_name == "sodium-mr.jar")
+            .unwrap();
+        sodium.version_id = "ver-2".into();
+        moved(
+            revision_of(&paths, &server).await,
+            "a new version of a recorded mod",
+        );
+
+        tokio::fs::create_dir_all(run.join("client-mods"))
+            .await
+            .unwrap();
+        tokio::fs::rename(
+            run.join("mods/added.jar"),
+            run.join("client-mods/added.jar"),
+        )
+        .await
+        .unwrap();
+        moved(
+            revision_of(&paths, &server).await,
+            "moving a jar to Client mods",
+        );
+
+        crate::server::share::save(&paths, &server.id, &share(true))
+            .await
+            .unwrap();
+        moved(revision_of(&paths, &server).await, "sending config");
+
+        tokio::fs::write(run.join("config/secret.toml"), b"token = \"rotated\"\n")
+            .await
+            .unwrap();
+        moved(
+            revision_of(&paths, &server).await,
+            "changing a config file that is sent",
+        );
+
+        // What players do not get, or get nothing new from.
+        let unmoved = revision_of(&paths, &server).await;
+        tokio::fs::write(run.join("config/secret.toml"), b"token = \"rotated\"\n")
+            .await
+            .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(run.join("config/secret.toml"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
+            .unwrap();
+        tokio::fs::write(run.join("server.properties"), b"motd=changed\n")
+            .await
+            .unwrap();
+        tokio::fs::write(run.join("world/level.dat"), b"a day later")
+            .await
+            .unwrap();
+        tokio::fs::write(run.join("logs/latest.log"), b"[Server] restarted\n")
+            .await
+            .unwrap();
+        server.name = "Renamed Club".into();
+        server.notes = "be nicer".into();
+        tokio::fs::write(paths.server_media(&server.id).join("icon.png"), b"NEW PNG")
+            .await
+            .unwrap();
+        assert_eq!(revision_of(&paths, &server).await, unmoved);
+
+        crate::server::share::save(&paths, &server.id, &share(false))
+            .await
+            .unwrap();
+        let unsent = revision_of(&paths, &server).await;
+        assert_ne!(unsent, unmoved, "no longer sending config");
+        tokio::fs::write(run.join("config/secret.toml"), b"token = \"again\"\n")
+            .await
+            .unwrap();
+        assert_eq!(
+            revision_of(&paths, &server).await,
+            unsent,
+            "a config file that is not sent moved the revision"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    /// Resolving a server's references again keeps one record for each file,
+    /// the new one, and every record for any other file.
+    /// A server rewrites files under itself while it runs — a mod saving its
+    /// config, a database renaming its own files — so one listed a moment ago
+    /// can be gone by the time it is read. It is left out of the revision,
+    /// rather than making the whole description unreadable and every Play say
+    /// the server could not be reached.
+    #[tokio::test]
+    async fn a_file_that_goes_while_the_revision_is_read_is_left_out() {
+        let (paths, server) =
+            small_server("ghost", &[("mods/there.jar", b"there".to_vec())], false).await;
+        let run = paths.server_run(&server.id);
+        let present = server_mods(&run, &server.content).await.unwrap();
+        let steady = server_revision(&paths, &server, &present, false)
+            .await
+            .unwrap();
+
+        // The same server, listing two files that have gone since: one with a
+        // record naming its version, one with nothing but its bytes.
+        let recorded = ContentRecord {
+            project_id: "G".into(),
+            version_id: "v".into(),
+            ..record("modrinth", "ghost-mr.jar", ContentKind::Mod)
+        };
+        let gone = ServerMods {
+            shared: vec![&recorded],
+            carried: present
+                .carried
+                .iter()
+                .cloned()
+                .chain([
+                    PathBuf::from("mods/ghost.jar"),
+                    PathBuf::from("mods/ghost-mr.jar"),
+                ])
+                .collect(),
+            sides: present.sides.clone(),
+        };
+        assert_eq!(
+            server_revision(&paths, &server, &gone, false)
+                .await
+                .unwrap(),
+            steady,
+            "a file that is not there says nothing about what players get"
+        );
+
+        // The one call the config walk makes for each file it listed.
+        assert_eq!(
+            sha1_if_there(&run.join("config/gone.toml")).await.unwrap(),
+            None
+        );
+        assert!(sha1_if_there(&run.join("mods/there.jar"))
+            .await
+            .unwrap()
+            .is_some());
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    #[test]
+    fn a_reference_is_never_recorded_twice() {
+        let mut content = vec![
+            ContentRecord {
+                version_id: "old".into(),
+                origin: Origin::Server,
+                ..record("curseforge", "create.jar", ContentKind::Mod)
+            },
+            record("curseforge", "create.jar", ContentKind::ResourcePack),
+            record("modrinth", "sodium.jar", ContentKind::Mod),
+        ];
+        put_records(
+            &mut content,
+            [ContentRecord {
+                version_id: "new".into(),
+                ..record("curseforge", "create.jar", ContentKind::Mod)
+            }],
+        );
+
+        let create: Vec<&ContentRecord> = content
+            .iter()
+            .filter(|r| r.kind == ContentKind::Mod && r.file_name == "create.jar")
+            .collect();
+        assert_eq!(create.len(), 1, "{content:?}");
+        assert_eq!(create[0].version_id, "new");
+        assert_eq!(content.len(), 3, "{content:?}");
+    }
+
+    /// A shared Fabric server holding nothing but the files named.
+    async fn small_server(
+        tag: &str,
+        files: &[(&str, Vec<u8>)],
+        include_config: bool,
+    ) -> (Paths, Server) {
+        let paths = Paths {
+            root: std::env::temp_dir().join(format!("geode-update-{tag}-{}", std::process::id())),
+        };
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+        let mut server = Server::new("Survival Club".into(), ServerKind::Fabric, "1.21.1".into());
+        server.id = format!("srv-{tag}");
+        server.build = "0.16.9".into();
+
+        let run = paths.server_run(&server.id);
+        tokio::fs::create_dir_all(run.join("mods")).await.unwrap();
+        for (rel, bytes) in files {
+            let path = run.join(rel);
+            tokio::fs::create_dir_all(path.parent().unwrap())
+                .await
+                .unwrap();
+            tokio::fs::write(path, bytes).await.unwrap();
+        }
+        let media = paths.server_media(&server.id);
+        tokio::fs::create_dir_all(&media).await.unwrap();
+        tokio::fs::write(media.join("icon.png"), b"PNG")
+            .await
+            .unwrap();
+        server.icon = Some("icon.png".into());
+
+        crate::server::share::save(
+            &paths,
+            &server.id,
+            &ServerShare {
+                code: crate::share::code::Code::generate(),
+                include_config,
+                shared: true,
+            },
+        )
+        .await
+        .unwrap();
+        (paths, server)
+    }
+
+    /// The server's pack as it is now.
+    async fn pack_now(paths: &Paths, server: &Server, name: &str) -> PathBuf {
+        let dest = paths.root.join(format!("{name}.geodepack"));
+        export_server(paths, server, dest.clone(), &Progress::silent("t"))
+            .await
+            .unwrap();
+        dest
+    }
+
+    /// Copy jars from the server's `mods/` into a player's, so the index
+    /// entries naming them download nothing.
+    async fn seed(paths: &Paths, server: &Server, player: &Instance, jars: &[&str]) {
+        let from = paths.server_run(&server.id).join("mods");
+        let to = paths.game_dir(&player.id).join("mods");
+        tokio::fs::create_dir_all(&to).await.unwrap();
+        for jar in jars {
+            tokio::fs::copy(from.join(jar), to.join(jar)).await.unwrap();
+        }
+    }
+
+    /// A fresh instance that joined the server's pack as it is now, offline.
+    async fn join_now(paths: &Paths, server: &Server, id: &str, seeded: &[&str]) -> Instance {
+        let mut joined = fresh(id);
+        joined.loader_version = "0.16.9".into();
+        let _ = tokio::fs::remove_dir_all(paths.instance(id)).await;
+        seed(paths, server, &joined, seeded).await;
+        let pack = pack_now(paths, server, &format!("{id}-joined")).await;
+        let missing = import(
+            &offline(),
+            paths,
+            &mut joined,
+            &pack,
+            None,
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+        assert!(missing.is_empty(), "{missing:?}");
+        joined
+    }
+
+    async fn update_offline(
+        paths: &Paths,
+        player: &mut Instance,
+        pack: &Path,
+    ) -> Result<UpdateReport> {
+        update(
+            &offline(),
+            paths,
+            player,
+            pack,
+            None,
+            &Progress::silent("t"),
+        )
+        .await
+    }
+
+    fn record_of<'a>(player: &'a Instance, file: &str) -> Option<&'a ContentRecord> {
+        player.content.iter().find(|r| r.file_name == file)
+    }
+
+    /// The server's changes arrive, and nothing of the player's goes: their own
+    /// mods, the one of the server's they turned off, their worlds and options,
+    /// and what they called the instance and the picture it has.
+    #[tokio::test]
+    async fn updating_brings_the_servers_changes_and_keeps_the_players_own() {
+        let (paths, mut server) = small_server(
+            "keeps",
+            &[
+                ("mods/a.jar", b"a".to_vec()),
+                ("mods/kept.jar", b"kept, first".to_vec()),
+                ("mods/back-on.jar.disabled", b"back on".to_vec()),
+                ("config/c.toml", b"c = 1\n".to_vec()),
+            ],
+            true,
+        )
+        .await;
+        let mut player = join_now(&paths, &server, "update-keeps", &[]).await;
+        let game = paths.game_dir(&player.id);
+        let mods = game.join("mods");
+        let icon = std::fs::read(paths.instance_media(&player.id).join("icon.png")).unwrap();
+
+        tokio::fs::write(mods.join("own.jar"), b"the player's own")
+            .await
+            .unwrap();
+        tokio::fs::write(mods.join("mine.jar"), b"installed by the player")
+            .await
+            .unwrap();
+        player.content.push(ContentRecord {
+            project_id: "mine".into(),
+            ..record("modrinth", "mine.jar", ContentKind::Mod)
+        });
+        crate::instance::content::set_enabled_in(&mods, "kept.jar", false)
+            .await
+            .unwrap();
+        player.name = "Mine".into();
+        tokio::fs::write(game.join("options.txt"), b"fov:90\n")
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(game.join("saves/w"))
+            .await
+            .unwrap();
+        tokio::fs::write(game.join("saves/w/level.dat"), b"my world")
+            .await
+            .unwrap();
+
+        let run = paths.server_run(&server.id);
+        tokio::fs::remove_file(run.join("mods/a.jar"))
+            .await
+            .unwrap();
+        tokio::fs::write(run.join("mods/b.jar"), b"b")
+            .await
+            .unwrap();
+        tokio::fs::write(run.join("mods/kept.jar"), b"kept, second")
+            .await
+            .unwrap();
+        tokio::fs::rename(
+            run.join("mods/back-on.jar.disabled"),
+            run.join("mods/back-on.jar"),
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(run.join("config/c.toml"), b"c = 2\n")
+            .await
+            .unwrap();
+        server.build = "0.17.0".into();
+        server.name = "Renamed Club".into();
+        tokio::fs::write(paths.server_media(&server.id).join("icon.png"), b"NEW PNG")
+            .await
+            .unwrap();
+        let pack = pack_now(&paths, &server, "b").await;
+
+        let report = update_offline(&paths, &mut player, &pack).await.unwrap();
+        assert!(
+            report.missing.is_empty() && report.turned_off.is_empty(),
+            "{report:?}"
+        );
+
+        assert!(!mods.join("a.jar").exists() && !mods.join("a.jar.disabled").exists());
+        assert!(
+            record_of(&player, "a.jar").is_none(),
+            "{:?}",
+            player.content
+        );
+        assert!(mods.join("b.jar").is_file());
+        assert_eq!(
+            record_of(&player, "b.jar").map(|r| r.origin),
+            Some(Origin::Server)
+        );
+        assert!(
+            !mods.join("kept.jar").exists(),
+            "a mod the player turned off came back on"
+        );
+        assert_eq!(
+            std::fs::read(mods.join("kept.jar.disabled")).unwrap(),
+            b"kept, second"
+        );
+        assert!(mods.join("back-on.jar").is_file() && !mods.join("back-on.jar.disabled").exists());
+        assert!(!record_of(&player, "back-on.jar").unwrap().server_off);
+
+        assert_eq!(
+            std::fs::read(mods.join("own.jar")).unwrap(),
+            b"the player's own"
+        );
+        assert!(
+            record_of(&player, "own.jar").is_none(),
+            "{:?}",
+            player.content
+        );
+        assert_eq!(
+            std::fs::read(mods.join("mine.jar")).unwrap(),
+            b"installed by the player"
+        );
+        assert_eq!(
+            record_of(&player, "mine.jar").map(|r| r.origin),
+            Some(Origin::User)
+        );
+        assert_eq!(
+            std::fs::read(game.join("options.txt")).unwrap(),
+            b"fov:90\n"
+        );
+        assert_eq!(
+            std::fs::read(game.join("saves/w/level.dat")).unwrap(),
+            b"my world"
+        );
+        assert_eq!(player.name, "Mine");
+        assert_eq!(player.icon.as_deref(), Some("icon.png"));
+        assert_eq!(
+            std::fs::read(paths.instance_media(&player.id).join("icon.png")).unwrap(),
+            icon
+        );
+        assert_eq!(
+            std::fs::read(game.join("config/c.toml")).unwrap(),
+            b"c = 2\n"
+        );
+
+        let files: HashSet<(ContentKind, &str)> = player
+            .content
+            .iter()
+            .map(|r| (r.kind, r.file_name.as_str()))
+            .collect();
+        assert_eq!(files.len(), player.content.len(), "{:?}", player.content);
+        assert!(player.pack.is_none(), "{:?}", player.pack);
+        assert_eq!(player.loader_version, "0.17.0");
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    /// A new version of a server's mod usually has a new file name. The player
+    /// who turned the old one off keeps it off, because it is the same project.
+    #[tokio::test]
+    async fn a_renamed_server_mod_stays_off_for_a_player_who_turned_it_off() {
+        let (paths, mut server) =
+            small_server("renamed", &[("mods/p-1.jar", b"p one".to_vec())], false).await;
+        server.content.push(ContentRecord {
+            project_id: "P".into(),
+            version_id: "v1".into(),
+            ..record("modrinth", "p-1.jar", ContentKind::Mod)
+        });
+        let mut player = join_now(&paths, &server, "update-renamed", &["p-1.jar"]).await;
+        let mods = paths.game_dir(&player.id).join("mods");
+        crate::instance::content::set_enabled_in(&mods, "p-1.jar", false)
+            .await
+            .unwrap();
+
+        let run = paths.server_run(&server.id);
+        tokio::fs::remove_file(run.join("mods/p-1.jar"))
+            .await
+            .unwrap();
+        tokio::fs::write(run.join("mods/p-2.jar"), b"p two")
+            .await
+            .unwrap();
+        server.content = vec![ContentRecord {
+            project_id: "P".into(),
+            version_id: "v2".into(),
+            ..record("modrinth", "p-2.jar", ContentKind::Mod)
+        }];
+        let pack = pack_now(&paths, &server, "b").await;
+        seed(&paths, &server, &player, &["p-2.jar"]).await;
+
+        update_offline(&paths, &mut player, &pack).await.unwrap();
+
+        for gone in ["p-1.jar", "p-1.jar.disabled", "p-2.jar"] {
+            assert!(!mods.join(gone).exists(), "{gone} is still there");
+        }
+        assert!(mods.join("p-2.jar.disabled").is_file());
+        assert!(
+            record_of(&player, "p-1.jar").is_none(),
+            "{:?}",
+            player.content
+        );
+        assert_eq!(
+            record_of(&player, "p-2.jar").map(|r| r.origin),
+            Some(Origin::Server)
+        );
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    /// A mod the player keeps turned off is already on their disk, under the
+    /// other name. An update moves it to the name the pack writes rather than
+    /// fetching it all over again — so keeping a server's mods off costs no
+    /// download, and an update still finishes when the mod cannot be fetched
+    /// at all.
+    #[tokio::test]
+    async fn a_mod_the_player_keeps_off_is_not_fetched_again() {
+        let (paths, mut server) = small_server(
+            "kept-off",
+            &[("mods/idx.jar", b"from modrinth".to_vec())],
+            false,
+        )
+        .await;
+        server.content.push(ContentRecord {
+            project_id: "I".into(),
+            ..record("modrinth", "idx.jar", ContentKind::Mod)
+        });
+        let mut player = join_now(&paths, &server, "update-kept-off", &["idx.jar"]).await;
+        let mods = paths.game_dir(&player.id).join("mods");
+        crate::instance::content::set_enabled_in(&mods, "idx.jar", false)
+            .await
+            .unwrap();
+
+        // Something else changed; the mod the player keeps off did not, and
+        // the only copy of it anywhere is theirs — anything fetched reaches
+        // the dead proxy.
+        tokio::fs::write(paths.server_run(&server.id).join("mods/new.jar"), b"new")
+            .await
+            .unwrap();
+        let pack = pack_now(&paths, &server, "b").await;
+
+        let report = update_offline(&paths, &mut player, &pack).await.unwrap();
+
+        assert!(report.missing.is_empty(), "{report:?}");
+        assert!(mods.join("idx.jar.disabled").is_file() && !mods.join("idx.jar").exists());
+        assert_eq!(
+            std::fs::read(mods.join("idx.jar.disabled")).unwrap(),
+            b"from modrinth"
+        );
+        assert_eq!(
+            record_of(&player, "idx.jar").map(|r| r.origin),
+            Some(Origin::Server)
+        );
+        assert!(mods.join("new.jar").is_file());
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    /// Only the player's copy of the very file the pack names takes its name.
+    /// Another build of the same mod stays where it is and is fetched, so an
+    /// update that stops halfway never leaves an old jar sitting under the new
+    /// version's name.
+    #[tokio::test]
+    async fn only_the_file_the_pack_names_takes_its_name() {
+        let dir = std::env::temp_dir().join(format!("geode-packs-name-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("x.jar.disabled"), b"one")
+            .await
+            .unwrap();
+        let sha1 = crate::net::sha1_file(&dir.join("x.jar.disabled"))
+            .await
+            .unwrap();
+        let another = "0".repeat(40);
+
+        take_the_packs_name(&dir, "x.jar", false, Some(&another))
+            .await
+            .unwrap();
+        assert!(dir.join("x.jar.disabled").is_file() && !dir.join("x.jar").exists());
+
+        // The file the index names, and one the pack carries itself.
+        take_the_packs_name(&dir, "x.jar", false, Some(&sha1))
+            .await
+            .unwrap();
+        assert!(dir.join("x.jar").is_file() && !dir.join("x.jar.disabled").exists());
+        take_the_packs_name(&dir, "x.jar", true, None)
+            .await
+            .unwrap();
+        assert!(dir.join("x.jar.disabled").is_file() && !dir.join("x.jar").exists());
+
+        // A copy already under the name the pack writes is left alone, and so
+        // is the other one beside it.
+        tokio::fs::write(dir.join("x.jar"), b"two").await.unwrap();
+        take_the_packs_name(&dir, "x.jar", false, None)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(dir.join("x.jar")).unwrap(), b"two");
+        assert!(dir.join("x.jar.disabled").is_file());
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// A player's setting applies to what the server sends later, and a
+    /// server-side mod they turned off by itself stays off with the setting on.
+    #[tokio::test]
+    async fn new_server_side_mods_follow_the_players_setting() {
+        // Kept off: a server-side mod the server adds arrives off.
+        let (paths, server) = small_server(
+            "side-off",
+            &[("mods/homemade.jar", fabric_jar("homemade", "*"))],
+            false,
+        )
+        .await;
+        let mut player = fresh("update-side-off");
+        let _ = tokio::fs::remove_dir_all(paths.instance(&player.id)).await;
+        player.server_side_mods_off = true;
+        let pack = pack_now(&paths, &server, "a").await;
+        import(
+            &offline(),
+            &paths,
+            &mut player,
+            &pack,
+            None,
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+
+        let run = paths.server_run(&server.id);
+        tokio::fs::write(
+            run.join("mods/new-side.jar"),
+            fabric_jar("newside", "server"),
+        )
+        .await
+        .unwrap();
+        let pack = pack_now(&paths, &server, "b").await;
+        update_offline(&paths, &mut player, &pack).await.unwrap();
+
+        let mods = paths.game_dir(&player.id).join("mods");
+        assert!(
+            mods.join("new-side.jar.disabled").is_file() && !mods.join("new-side.jar").exists()
+        );
+        assert_eq!(
+            record_of(&player, "new-side.jar").and_then(|r| r.side),
+            Some(Side::Server)
+        );
+        assert!(mods.join("homemade.jar").is_file());
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+
+        // Kept on: the one the player turned off stays off.
+        let (paths, server) = small_server(
+            "side-on",
+            &[("mods/side.jar", fabric_jar("side", "server"))],
+            false,
+        )
+        .await;
+        let mut player = join_now(&paths, &server, "update-side-on", &[]).await;
+        let mods = paths.game_dir(&player.id).join("mods");
+        assert!(mods.join("side.jar").is_file());
+        crate::instance::content::set_enabled_in(&mods, "side.jar", false)
+            .await
+            .unwrap();
+
+        let run = paths.server_run(&server.id);
+        tokio::fs::write(run.join("mods/other.jar"), b"other")
+            .await
+            .unwrap();
+        let pack = pack_now(&paths, &server, "b").await;
+        update_offline(&paths, &mut player, &pack).await.unwrap();
+
+        assert!(mods.join("side.jar.disabled").is_file() && !mods.join("side.jar").exists());
+        assert!(mods.join("other.jar").is_file());
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    /// Two copies of one mod is a game that does not start. When the server
+    /// starts sending a project the player installed themselves, the player's
+    /// copy is turned off, not deleted, stays theirs, and they are told.
+    #[tokio::test]
+    async fn the_players_own_copy_of_a_mod_the_server_now_ships_is_turned_off() {
+        let (paths, mut server) = small_server(
+            "own-copy",
+            &[("mods/homemade.jar", b"homemade".to_vec())],
+            false,
+        )
+        .await;
+        let mut player = join_now(&paths, &server, "update-own-copy", &[]).await;
+        let mods = paths.game_dir(&player.id).join("mods");
+        tokio::fs::write(mods.join("mine-p.jar"), b"the player's P")
+            .await
+            .unwrap();
+        player.content.push(ContentRecord {
+            project_id: "P".into(),
+            name: "My P".into(),
+            ..record("modrinth", "mine-p.jar", ContentKind::Mod)
+        });
+
+        tokio::fs::write(
+            paths.server_run(&server.id).join("mods/p.jar"),
+            b"the server's P",
+        )
+        .await
+        .unwrap();
+        server.content.push(ContentRecord {
+            project_id: "P".into(),
+            ..record("modrinth", "p.jar", ContentKind::Mod)
+        });
+        let pack = pack_now(&paths, &server, "b").await;
+        seed(&paths, &server, &player, &["p.jar"]).await;
+
+        let report = update_offline(&paths, &mut player, &pack).await.unwrap();
+
+        assert_eq!(report.turned_off, vec!["My P".to_string()]);
+        assert!(mods.join("mine-p.jar.disabled").is_file() && !mods.join("mine-p.jar").exists());
+        assert_eq!(
+            record_of(&player, "mine-p.jar").map(|r| r.origin),
+            Some(Origin::User)
+        );
+        assert!(mods.join("p.jar").is_file());
+        assert_eq!(
+            record_of(&player, "p.jar").map(|r| r.origin),
+            Some(Origin::Server)
+        );
+
+        // Said again by an update that runs again — after one that stopped
+        // partway, say. What is reported is what is off, not what this run
+        // happened to switch.
+        let again = update_offline(&paths, &mut player, &pack).await.unwrap();
+        assert_eq!(again.turned_off, vec!["My P".to_string()]);
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    /// A player's own copy is only turned off for a copy of the server's that
+    /// is actually on. A server-side mod they keep off leaves their own copy
+    /// the one they play with, and nothing is reported.
+    #[tokio::test]
+    async fn a_players_own_copy_stays_on_when_the_servers_is_off() {
+        let (paths, mut server) = small_server(
+            "own-copy-off",
+            &[("mods/homemade.jar", b"homemade".to_vec())],
+            false,
+        )
+        .await;
+        let mut player = fresh("update-own-copy-off");
+        let _ = tokio::fs::remove_dir_all(paths.instance(&player.id)).await;
+        player.server_side_mods_off = true;
+        let pack = pack_now(&paths, &server, "a").await;
+        import(
+            &offline(),
+            &paths,
+            &mut player,
+            &pack,
+            None,
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+
+        let mods = paths.game_dir(&player.id).join("mods");
+        tokio::fs::write(mods.join("mine-s.jar"), b"the player's S")
+            .await
+            .unwrap();
+        player.content.push(ContentRecord {
+            project_id: "S".into(),
+            name: "My S".into(),
+            ..record("modrinth", "mine-s.jar", ContentKind::Mod)
+        });
+
+        // The server starts sending that project as a server-side mod, which
+        // this player keeps off.
+        tokio::fs::write(
+            paths.server_run(&server.id).join("mods/s.jar"),
+            fabric_jar("s", "server"),
+        )
+        .await
+        .unwrap();
+        server.content.push(ContentRecord {
+            project_id: "S".into(),
+            ..record("modrinth", "s.jar", ContentKind::Mod)
+        });
+        let pack = pack_now(&paths, &server, "b").await;
+        seed(&paths, &server, &player, &["s.jar"]).await;
+
+        let report = update_offline(&paths, &mut player, &pack).await.unwrap();
+
+        assert!(report.turned_off.is_empty(), "{report:?}");
+        assert!(mods.join("s.jar.disabled").is_file() && !mods.join("s.jar").exists());
+        assert!(
+            mods.join("mine-s.jar").is_file(),
+            "the player's own copy is the only one they have"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    /// An update that fails partway is saved as far as it got, so what it did
+    /// has to be right already: a mod the server dropped is gone, what landed
+    /// is the server's, and the player's own files are theirs. The game the
+    /// instance starts stays the one it had until an update finishes.
+    #[tokio::test]
+    async fn a_failed_update_leaves_ownership_right_and_versions_alone() {
+        let (paths, mut server) = small_server(
+            "failed",
+            &[
+                ("mods/gone.jar", b"gone".to_vec()),
+                ("mods/stays.jar", b"stays".to_vec()),
+            ],
+            false,
+        )
+        .await;
+        let mut player = join_now(&paths, &server, "update-failed", &[]).await;
+        let mods = paths.game_dir(&player.id).join("mods");
+        tokio::fs::write(mods.join("own.jar"), b"the player's own")
+            .await
+            .unwrap();
+
+        let run = paths.server_run(&server.id);
+        tokio::fs::remove_file(run.join("mods/gone.jar"))
+            .await
+            .unwrap();
+        tokio::fs::write(run.join("mods/new.jar"), b"new")
+            .await
+            .unwrap();
+        // Indexed, and on no disk of the player's: fetching it reaches the
+        // dead proxy and fails.
+        tokio::fs::write(run.join("mods/unfetched.jar"), b"from modrinth")
+            .await
+            .unwrap();
+        server.content.push(ContentRecord {
+            project_id: "U".into(),
+            ..record("modrinth", "unfetched.jar", ContentKind::Mod)
+        });
+        server.mc_version = "1.21.4".into();
+        server.build = "0.17.0".into();
+        let pack = pack_now(&paths, &server, "b").await;
+
+        update_offline(&paths, &mut player, &pack)
+            .await
+            .expect_err("a download through the dead proxy");
+
+        assert!(!mods.join("gone.jar").exists());
+        assert!(
+            record_of(&player, "gone.jar").is_none(),
+            "{:?}",
+            player.content
+        );
+        for landed in ["new.jar", "stays.jar"] {
+            assert!(mods.join(landed).is_file(), "{landed}");
+            assert_eq!(
+                record_of(&player, landed).map(|r| r.origin),
+                Some(Origin::Server),
+                "{landed}"
+            );
+        }
+        assert_eq!(
+            std::fs::read(mods.join("own.jar")).unwrap(),
+            b"the player's own"
+        );
+        assert!(
+            record_of(&player, "own.jar").is_none(),
+            "{:?}",
+            player.content
+        );
+        assert_eq!(
+            (player.mc_version.as_str(), player.loader_version.as_str()),
+            ("1.21.1", "0.16.9")
+        );
+        assert!(player.pack.is_none(), "{:?}", player.pack);
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    /// The same when the update finishes but the new version is one of the
+    /// files a player has to fetch by hand — a CurseForge mod, with no key
+    /// here. Nothing has landed to hold the choice, so the old file stays.
+    #[tokio::test]
+    async fn a_mod_kept_off_survives_an_update_that_could_not_fetch_it() {
+        let (paths, mut server) = small_server(
+            "kept-off-missing",
+            &[("mods/hand.jar", b"hand".to_vec())],
+            false,
+        )
+        .await;
+        let mut player = join_now(&paths, &server, "update-kept-off-missing", &[]).await;
+        let mods = paths.game_dir(&player.id).join("mods");
+
+        // The player holds the server's CurseForge mod, turned off. It reached
+        // them through their own key on an earlier join; there is none here.
+        tokio::fs::write(mods.join("p-1.jar.disabled"), b"p one")
+            .await
+            .unwrap();
+        player.content.push(ContentRecord {
+            project_id: "123".into(),
+            version_id: "v1".into(),
+            origin: Origin::Server,
+            ..record("curseforge", "p-1.jar", ContentKind::Mod)
+        });
+
+        // The admin moves that project on to a new version, under a new name.
+        let run = paths.server_run(&server.id);
+        tokio::fs::write(run.join("mods/p-2.jar"), b"p two")
+            .await
+            .unwrap();
+        server.content = vec![ContentRecord {
+            project_id: "123".into(),
+            version_id: "v2".into(),
+            ..record("curseforge", "p-2.jar", ContentKind::Mod)
+        }];
+        let pack = pack_now(&paths, &server, "missing").await;
+
+        let report = update_offline(&paths, &mut player, &pack).await.unwrap();
+        assert!(
+            report.missing.iter().any(|m| m.contains("p-2.jar")),
+            "{:?}",
+            report.missing
+        );
+        assert!(
+            mods.join("p-1.jar.disabled").is_file(),
+            "the only thing holding the player's choice was deleted"
+        );
+        assert!(
+            record_of(&player, "p-1.jar").is_some(),
+            "{:?}",
+            player.content
+        );
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    /// An update that fails before the new version of a mod lands does not
+    /// forget that the player had turned that mod off. The old file holds the
+    /// choice until the new one is there to take it over, so the next try does
+    /// not bring the mod back on.
+    #[tokio::test]
+    async fn a_mod_kept_off_is_not_forgotten_by_an_update_that_failed() {
+        let (paths, mut server) = small_server(
+            "kept-off-fail",
+            &[("mods/p-1.jar", b"p one".to_vec())],
+            false,
+        )
+        .await;
+        server.content.push(ContentRecord {
+            project_id: "P".into(),
+            version_id: "v1".into(),
+            ..record("modrinth", "p-1.jar", ContentKind::Mod)
+        });
+        let mut player = join_now(&paths, &server, "update-kept-off-fail", &["p-1.jar"]).await;
+        let mods = paths.game_dir(&player.id).join("mods");
+        crate::instance::content::set_enabled_in(&mods, "p-1.jar", false)
+            .await
+            .unwrap();
+
+        // A new version under a new name, which the player has not got and the
+        // dead proxy cannot fetch.
+        let run = paths.server_run(&server.id);
+        tokio::fs::remove_file(run.join("mods/p-1.jar"))
+            .await
+            .unwrap();
+        tokio::fs::write(run.join("mods/p-2.jar"), b"p two")
+            .await
+            .unwrap();
+        server.content = vec![ContentRecord {
+            project_id: "P".into(),
+            version_id: "v2".into(),
+            ..record("modrinth", "p-2.jar", ContentKind::Mod)
+        }];
+        let pack = pack_now(&paths, &server, "b").await;
+
+        update_offline(&paths, &mut player, &pack)
+            .await
+            .expect_err("a download through the dead proxy");
+        assert!(
+            mods.join("p-1.jar.disabled").is_file(),
+            "nothing else holds the player's choice yet"
+        );
+        assert!(
+            record_of(&player, "p-1.jar").is_some(),
+            "{:?}",
+            player.content
+        );
+
+        // The next try, with the new version to hand: it arrives off, and the
+        // old file goes.
+        seed(&paths, &server, &player, &["p-2.jar"]).await;
+        update_offline(&paths, &mut player, &pack).await.unwrap();
+
+        for gone in ["p-1.jar", "p-1.jar.disabled", "p-2.jar"] {
+            assert!(!mods.join(gone).exists(), "{gone} is still there");
+        }
+        assert!(mods.join("p-2.jar.disabled").is_file());
+        assert!(
+            record_of(&player, "p-1.jar").is_none(),
+            "{:?}",
+            player.content
+        );
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    /// A cancelled update still leaves every file the pack brought in one state,
+    /// on or off as it should be, and the versions as they were.
+    #[tokio::test]
+    async fn a_cancelled_update_still_settles_what_landed() {
+        let (paths, mut server) = small_server(
+            "cancelled",
+            &[
+                ("mods/stays.jar", b"stays".to_vec()),
+                ("mods/idx.jar", b"from modrinth".to_vec()),
+            ],
+            false,
+        )
+        .await;
+        server.content.push(ContentRecord {
+            project_id: "I".into(),
+            ..record("modrinth", "idx.jar", ContentKind::Mod)
+        });
+        let mut player = join_now(&paths, &server, "update-cancelled", &["idx.jar"]).await;
+        let mods = paths.game_dir(&player.id).join("mods");
+        crate::instance::content::set_enabled_in(&mods, "idx.jar", false)
+            .await
+            .unwrap();
+
+        let run = paths.server_run(&server.id);
+        tokio::fs::write(run.join("mods/new.jar"), b"new")
+            .await
+            .unwrap();
+        tokio::fs::rename(
+            run.join("mods/stays.jar"),
+            run.join("mods/stays.jar.disabled"),
+        )
+        .await
+        .unwrap();
+        server.mc_version = "1.21.4".into();
+        server.build = "0.17.0".into();
+        let pack = pack_now(&paths, &server, "b").await;
+
+        let progress = Progress::silent("t");
+        progress
+            .cancel_flag()
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let result = update(&offline(), &paths, &mut player, &pack, None, &progress).await;
+        assert!(matches!(result, Err(Error::Cancelled)), "{result:?}");
+
+        for jar in ["idx.jar", "stays.jar", "new.jar"] {
+            let states = (
+                mods.join(jar).is_file(),
+                mods.join(format!("{jar}.disabled")).is_file(),
+            );
+            let want = if jar == "new.jar" {
+                (true, false)
+            } else {
+                (false, true)
+            };
+            assert_eq!(states, want, "{jar}");
+            assert_eq!(
+                record_of(&player, jar).map(|r| r.origin),
+                Some(Origin::Server),
+                "{jar}"
+            );
+        }
+        assert_eq!(
+            (
+                player.mc_version.as_str(),
+                player.loader,
+                player.loader_version.as_str()
+            ),
+            ("1.21.1", crate::meta::Loader::Fabric, "0.16.9")
+        );
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    /// A pack says which revision it is, worked out from the very files it
+    /// holds. What a player keeps is that, not the revision of a description
+    /// read before the pack was built — a server changed and changed back in
+    /// between would otherwise leave them holding one revision's name over
+    /// another's content, with nothing left to notice it.
+    #[tokio::test]
+    async fn an_update_keeps_the_revision_the_pack_carries() {
+        let (paths, server) =
+            small_server("pack-revision", &[("mods/a.jar", b"a".to_vec())], false).await;
+        let mut player = join_now(&paths, &server, "update-pack-revision", &[]).await;
+
+        let described = server_pack_info(&paths, &server).await.unwrap();
+        tokio::fs::write(paths.server_run(&server.id).join("mods/b.jar"), b"b")
+            .await
+            .unwrap();
+        let pack = pack_now(&paths, &server, "b").await;
+
+        let report = update_offline(&paths, &mut player, &pack).await.unwrap();
+
+        let carried = pack_revision(&read_manifest(&pack).unwrap().unwrap());
+        assert_eq!(report.revision, carried);
+        assert_eq!(
+            report.revision.as_deref(),
+            Some(revision_of(&paths, &server).await.as_str())
+        );
+        assert_ne!(
+            report.revision.as_deref(),
+            Some(described.revision.as_str())
+        );
+
+        // An admin's Geode from before packs carried one says nothing, and the
+        // caller keeps the description's instead.
+        let mut older = read_manifest(&pack).unwrap().unwrap();
+        older.revision = None;
+        assert_eq!(pack_revision(&older), None);
+        older.revision = Some("  ".into());
+        assert_eq!(pack_revision(&older), None);
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    /// Only a server's pack updates a joined instance. Anything else is refused
+    /// before a single file or record is touched.
+    #[tokio::test]
+    async fn an_update_refuses_a_personal_pack() {
+        let (paths, inst) = fixture("personal-update", &[("mods", "homemade.jar")]).await;
+        let pack = paths.root.join("personal.geodepack");
+        export(&paths, &inst, pack.clone(), false, &Progress::silent("t"))
+            .await
+            .unwrap();
+
+        let mut player = fresh("personal-update-player");
+        let mods = paths.game_dir(&player.id).join("mods");
+        let _ = tokio::fs::remove_dir_all(paths.instance(&player.id)).await;
+        tokio::fs::create_dir_all(&mods).await.unwrap();
+        tokio::fs::write(mods.join("srv.jar"), b"the server's")
+            .await
+            .unwrap();
+        player.content.push(ContentRecord {
+            origin: Origin::Server,
+            ..record("", "srv.jar", ContentKind::Mod)
+        });
+        let before = serde_json::to_value(&player.content).unwrap();
+
+        let err = update_offline(&paths, &mut player, &pack)
+            .await
+            .expect_err("a personal pack");
+        assert!(err.to_string().contains("server's pack"), "{err}");
+        assert_eq!(serde_json::to_value(&player.content).unwrap(), before);
+        let names: Vec<String> = std::fs::read_dir(&mods)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["srv.jar".to_string()]);
 
         let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }

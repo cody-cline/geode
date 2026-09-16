@@ -259,6 +259,50 @@ connects straight to the admin's machine. Nothing sits in the middle.
   mod: that is all a server writes, and a download from anywhere would let a
   pack make the player's Geode request any address, their own router
   included.
+- A server's description carries a **revision**, which changes exactly when
+  what a player receives changes, and `serverId`, the server's id on the
+  admin's machine, so a player's Geode can tell the same server apart under a
+  new password. `pack::server_revision` is the SHA-256 of a fixed header — the
+  revision format, the Minecraft version, the client loader and its version,
+  and whether `config/` is sent — followed by one sorted line for each mod the
+  pack carries: its path on disk, `.disabled` included, the side it is sent
+  with, and what it is. A mod whose record names a provider, project and
+  version is those and its size; any other is the SHA-1 of its bytes. When
+  `config/` is sent, each regular file under it adds its path and SHA-1, found
+  the way the pack's walk finds them, through no link. Left out on purpose: the
+  server's name, notes and artwork, which an update does not apply to a
+  player's instance; its worlds, logs and properties, which never travel; and
+  every modification time, so a restart that writes the same configs again
+  does not update every player. A jar replaced by hand with another of the
+  same name and size, under the same provider record, is not noticed. A file
+  that is gone between being listed and being read — a mod rewriting its
+  config while the server runs, a database renaming its own files — is left
+  out of the revision rather than failing the description, which would tell
+  every player pressing Play that the server could not be reached; it costs at
+  most one extra update.
+  Hashing the jars added by hand, and the config, happens each time a
+  description is worked out, which is at most once every five seconds per
+  server (`PREVIEW_FRESH`); the revision is cached with the rest of the
+  description, so a check made inside those few seconds can be told nothing
+  has changed when something just did, and the next one sees it.
+- Every pack a server builds carries its own revision too, in `revision` in
+  `geode/manifest.json`, worked out from the very files that pack is written
+  from and before it is written. A pack that changes while it is built is
+  therefore described by the older of the two, which the next check finds
+  changed — never the newer, which nobody would ever look for again.
+- A joined instance keeps `joined_server_id` from the description it was
+  joined with, and `joined_revision` only once its import finished — files
+  left to fetch by hand still count as finished, a stop or a cancel does not.
+  The revision kept is the one the pack carries, not the one the description
+  named: a description is worked out before the pack is built, so keeping its
+  revision would describe an instance by what the server held a moment
+  earlier. A server changed and changed back in between — a mod added and
+  taken away again — would leave that instance holding one revision's name
+  over another's content, and nothing would ever notice: the player would keep
+  a mod the server dropped, or miss one it added, until something else
+  changed. A pack whose `revision` is missing falls back to the description's,
+  and an admin on a Geode from before revisions sends neither, so nothing is
+  kept and that instance is never updated from them.
 
 **Why direct, and what was tried first.** Players already need a server's
 address to join it, so routing its pack anywhere else hides nothing from them.
@@ -446,6 +490,69 @@ finds no server-side mods in them and changes nothing. Nothing records those
 for an instance that already exists, since there is no update from the server
 yet (item 3's known limits): joining the server again makes a new instance
 that has them.
+
+**Updating in place.** `share::pack::update` brings a joined instance up to a
+newer pack from its server without making a new instance. Nothing in the app
+runs it yet. In order:
+
+1. The pack must be a server's, and download from nowhere but Modrinth, or
+   nothing is touched. The pack's Minecraft and loader versions are read, and
+   what it brings is read off it with `arrivals`, as an import reads it.
+2. What the player turned off among the server's files is noted, by name and
+   by project, before anything lands. A file that is off because the server
+   had it off (`server_off`), or because the player keeps server-side mods off,
+   is not the player's own switch, and follows the pack instead.
+3. Each file the player already has moves to the name the pack writes it under
+   — `x.jar` for a mod the server has on, `x.jar.disabled` for one it has off.
+   A mod the player keeps off otherwise sits under a name the import does not
+   look at, and is fetched all over again: with server-side mods off, one
+   changed setting on the server would re-download every server-side mod, and a
+   Modrinth that cannot be reached, or a version taken down since, would fail
+   the whole update over files the player already has. Only their copy of the
+   very file the pack names is moved: where the index says by SHA-1 which file
+   that is, it has to be that one, or it stays where it is and is fetched.
+4. The mrpack half runs, and the pack's references are resolved again.
+   Resolving keeps one record per file (`put_records`) rather than adding a
+   second beside last time's. The rest of the Geode half does not run.
+5. On every exit, error and cancel included, the instance stops naming a
+   modpack and `settle_server_files` makes what landed the server's, with the
+   player's own switches from step 2 kept — under a new file name too, when a
+   new version of a project comes with one.
+6. Every file of the server's that the pack no longer brings is deleted, on or
+   off, with its record: the server decides what it has. One the player had
+   turned off waits instead, when the update failed before the new version of
+   that project landed to hold the choice in its place — deleted first, a
+   failed update would forget the choice, and the next one would bring the mod
+   back on. A jar added by hand that the server dropped goes either way.
+7. A mod of the player's own that is the same Modrinth or CurseForge project as
+   one the pack brings and the server has on, under another file name, is
+   turned off — two copies of one mod is a game that does not start — but not
+   deleted, and stays the player's. A copy of the server's that ends up off, or
+   that never landed, leaves theirs alone: turning it off as well would leave
+   them with neither. What is reported is what ended up off, so an update run
+   again after one that failed says the same thing again.
+8. Only when all of that finished does the instance take the pack's Minecraft
+   version, loader and loader version. A failed update leaves them, so the
+   game it starts is the one it had.
+
+What an update keeps is everything that is the player's: their own records
+and untracked files, worlds, options, resource packs and shaders, the
+instance's name, group, notes, icon and banner, memory, Java, window size, and
+whether server-side mods are on. Of the switches they flipped on a server's
+mods, the offs are what hold: a server mod they turned off stays off, under a
+renamed version of the same project too. An on does not hold against the
+server — a mod the server has off, and a server-side mod while they keep those
+off, is off again after every update, because that is the server's decision or
+their own standing one. What it changes is the server's part: its mods, the
+config files it sends, which overwrite the player's copies (config it stopped
+sending stays), and the Minecraft and loader versions. A file of the player's
+with the same name as a file the server now sends becomes the server's.
+
+A joined instance from before revisions has no `joined_revision`, so its first
+update always runs. On that run a server file that is off, with no
+`server_off` recorded, counts as the player's own switch — so a mod the admin
+turned off before upgrading, and turns back on later, stays off for that player
+until they turn it on.
 
 ### 7. Client, server and both — **done**
 

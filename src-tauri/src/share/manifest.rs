@@ -49,6 +49,15 @@ pub struct Manifest {
     /// every mod runs on both sides carries an empty map.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<FileNote>,
+    /// In a server's pack, the revision of what this very pack holds, so a
+    /// player keeps the revision of what they received rather than of a
+    /// description read before it was built — a server changed and changed
+    /// back in between would otherwise never be noticed.
+    ///
+    /// An instance's pack has none, and so does a server's from a Geode older
+    /// than this, which an older reader ignores in turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -186,6 +195,7 @@ mod tests {
                 manual: false,
                 disabled: false,
             }],
+            revision: None,
         }
     }
 
