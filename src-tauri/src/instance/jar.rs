@@ -13,6 +13,19 @@ use std::io::{Cursor, Read, Seek};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
+/// The most a jar's manifest may inflate to before it is treated as saying
+/// nothing. A real `fabric.mod.json` — or any of the others read here — is a
+/// few kilobytes of declarations, and the jars this runs over come from
+/// whoever runs the server a player joined.
+const MANIFEST_LIMIT: u64 = 8 * 1024 * 1024;
+
+/// The most a jar packed inside another may inflate to. Larger than a manifest
+/// because the whole thing is held in memory to be opened from there. It bounds
+/// the bytes, which is what the nested archive's list of files is then read
+/// from; what it does not bound is the count of files that archive declares,
+/// the same gap [`crate::instance::modpack::open_pack`] has.
+const NESTED_JAR_LIMIT: u64 = 64 * 1024 * 1024;
+
 /// Ids every mod depends on that no file in the folder provides. Left in, they
 /// would show up as missing dependencies on literally everything.
 const PLATFORM_IDS: &[&str] = &[
@@ -133,8 +146,7 @@ async fn stamp(path: &Path) -> (u64, u64) {
 
 /// Read one jar. Blocking — callers go through [`MetaCache`].
 pub fn read(path: &Path) -> Option<JarMeta> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut zip = zip::ZipArchive::new(file).ok()?;
+    let mut zip = crate::instance::modpack::open_pack(path).ok()?;
     let mut meta = declaration(&mut zip)?;
 
     // A bundled jar satisfies its ids without being a separate file, so those
@@ -210,14 +222,29 @@ fn nested_jar_names<R: Read + Seek>(zip: &mut zip::ZipArchive<R>) -> Vec<String>
 fn entry_text<R: Read + Seek>(zip: &mut zip::ZipArchive<R>, name: &str) -> Option<String> {
     let mut entry = zip.by_name(name).ok()?;
     let mut s = String::new();
-    entry.read_to_string(&mut s).ok()?;
+    // Counted as it inflates: the entry's header states a size too, and a
+    // crafted jar can understate it. Reaching the limit is a jar that says
+    // nothing readable, not a jar that says a great deal.
+    (&mut entry)
+        .take(MANIFEST_LIMIT)
+        .read_to_string(&mut s)
+        .ok()?;
+    if s.len() as u64 == MANIFEST_LIMIT {
+        return None;
+    }
     Some(s)
 }
 
 fn entry_bytes<R: Read + Seek>(zip: &mut zip::ZipArchive<R>, name: &str) -> Option<Vec<u8>> {
     let mut entry = zip.by_name(name).ok()?;
     let mut buf = Vec::new();
-    entry.read_to_end(&mut buf).ok()?;
+    (&mut entry)
+        .take(NESTED_JAR_LIMIT)
+        .read_to_end(&mut buf)
+        .ok()?;
+    if buf.len() as u64 == NESTED_JAR_LIMIT {
+        return None;
+    }
     Some(buf)
 }
 
@@ -916,5 +943,86 @@ dependencies:
         // The requirement survives being bundled: an installed Fabric API is
         // still what the loader would use, and what the graph should show.
         assert_eq!(meta.requires, vec!["fabric-resource-loader-v0", "sodium"]);
+    }
+
+    // -----------------------------------------------------------------
+    // Reading a jar off disk
+    // -----------------------------------------------------------------
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("geode-jar-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_jar(dest: &Path, entries: &[(&str, &[u8])]) {
+        use std::io::Write;
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(dest).unwrap());
+        let options: zip::write::FileOptions<'_, ()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for (name, bytes) in entries {
+            zip.start_file(*name, options).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    /// The jars this reads belong to whoever runs the server a player joined,
+    /// and deflate turns a run of spaces into a thousandth of its size — so a
+    /// manifest that arrives as kilobytes and inflates to gigabytes is a way to
+    /// exhaust the player's memory from the Content tab. Padding with spaces
+    /// keeps the JSON valid: only its size refuses it.
+    #[test]
+    fn a_manifest_too_large_to_be_real_is_not_read() {
+        let dir = scratch("bigmanifest");
+        let path = dir.join("bloated.jar");
+        let declaration = br#"{"schemaVersion":1,"id":"bloated","version":"1.0"}"#;
+        let padded = [declaration.as_slice(), &vec![b' '; 9 * 1024 * 1024]].concat();
+        write_jar(&path, &[("fabric.mod.json", &padded)]);
+        assert!(
+            std::fs::metadata(&path).unwrap().len() < 1024 * 1024,
+            "not a bomb"
+        );
+
+        assert_eq!(read(&path), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The other side of the same caps: a jar shaped like the ones the rest of
+    /// the app's tests build — a manifest, and a library packed inside — still
+    /// gives up its ids and its side. The manifest is padded to a quarter of a
+    /// megabyte, well past any real one, so a cap lowered to "a manifest is
+    /// kilobytes" fails here instead of quietly reading real mods as untracked.
+    #[test]
+    fn a_real_jars_ids_and_side_are_still_found() {
+        let dir = scratch("realjar");
+        let nested = dir.join("nested.jar");
+        write_jar(
+            &nested,
+            &[(
+                "fabric.mod.json",
+                br#"{"schemaVersion":1,"id":"packed-lib","version":"1.0"}"#,
+            )],
+        );
+        let declaration =
+            br#"{"schemaVersion":1,"id":"sodium","version":"1.0","environment":"client"}"#;
+        let roomy = [declaration.as_slice(), &vec![b' '; 256 * 1024]].concat();
+        let path = dir.join("sodium.jar");
+        write_jar(
+            &path,
+            &[
+                ("fabric.mod.json", &roomy),
+                ("META-INF/jars/nested.jar", &std::fs::read(&nested).unwrap()),
+            ],
+        );
+
+        let meta = read(&path).expect("a real jar reads");
+        assert_eq!(meta.primary, vec!["sodium"]);
+        assert_eq!(meta.bundled, vec!["packed-lib"]);
+        assert_eq!(meta.side, Some(Side::Client));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

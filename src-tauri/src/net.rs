@@ -18,11 +18,18 @@ pub const USER_AGENT: &str = concat!(
     " (github.com/littlesquirt1/geode)"
 );
 
+/// How long one request may take, and how long it may spend reaching the host.
+/// Named rather than written where they are used because a joined server's
+/// pack is downloaded through a client of its own (`share::pack`), and the
+/// answer to "how patient is Geode?" should not depend on which one asked.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+
 pub fn client() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(USER_AGENT)
-        .timeout(Duration::from_secs(120))
-        .connect_timeout(Duration::from_secs(20))
+        .timeout(REQUEST_TIMEOUT)
+        .connect_timeout(CONNECT_TIMEOUT)
         .pool_max_idle_per_host(16)
         .build()
         .expect("http client")
@@ -233,7 +240,8 @@ pub async fn sha256_file(path: &Path) -> Result<String> {
 
 /// True when the file already on disk matches what we were going to download.
 /// When we have a hash we trust only the hash; otherwise we fall back to size,
-/// and with neither we accept any existing file.
+/// and with neither we accept any existing file that is not empty — a
+/// zero-byte file is a write that did not finish, not a download that did.
 async fn already_valid(d: &Download) -> bool {
     let Ok(meta) = tokio::fs::metadata(&d.dest).await else {
         return false;

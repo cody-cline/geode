@@ -385,11 +385,23 @@ pub async fn import(
         None => None,
     };
 
+    let from_a_server = manifest.as_ref().is_some_and(|m| m.kind == Kind::Server);
+
     let outcome = async {
-        if manifest.as_ref().is_some_and(|m| m.kind == Kind::Server) {
+        if from_a_server {
             check_server_downloads(archive).await?;
         }
-        instance::modpack::import_into(client, paths, instance, archive, curseforge_key, progress)
+        // Only a server's pack is held to Modrinth — and with it everything
+        // else the import does over the network, the lookup that turns its
+        // files into names included. A `.mrpack` the player chose themselves
+        // names whatever hosts that format allows, and a CurseForge one is
+        // fetched from wherever the CurseForge API answers with.
+        let http = if from_a_server {
+            server_pack_client()
+        } else {
+            client.clone()
+        };
+        instance::modpack::import_into(&http, paths, instance, archive, curseforge_key, progress)
             .await?;
         match &manifest {
             Some(manifest) => {
@@ -550,7 +562,11 @@ pub async fn update(
             take_the_packs_name(&dir, name, arrival.off, named).await?;
         }
 
-        instance::modpack::import_into(client, paths, instance, archive, curseforge_key, progress)
+        // The pack's own downloads go through the client that holds them to
+        // Modrinth; the references do not, since those URLs come from the
+        // provider's API rather than from the pack.
+        let http = server_pack_client();
+        instance::modpack::import_into(&http, paths, instance, archive, curseforge_key, progress)
             .await?;
         resolve_references(client, paths, instance, &manifest, curseforge_key, progress).await
     }
@@ -934,9 +950,18 @@ pub async fn check_server_downloads(archive: &Path) -> Result<()> {
     let index = tokio::task::spawn_blocking(move || instance::modpack::read_index(&probe))
         .await
         .map_err(|e| Error::msg(format!("reading the pack's index panicked: {e}")))??;
+    // A pack with no Modrinth index is a CurseForge one, and there is no index
+    // here to check: its files are ids the CurseForge API turns into downloads.
+    // [`export_server`] only ever writes a Modrinth index, so nothing a real
+    // server sends arrives this way.
+    let Some(index) = index else {
+        return Err(Error::msg(
+            "this server's pack is in CurseForge's format, not Modrinth's, so it was not installed",
+        ));
+    };
     let elsewhere = index
+        .files
         .iter()
-        .flat_map(|index| &index.files)
         .find(|file| !file.downloads.iter().all(|url| from_modrinth(url)));
     match elsewhere {
         Some(file) => Err(Error::msg(format!(
@@ -947,7 +972,67 @@ pub async fn check_server_downloads(archive: &Path) -> Result<()> {
     }
 }
 
+/// The client a server's pack is downloaded through.
+///
+/// [`check_server_downloads`] reads the URLs the index names, and the general
+/// client would then follow up to ten redirects from them to any host and any
+/// scheme — so the promise that check makes would rest on Modrinth's CDN never
+/// answering with a `Location`. Here a hop is followed only to where the index
+/// was allowed to point in the first place, through the same predicate, and a
+/// plain HTTP URL is refused outright rather than requested.
+///
+/// The pack's files are not all that rides on it: the import that follows also
+/// asks Modrinth's API what the files it just fetched belong to, and that host
+/// is not one [`from_modrinth`] allows, so a redirect on that call is stopped
+/// and the pack's contents show under their file names.
+///
+/// Built once: a client holds its own connection pool, and these downloads
+/// arrive ten at a time.
+fn server_pack_client() -> reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                // Held to the general client's numbers: the largest download
+                // the app makes is no place to be more impatient than the rest.
+                .user_agent(crate::net::USER_AGENT)
+                .timeout(crate::net::REQUEST_TIMEOUT)
+                .connect_timeout(crate::net::CONNECT_TIMEOUT)
+                .https_only(true)
+                .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                    if may_follow(attempt.previous().len(), attempt.url().as_str()) {
+                        attempt.follow()
+                    } else {
+                        attempt.stop()
+                    }
+                }))
+                .build()
+                .expect("http client")
+        })
+        .clone()
+}
+
+/// The most hops a server pack's download may be sent through.
+///
+/// What reqwest's own limit would have been, restated because a custom policy
+/// replaces it rather than adding to it: nothing but the policy counts the
+/// chain, so two Modrinth URLs that redirect to each other would be followed
+/// for as long as they kept answering.
+const MAX_REDIRECTS: usize = 10;
+
+/// Whether the client above may follow a redirect it was handed.
+///
+/// Past the cap the hop is stopped rather than made, which hands the 30x back
+/// to the caller — and a reply that is not a success is already a failed
+/// download, so the chain ends there.
+fn may_follow(hops_so_far: usize, url: &str) -> bool {
+    hops_so_far <= MAX_REDIRECTS && from_modrinth(url)
+}
+
 /// `https://cdn.modrinth.com/…`, and nothing dressed up to look like it.
+///
+/// Both what the index may name and where a redirect may lead — see
+/// [`server_pack_client`].
 fn from_modrinth(url: &str) -> bool {
     url::Url::parse(url).is_ok_and(|url| {
         url.scheme() == "https"
@@ -2303,13 +2388,15 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(&paths.root).await;
         tokio::fs::create_dir_all(&paths.root).await.unwrap();
 
-        // One index file already present on the recipient's disk, so the
-        // download step completes without the network and then notices the
-        // cancel — deterministic, and offline.
+        // Both of the pack's files already on the recipient's disk, standing
+        // for a run that was interrupted after they landed: a cancel is heard
+        // at the first entry of the extraction now, so a run cancelled from the
+        // start brings nothing in of its own — deterministic, and offline.
         let mut arrived = fresh("cancel-arrived");
         let mods = paths.game_dir("cancel-arrived").join("mods");
         tokio::fs::create_dir_all(&mods).await.unwrap();
         tokio::fs::write(mods.join("indexed.jar"), b"indexed").await.unwrap();
+        tokio::fs::write(mods.join("private.jar"), b"private").await.unwrap();
         let sha1 = crate::net::sha1_file(&mods.join("indexed.jar")).await.unwrap();
 
         let index = serde_json::json!({
@@ -4915,6 +5002,12 @@ mod tests {
         tokio::fs::write(run.join("mods/new.jar"), b"new")
             .await
             .unwrap();
+        // On the player's disk too, standing for a run interrupted after it
+        // landed: a cancel is heard at the first entry of the extraction now,
+        // so a run cancelled from the start brings nothing in of its own.
+        tokio::fs::write(mods.join("new.jar"), b"new")
+            .await
+            .unwrap();
         tokio::fs::rename(
             run.join("mods/stays.jar"),
             run.join("mods/stays.jar.disabled"),
@@ -5106,6 +5199,10 @@ mod tests {
         send(server_pack_info(&paths, &server));
     }
 
+    /// This decides both what a server's pack may name and where a redirect
+    /// from it may lead, so every shape that dresses up as Modrinth is refused
+    /// twice over — once in the index, once in a `Location` header the CDN
+    /// would have to send to reach it.
     #[test]
     fn only_modrinth_over_https_is_a_place_a_server_pack_may_download_from() {
         assert!(from_modrinth(
@@ -5126,6 +5223,63 @@ mod tests {
         ] {
             assert!(!from_modrinth(elsewhere), "{elsewhere}");
         }
+    }
+
+    /// The same rule applied to a hop, plus the one the general client got for
+    /// free and a custom policy does not: a pair of Modrinth addresses that
+    /// redirect to each other is a chain that never ends on its own.
+    #[test]
+    fn a_server_packs_downloads_are_not_followed_around_forever() {
+        let modrinth = "https://cdn.modrinth.com/data/x/versions/y/z.jar";
+        assert!(may_follow(0, modrinth));
+        assert!(may_follow(MAX_REDIRECTS, modrinth));
+        assert!(!may_follow(MAX_REDIRECTS + 1, modrinth));
+        assert!(!may_follow(0, "https://cdn.modrinth.com.example.net/z.jar"));
+    }
+
+    /// A redirect is not the only way off Modrinth: the client the pack's own
+    /// downloads go through refuses a plain HTTP address before it is asked
+    /// for, rather than requesting it and reading what came back. The address
+    /// is one on the player's own machine, which is the thing that promise is
+    /// about — and a refusal that is not a connection is what says it was
+    /// never dialled.
+    #[tokio::test]
+    async fn a_server_packs_client_will_not_speak_plain_http() {
+        let err = server_pack_client()
+            .get("http://127.0.0.1:1/z.jar")
+            .send()
+            .await
+            .expect_err("a plain HTTP address must not be requested");
+        assert!(err.is_builder(), "{err}");
+    }
+
+    /// A server's pack in CurseForge's format carries no index to check, and
+    /// its files are ids resolved through the CurseForge API with the player's
+    /// own key. Nothing [`export_server`] writes takes that shape, so it is
+    /// refused by name rather than quietly taking the other route.
+    #[tokio::test]
+    async fn a_curseforge_format_server_pack_is_refused() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("geode-cfpack-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let archive = dir.join("theirs.geodepack");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+        let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        zip.start_file("manifest.json", options).unwrap();
+        zip.write_all(
+            br#"{"minecraft":{"version":"1.21.1","modLoaders":[]},"name":"S","files":[]}"#,
+        )
+        .unwrap();
+        zip.finish().unwrap();
+
+        let err = check_server_downloads(&archive)
+            .await
+            .expect_err("a pack with no Modrinth index");
+        assert!(err.to_string().contains("CurseForge's format"), "{err}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

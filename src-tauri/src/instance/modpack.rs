@@ -228,9 +228,11 @@ pub(crate) fn open_pack(archive: &Path) -> Result<zip::ZipArchive<std::fs::File>
 /// [`open_pack`] with the budget a test can reach.
 ///
 /// Opened once through a reader that stops after `budget` bytes, then again
-/// for real. Counting what is read, rather than trusting the count of files a
-/// zip declares, holds however the zip reader settles on a directory — and it
-/// will try every end-of-directory record in the file before giving up.
+/// for real. Counting what is read holds however the zip reader settles on a
+/// directory — and it will try every end-of-directory record in the file
+/// before giving up. What it does not cover is the count of files the zip
+/// declares: the reader sizes its list from that count before reading any
+/// entry, and the seeks to find the count spend almost none of the budget.
 fn open_pack_within(archive: &Path, budget: u64) -> Result<zip::ZipArchive<std::fs::File>> {
     struct Budgeted<'a> {
         file: std::fs::File,
@@ -434,6 +436,7 @@ pub async fn import_into(
                 &archive_owned,
                 &game_dir,
                 &["overrides", "client-overrides"],
+                progress,
             )
             .await?;
             progress.advance(1, "overrides").await;
@@ -485,7 +488,13 @@ pub async fn import_into(
             })?;
 
             progress.stage("Extracting overrides", 1).await;
-            extract_overrides(&archive_owned, &game_dir, &[manifest.overrides.as_str()]).await?;
+            extract_overrides(
+                &archive_owned,
+                &game_dir,
+                &[manifest.overrides.as_str()],
+                progress,
+            )
+            .await?;
             progress.advance(1, "overrides").await;
 
             progress
@@ -585,64 +594,100 @@ pub async fn import_into(
 /// Measured against the pack's own size, so a large legitimate pack is never
 /// refused for being large, with a floor so a small one that happens to be all
 /// configs is not refused either.
+///
+/// The ceiling is what the ratio cannot give: a join accepts a pack of up to
+/// 2 GiB (`MAX_PACK_BYTES`, share/join.rs), which the ratio alone would let
+/// unpack to sixty-odd, so it is set at four times that and far past what any
+/// real pack unpacks to. A local pack that genuinely goes past it is refused
+/// with the message below, which names the limit it hit.
 fn overrides_budget(archive_bytes: u64) -> u64 {
     const RATIO: u64 = 32;
     const FLOOR: u64 = 16 * 1024 * 1024;
-    archive_bytes.saturating_mul(RATIO).max(FLOOR)
+    const CEILING: u64 = 8 * 1024 * 1024 * 1024;
+    archive_bytes.saturating_mul(RATIO).clamp(FLOOR, CEILING)
 }
 
 /// Copy the pack's override trees into the game directory. Later roots win, so
 /// `client-overrides` correctly shadows `overrides`.
-async fn extract_overrides(archive: &Path, game_dir: &Path, roots: &[&str]) -> Result<()> {
+///
+/// Stops at the next entry when the run is cancelled. If it does not finish —
+/// cancelled, or refused for unpacking past its budget — it unlinks the files
+/// it brought into being and only those, so a file the player already had
+/// keeps the pack's copy rather than being taken away from them.
+async fn extract_overrides(
+    archive: &Path,
+    game_dir: &Path,
+    roots: &[&str],
+    progress: &Progress,
+) -> Result<()> {
     let archive = archive.to_path_buf();
     let game_dir = game_dir.to_path_buf();
     let roots: Vec<String> = roots.iter().map(|s| s.to_string()).collect();
+    let progress = progress.clone();
 
     tokio::task::spawn_blocking(move || -> Result<()> {
         let archive_bytes = std::fs::metadata(&archive)?.len();
         let budget = overrides_budget(archive_bytes);
         let mut unpacked: u64 = 0;
         let mut zip = open_pack(&archive)?;
+        // What this run brought into being, to take back if it does not finish.
+        // A file that was already there and was overwritten stays overwritten:
+        // the pack's copy is the one that was asked for, and an update extracts
+        // over a game directory full of the player's own files.
+        let mut created: Vec<PathBuf> = Vec::new();
 
-        for i in 0..zip.len() {
-            let mut entry = zip.by_index(i)?;
-            if entry.is_dir() {
-                continue;
-            }
-            let name = entry.name().to_string();
-            let Some(rel) = roots
-                .iter()
-                .find_map(|root| name.strip_prefix(&format!("{root}/")))
-            else {
-                continue;
-            };
+        let mut unpack = || -> Result<()> {
+            for i in 0..zip.len() {
+                progress.check_cancelled()?;
+                let mut entry = zip.by_index(i)?;
+                if entry.is_dir() {
+                    continue;
+                }
+                let name = entry.name().to_string();
+                let Some(rel) = roots
+                    .iter()
+                    .find_map(|root| name.strip_prefix(&format!("{root}/")))
+                else {
+                    continue;
+                };
 
-            let rel_path = Path::new(rel);
-            if !crate::paths::is_safe_relative(rel_path) {
-                continue;
+                let rel_path = Path::new(rel);
+                if !crate::paths::is_safe_relative(rel_path) {
+                    continue;
+                }
+                let dest = game_dir.join(rel_path);
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let fresh = !dest.exists();
+                let mut out = std::fs::File::create(&dest)?;
+                if fresh {
+                    created.push(dest.clone());
+                }
+                // Counted on the bytes as they inflate. The entry's header states a
+                // size too, and a crafted zip can understate it.
+                let left = budget - unpacked;
+                let copied = std::io::copy(&mut (&mut entry).take(left + 1), &mut out)?;
+                if copied > left {
+                    return Err(Error::msg(format!(
+                        "this pack unpacks to more than {} MB from a {} MB file, which no real \
+                         pack does — it was stopped before it could fill the disk",
+                        budget / (1024 * 1024),
+                        archive_bytes.div_ceil(1024 * 1024)
+                    )));
+                }
+                unpacked += copied;
             }
-            let dest = game_dir.join(rel_path);
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)?;
+            Ok(())
+        };
+
+        let outcome = unpack();
+        if outcome.is_err() {
+            for dest in &created {
+                let _ = std::fs::remove_file(dest);
             }
-            let mut out = std::fs::File::create(&dest)?;
-            // Counted on the bytes as they inflate. The entry's header states a
-            // size too, and a crafted zip can understate it.
-            let left = budget - unpacked;
-            let copied = std::io::copy(&mut (&mut entry).take(left + 1), &mut out)?;
-            if copied > left {
-                drop(out);
-                let _ = std::fs::remove_file(&dest);
-                return Err(Error::msg(format!(
-                    "this pack unpacks to more than {} MB from a {} MB file, which no real \
-                     pack does — it was stopped before it could fill the disk",
-                    budget / (1024 * 1024),
-                    archive_bytes.div_ceil(1024 * 1024)
-                )));
-            }
-            unpacked += copied;
         }
-        Ok(())
+        outcome
     })
     .await
     .map_err(|e| Error::msg(format!("extracting overrides panicked: {e}")))?
@@ -1319,7 +1364,8 @@ mod tests {
 
     /// Deflate turns a run of zeros into a thousandth of its size, so a pack
     /// that is small to download can unpack to fill a disk. It is stopped at
-    /// its budget, and the file it was writing is not left behind half done.
+    /// its budget, and nothing it wrote is left behind — neither the file it
+    /// was part way through nor the ones that landed before it.
     #[tokio::test]
     async fn an_override_bomb_is_stopped_before_it_fills_the_disk() {
         use zip::CompressionMethod::Deflated;
@@ -1342,10 +1388,109 @@ mod tests {
         assert!(err.to_string().contains("fill the disk"), "{err}");
 
         let game = paths.game_dir(&inst.id);
-        assert!(game.join("config/ok.toml").is_file(), "what came before the bomb was lost");
+        assert!(!game.join("config/ok.toml").exists(), "what came before the bomb stayed");
         assert!(!game.join("mods/filler.jar").exists(), "the half-written file was left behind");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The other half of that clean-up: an update extracts over a game
+    /// directory the player has been living in, so only what the run itself
+    /// brought into being may be taken back.
+    #[tokio::test]
+    async fn a_refused_pack_takes_back_only_what_it_wrote() {
+        use zip::CompressionMethod::Deflated;
+        let dir = scratch("refused");
+        let archive = dir.join("bomb.mrpack");
+        write_zip(
+            &archive,
+            &[
+                ("modrinth.index.json", INDEX.as_bytes(), Deflated),
+                ("overrides/config/theirs.toml", b"theirs = true\n", Deflated),
+                ("overrides/mods/filler.jar", &vec![0u8; 17 * MIB], Deflated),
+            ],
+        );
+
+        let (paths, mut inst) = unpacking(&dir);
+        let game = paths.game_dir(&inst.id);
+        std::fs::create_dir_all(game.join("config")).unwrap();
+        std::fs::create_dir_all(game.join("mods")).unwrap();
+        std::fs::write(game.join("config/mine.toml"), b"mine = true\n").unwrap();
+        std::fs::write(game.join("config/theirs.toml"), b"old = true\n").unwrap();
+        // The entry that trips the budget lands on a file the player already
+        // had, which is the one the run must not take away.
+        std::fs::write(game.join("mods/filler.jar"), b"mine\n").unwrap();
+
+        let err = import_into(&reqwest::Client::new(), &paths, &mut inst, &archive, None, &Progress::silent("t"))
+            .await
+            .expect_err("the bomb must be refused");
+        assert!(err.to_string().contains("fill the disk"), "{err}");
+
+        assert_eq!(
+            std::fs::read(game.join("config/mine.toml")).unwrap(),
+            b"mine = true\n",
+            "a file the pack never named was deleted"
+        );
+        // Overwritten is not created: the pack's copy of a file that was
+        // already there is the one that was asked for, and it stays.
+        assert_eq!(
+            std::fs::read(game.join("config/theirs.toml")).unwrap(),
+            b"theirs = true\n",
+            "a file the pack overwrote was rolled back"
+        );
+        assert!(
+            game.join("mods/filler.jar").exists(),
+            "the file the budget stopped on was the player's, and it was deleted"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Unpacking a joined server's pack is the longest step of an update the
+    /// player waits through on their way to Play, so Cancel has to be heard
+    /// inside it rather than only after it.
+    #[tokio::test]
+    async fn a_cancelled_extraction_stops_where_it_is() {
+        use zip::CompressionMethod::Deflated;
+        let dir = scratch("cancelled");
+        let archive = dir.join("pack.mrpack");
+        write_zip(
+            &archive,
+            &[
+                ("modrinth.index.json", INDEX.as_bytes(), Deflated),
+                ("overrides/config/ok.toml", b"ok = true\n", Deflated),
+            ],
+        );
+
+        let (paths, mut inst) = unpacking(&dir);
+        let progress = Progress::silent("t");
+        progress
+            .cancel_flag()
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        let err = import_into(&reqwest::Client::new(), &paths, &mut inst, &archive, None, &progress)
+            .await
+            .expect_err("a cancelled import");
+        assert!(matches!(err, Error::Cancelled), "{err}");
+        assert!(
+            !paths.game_dir(&inst.id).join("config/ok.toml").exists(),
+            "the cancelled run wrote anyway"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The ratio is measured against the pack, so a pack the size of the
+    /// largest a join accepts would be allowed sixty-odd gigabytes by the ratio
+    /// alone. The ceiling is what says no to that, and the floor still lets a
+    /// tiny pack of configs through.
+    #[test]
+    fn what_a_pack_may_unpack_to_has_a_floor_and_a_ceiling() {
+        assert_eq!(overrides_budget(0), 16 * MIB as u64);
+        assert_eq!(overrides_budget(4 * MIB as u64), 128 * MIB as u64);
+        // `MAX_PACK_BYTES`, share/join.rs.
+        let largest_join = 2 * 1024 * 1024 * 1024;
+        assert_eq!(overrides_budget(largest_join), 8 * 1024 * 1024 * 1024);
     }
 
     /// The other side of the same budget: a pack that is large because its
