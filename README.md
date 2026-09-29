@@ -14,8 +14,9 @@ Prism-grade control, in an interface that doesn't feel like a control panel.
 
 Geode manages Minecraft instances, installs mods from Modrinth and CurseForge
 in one combined list, and launches the game directly — no official launcher in
-the middle. It's a Tauri app: a Rust core doing the downloading, patching and
-process work, and a React frontend that stays out of the way.
+the middle. It installs and runs servers too, from the same content list. It's a
+Tauri app: a Rust core doing the downloading, patching and process work, and a
+React frontend that stays out of the way.
 
 The release binary is **7.3 MB**, because the UI runs in the webview your OS
 already ships rather than a bundled copy of Chromium. Measured idle memory is
@@ -52,6 +53,49 @@ filterable, searchable entries instead of a wall of markup.
 
 **Modpacks.** Import `.mrpack` and CurseForge zips. Export `.mrpack` — Modrinth
 content is linked rather than copied, so packs stay small.
+
+**Servers.** Fourteen kinds: Paper, Purpur, Folia, Spigot, Vanilla, Fabric,
+Quilt, NeoForge, Forge, the hybrids Mohist, Arclight and Banner, and the
+Velocity and Waterfall proxies. Geode finds the build, runs the installer where
+there is one, and drives BuildTools for Spigot — which cannot legally be
+redistributed as a jar, so it is compiled locally, Git and all. The console is
+two-way: stdin stays open, so `stop` is graceful rather than a kill. Plus
+backups and commands on a timer, `server.properties` explained in words instead
+of keys, plugins and mods each in the folder they belong in, and command
+completion that knows what the installed mods and plugins actually registered —
+read from inside the JVM by a small Java agent, with nobody joining the world.
+
+**Plans.** A plan is a mod list with no Minecraft version and no loader
+attached. You collect what you want to play with; the resolver works out
+afterwards which pair can actually run all of it — preferring Fabric, then
+NeoForge, then Forge, and using Sinytra Connector where a mod has no native
+build. The same plan can be built more than once, at different versions, as an
+instance or as a server.
+
+**Logs, and something to paste when you ask for help.** Old logs stay readable
+inside the app — Minecraft gzips yesterday's, and Geode reads those back rather
+than making you find them — and the oldest are pruned so a long-lived server
+does not fill a disk with its own history. One button copies the log *plus* what
+is installed, the loader and version, and any crash report, under a prompt
+asking for the cause: a stack trace alone rarely explains anything, and the mod
+list is what turns it into a diagnosis.
+
+**Sharing, two ways.** Export a `.geodepack`: a `.mrpack` with one extra
+directory, so other launchers still read it correctly and Geode gets the things
+`.mrpack` has nowhere to put — artwork, memory settings, per-file notes. Content
+that exists on a provider travels as a reference rather than a copy, which keeps
+a pack in single digits of megabytes and means each recipient fetches from the
+author's own source with their own credentials.
+
+Or share a server with the people who play on it. The admin copies a
+`geode://join` link, a player opens it, and their Geode builds a matching
+instance — client mods and all, server-only jars left behind — then keeps it in
+step, bringing it up to date before Play starts the game. It goes straight from
+the admin's machine over TLS, with no third party in the middle: players already
+need the server's address to join, so there is nothing to gain by routing the
+pack elsewhere. The link carries the certificate's fingerprint, so a player's
+Geode talks to that machine and no other, and Geode asks the router for the port
+itself — on a lease, so a crash cannot leave a hole in somebody's firewall.
 
 ## Status
 
@@ -197,30 +241,50 @@ and what else was evaluated.
 ```
 src/                    React frontend
   components/           Sidebar, modals, cards, the project drawer
-  views/                Library, Browse, Settings, per-instance tabs
+  views/                Library, Browse, Servers, Plans, Settings, and the tabs
   lib/                  Typed IPC wrappers, store, formatting
 
 src-tauri/src/
+  commands.rs           The IPC surface: 114 of the 115 thin commands
   meta/                 Version manifests; Fabric/Quilt/Forge resolution
   install/              Download engine, assets, natives, content installs
   launch/               Argument templating, process control, log4j parsing
   auth/                 MSA → Xbox Live → XSTS → Minecraft, token storage
-  providers/            Modrinth, CurseForge, and the federated merge
+  providers/            Modrinth, CurseForge, SpigotMC, and the federated merge
   instance/             Instance CRUD, content tracking, modpack import/export
+  server/               Server software, console, backups, schedules, the probe
+  plan/                 Versionless mod lists and the loader/version resolver
+  share/                .geodepack export/import and share codes
+  events.rs             Where the library reports to, so it needs no window
+
+agent/                  The Java command probe (built into a committed jar)
+container/              Headless hosting image — written, not yet built
+docs/                   Architecture and design notes
 ```
+
+[docs/architecture.md](docs/architecture.md) is the guided version of that, and
+[CLAUDE.md](CLAUDE.md) is the short brief for anyone — or anything — making a
+change here.
 
 ## Tests
 
 ```bash
+npm test                                            # node --test, the frontend's own
 cargo test --manifest-path src-tauri/Cargo.toml     # unit tests, no network
 
-# Against the real APIs
+# Against the real APIs. Eight files: metadata, install, launch, server, plan,
+# plugins, sides and spiget — 42 tests, every one #[ignore]d.
 cargo test --manifest-path src-tauri/Cargo.toml --test live_metadata -- --ignored --nocapture
 
 # Full install-and-launch. Downloads a lot; runs the game under Xvfb.
 GEODE_HOME=/tmp/geode-e2e GEODE_TEST_VERSION=1.21.1 GEODE_TEST_LOADER=fabric \
   cargo test --manifest-path src-tauri/Cargo.toml --test live_launch -- --ignored --nocapture
 ```
+
+Two of the integration test files need no network and so run in the ordinary
+pass: `backup_roundtrip.rs` writes real zips and restores them across five
+tests, and `header_wire_format.rs` binds a socket to prove a bcrypt CurseForge
+key reaches the wire unmangled.
 
 The live tests exist because the parts most likely to break are the ones nobody
 here controls. They've already earned their keep: the launch test caught
