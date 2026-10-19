@@ -1039,24 +1039,23 @@ pub async fn write_mrpack(
         // Under a walk that follows no links, the index does not either: a
         // link named like a record would otherwise have its target hashed and
         // described, beside a real turned-off twin that is carried anyway.
-        let meta = match input.walk {
-            Walk::Except(_) => tokio::fs::metadata(&full).await.ok(),
-            Walk::Only { .. } => tokio::fs::symlink_metadata(&full)
+        if players_pack {
+            let is_file = tokio::fs::symlink_metadata(&full)
                 .await
-                .ok()
-                .filter(|meta| meta.is_file()),
-        };
-        let Some(meta) = meta else {
-            continue;
-        };
-        let Ok(sha1) = crate::net::sha1_file(&full).await else {
-            continue;
-        };
-        // Both hashes, because the readers disagree about which is optional.
-        // Modrinth refuses an upload without sha512, and Prism reads it with
+                .is_ok_and(|meta| meta.is_file());
+            if !is_file {
+                continue;
+            }
+        }
+        // The size and both SHA hashes from one streaming pass, rather than a
+        // read of the whole file into memory per hash. Both hashes go in,
+        // because the readers disagree about which is optional: Modrinth
+        // refuses an upload without sha512, and Prism reads it with
         // `requireString` and no fallback — so a pack carrying only sha1 is
-        // one no other launcher will open.
-        let Ok(sha512) = crate::net::sha512_file(&full).await else {
+        // one no other launcher will open. No murmur2: this index names
+        // Modrinth files and nothing here can use a CurseForge fingerprint,
+        // and asking for one would read every file in the instance twice.
+        let Ok(digests) = crate::net::digests(&full, false).await else {
             continue;
         };
 
@@ -1078,9 +1077,12 @@ pub async fn write_mrpack(
 
         index.files.push(MrFile {
             path: rel.to_string_lossy().replace('\\', "/"),
-            hashes: [("sha1".to_string(), sha1), ("sha512".to_string(), sha512)]
-                .into_iter()
-                .collect(),
+            hashes: [
+                ("sha1".to_string(), digests.sha1),
+                ("sha512".to_string(), digests.sha512),
+            ]
+            .into_iter()
+            .collect(),
             // Always both sides, never omitted. Prism reads the client value
             // with a default of "unsupported", so a file that leaves it out
             // is a file Prism silently declines to install.
@@ -1091,7 +1093,7 @@ pub async fn write_mrpack(
                 record.version_id,
                 urlencoding::encode(&record.file_name)
             )],
-            file_size: Some(meta.len()),
+            file_size: Some(digests.size),
         });
         indexed.insert(disk_rel);
     }

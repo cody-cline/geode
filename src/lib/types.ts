@@ -470,6 +470,7 @@ export interface VersionFile {
   url: string;
   filename: string;
   sha1?: string | null;
+  sha512?: string | null;
   size?: number | null;
   primary: boolean;
 }

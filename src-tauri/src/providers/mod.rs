@@ -180,6 +180,7 @@ pub struct VersionFile {
     pub url: String,
     pub filename: String,
     pub sha1: Option<String>,
+    pub sha512: Option<String>,
     pub size: Option<u64>,
     pub primary: bool,
 }

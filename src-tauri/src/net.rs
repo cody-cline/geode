@@ -223,7 +223,12 @@ pub async fn sha1_file(path: &Path) -> Result<String> {
 }
 
 /// Modrinth's pack index requires this one specifically, and the launchers
-/// that read a `.mrpack` require it without a fallback.
+/// that read a `.mrpack` require it without a fallback — though the pack
+/// writer now takes it from `digests`. What keeps this here is that it reads
+/// the file whole in one go, so it is the independent answer the streaming
+/// version is checked against, and that check is the only thing standing
+/// between a chunk-boundary bug and a pack whose index disagrees with its
+/// own bytes.
 pub async fn sha512_file(path: &Path) -> Result<String> {
     let bytes = tokio::fs::read(path).await?;
     let mut h = sha2::Sha512::new();
@@ -236,6 +241,182 @@ pub async fn sha256_file(path: &Path) -> Result<String> {
     let mut h = Sha256::new();
     h.update(&bytes);
     Ok(hex::encode(h.finalize()))
+}
+
+/// Everything a pack writer or a platform lookup can want to know about one
+/// file's bytes. Both SHA hashes because the launchers that read a `.mrpack`
+/// disagree about which one is optional, and the murmur2 because that is the
+/// only name CurseForge knows a file by. The murmur2 is `None` when the caller
+/// did not ask for one, so a fingerprint nobody computed can never be read as
+/// one that came out zero.
+#[derive(Debug, Clone)]
+pub struct Digests {
+    pub size: u64,
+    pub sha1: String,
+    pub sha512: String,
+    pub murmur2: Option<u32>,
+}
+
+/// Everything one file's bytes can say about themselves, read in 1 MiB chunks
+/// rather than whole: a pack export runs this over every file in an instance,
+/// and a resource pack can be hundreds of megabytes.
+///
+/// The size and both SHA hashes come out of one pass. `want_murmur2` costs a
+/// second pass over the same open file, and that second pass is forced by the
+/// algorithm: CurseForge's murmur2 seeds its state with the number of bytes it
+/// is about to hash, so that count has to be known before any mixing starts.
+/// Xoring the length in at the end instead does not give the same answer —
+/// multiplication mod 2^32 does not distribute over xor, and `b"abcd"` comes
+/// out 792981580 that way instead of 3376380438. Prism reads its own stream
+/// twice for this reason too; the second pass comes from the page cache.
+///
+/// So it is asked for rather than always taken. The argument for computing it
+/// unconditionally was that it costs a few cycles per byte beside the I/O,
+/// which holds for a single interleaved pass and not for the second read the
+/// paragraph above forces: a 300-jar export would read every jar twice to
+/// fingerprint files for a platform the pack cannot even name. One `if` around
+/// a pass that is already separate is cheaper than that, and cheaper than the
+/// two interleaved code paths the alternative was weighed against.
+pub async fn digests(path: &Path, want_murmur2: bool) -> Result<Digests> {
+    let owned = path.to_path_buf();
+    tokio::task::spawn_blocking(move || digests_blocking(&owned, want_murmur2))
+        .await
+        .map_err(|e| Error::msg(format!("hashing a file panicked: {e}")))?
+}
+
+fn digests_blocking(path: &Path, want_murmur2: bool) -> Result<Digests> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path)?;
+    let mut buf = vec![0u8; 1 << 20];
+
+    let mut sha1 = Sha1::new();
+    let mut sha512 = sha2::Sha512::new();
+    let mut size = 0u64;
+    let mut hashable = 0u64;
+    loop {
+        let read = file.read(&mut buf)?;
+        if read == 0 {
+            break;
+        }
+        let chunk = &buf[..read];
+        sha1.update(chunk);
+        sha512.update(chunk);
+        size += read as u64;
+        if want_murmur2 {
+            hashable += chunk.iter().filter(|b| !murmur2::is_skipped(**b)).count() as u64;
+        }
+    }
+
+    let mut murmur = None;
+    if want_murmur2 {
+        // The count is kept to 32 bits because that is the width of the value
+        // CurseForge matches against. A file with more than 4 GiB of hashable
+        // bytes therefore gets a fingerprint no platform will recognise, which
+        // costs a miss — the file travels as bytes — and nothing worse.
+        file.seek(SeekFrom::Start(0))?;
+        let mut acc = murmur2::Accumulator::new(hashable as u32);
+        loop {
+            let read = file.read(&mut buf)?;
+            if read == 0 {
+                break;
+            }
+            acc.update(&buf[..read]);
+        }
+        murmur = Some(acc.finish());
+    }
+
+    Ok(Digests {
+        size,
+        sha1: hex::encode(sha1.finalize()),
+        sha512: hex::encode(sha512.finalize()),
+        murmur2: murmur,
+    })
+}
+
+/// CurseForge identifies a file by MurmurHash2, 32-bit, over its bytes with
+/// every tab, newline, carriage return and space dropped, seeded with 1 xor
+/// the number of bytes that survive that filter. Transcribed from Prism's
+/// `libraries/murmur2/src/MurmurHash2.cpp` and the filter in its
+/// `launcher/modplatform/helpers/HashUtils.cpp`.
+///
+/// Nothing in here is called `fingerprint`: in `providers::curseforge` that
+/// word already means an API key rendered safe to display.
+pub mod murmur2 {
+    const M: u32 = 0x5bd1_e995;
+    const R: u32 = 24;
+
+    /// The four bytes CurseForge removes before hashing.
+    pub fn is_skipped(b: u8) -> bool {
+        matches!(b, 0x09 | 0x0a | 0x0d | 0x20)
+    }
+
+    /// The hash of a slice already in hand.
+    pub fn hash(bytes: &[u8]) -> u32 {
+        let hashable = bytes.iter().filter(|b| !is_skipped(**b)).count() as u32;
+        let mut acc = Accumulator::new(hashable);
+        acc.update(bytes);
+        acc.finish()
+    }
+
+    /// Fed raw bytes in pieces of any size; it filters them itself and keeps
+    /// the four-byte block it is part way through. The length it is built with
+    /// is the post-filter count, and seeding is all the length is needed for:
+    /// whether a block or the tail gets mixed falls out of how many bytes have
+    /// actually arrived.
+    pub struct Accumulator {
+        h: u32,
+        block: [u8; 4],
+        filled: usize,
+    }
+
+    impl Accumulator {
+        pub fn new(hashable_len: u32) -> Self {
+            Self {
+                h: 1 ^ hashable_len,
+                block: [0; 4],
+                filled: 0,
+            }
+        }
+
+        pub fn update(&mut self, bytes: &[u8]) {
+            for &b in bytes.iter().filter(|b| !is_skipped(**b)) {
+                self.block[self.filled] = b;
+                self.filled += 1;
+                if self.filled == 4 {
+                    self.mix_block();
+                    self.filled = 0;
+                }
+            }
+        }
+
+        fn mix_block(&mut self) {
+            let mut k = u32::from_le_bytes(self.block).wrapping_mul(M);
+            k ^= k >> R;
+            k = k.wrapping_mul(M);
+            self.h = self.h.wrapping_mul(M) ^ k;
+        }
+
+        /// Mixes in whatever is left of a block, then the shuffles that spread
+        /// those last bytes through the whole word.
+        pub fn finish(self) -> u32 {
+            let mut h = self.h;
+            if self.filled == 3 {
+                h ^= u32::from(self.block[2]) << 16;
+            }
+            if self.filled >= 2 {
+                h ^= u32::from(self.block[1]) << 8;
+            }
+            if self.filled >= 1 {
+                h ^= u32::from(self.block[0]);
+                h = h.wrapping_mul(M);
+            }
+            h ^= h >> 13;
+            h = h.wrapping_mul(M);
+            h ^= h >> 15;
+            h
+        }
+    }
 }
 
 /// True when the file already on disk matches what we were going to download.
@@ -391,4 +572,131 @@ pub async fn get_json<T: serde::de::DeserializeOwned>(
         return Err(Error::msg(format!("{url} returned HTTP {status}")));
     }
     serde_json::from_str(&text).map_err(|e| Error::json(url, e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::paths::Scratch;
+
+    /// Bytes a test can ask for again and expect to the last one, so the
+    /// murmur2 values below can come from an implementation outside Rust.
+    fn pseudo_random(len: usize) -> Vec<u8> {
+        let mut state = 1u64;
+        (0..len)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (state >> 33) as u8
+            })
+            .collect()
+    }
+
+    /// The values Prism's own murmur2 produces, covering every tail length and
+    /// a whole block. They pin the constants, the little-endian block reads,
+    /// the tail switch and the final mixes: get any one of those wrong and
+    /// every CurseForge lookup becomes a silent miss.
+    #[test]
+    fn murmur2_matches_prisms_own_values() {
+        for (bytes, want) in [
+            (&b""[..], 1540447798u32),
+            (&b"a"[..], 626045324),
+            (&b"ab"[..], 1692487918),
+            (&b"abc"[..], 1621425345),
+            (&b"abcd"[..], 3376380438),
+            (&b"abcde"[..], 3469237630),
+            (&b"abcdefgh"[..], 1080400154),
+        ] {
+            assert_eq!(murmur2::hash(bytes), want, "{bytes:?}");
+        }
+    }
+
+    /// The filter runs first and the length term counts what survives it, so
+    /// bytes that differ only by whitespace hash identically. This is the
+    /// failure that looks like "CurseForge never recognises anything" rather
+    /// than like a bug.
+    #[test]
+    fn whitespace_is_stripped_before_the_length_is_taken() {
+        assert_eq!(murmur2::hash(b"a\tb\nc\rd e"), 3469237630);
+        assert_eq!(murmur2::hash(b"abcde"), 3469237630);
+        assert_eq!(murmur2::hash(b"   "), 1540447798);
+        assert_eq!(murmur2::hash(b"\t\n\r "), 1540447798);
+        assert_eq!(murmur2::hash(b""), 1540447798);
+    }
+
+    /// The streaming rewrite must not have moved a digest: a pack whose index
+    /// hashes disagree with its bytes is one every reader refuses.
+    #[tokio::test]
+    async fn digests_agree_with_the_single_hash_helpers() {
+        let scratch = Scratch::new("digests");
+        tokio::fs::create_dir_all(&scratch.paths.root)
+            .await
+            .unwrap();
+        let path = scratch.paths.root.join("blob.bin");
+        tokio::fs::write(&path, pseudo_random(5000)).await.unwrap();
+
+        let d = digests(&path, true).await.unwrap();
+        assert_eq!(d.sha1, sha1_file(&path).await.unwrap());
+        assert_eq!(d.sha512, sha512_file(&path).await.unwrap());
+        assert_eq!(d.size, tokio::fs::metadata(&path).await.unwrap().len());
+    }
+
+    /// The murmur2 needs a whole second read of the file, so a caller that is
+    /// not going to ask CurseForge about anything must not pay for one. An
+    /// `.mrpack` export is exactly that caller, and it runs over every file in
+    /// the instance.
+    #[tokio::test]
+    async fn a_caller_that_wants_no_murmur2_is_not_given_one() {
+        let scratch = Scratch::new("digests-unasked");
+        tokio::fs::create_dir_all(&scratch.paths.root)
+            .await
+            .unwrap();
+        let path = scratch.paths.root.join("blob.bin");
+        let bytes = pseudo_random(5000);
+        tokio::fs::write(&path, &bytes).await.unwrap();
+
+        let asked = digests(&path, true).await.unwrap();
+        let unasked = digests(&path, false).await.unwrap();
+
+        assert_eq!(asked.murmur2, Some(murmur2::hash(&bytes)));
+        assert_eq!(unasked.murmur2, None);
+        // Everything the first pass produces is there either way.
+        assert_eq!(unasked.sha1, asked.sha1);
+        assert_eq!(unasked.sha512, asked.sha512);
+        assert_eq!(unasked.size, asked.size);
+    }
+
+    /// A file of exactly one chunk and one of a chunk plus three bytes, so the
+    /// three accumulators are checked across a boundary at once — and the
+    /// murmur2 against values from a separate implementation of the same
+    /// algorithm, not just against this module's own slice form.
+    #[tokio::test]
+    async fn digests_streams_across_chunk_boundaries() {
+        let scratch = Scratch::new("digests-chunks");
+        tokio::fs::create_dir_all(&scratch.paths.root)
+            .await
+            .unwrap();
+
+        for (len, murmur) in [(1 << 20, 1336806114u32), ((1 << 20) + 3, 3025778575)] {
+            let path = scratch.paths.root.join(format!("blob-{len}.bin"));
+            let bytes = pseudo_random(len);
+            tokio::fs::write(&path, &bytes).await.unwrap();
+
+            let d = digests(&path, true).await.unwrap();
+            assert_eq!(d.size, len as u64, "size at {len}");
+            assert_eq!(d.sha1, sha1_file(&path).await.unwrap(), "sha1 at {len}");
+            assert_eq!(
+                d.sha512,
+                sha512_file(&path).await.unwrap(),
+                "sha512 at {len}"
+            );
+            assert_eq!(d.murmur2, Some(murmur), "murmur2 at {len}");
+            assert_eq!(
+                d.murmur2,
+                Some(murmur2::hash(&bytes)),
+                "murmur2 in one go at {len}"
+            );
+        }
+    }
 }

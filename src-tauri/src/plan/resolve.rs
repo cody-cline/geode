@@ -871,6 +871,7 @@ mod tests {
                 url: "https://example.invalid/a.jar".into(),
                 filename: "a.jar".into(),
                 sha1: None,
+                sha512: None,
                 size: None,
                 primary: true,
             }],

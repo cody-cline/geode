@@ -318,6 +318,7 @@ fn to_version(v: VersionResponse) -> Version {
             .into_iter()
             .map(|f| VersionFile {
                 sha1: f.hashes.get("sha1").cloned(),
+                sha512: f.hashes.get("sha512").cloned(),
                 url: f.url,
                 filename: f.filename,
                 size: f.size,
@@ -434,34 +435,100 @@ pub async fn projects_by_ids(client: &reqwest::Client, ids: &[String]) -> Result
     Ok(out)
 }
 
-/// Identify files by SHA-1. This is how a jar with no provenance — dropped in
+/// The two algorithms Modrinth's bulk hash endpoint accepts. An enum rather
+/// than a string because the one value both goes on the wire and decides which
+/// of a candidate file's hashes it is compared against. As a `&str` any third
+/// spelling — `"sha-512"`, `"SHA512"` — would be sent as given and then
+/// quietly compared against sha1, and the answer to "which of these 200 mods
+/// does Modrinth know" would come back empty with complete confidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HashAlgorithm {
+    Sha1,
+    Sha512,
+}
+
+impl HashAlgorithm {
+    /// Exactly what the endpoint's `algorithm` field takes.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sha1 => "sha1",
+            Self::Sha512 => "sha512",
+        }
+    }
+}
+
+/// Identify files by hash. This is how a jar with no provenance — dropped in
 /// by hand, or written by a pack index that records only URLs — gets linked
 /// back to the project it came from.
-pub async fn versions_by_hashes(
+///
+/// A hash lookup answers with a version, and a version can hold several files:
+/// a sources jar, the other loader's build, and the one that was asked about.
+/// So each hit comes back paired with the file whose hash actually matched,
+/// and an answer carrying no such file is no match at all.
+pub async fn files_by_hashes(
     client: &reqwest::Client,
-    sha1s: &[String],
-) -> Result<std::collections::HashMap<String, Version>> {
+    hashes: &[String],
+    algorithm: HashAlgorithm,
+) -> Result<std::collections::HashMap<String, (Version, VersionFile)>> {
     let mut found = std::collections::HashMap::new();
-    if sha1s.is_empty() {
+    if hashes.is_empty() {
         return Ok(found);
     }
 
-    for chunk in sha1s.chunks(500) {
-        let body = serde_json::json!({ "hashes": chunk, "algorithm": "sha1" });
+    for chunk in hashes.chunks(500) {
+        let body = serde_json::json!({ "hashes": chunk, "algorithm": algorithm.as_str() });
         let resp = client
             .post(format!("{API}/version_files"))
             .json(&body)
             .send()
             .await?;
+        // A chunk turned away — rate-limited, or the API having a bad minute —
+        // reads to the caller exactly like a chunk where nothing matched. That
+        // is tolerable while a miss only means "no provenance yet", and will
+        // not be once a miss decides whether a file travels as bytes.
         if !resp.status().is_success() {
             continue;
         }
-        let batch: std::collections::HashMap<String, VersionResponse> = resp.json().await?;
-        for (hash, version) in batch {
-            found.insert(hash.to_lowercase(), to_version(version));
-        }
+        found.extend(matches_in(resp.json().await?, algorithm));
     }
     Ok(found)
+}
+
+/// One answered chunk turned into the hits it actually carries, kept apart
+/// from the request so it can be read against a hand-written body. This is
+/// where a hash whose version holds no file of that hash is dropped instead of
+/// paired with whatever file the version happened to list: the pack would
+/// carry the local file's hashes beside another artifact's URL, and every
+/// launcher reading it would fail the checksum.
+fn matches_in(
+    batch: std::collections::HashMap<String, VersionResponse>,
+    algorithm: HashAlgorithm,
+) -> std::collections::HashMap<String, (Version, VersionFile)> {
+    let mut found = std::collections::HashMap::new();
+    for (hash, version) in batch {
+        let hash = hash.to_lowercase();
+        let version = to_version(version);
+        let Some(file) = matched_file(&version, &hash, algorithm) else {
+            continue;
+        };
+        found.insert(hash, (version, file));
+    }
+    found
+}
+
+/// The file in a version that carries the hash that was asked about, if any.
+fn matched_file(version: &Version, hash: &str, algorithm: HashAlgorithm) -> Option<VersionFile> {
+    version
+        .files
+        .iter()
+        .find(|f| {
+            let theirs = match algorithm {
+                HashAlgorithm::Sha1 => f.sha1.as_deref(),
+                HashAlgorithm::Sha512 => f.sha512.as_deref(),
+            };
+            theirs.is_some_and(|h| h.eq_ignore_ascii_case(hash))
+        })
+        .cloned()
 }
 
 #[derive(Debug, Deserialize)]
@@ -485,6 +552,93 @@ pub async fn categories(client: &reqwest::Client, kind: ProjectKind) -> Result<V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One version as the bulk hash endpoint hands it over: the jar that was
+    /// asked about is neither the first file nor the primary one.
+    const VERSION_WITH_THREE_FILES: &str = r#"{
+            "id": "AAAAAAAA",
+            "project_id": "PPPPPPPP",
+            "name": "Cool Mod 1.2.3",
+            "version_number": "1.2.3",
+            "version_type": "release",
+            "game_versions": ["1.21.1"],
+            "loaders": ["fabric", "neoforge"],
+            "downloads": 42,
+            "files": [
+                {
+                    "url": "https://cdn.modrinth.com/data/PPPPPPPP/versions/AAAAAAAA/cool-1.2.3-sources.jar",
+                    "filename": "cool-1.2.3-sources.jar",
+                    "primary": true,
+                    "size": 111,
+                    "hashes": { "sha1": "a1", "sha512": "a512" }
+                },
+                {
+                    "url": "https://cdn.modrinth.com/data/PPPPPPPP/versions/AAAAAAAA/cool-1.2.3-fabric.jar",
+                    "filename": "cool-1.2.3-fabric.jar",
+                    "primary": false,
+                    "size": 222,
+                    "hashes": { "sha1": "b1", "sha512": "b512" }
+                },
+                {
+                    "url": "https://cdn.modrinth.com/data/PPPPPPPP/versions/AAAAAAAA/cool-1.2.3-neoforge.jar",
+                    "filename": "cool-1.2.3-neoforge.jar",
+                    "primary": false,
+                    "size": 333,
+                    "hashes": { "sha1": "c1", "sha512": "c512" }
+                }
+            ]
+        }"#;
+
+    /// That version, keyed by the hash the lookup asked about, as one answered
+    /// chunk of the endpoint's reply.
+    fn answer_for(hash: &str) -> std::collections::HashMap<String, VersionResponse> {
+        [(
+            hash.to_string(),
+            serde_json::from_str(VERSION_WITH_THREE_FILES).unwrap(),
+        )]
+        .into()
+    }
+
+    /// The one mistake that would make a pack install bytes other than the
+    /// ones it was exported from: taking the version's primary file instead of
+    /// the file whose hash was looked up.
+    #[test]
+    fn a_hash_lookup_picks_the_file_that_matched_not_the_primary_one() {
+        // Upper case going in, to pin the lowercasing of the answer's key.
+        let found = matches_in(answer_for("B512"), HashAlgorithm::Sha512);
+
+        let (version, file) = found.get("b512").expect("the fabric jar");
+        assert_eq!(version.id, "AAAAAAAA");
+        assert_eq!(file.filename, "cool-1.2.3-fabric.jar");
+        assert_eq!(
+            file.url,
+            "https://cdn.modrinth.com/data/PPPPPPPP/versions/AAAAAAAA/cool-1.2.3-fabric.jar"
+        );
+        assert_eq!(file.size, Some(222));
+        assert_eq!(file.sha512.as_deref(), Some("b512"));
+        assert_eq!(file.sha1.as_deref(), Some("b1"));
+    }
+
+    /// A version that answered but holds no file with the hash asked about is
+    /// not an answer. It has to leave the map empty rather than fall back to
+    /// some file of that version — naming an arbitrary one would be a wrong
+    /// match a receiving launcher then fails the checksum on.
+    #[test]
+    fn a_hash_with_no_matching_file_in_its_version_is_not_a_match() {
+        assert!(matches_in(answer_for("d512"), HashAlgorithm::Sha512).is_empty());
+        // And asking with the wrong algorithm is a miss, not a sideways hit.
+        assert!(matches_in(answer_for("b512"), HashAlgorithm::Sha1).is_empty());
+    }
+
+    /// The algorithm name goes on the wire and chooses which hash a candidate
+    /// is compared against, so these two spellings are the whole agreement
+    /// between Modrinth's endpoint and the comparison here. Either one wrong
+    /// turns every lookup into a confident "nothing matched".
+    #[test]
+    fn the_two_algorithms_are_spelled_the_way_modrinth_takes_them() {
+        assert_eq!(HashAlgorithm::Sha1.as_str(), "sha1");
+        assert_eq!(HashAlgorithm::Sha512.as_str(), "sha512");
+    }
 
     #[test]
     fn separates_loaders_from_genres() {

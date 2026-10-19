@@ -610,6 +610,8 @@ fn to_version(f: CfFile) -> Version {
                 .iter()
                 .find(|h| h.algo == 1)
                 .map(|h| h.value.clone()),
+            // CurseForge publishes sha1 (algo 1) and md5 (algo 2), nothing else.
+            sha512: None,
             size: f.file_length,
             primary: true,
         }],

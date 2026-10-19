@@ -509,6 +509,7 @@ mod tests {
                     url: "https://example.invalid/a.jar".into(),
                     filename: "a.jar".into(),
                     sha1: None,
+                    sha512: None,
                     size: None,
                     primary: true,
                 }]
@@ -852,11 +853,16 @@ pub async fn link_untracked_in(
         .await;
 
     let hashes: Vec<String> = pending.iter().map(|(_, _, h)| h.clone()).collect();
-    let found = crate::providers::modrinth::versions_by_hashes(client, &hashes).await?;
+    let found = crate::providers::modrinth::files_by_hashes(
+        client,
+        &hashes,
+        crate::providers::modrinth::HashAlgorithm::Sha1,
+    )
+    .await?;
 
     // One more call turns ids into names and icons.
     let project_ids: Vec<String> = {
-        let mut ids: Vec<String> = found.values().map(|v| v.project_id.clone()).collect();
+        let mut ids: Vec<String> = found.values().map(|(v, _)| v.project_id.clone()).collect();
         ids.sort();
         ids.dedup();
         ids
@@ -868,7 +874,7 @@ pub async fn link_untracked_in(
     let mut identified = 0;
     for (kind, file_name, sha1) in pending {
         progress.advance(1, &file_name).await;
-        let Some(version) = found.get(&sha1) else {
+        let Some((version, _)) = found.get(&sha1) else {
             continue;
         };
         let project = projects.iter().find(|p| p.id == version.project_id);

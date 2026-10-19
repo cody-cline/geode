@@ -212,6 +212,7 @@ pub async fn versions(client: &reqwest::Client, id: &str) -> Result<Vec<Version>
             // before downloading.
             filename: format!("{}-{version_name}.jar", sanitise(&resource.name)),
             sha1: None,
+            sha512: None,
             size: None,
             primary: true,
         }]
