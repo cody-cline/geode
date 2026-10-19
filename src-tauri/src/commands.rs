@@ -835,7 +835,7 @@ pub async fn install_modpack(
     }
     progress.advance(1, &file.filename).await;
 
-    let preview = instance::modpack::preview(archive.clone()).await?;
+    let preview = share::pack::preview(&archive).await?;
     if preview.needs_curseforge_key && cf_key.is_none() {
         state.clear_cancel(progress.id());
         let e = Error::msg(
@@ -860,7 +860,11 @@ pub async fn install_modpack(
     )
     .await?;
 
-    let result = instance::modpack::import_into(
+    // Both halves, exactly as a pack file the user picked themselves gets. A
+    // `.geodepack` can be published on a provider like any other pack, and
+    // read with the mrpack reader alone it arrives stripped of its settings,
+    // its artwork and every reference its Geode half carried.
+    let result = share::pack::import(
         &state.http,
         &state.paths,
         &mut inst,
@@ -3218,7 +3222,7 @@ pub struct PackImport {
 
 #[tauri::command]
 pub async fn preview_modpack(path: String) -> Result<instance::modpack::PackPreview> {
-    instance::modpack::preview(PathBuf::from(path)).await
+    share::pack::preview(&PathBuf::from(path)).await
 }
 
 /// Import a pack file, and report what it could not fetch *beside* the
@@ -3418,6 +3422,45 @@ pub async fn export_curseforge_pack(
         &inst,
         dest,
         &author,
+        include_saves,
+        &progress,
+    )
+    .await;
+    if let Err(e) = &result {
+        progress.fail(&e.to_string()).await;
+    }
+    result
+}
+
+/// Write an instance out as a zip Prism opens as an instance of its own.
+///
+/// Every jar travels inside it whatever any platform says about it: Prism's own
+/// importer takes the tree as it finds it and fetches nothing, so there is no
+/// way for this format to say "download this". The packwiz index written beside
+/// the jars is what gives the recipient's Prism a name and an update path for
+/// each one instead of a folder of anonymous files.
+#[tauri::command]
+pub async fn export_prism_instance(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    dest: String,
+    include_saves: bool,
+) -> Result<instance::modpack::ExportReport> {
+    let inst = instance::load(&state.paths, &id).await?;
+    let progress = Progress::new(crate::desktop::sink(app), format!("export:{id}"));
+    let dest = PathBuf::from(dest);
+    let cf_key = state.cf_key().await;
+
+    let result = instance::prism::export_instance(
+        crate::install::identity::Ask::exporting(
+            &state.http,
+            cf_key.as_deref(),
+            crate::install::identity::Carry::PRISM,
+        ),
+        &state.paths,
+        &inst,
+        dest,
         include_saves,
         &progress,
     )
@@ -5830,7 +5873,7 @@ async fn fetch_and_read(
     progress: &Progress,
 ) -> Result<instance::modpack::PackPreview> {
     share::fetch::pack(&link.source, &link.hash, archive, progress).await?;
-    instance::modpack::preview(archive.to_path_buf()).await
+    share::pack::preview(archive).await
 }
 
 /// Import a pack that arrived from a link, through the ordinary importer.

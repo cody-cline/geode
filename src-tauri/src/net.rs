@@ -167,6 +167,13 @@ impl Progress {
 #[derive(Debug, Clone)]
 pub struct Download {
     pub url: String,
+    /// Somewhere else the same bytes are, tried when `url` will not answer.
+    ///
+    /// A pack index may list several hosts for one file, and a mirror listed
+    /// second is there for the day the first is down. Only one, because that
+    /// is what the format's readers honour and what the hashes make safe: the
+    /// bytes are checked against the same pair whichever host served them.
+    pub mirror: Option<String>,
     pub dest: PathBuf,
     pub sha1: Option<String>,
     /// Some publishers checksum with SHA-256 instead — PaperMC does — and a
@@ -186,12 +193,18 @@ impl Download {
             .unwrap_or_else(|| url.clone());
         Self {
             url,
+            mirror: None,
             dest,
             sha1: None,
             sha256: None,
             size: None,
             label,
         }
+    }
+
+    pub fn mirror(mut self, url: Option<String>) -> Self {
+        self.mirror = url;
+        self
     }
 
     pub fn sha1(mut self, hash: Option<String>) -> Self {
@@ -458,16 +471,21 @@ pub async fn fetch_one(client: &reqwest::Client, d: &Download) -> Result<()> {
         if attempt > 0 {
             tokio::time::sleep(Duration::from_millis(400 * (1 << attempt))).await;
         }
-        match try_fetch(client, d).await {
-            Ok(()) => return Ok(()),
-            Err(e) => last_err = Some(e),
+        // The mirror within the round rather than after all of them: a host
+        // that is simply gone refuses at once, and waiting out three rounds of
+        // backoff before trying the other one is a minute of nothing per file.
+        for url in [Some(&d.url), d.mirror.as_ref()].into_iter().flatten() {
+            match try_fetch(client, d, url).await {
+                Ok(()) => return Ok(()),
+                Err(e) => last_err = Some(e),
+            }
         }
     }
     Err(last_err.unwrap_or_else(|| Error::msg("download failed")))
 }
 
-async fn try_fetch(client: &reqwest::Client, d: &Download) -> Result<()> {
-    let resp = client.get(&d.url).send().await?;
+async fn try_fetch(client: &reqwest::Client, d: &Download, url: &str) -> Result<()> {
+    let resp = client.get(url).send().await?;
     if !resp.status().is_success() {
         return Err(Error::msg(format!(
             "{} returned HTTP {}",

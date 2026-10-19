@@ -463,7 +463,7 @@ export const api = {
   /** Makes the instance and reports what it could not fetch beside it. Progress id `import:<instance id>`. */
   importModpack: (path: string, name?: string) =>
     invoke<PackImport>("import_modpack", { path, name: name ?? null }),
-  /** All three return what the pack did with the instance's content, so the UI can say it. */
+  /** All four return what the export did with the instance's content, so the UI can say it. */
   exportModpack: (id: string, dest: string, includeSaves: boolean) =>
     invoke<ExportReport>("export_modpack", { id, dest, includeSaves }),
   exportGeodepack: (id: string, dest: string, includeSaves: boolean) =>
@@ -479,6 +479,14 @@ export const api = {
     author: string | null,
     includeSaves: boolean,
   ) => invoke<ExportReport>("export_curseforge_pack", { id, dest, author, includeSaves }),
+  /**
+   * A zip Prism opens as an instance of its own. Every jar travels inside it —
+   * the format has no way to say "download this" — so `referenced` counts the
+   * mods the recipient's Prism will know the name and update path of, not what
+   * the zip left out.
+   */
+  exportPrismInstance: (id: string, dest: string, includeSaves: boolean) =>
+    invoke<ExportReport>("export_prism_instance", { id, dest, includeSaves }),
 
   // Google Drive. Connecting opens the user's browser and blocks until they
   // come back, the way completeMicrosoftLogin does; cancel it with

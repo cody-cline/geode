@@ -338,6 +338,12 @@ fn referenced(manifest: &Manifest) -> HashSet<PathBuf> {
 /// `Ok(None)` means a plain `.mrpack`, which is a perfectly good thing to be
 /// handed and is imported as one.
 pub fn read_manifest(archive: &Path) -> Result<Option<Manifest>> {
+    // An instance folder somebody pointed at is not a zip and has no Geode
+    // half to find — the import path is shared with a pack file, and this is
+    // the one step that would refuse a folder for not being an archive.
+    if archive.is_dir() {
+        return Ok(None);
+    }
     let mut zip = instance::modpack::open_pack(archive)?;
     let Ok(entry) = zip.by_name(Manifest::PATH) else {
         return Ok(None);
@@ -357,6 +363,39 @@ pub fn read_manifest(archive: &Path) -> Result<Option<Manifest>> {
         )));
     }
     Ok(Some(manifest))
+}
+
+/// What a pack file is, both halves read.
+///
+/// [`instance::modpack::preview`] answers for the half other launchers read,
+/// and knows nothing of the Geode half — so a `.geodepack` whose notes name
+/// CurseForge files used to report that it needed no key and then discover the
+/// need inside [`resolve_references`], after the rest of the import had
+/// already run, reporting those mods as missing. Asked here instead, the
+/// question is answered before an instance exists.
+pub async fn preview(archive: &Path) -> Result<instance::modpack::PackPreview> {
+    let mut described = instance::modpack::preview(archive.to_path_buf()).await?;
+    let probe = archive.to_path_buf();
+    let manifest = tokio::task::spawn_blocking(move || read_manifest(&probe))
+        .await
+        .map_err(|e| Error::msg(format!("reading the pack's manifest panicked: {e}")))??;
+    described.needs_curseforge_key |= manifest.as_ref().is_some_and(needs_curseforge_key);
+    Ok(described)
+}
+
+/// Whether finishing this pack's import will need the recipient's own
+/// CurseForge key.
+///
+/// A note's source is ids rather than a URL precisely so the recipient
+/// resolves it themselves, and CurseForge is the one provider
+/// [`resolve_references`] can resolve — so a note naming one is a note that
+/// needs a key.
+fn needs_curseforge_key(manifest: &Manifest) -> bool {
+    manifest.files.iter().any(|note| {
+        note.source
+            .as_ref()
+            .is_some_and(|source| source.provider == "curseforge")
+    })
 }
 
 /// Apply the annotations to an instance the mrpack half already created.
@@ -498,6 +537,21 @@ pub async fn import(
     if let Some(arrived) = &arrived {
         instance.pack = None;
         settle_server_files(paths, instance, arrived, &PlayerOff::default()).await?;
+    }
+    // Last, and after the server has claimed what it sent: a jar that arrived
+    // as bytes gets its record from `settle_server_files`, so naming it before
+    // that ran would mean naming nothing at all. Only once the import worked —
+    // a failure is already a sentence the player has to read, and a minute of
+    // hashing on the way to it is not an improvement.
+    //
+    // The general client even for a server's pack, which is no widening: the
+    // only addresses this reaches are Modrinth's own API, written down in
+    // `providers::modrinth` and never read out of the pack. What the
+    // restricted client is for is a pack naming where to download from, and
+    // this asks nothing of the pack at all — the same reason
+    // `update_from_server` resolves its references through it.
+    if outcome.is_ok() {
+        crate::install::content::name_what_arrived(client, paths, instance, progress).await;
     }
     outcome
 }
@@ -650,6 +704,13 @@ pub async fn update(
     settle_server_files(paths, instance, &arrived, &player_off).await?;
     remove_departed(paths, instance, &arrived, &player_off).await?;
     let turned_off = turn_off_the_players_duplicates(paths, instance, &arrived).await?;
+
+    // Named after the settling, for the reason `import` gives: a mod the
+    // server sent as bytes has no record until it has been claimed. Through
+    // the general client, for the reason `import` gives for that too.
+    if outcome.is_ok() {
+        crate::install::content::name_what_arrived(client, paths, instance, progress).await;
+    }
 
     // Settled before the outcome is asked for, and not a line sooner: a half
     // that failed or was cancelled still left the server's files on disk, and
@@ -2718,6 +2779,7 @@ mod tests {
                 want: &["modrinth"],
                 curseforge_key: None,
                 index: true,
+                spares_bytes: true,
             },
             &paths,
             &inst,
@@ -3556,10 +3618,12 @@ mod tests {
         i
     }
 
-    /// The app's own import sequence, with no key and a client that is never
-    /// used — none of these fixtures download anything.
+    /// The app's own import sequence, with no key and a client that cannot
+    /// reach anything. None of these fixtures download a file — and the pass
+    /// that names what arrived does ask Modrinth, so a client that fails is
+    /// what proves these fixtures do not depend on the answer.
     async fn import_offline(paths: &Paths, inst: &mut Instance, archive: &Path) -> Result<Vec<String>> {
-        import(&reqwest::Client::new(), paths, inst, archive, None, &Progress::silent("t")).await
+        import(&offline(), paths, inst, archive, None, &Progress::silent("t")).await
     }
 
     /// Rewrite an exported pack in place: edit its manifest, add entries.
@@ -6229,5 +6293,133 @@ mod tests {
         assert_eq!(file_name("All the Mods 10"), "All the Mods 10.geodepack");
         assert_eq!(file_name("bad/name:here"), "bad-name-here.geodepack");
         assert_eq!(file_name("   "), "pack.geodepack");
+    }
+
+    /// An index may list a second host for a file, and the importer now tries
+    /// it when the first will not answer. A server's pack is the one place
+    /// that must not widen: it comes from a machine the player was only given
+    /// an address for, so every URL it names — the mirror as much as the first
+    /// — has to be Modrinth's, and has to be refused before a byte is
+    /// fetched.
+    #[tokio::test]
+    async fn a_server_pack_is_still_held_to_modrinth_only() {
+        let scratch = Scratch::new("mirror-host");
+        let dir = scratch.paths.root.clone();
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let index = serde_json::json!({
+            "formatVersion": 1,
+            "game": "minecraft",
+            "versionId": "1",
+            "name": "S",
+            "files": [{
+                "path": "mods/indexed.jar",
+                "hashes": {},
+                "fileSize": 7,
+                "downloads": [
+                    "https://cdn.modrinth.com/data/p/versions/v/indexed.jar",
+                    "https://mirror.example.net/indexed.jar",
+                ],
+            }],
+            "dependencies": { "minecraft": "1.21.1" },
+        });
+        let manifest = Manifest {
+            geode_format: FORMAT,
+            kind: Kind::Server,
+            profile: Profile { name: "Survival".into(), ..Default::default() },
+            icon: None,
+            banner: None,
+            source: None,
+            files: Vec::new(),
+            revision: None,
+            listing: None,
+        };
+        let archive = dir.join("theirs.geodepack");
+        write_pack(&archive, &index, &manifest, &[]);
+
+        let err = check_server_downloads(&archive)
+            .await
+            .expect_err("a mirror off Modrinth must be refused");
+        assert!(
+            err.to_string().contains("somewhere other than Modrinth"),
+            "{err}"
+        );
+
+        let mut player = fresh("mirror-host-player");
+        let err = import(
+            &offline(),
+            &scratch.paths,
+            &mut player,
+            &archive,
+            None,
+            &Progress::silent("t"),
+        )
+        .await
+        .expect_err("and refused by the import that reads it");
+        assert!(
+            err.to_string().contains("somewhere other than Modrinth"),
+            "{err}"
+        );
+        assert!(
+            !scratch.paths.game_dir(&player.id).join("mods").exists(),
+            "the pack was read before it was refused"
+        );
+    }
+
+    /// A `.geodepack`'s notes name CurseForge files by id, which the recipient
+    /// resolves with their own key — so a pack carrying one needs a key as
+    /// surely as a CurseForge pack does. Only the CurseForge *format* used to
+    /// say so, which meant this pack discovered the need inside
+    /// `resolve_references`, after the rest of the import had already run, and
+    /// reported those mods as missing instead of asking first.
+    #[tokio::test]
+    async fn a_geodepack_needing_a_key_says_so_before_importing() {
+        let scratch = Scratch::new("preflight");
+        let dir = scratch.paths.root.clone();
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let index = serde_json::json!({
+            "formatVersion": 1,
+            "game": "minecraft",
+            "versionId": "1",
+            "name": "Kitchen Sink",
+            "files": [],
+            "dependencies": { "minecraft": "1.21.1", "fabric-loader": "0.16.9" },
+        });
+        let mut manifest = Manifest {
+            geode_format: FORMAT,
+            kind: Kind::Instance,
+            profile: Profile { name: "Kitchen Sink".into(), ..Default::default() },
+            icon: None,
+            banner: None,
+            source: None,
+            files: Vec::new(),
+            revision: None,
+            listing: None,
+        };
+
+        let plain = dir.join("plain.geodepack");
+        write_pack(&plain, &index, &manifest, &[]);
+        assert!(
+            !preview(&plain).await.unwrap().needs_curseforge_key,
+            "a pack that names nothing by id needs no key"
+        );
+
+        manifest.files = vec![FileNote {
+            path: "mods/create.jar".into(),
+            side: None,
+            source: Some(SourceRef {
+                provider: "curseforge".into(),
+                project_id: "328085".into(),
+                version_id: "4712345".into(),
+            }),
+            disabled: false,
+        }];
+        let referencing = dir.join("referencing.geodepack");
+        write_pack(&referencing, &index, &manifest, &[]);
+        assert!(
+            preview(&referencing).await.unwrap().needs_curseforge_key,
+            "a note naming a CurseForge file needs the recipient's key"
+        );
     }
 }

@@ -5,6 +5,11 @@
 //! that have to be resolved through their API). Both are read and both are
 //! written.
 //!
+//! A third thing can be read and not written here: a Prism / MultiMC
+//! instance, which is not a pack but a whole instance, and which arrives as a
+//! zip or as the folder itself. [`super::prism`] knows that format; this
+//! module only recognises it and brings its files in.
+//!
 //! They differ in what they are able to say, not only in how they say it, so
 //! which one a sharer picks changes what their pack holds: an `.mrpack` carries
 //! a URL and a pair of hashes for anything Modrinth has, a CurseForge pack
@@ -26,11 +31,18 @@ use crate::net::{Download, Progress};
 use crate::paths::Paths;
 
 use super::content::{ContentKind, ContentRecord};
-use super::Instance;
+use super::{prism, Instance};
 
 // ---------------------------------------------------------------------------
 // modrinth.index.json
 // ---------------------------------------------------------------------------
+
+/// The one revision of Modrinth's pack format there is, written and read.
+const MR_FORMAT: u32 = 1;
+
+/// The one game it describes. Modrinth's own validator refuses anything else
+/// outright ("Game {0} does not exist!").
+const MR_GAME: &str = "minecraft";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -55,6 +67,14 @@ pub struct MrFile {
     pub hashes: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<MrEnv>,
+    /// Where the recipient fetches this file from — several hosts allowed, and
+    /// a mirror listed second is there for when the first will not answer.
+    ///
+    /// Defaulted although the format does not default it, because the format's
+    /// other readers do not either: one entry missing the key makes an index
+    /// unparsable, and refusing a whole pack of two hundred mods over one file
+    /// nobody can fetch is worse than importing the rest and naming that one.
+    #[serde(default)]
     pub downloads: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_size: Option<u64>,
@@ -88,6 +108,27 @@ fn env_for(side: Option<crate::instance::jar::Side>) -> MrEnv {
     MrEnv {
         client: client.into(),
         server: server.into(),
+    }
+}
+
+/// Which side a pack's own `env` pair says a file belongs on.
+///
+/// The inverse of [`env_for`], and read on import for the same reason it is
+/// written on export: a pack that says `{client: required, server:
+/// unsupported}` has told us this is a client mod, and throwing that away
+/// leaves every file an import installs classified by nobody.
+///
+/// `None` where the pair does not settle it — no `env` object, or one that
+/// states only half of itself. A guess here is worse than nothing: it ends up
+/// keeping a mod off a server, or sending a client's rendering mod to one.
+fn side_from_env(env: &MrEnv) -> Option<crate::instance::jar::Side> {
+    use crate::instance::jar::Side;
+    match (env.client.as_str(), env.server.as_str()) {
+        (_, "unsupported") => Some(Side::Client),
+        ("unsupported", _) => Some(Side::Server),
+        ("optional", "required") => Some(Side::Server),
+        ("", _) | (_, "") => None,
+        _ => Some(Side::Both),
     }
 }
 
@@ -234,7 +275,7 @@ fn parse_cf_loader(id: &str) -> (Loader, String) {
 ///
 /// Nothing here hardcodes a version: the prefix is built from the instance's
 /// own `mc_version`, and a version that does not carry it is left alone.
-fn interop_loader_version<'a>(
+pub(super) fn interop_loader_version<'a>(
     loader: Loader,
     loader_version: &'a str,
     mc_version: &str,
@@ -329,6 +370,10 @@ pub struct PackPreview {
 enum PackKind {
     Modrinth(MrIndex),
     CurseForge(CfManifest),
+    /// A Prism / MultiMC instance, as a zip or as the folder itself. Not a
+    /// pack at all: it carries its files rather than naming them, and what it
+    /// does name it names in a packwiz index — see [`prism`].
+    Prism(prism::PrismInstance),
 }
 
 /// The most a pack's index or manifest may inflate to.
@@ -419,31 +464,76 @@ fn open_pack_within(archive: &Path, budget: u64) -> Result<zip::ZipArchive<std::
 }
 
 fn read_pack(archive: &Path) -> Result<PackKind> {
+    // A folder is an instance somebody pointed at — only a file can be a pack.
+    if archive.is_dir() {
+        return prism::from_folder(archive)?
+            .map(PackKind::Prism)
+            .ok_or_else(|| {
+                Error::msg(
+                    "that folder is not an instance — expected an instance.cfg inside it, as a \
+                     Prism or MultiMC instance has",
+                )
+            });
+    }
+
     let mut zip = open_pack(archive)?;
 
     if let Ok(entry) = zip.by_name("modrinth.index.json") {
         let raw = read_json_entry(entry, "modrinth.index.json")?;
         let index: MrIndex =
             serde_json::from_slice(&raw).map_err(|e| Error::json("modrinth.index.json", e))?;
+        // Read and acted on rather than read and ignored. Both are stated in
+        // every index and both are checked by Modrinth and by Prism, because a
+        // format that revises itself will put the revision here: a version 2
+        // pack read as if it were version 1 installs whatever the fields still
+        // happen to mean, which is a wrong instance rather than a refusal.
+        if index.format_version != MR_FORMAT {
+            return Err(Error::msg(format!(
+                "this pack is written in version {} of Modrinth's pack format, and this build of \
+                 Geode reads version {MR_FORMAT} — update Geode and try again",
+                index.format_version
+            )));
+        }
+        if index.game != MR_GAME {
+            return Err(Error::msg(format!(
+                "this pack is for {}, not Minecraft, so it was not imported",
+                index.game
+            )));
+        }
         return Ok(PackKind::Modrinth(index));
     }
 
-    let entry = zip.by_name("manifest.json").map_err(|_| {
-        Error::msg("not a modpack — expected modrinth.index.json or manifest.json inside")
-    })?;
-    let raw = read_json_entry(entry, "manifest.json")?;
-    let manifest: CfManifest =
-        serde_json::from_slice(&raw).map_err(|e| Error::json("manifest.json", e))?;
-    check_is_modpack(&manifest)?;
-    Ok(PackKind::CurseForge(manifest))
+    if let Ok(entry) = zip.by_name("manifest.json") {
+        let raw = read_json_entry(entry, "manifest.json")?;
+        let manifest: CfManifest =
+            serde_json::from_slice(&raw).map_err(|e| Error::json("manifest.json", e))?;
+        // A manifest.json at the root is a claim to be a CurseForge pack, so a
+        // bad one is refused rather than left to the reader below: nothing else
+        // puts that file there.
+        check_is_modpack(&manifest)?;
+        return Ok(PackKind::CurseForge(manifest));
+    }
+
+    // Prism's own order, so a zip that satisfies two is read the way Prism
+    // would read it: the two pack manifests are matched at the exact root and
+    // win, and `instance.cfg` is matched at any depth.
+    if let Some(instance) = prism::from_zip(&mut zip, archive)? {
+        return Ok(PackKind::Prism(instance));
+    }
+
+    Err(Error::msg(
+        "not a modpack — expected modrinth.index.json, manifest.json or a Prism instance.cfg \
+         inside",
+    ))
 }
 
 /// A Modrinth pack's index; `None` for a CurseForge pack, whose files are
-/// named by id and resolved through CurseForge.
+/// named by id and resolved through CurseForge, and for a Prism instance,
+/// which has no index of downloads at all.
 pub(crate) fn read_index(archive: &Path) -> Result<Option<MrIndex>> {
     Ok(match read_pack(archive)? {
         PackKind::Modrinth(index) => Some(index),
-        PackKind::CurseForge(_) => None,
+        PackKind::CurseForge(_) | PackKind::Prism(_) => None,
     })
 }
 
@@ -487,6 +577,22 @@ pub async fn preview(archive: PathBuf) -> Result<PackPreview> {
                     needs_curseforge_key: !manifest.files.is_empty(),
                 }
             }
+            PackKind::Prism(instance) => PackPreview {
+                name: instance.name,
+                // An instance is not a release of anything: it has a name and
+                // no version, and its packwiz index versions the files rather
+                // than the whole.
+                version: String::new(),
+                summary: None,
+                mc_version: instance.mc_version,
+                loader: instance.loader,
+                loader_version: instance.loader_version,
+                file_count: instance.file_count,
+                format: "prism".into(),
+                // Nothing in an instance is fetched: every file it names it
+                // also carries.
+                needs_curseforge_key: false,
+            },
         })
     })
     .await
@@ -547,6 +653,15 @@ pub async fn index_mods(archive: PathBuf) -> Result<PackMods> {
                     }
                 }
                 PackMods::CurseForge(ids)
+            }
+            // A plan is built from a pack a provider published, and nobody
+            // publishes an instance — so this says what to do instead rather
+            // than reading half of a mod list.
+            PackKind::Prism(_) => {
+                return Err(Error::msg(
+                    "that is a Prism instance, not a modpack — import it as an instance instead \
+                     of building a plan from it",
+                ))
             }
         })
     })
@@ -620,6 +735,12 @@ pub async fn import_into_at(
     match pack {
         PackKind::Modrinth(index) => {
             progress.stage("Extracting overrides", 1).await;
+            // `server-overrides/` is deliberately not here. It is the trees
+            // this pack means for a server, and nothing in Geode builds a
+            // server out of a pack's files — `server::from_pack` installs the
+            // mods the index names, by project id, and never opens the
+            // archive. Extracting it into a client instance would overwrite
+            // the client's own config with a server's.
             extract_overrides(
                 &archive_owned,
                 &game_dir,
@@ -629,30 +750,40 @@ pub async fn import_into_at(
             .await?;
             progress.advance(1, "overrides").await;
 
-            let downloads: Vec<Download> = index
-                .files
-                .iter()
-                .filter(|f| {
-                    // Server-only files have no business in a client instance.
-                    f.env
-                        .as_ref()
-                        .map(|e| e.client != "unsupported")
-                        .unwrap_or(true)
-                })
-                .filter_map(|f| {
-                    let rel = Path::new(&f.path);
-                    if !crate::paths::is_safe_relative(rel) {
-                        return None;
-                    }
-                    let url = f.downloads.first()?;
-                    Some(
-                        Download::new(url.clone(), game_dir.join(rel))
-                            .sha1(f.hashes.get("sha1").cloned())
-                            .size(f.file_size)
-                            .label(f.path.clone()),
-                    )
-                })
-                .collect();
+            let mut downloads: Vec<Download> = Vec::new();
+            for file in &index.files {
+                // Server-only files have no business in a client instance.
+                // `optional` on a client is not one of them: the format means
+                // a choice there, and Prism asks and writes `.disabled` for
+                // what the user leaves out. Geode installs them enabled —
+                // decided, not overlooked, because nobody asked for a prompt.
+                if file
+                    .env
+                    .as_ref()
+                    .is_some_and(|e| e.client == "unsupported")
+                {
+                    continue;
+                }
+                let rel = Path::new(&file.path);
+                if !crate::paths::is_safe_relative(rel) {
+                    continue;
+                }
+                let Some(url) = file.downloads.first() else {
+                    left_out.push(file.path.clone());
+                    continue;
+                };
+                downloads.push(
+                    Download::new(url.clone(), game_dir.join(rel))
+                        // The second host the pack lists, where it lists one.
+                        // A server's pack is no wider for it: every URL in one
+                        // is held to Modrinth by `check_server_downloads`
+                        // before a byte is fetched, the mirror included.
+                        .mirror(file.downloads.get(1).cloned())
+                        .sha1(file.hashes.get("sha1").cloned())
+                        .size(file.file_size)
+                        .label(file.path.clone()),
+                );
+            }
 
             progress
                 .stage("Downloading pack contents", downloads.len() as u64)
@@ -882,6 +1013,55 @@ pub async fn import_into_at(
                 Some("curseforge".into()),
             ));
         }
+
+        PackKind::Prism(prism_instance) => {
+            // Nothing is fetched: an instance carries its files, and Prism's
+            // own importer downloads nothing either. What it does carry is a
+            // packwiz index naming where each of those files came from, which
+            // is read once they have landed.
+            if archive_owned.is_dir() {
+                // A folder the user pointed at, not an archive: copied the way
+                // an instance is duplicated, with no unpack budget to enforce
+                // and no entry names to distrust. Counted file by file, since
+                // a real instance is tens of thousands of them and the copy is
+                // the longest thing this import does — the preview already
+                // counted them, so the bar has a total to move against and
+                // Cancel stops it where it stands.
+                progress
+                    .stage("Copying the instance", prism_instance.file_count as u64)
+                    .await;
+                super::copy_dir(
+                    &archive_owned.join(&prism_instance.game_dir),
+                    &game_dir,
+                    progress,
+                )
+                .await?;
+            } else {
+                progress.stage("Copying the instance", 1).await;
+                extract_overrides(
+                    &archive_owned,
+                    &game_dir,
+                    &[prism_instance.game_root().as_str()],
+                    progress,
+                )
+                .await?;
+                progress.advance(1, &prism_instance.game_dir).await;
+            }
+
+            instance.notes = prism_instance.notes;
+            // Only the values whose gate `instance.cfg` set, one by one: the
+            // rest of an instance's overrides are this machine's business.
+            instance.overrides.memory_mb = prism_instance.overrides.memory_mb;
+            instance.overrides.java_args = prism_instance.overrides.java_args;
+            instance.overrides.width = prism_instance.overrides.width;
+            instance.overrides.height = prism_instance.overrides.height;
+
+            progress.stage("Reading the instance's index", 1).await;
+            instance
+                .content
+                .extend(prism::index_records(&game_dir).await);
+            progress.advance(1, "mods").await;
+        }
     }
 
     Ok(left_out)
@@ -1005,6 +1185,12 @@ async fn extract_overrides(
 /// extra lookup is needed to establish provenance — only one batched call to
 /// turn those ids into names and icons.
 ///
+/// The pack's own `env` pair comes through as the file's side, because the
+/// pack said so and is the only one here who has: a version number is the one
+/// thing this cannot know, since the id in the URL is not a number anybody
+/// reads, and that is filled afterwards by the pass that names everything else
+/// ([`crate::install::content::name_what_arrived`]).
+///
 /// Best-effort: a pack is perfectly usable with imperfect labels, so a failure
 /// here is swallowed rather than failing the install.
 async fn record_mrpack_provenance(
@@ -1013,7 +1199,14 @@ async fn record_mrpack_provenance(
     files: &[MrFile],
     progress: &Progress,
 ) {
-    let mut pending: Vec<(ContentKind, String, String, String)> = Vec::new();
+    type Pending = (
+        ContentKind,
+        String,
+        String,
+        String,
+        Option<crate::instance::jar::Side>,
+    );
+    let mut pending: Vec<Pending> = Vec::new();
 
     for file in files {
         let path = Path::new(&file.path);
@@ -1038,7 +1231,13 @@ async fn record_mrpack_provenance(
         else {
             continue;
         };
-        pending.push((kind, name.to_string(), project_id, version_id));
+        pending.push((
+            kind,
+            name.to_string(),
+            project_id,
+            version_id,
+            file.env.as_ref().and_then(side_from_env),
+        ));
     }
 
     if pending.is_empty() {
@@ -1050,7 +1249,7 @@ async fn record_mrpack_provenance(
         .await;
 
     let ids: Vec<String> = {
-        let mut v: Vec<String> = pending.iter().map(|(_, _, p, _)| p.clone()).collect();
+        let mut v: Vec<String> = pending.iter().map(|(_, _, p, ..)| p.clone()).collect();
         v.sort();
         v.dedup();
         v
@@ -1059,7 +1258,7 @@ async fn record_mrpack_provenance(
         .await
         .unwrap_or_default();
 
-    for (kind, file_name, project_id, version_id) in pending {
+    for (kind, file_name, project_id, version_id, side) in pending {
         progress.advance(1, &file_name).await;
         let project = projects.iter().find(|p| p.id == project_id);
         instance
@@ -1074,13 +1273,15 @@ async fn record_mrpack_provenance(
             name: project
                 .map(|p| p.name.clone())
                 .unwrap_or_else(|| file_name.clone()),
+            // Not in the URL and not worth a request of its own — the naming
+            // pass has the matched version in hand and fills it there.
             version_number: String::new(),
             slug: project.map(|p| p.slug.clone()),
             icon_url: project.and_then(|p| p.icon_url.clone()),
             dependency: false,
             origin: Default::default(),
             requires: None,
-            side: None,
+            side,
             server_off: false,
         });
     }
@@ -1243,7 +1444,11 @@ pub async fn write_instance_pack(
 ///
 /// Shared by every format an instance exports as, so what a pack of this
 /// instance holds is one decision rather than one per writer.
-fn instance_input<'a>(paths: &Paths, instance: &'a Instance, include_saves: bool) -> PackInput<'a> {
+pub(super) fn instance_input<'a>(
+    paths: &Paths,
+    instance: &'a Instance,
+    include_saves: bool,
+) -> PackInput<'a> {
     let mut skip_dirs: Vec<&'static str> = vec![
         "logs",
         "crash-reports",
@@ -1400,8 +1605,8 @@ pub async fn write_mrpack(
     };
 
     let mut index = MrIndex {
-        format_version: 1,
-        game: "minecraft".into(),
+        format_version: MR_FORMAT,
+        game: MR_GAME.into(),
         version_id: input.version,
         name: input.name.to_string(),
         summary: (!input.notes.is_empty()).then(|| input.notes.to_string()),
@@ -1548,6 +1753,7 @@ pub async fn write_mrpack(
                 carried: indexed,
                 referenced,
                 players_pack,
+                tree: "overrides",
             },
         )
     })
@@ -1559,19 +1765,26 @@ pub async fn write_mrpack(
 }
 
 /// Everything a pack's zip holds besides the files its walk carries as bytes.
-struct Layout {
+pub(super) struct Layout {
     /// Written first, in order: the format's own index or manifest, then a
     /// `.geodepack`'s `geode/` directory.
-    named: Extras,
+    pub(super) named: Extras,
     /// Paths on disk whose bytes the pack already carries by name, so they
     /// stay out of `overrides/`.
-    carried: std::collections::HashSet<PathBuf>,
+    pub(super) carried: std::collections::HashSet<PathBuf>,
     /// The same, for what a Geode half's notes name: keyed on the enabled file
     /// name the way records are, so a disabled file matches too.
-    referenced: std::collections::HashSet<PathBuf>,
+    pub(super) referenced: std::collections::HashSet<PathBuf>,
     /// A server's pack for its players, where `client-mods/` becomes `mods/`
     /// and lands under `client-overrides/`.
-    players_pack: bool,
+    pub(super) players_pack: bool,
+    /// The directory the walk's files are written under.
+    ///
+    /// `overrides/`, for every pack: a pack's own files are the format's, and
+    /// what the walk carries overrides them. A Prism instance zip is the
+    /// exception — there the walked files *are* the instance, and they go
+    /// under `minecraft/`, the game directory Prism reads.
+    pub(super) tree: &'static str,
 }
 
 /// Lay a pack out: what it names first, then every file the walk carries that
@@ -1580,12 +1793,18 @@ struct Layout {
 /// The one place that knows how a pack's zip is put together, so the formats
 /// cannot come to disagree about where an override goes or which files are left
 /// out of one. Blocking, because `zip` is.
-fn lay_out(dest: &Path, game_dir: &Path, walk: &Walk, layout: Layout) -> Result<Vec<String>> {
+pub(super) fn lay_out(
+    dest: &Path,
+    game_dir: &Path,
+    walk: &Walk,
+    layout: Layout,
+) -> Result<Vec<String>> {
     let Layout {
         named,
         carried,
         referenced,
         players_pack,
+        tree,
     } = layout;
 
     let file = std::fs::File::create(dest)?;
@@ -1628,7 +1847,7 @@ fn lay_out(dest: &Path, game_dir: &Path, walk: &Walk, layout: Layout) -> Result<
             let root = if players_pack && rel.starts_with(ContentKind::ClientMod.folder()) {
                 "client-overrides"
             } else {
-                "overrides"
+                tree
             };
             // A zip entry name is text. A path that is not UTF-8 would go in as
             // U+FFFD and name a file nobody can match back, so it is left out
@@ -1876,6 +2095,7 @@ async fn write_cfpack(
                 // Never a server's pack for its players: what a share serves
                 // is the mrpack.
                 players_pack: false,
+                tree: "overrides",
             },
         )
     })
@@ -2823,6 +3043,192 @@ mod tests {
         assert_eq!(
             parse_cf_loader("fabric-0.15.0"),
             (Loader::Fabric, "0.15.0".into())
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // What the reader will and will not put up with
+    // -----------------------------------------------------------------------
+
+    /// An index with whatever `files` the caller hands over, as JSON.
+    fn index_of(files: serde_json::Value) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "formatVersion": 1,
+            "game": "minecraft",
+            "versionId": "1",
+            "name": "P",
+            "files": files,
+            "dependencies": { "minecraft": "1.21.1" },
+        }))
+        .unwrap()
+    }
+
+    /// A client that cannot reach anything, so a test that fetches fails
+    /// rather than going out to the real internet.
+    fn offline() -> reqwest::Client {
+        reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:9").unwrap())
+            .build()
+            .unwrap()
+    }
+
+    /// The format does not default `downloads`, so one entry missing the key
+    /// made the whole index unparsable here while Prism imported the pack and
+    /// complained about that one file. Two hundred mods are worth more than
+    /// the one nobody can fetch — and that one is named rather than quietly
+    /// dropped.
+    #[tokio::test]
+    async fn one_file_without_a_downloads_key_does_not_reject_the_pack() {
+        use zip::CompressionMethod::Deflated;
+        let scratch = scratch_dir("nodownloads");
+        let dir = scratch.paths.root.clone();
+        let archive = dir.join("pack.mrpack");
+        let index = index_of(serde_json::json!([
+            {
+                "path": "mods/here.jar",
+                "hashes": {},
+                "fileSize": 5,
+                "downloads": ["http://127.0.0.1:9/here.jar"],
+            },
+            { "path": "mods/nowhere.jar", "hashes": {} },
+        ]));
+        write_zip(&archive, &[("modrinth.index.json", &index, Deflated)]);
+
+        let (paths, mut inst) = unpacking(&dir);
+        let game = paths.game_dir(&inst.id);
+        // Already on disk at the size the index states, so the one entry that
+        // does name a download needs no fetching.
+        std::fs::create_dir_all(game.join("mods")).unwrap();
+        std::fs::write(game.join("mods/here.jar"), b"here!").unwrap();
+
+        let unfetchable = import_into(
+            &offline(),
+            &paths,
+            &mut inst,
+            &archive,
+            None,
+            &Progress::silent("t"),
+        )
+        .await
+        .expect("a pack with one unfetchable file still imports");
+
+        assert_eq!(unfetchable, vec!["mods/nowhere.jar".to_string()]);
+        assert!(game.join("mods/here.jar").is_file(), "the rest of the pack");
+    }
+
+    /// Several hosts per file is legal, and a mirror listed second is there
+    /// for the day the first one is gone. Only the first was ever tried, so a
+    /// pack that named a dead host first failed whole.
+    #[tokio::test]
+    async fn a_second_download_url_is_tried_when_the_first_fails() {
+        use http_body_util::Full;
+        use hyper::body::Bytes;
+        use hyper::service::service_fn;
+        use hyper::Response;
+        use hyper_util::rt::TokioIo;
+        use zip::CompressionMethod::Deflated;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mirror = format!("http://{}/mirrored.jar", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let service = service_fn(|_request| async {
+                        Ok::<_, std::convert::Infallible>(Response::new(Full::new(
+                            Bytes::from_static(b"the jar"),
+                        )))
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(TokioIo::new(tcp), service)
+                        .await;
+                });
+            }
+        });
+
+        let scratch = scratch_dir("mirror");
+        let dir = scratch.paths.root.clone();
+        let archive = dir.join("pack.mrpack");
+        let index = index_of(serde_json::json!([{
+            "path": "mods/mirrored.jar",
+            "hashes": {},
+            // Port 9 discards whatever reaches it and nothing listens there,
+            // so the first host refuses at once.
+            "downloads": ["http://127.0.0.1:9/mirrored.jar", mirror],
+        }]));
+        write_zip(&archive, &[("modrinth.index.json", &index, Deflated)]);
+
+        let (paths, mut inst) = unpacking(&dir);
+        import_into(
+            &reqwest::Client::new(),
+            &paths,
+            &mut inst,
+            &archive,
+            None,
+            &Progress::silent("t"),
+        )
+        .await
+        .expect("the mirror should have served it");
+
+        let landed = paths.game_dir(&inst.id).join("mods/mirrored.jar");
+        assert_eq!(std::fs::read(landed).unwrap(), b"the jar");
+    }
+
+    /// `formatVersion` and `game` were read and then ignored, so a pack
+    /// written in a revision of the format this build has never seen was read
+    /// as if it were this one — which is a wrong instance rather than a
+    /// refusal. Modrinth's own validator and Prism both check them.
+    #[tokio::test]
+    async fn a_pack_from_a_future_format_version_is_refused() {
+        use zip::CompressionMethod::Deflated;
+        let scratch = scratch_dir("futurepack");
+        let dir = scratch.paths.root.clone();
+
+        for (tag, index, say) in [
+            (
+                "version",
+                serde_json::json!({
+                    "formatVersion": 2, "game": "minecraft", "versionId": "1",
+                    "name": "P", "files": [], "dependencies": {},
+                }),
+                "version 2 of Modrinth's pack format",
+            ),
+            (
+                "game",
+                serde_json::json!({
+                    "formatVersion": 1, "game": "terraria", "versionId": "1",
+                    "name": "P", "files": [], "dependencies": {},
+                }),
+                "for terraria, not Minecraft",
+            ),
+        ] {
+            let archive = dir.join(format!("{tag}.mrpack"));
+            let raw = serde_json::to_vec(&index).unwrap();
+            write_zip(&archive, &[("modrinth.index.json", &raw, Deflated)]);
+            let err = preview(archive)
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains(say), "{tag}: {err}");
+        }
+    }
+
+    /// The `env` pair is the pack's own word on which side a file belongs on,
+    /// and import threw it away — so every file a pack installed was
+    /// classified by nobody. Written and read through one pair of functions,
+    /// so a round trip is the whole agreement.
+    #[test]
+    fn a_side_survives_the_pack_that_carried_it() {
+        use crate::instance::jar::Side;
+        for side in [Side::Client, Side::Server, Side::Both] {
+            assert_eq!(side_from_env(&env_for(Some(side))), Some(side), "{side:?}");
+        }
+        // Half an `env` settles nothing, and a guess here keeps a mod off a
+        // server or sends a rendering mod to one.
+        assert_eq!(
+            side_from_env(&MrEnv {
+                client: "required".into(),
+                server: String::new(),
+            }),
+            None
         );
     }
 }

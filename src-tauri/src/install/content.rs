@@ -915,3 +915,670 @@ pub async fn link_untracked_in(
         unknown: hashes.len() - identified,
     })
 }
+
+// ---------------------------------------------------------------------------
+// Naming what a pack brought
+// ---------------------------------------------------------------------------
+
+/// Give the files an import just brought in a name, where the pack itself gave
+/// none.
+///
+/// Every format says where a mod came from in a way that needs no hash: a
+/// CurseForge manifest names ids, a packwiz index names a project, an
+/// `.mrpack` names a URL with the ids inside it. An import that read one has
+/// already written those records. This is for everything it could not — a jar
+/// out of an `overrides/` tree, an index entry served from a host Geode can
+/// read no ids out of (github and gitlab are both legal there, and Prism's own
+/// export emits them), a file in a folder the index reader passes over, a mod
+/// that arrived in a server's pack as bytes. Without this they sit in the mods
+/// list as untracked rows with a jar name for a name and no update path, until
+/// somebody presses Identify files by hand.
+///
+/// Best-effort from end to end, and deliberately: a pack is perfectly usable
+/// with imperfect labels, so a lookup that could not be made leaves the labels
+/// as they were rather than failing an import that has already finished.
+///
+/// What this never does is overwrite provenance. A record that already names a
+/// release — another platform's, or another version of this one — is somebody
+/// else's answer about where the file came from, and a hash lookup is not here
+/// to overrule it; `origin`, `server_off` and a side the server stated survive
+/// untouched, which is what makes this safe to run on a joined instance.
+/// [`link_untracked_in`] cannot stand in for it for exactly those two reasons:
+/// it only looks at files with no record at all — and a jar that arrived in a
+/// server's pack *has* a record, the provenance-less one `settle_server_files`
+/// writes it — and it would then write `origin: User` and a fresh side over
+/// what the server said.
+pub async fn name_what_arrived(
+    client: &reqwest::Client,
+    paths: &Paths,
+    instance: &mut Instance,
+    progress: &Progress,
+) {
+    use crate::install::identity::{candidates_in, identify, Ask, INSTANCE_KINDS};
+
+    let game_dir = paths.game_dir(&instance.id);
+    let Ok(candidates) = candidates_in(&game_dir, &INSTANCE_KINDS).await else {
+        return;
+    };
+    // Only the files something is still missing about, which is the whole
+    // reason this builds its own candidate list rather than taking the one an
+    // export takes. Listing a folder is free; reading every jar in it is not,
+    // and an update from a server runs on the way to Play. After the first
+    // time, an instance whose records are all filled in has nothing here to
+    // hash and this costs a `read_dir`.
+    let worth: Vec<_> = candidates
+        .into_iter()
+        .filter(|candidate| {
+            match instance
+                .content
+                .iter()
+                .find(|r| r.kind == candidate.kind && r.file_name == candidate.file_name)
+            {
+                Some(record) => has_blanks(record),
+                None => true,
+            }
+        })
+        .collect();
+    if worth.is_empty() {
+        return;
+    }
+
+    let records: Vec<&ContentRecord> = instance.content.iter().collect();
+    let Ok(catalogue) = identify(
+        &game_dir,
+        worth,
+        &records,
+        Ask::naming(client),
+        progress,
+    )
+    .await
+    else {
+        return;
+    };
+    name_from_catalogue(client, instance, &catalogue).await;
+}
+
+/// The same, from a catalogue already built.
+///
+/// The seam: everything above this line is one hash-and-lookup pass that lives
+/// in [`crate::install::identity`] and is shared with every pack writer, and
+/// everything below it is what an import does with the answer. Which also
+/// makes the rules below readable against a catalogue a test built by hand,
+/// without a request in the way.
+async fn name_from_catalogue(
+    client: &reqwest::Client,
+    instance: &mut Instance,
+    catalogue: &crate::install::identity::Catalogue,
+) {
+    use crate::install::identity::PlatformRef;
+
+    let mut pending: Vec<(ContentKind, String, PlatformRef)> = Vec::new();
+    for ident in catalogue.identities() {
+        let Some(reference) = ident.reference(Provider::Modrinth.as_str()) else {
+            continue;
+        };
+        let held = instance
+            .content
+            .iter()
+            .find(|r| r.kind == ident.kind && r.file_name == ident.file_name);
+        if held.is_some_and(|record| !has_blanks(record) || !may_fill(record, reference)) {
+            continue;
+        }
+        pending.push((ident.kind, ident.file_name.clone(), reference.clone()));
+    }
+    if pending.is_empty() {
+        return;
+    }
+
+    // One batched call turns ids into names, slugs and icons — the same one
+    // every other import makes, for the same reason.
+    let ids: Vec<String> = {
+        let mut ids: Vec<String> = pending.iter().map(|(_, _, r)| r.project_id.clone()).collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    };
+    let projects = providers::modrinth::projects_by_ids(client, &ids)
+        .await
+        .unwrap_or_default();
+
+    for (kind, file_name, reference) in pending {
+        let project = projects.iter().find(|p| p.id == reference.project_id);
+        match instance
+            .content
+            .iter_mut()
+            .find(|r| r.kind == kind && r.file_name == file_name)
+        {
+            Some(record) => fill_blanks(record, &reference, project),
+            None => instance.content.push(ContentRecord {
+                name: project
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| file_name.clone()),
+                file_name,
+                kind,
+                provider: reference.provider.clone(),
+                project_id: reference.project_id.clone(),
+                version_id: reference.version_id.clone(),
+                version_number: reference.version_number.clone(),
+                slug: project.map(|p| p.slug.clone()),
+                icon_url: project.and_then(|p| p.icon_url.clone()),
+                dependency: false,
+                origin: Default::default(),
+                // A hash lookup gives provenance, not a dependency list.
+                requires: None,
+                side: project.and_then(|p| p.listed_side()),
+                server_off: false,
+            }),
+        }
+    }
+}
+
+/// Whether anything about this file is still unsaid.
+///
+/// A record with every field filled is what an ordinary install leaves behind,
+/// and there is nothing a lookup could add to it — so this is both what decides
+/// whether a file is worth hashing and what decides whether an answer is worth
+/// reading. A name that is the file's own name counts as unsaid: see
+/// [`fill_blanks`].
+fn has_blanks(record: &ContentRecord) -> bool {
+    // A record that names another platform's release has nothing here anybody
+    // could fill: the only lookup is Modrinth's, and `may_fill` will not let
+    // its answer touch such a record. Counting its unsaid fields — a side,
+    // most of all, which a CurseForge import never writes — would have every
+    // jar in a three-hundred-mod CurseForge pack re-hashed on that import and
+    // on every update after it, to learn nothing each time.
+    if !is_blank(record) && record.provider != Provider::Modrinth.as_str() {
+        return false;
+    }
+    is_blank(record)
+        || record.name.is_empty()
+        || record.name == record.file_name
+        || record.version_number.is_empty()
+        || record.side.is_none()
+}
+
+/// Whether this answer is allowed to fill them.
+///
+/// Only when the record is blank, or when it names the very release the lookup
+/// found. A record naming a release this is not — another platform's, or
+/// another version of this one — is somebody's own account of where the file
+/// came from, and filling fields in from a second account would mix the two.
+fn may_fill(record: &ContentRecord, reference: &crate::install::identity::PlatformRef) -> bool {
+    is_blank(record) || names(record, reference)
+}
+
+/// A record nobody has said anything about yet.
+///
+/// The three fields travel together — a provider with no ids names nothing —
+/// so one missing makes the whole claim blank. This is what
+/// `settle_server_files` writes for a jar that arrived in a server's pack with
+/// no download to its name.
+fn is_blank(record: &ContentRecord) -> bool {
+    record.provider.is_empty() || record.project_id.is_empty() || record.version_id.is_empty()
+}
+
+/// Whether a record and a lookup are talking about the same release.
+fn names(record: &ContentRecord, reference: &crate::install::identity::PlatformRef) -> bool {
+    record.provider == reference.provider
+        && record.project_id == reference.project_id
+        && record.version_id == reference.version_id
+}
+
+/// Fill in what nobody had said, and nothing else.
+///
+/// `origin`, `server_off`, `dependency` and `requires` are not this function's
+/// to touch: the first two are the server's word about a joined instance's
+/// files and the others were settled when the file was installed. A side that
+/// is already set stays — on a joined instance it is how the server classified
+/// the file, which outranks a project listing.
+fn fill_blanks(
+    record: &mut ContentRecord,
+    reference: &crate::install::identity::PlatformRef,
+    project: Option<&Project>,
+) {
+    if is_blank(record) {
+        record.provider = reference.provider.clone();
+        record.project_id = reference.project_id.clone();
+        record.version_id = reference.version_id.clone();
+    }
+    if record.version_number.is_empty() {
+        record.version_number = reference.version_number.clone();
+    }
+    let Some(project) = project else {
+        return;
+    };
+    // A name that is the file's own name is the placeholder the importers
+    // write when they have nothing better — `settle_server_files` for a jar
+    // that arrived as bytes, `record_mrpack_provenance` for a project it could
+    // not look up. It is a blank with a jar name in it, not an answer.
+    if record.name.is_empty() || record.name == record.file_name {
+        record.name = project.name.clone();
+    }
+    if record.slug.is_none() {
+        record.slug = Some(project.slug.clone());
+    }
+    if record.icon_url.is_none() {
+        record.icon_url = project.icon_url.clone();
+    }
+    if record.side.is_none() {
+        record.side = project.listed_side();
+    }
+}
+
+#[cfg(test)]
+mod naming_tests {
+    use super::*;
+    use crate::install::identity::{for_instance, Ask, Catalogue};
+    use crate::instance::content::Origin;
+    use crate::instance::jar::Side;
+    use crate::meta::Loader;
+    use crate::paths::Scratch;
+
+    /// A client that cannot reach anything. Every test here names its files
+    /// through a catalogue built by hand, so a client that fails is what
+    /// proves no answer was fetched — a project lookup that cannot be made
+    /// leaves the names as they were, which is the best-effort rule working.
+    fn offline() -> reqwest::Client {
+        reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:9").unwrap())
+            .build()
+            .unwrap()
+    }
+
+    fn fixture(tag: &str) -> (Scratch, Instance) {
+        let scratch = Scratch::new(&format!("naming-{tag}"));
+        let mut inst = Instance::new("P".into(), "1.21.1".into(), Loader::Fabric, String::new());
+        inst.id = tag.to_string();
+        (scratch, inst)
+    }
+
+    /// What the files on disk are, with nobody asked about them — then told
+    /// that Modrinth holds the named ones, through the same code a real answer
+    /// goes through.
+    async fn catalogue_claiming(
+        paths: &Paths,
+        inst: &Instance,
+        held: &[&str],
+    ) -> Catalogue {
+        let mut catalogue = for_instance(Ask::Nobody, paths, inst, &Progress::silent("t"))
+            .await
+            .unwrap();
+        catalogue.pretend_modrinth_holds(held);
+        catalogue
+    }
+
+    /// A pack's `overrides/` tree is bytes with nothing said about them, so
+    /// every jar in one landed as an untracked row with a file name for a name
+    /// — and the only thing that ever fixed it was the player pressing
+    /// Identify files by hand.
+    #[tokio::test]
+    async fn a_jar_that_arrived_in_overrides_gets_a_name() {
+        let (scratch, mut inst) = fixture("overrides");
+        let paths = &scratch.paths;
+        let archive = paths.root.join("pack.mrpack");
+        std::fs::create_dir_all(&paths.root).unwrap();
+        write_pack(
+            &archive,
+            serde_json::json!([]),
+            &[("overrides/mods/carried.jar", b"carried bytes")],
+        );
+
+        crate::instance::modpack::import_into(
+            &offline(),
+            paths,
+            &mut inst,
+            &archive,
+            None,
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            inst.content.is_empty(),
+            "a pack says nothing about its overrides: {:?}",
+            inst.content
+        );
+
+        let catalogue = catalogue_claiming(paths, &inst, &["carried.jar"]).await;
+        name_from_catalogue(&offline(), &mut inst, &catalogue).await;
+
+        let record = named(&inst, "carried.jar");
+        assert_eq!(
+            (
+                record.provider.as_str(),
+                record.project_id.as_str(),
+                record.version_id.as_str()
+            ),
+            ("modrinth", "mr-project", "mr-version")
+        );
+    }
+
+    /// Provenance used to depend on the shape of a download URL: the ids were
+    /// read out of `cdn.modrinth.com/data/<p>/versions/<v>/`, and the format
+    /// allows github, gitlab and raw.githubusercontent too — which Prism's own
+    /// export emits. Those files arrived nameless. A hash does not care who
+    /// served the bytes.
+    #[tokio::test]
+    async fn an_index_file_from_github_is_identified_by_hash() {
+        let (scratch, mut inst) = fixture("github");
+        let paths = &scratch.paths;
+        let archive = paths.root.join("pack.mrpack");
+        std::fs::create_dir_all(&paths.root).unwrap();
+        write_pack(
+            &archive,
+            serde_json::json!([{
+                "path": "mods/elsewhere.jar",
+                "hashes": {},
+                "fileSize": 9,
+                "downloads": ["https://raw.githubusercontent.com/someone/repo/main/elsewhere.jar"],
+            }]),
+            &[],
+        );
+
+        // Already there at the size the index states, so nothing is fetched
+        // and the URL only has to be read, not reached.
+        let game = paths.game_dir(&inst.id);
+        std::fs::create_dir_all(game.join("mods")).unwrap();
+        std::fs::write(game.join("mods/elsewhere.jar"), b"from repo").unwrap();
+
+        crate::instance::modpack::import_into(
+            &offline(),
+            paths,
+            &mut inst,
+            &archive,
+            None,
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            inst.content.is_empty(),
+            "no ids can be read out of that URL: {:?}",
+            inst.content
+        );
+
+        let catalogue = catalogue_claiming(paths, &inst, &["elsewhere.jar"]).await;
+        name_from_catalogue(&offline(), &mut inst, &catalogue).await;
+
+        let record = named(&inst, "elsewhere.jar");
+        assert_eq!(record.project_id, "mr-project");
+        assert_eq!(record.version_id, "mr-version");
+    }
+
+    /// Two blanks the importer left on every file a pack installed: no version
+    /// at all, and no side although the pack's own `env` pair had said one.
+    #[tokio::test]
+    async fn an_imported_pack_knows_its_versions_and_sides() {
+        let (scratch, mut inst) = fixture("blanks");
+        let paths = &scratch.paths;
+        let archive = paths.root.join("pack.mrpack");
+        std::fs::create_dir_all(&paths.root).unwrap();
+        write_pack(
+            &archive,
+            serde_json::json!([{
+                "path": "mods/clientonly.jar",
+                "hashes": {},
+                "fileSize": 7,
+                "env": { "client": "required", "server": "unsupported" },
+                "downloads": [
+                    "https://cdn.modrinth.com/data/mr-project/versions/mr-version/clientonly.jar"
+                ],
+            }]),
+            &[],
+        );
+
+        let game = paths.game_dir(&inst.id);
+        std::fs::create_dir_all(game.join("mods")).unwrap();
+        std::fs::write(game.join("mods/clientonly.jar"), b"client!").unwrap();
+
+        crate::instance::modpack::import_into(
+            &offline(),
+            paths,
+            &mut inst,
+            &archive,
+            None,
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+        // The pack said this one is a client mod, and the pack is the only one
+        // here who knows.
+        assert_eq!(named(&inst, "clientonly.jar").side, Some(Side::Client));
+
+        let catalogue = catalogue_claiming(paths, &inst, &["clientonly.jar"]).await;
+        name_from_catalogue(&offline(), &mut inst, &catalogue).await;
+
+        let record = named(&inst, "clientonly.jar");
+        assert_eq!(
+            record.version_number, "mr-1.0",
+            "the matched version's own number"
+        );
+        assert_eq!(
+            record.side,
+            Some(Side::Client),
+            "the pack's side was overwritten by a lookup's"
+        );
+    }
+
+    /// The trap that makes `link_untracked_in` unsafe to reuse here. A jar
+    /// that arrived in a server's pack as bytes has a record already — the
+    /// provenance-less one `settle_server_files` writes it — saying whose it
+    /// is, which side the server put it on and whether the server had it off.
+    /// Naming it must fill the blanks and touch nothing else, or a player
+    /// could delete the server's anti-cheat.
+    #[tokio::test]
+    async fn enriching_a_record_keeps_what_the_server_said() {
+        let (scratch, mut inst) = fixture("joined");
+        let paths = &scratch.paths;
+        let game = paths.game_dir(&inst.id);
+        std::fs::create_dir_all(game.join("mods")).unwrap();
+        std::fs::write(game.join("mods/theirs.jar"), b"the server's").unwrap();
+
+        inst.content.push(ContentRecord {
+            file_name: "theirs.jar".into(),
+            kind: ContentKind::Mod,
+            provider: String::new(),
+            project_id: String::new(),
+            version_id: String::new(),
+            name: "theirs.jar".into(),
+            version_number: String::new(),
+            slug: None,
+            icon_url: None,
+            dependency: false,
+            origin: Origin::Server,
+            requires: None,
+            side: Some(Side::Server),
+            server_off: true,
+        });
+
+        let catalogue = catalogue_claiming(paths, &inst, &["theirs.jar"]).await;
+        name_from_catalogue(&offline(), &mut inst, &catalogue).await;
+
+        let record = named(&inst, "theirs.jar");
+        assert_eq!(record.provider, "modrinth", "the blank was not filled");
+        assert_eq!(record.project_id, "mr-project");
+        assert_eq!(record.version_number, "mr-1.0");
+        assert_eq!(record.origin, Origin::Server, "whose file this is");
+        assert!(record.server_off, "the server had it off");
+        assert_eq!(
+            record.side,
+            Some(Side::Server),
+            "the server's own classification"
+        );
+    }
+
+    /// The other half of the same rule, and the one that can corrupt an
+    /// instance rather than merely fail to improve one: a record that already
+    /// names a release is somebody's answer about where this file came from,
+    /// and a hash lookup does not get to replace it.
+    #[tokio::test]
+    async fn a_record_that_names_another_release_is_left_alone() {
+        let (scratch, mut inst) = fixture("stands");
+        let paths = &scratch.paths;
+        let game = paths.game_dir(&inst.id);
+        std::fs::create_dir_all(game.join("mods")).unwrap();
+        std::fs::write(game.join("mods/known.jar"), b"known bytes").unwrap();
+
+        inst.content.push(ContentRecord {
+            file_name: "known.jar".into(),
+            kind: ContentKind::Mod,
+            provider: "curseforge".into(),
+            project_id: "238222".into(),
+            version_id: "4712345".into(),
+            name: "Just Enough Items".into(),
+            version_number: String::new(),
+            slug: None,
+            icon_url: None,
+            dependency: true,
+            origin: Default::default(),
+            requires: None,
+            side: None,
+            server_off: false,
+        });
+
+        let catalogue = catalogue_claiming(paths, &inst, &["known.jar"]).await;
+        name_from_catalogue(&offline(), &mut inst, &catalogue).await;
+
+        let record = named(&inst, "known.jar");
+        assert_eq!(record.provider, "curseforge");
+        assert_eq!(record.project_id, "238222");
+        assert_eq!(record.version_id, "4712345");
+        assert_eq!(record.name, "Just Enough Items");
+        assert!(
+            record.version_number.is_empty(),
+            "a number from another platform's release was written in"
+        );
+        assert!(record.dependency, "how it was installed");
+    }
+
+    /// The hashing pass is the expensive half, and what makes it worth paying
+    /// is that something could be filled in afterwards. A record naming
+    /// another platform's release is one `may_fill` will not let a Modrinth
+    /// answer touch, so counting its unsaid side as a blank would re-read
+    /// every jar of an imported CurseForge pack on that import and on every
+    /// update after it, to learn nothing each time.
+    #[test]
+    fn a_record_naming_another_platform_is_not_worth_hashing() {
+        let mut curseforge = a_record("curseforge", "328085", "4593548");
+        // What a CurseForge pack import writes, every time: the manifest named
+        // the project and the file and said nothing about sides.
+        curseforge.side = None;
+        assert!(!has_blanks(&curseforge));
+
+        // The two that are still worth it: a Modrinth record a lookup may fill
+        // in, and a jar nobody has said anything about at all.
+        let mut modrinth = a_record("modrinth", "AANobbMI", "Hu34AbCd");
+        modrinth.side = None;
+        assert!(has_blanks(&modrinth));
+        let mut blank = curseforge.clone();
+        blank.project_id = String::new();
+        assert!(has_blanks(&blank));
+    }
+
+    /// The half of [`fill_blanks`] a project listing fills. Every other test
+    /// here reaches it through a lookup that cannot be made, so the listing is
+    /// always `None` and this half is never run — the guards are handed the
+    /// answer directly instead.
+    #[test]
+    fn a_project_listing_fills_only_what_nobody_had_said() {
+        let reference = crate::install::identity::PlatformRef {
+            provider: "modrinth".into(),
+            project_id: "AANobbMI".into(),
+            version_id: "Hu34AbCd".into(),
+            version_number: "mr-1.0".into(),
+            url: None,
+            distributable: true,
+        };
+        // Listed as a client mod, which is what a listing has to say for the
+        // server's own answer to be worth keeping over it.
+        let project: Project = serde_json::from_value(serde_json::json!({
+            "provider": "modrinth", "id": "AANobbMI", "slug": "sodium",
+            "name": "Sodium", "summary": "", "downloads": 0, "follows": 0,
+            "author": "", "kind": "mod", "pageUrl": "",
+            "iconUrl": "https://cdn.modrinth.com/sodium.png",
+            "clientSide": "required", "serverSide": "unsupported",
+        }))
+        .unwrap();
+
+        // A jar that arrived in a server's pack as bytes: a file name for a
+        // name, and the side the server itself put it on.
+        let mut theirs = a_record("", "", "");
+        theirs.name = theirs.file_name.clone();
+        theirs.slug = None;
+        theirs.icon_url = None;
+        theirs.side = Some(Side::Server);
+        fill_blanks(&mut theirs, &reference, Some(&project));
+        assert_eq!(theirs.name, "Sodium", "a jar name is a blank, not an answer");
+        assert_eq!(theirs.slug.as_deref(), Some("sodium"));
+        assert_eq!(
+            theirs.icon_url.as_deref(),
+            Some("https://cdn.modrinth.com/sodium.png")
+        );
+        assert_eq!(
+            theirs.side,
+            Some(Side::Server),
+            "the server classified this file and outranks a listing"
+        );
+
+        // The same release, installed here, with its own answers already.
+        let mut ours = a_record("modrinth", "AANobbMI", "Hu34AbCd");
+        ours.name = "Sodium (renamed)".into();
+        ours.slug = Some("sodium-fork".into());
+        ours.icon_url = Some("file:///mine.png".into());
+        fill_blanks(&mut ours, &reference, Some(&project));
+        assert_eq!(ours.name, "Sodium (renamed)");
+        assert_eq!(ours.slug.as_deref(), Some("sodium-fork"));
+        assert_eq!(ours.icon_url.as_deref(), Some("file:///mine.png"));
+    }
+
+    /// One record for the predicates, in the shape an install leaves behind.
+    fn a_record(provider: &str, project_id: &str, version_id: &str) -> ContentRecord {
+        ContentRecord {
+            file_name: "mod.jar".into(),
+            kind: ContentKind::Mod,
+            provider: provider.into(),
+            project_id: project_id.into(),
+            version_id: version_id.into(),
+            name: "A Mod".into(),
+            version_number: "1.0".into(),
+            slug: Some("a-mod".into()),
+            icon_url: Some("https://example.invalid/a.png".into()),
+            dependency: false,
+            origin: Default::default(),
+            requires: None,
+            side: Some(Side::Both),
+            server_off: false,
+        }
+    }
+
+    fn named<'a>(inst: &'a Instance, file_name: &str) -> &'a ContentRecord {
+        inst.content
+            .iter()
+            .find(|r| r.file_name == file_name)
+            .unwrap_or_else(|| panic!("no record for {file_name}: {:?}", inst.content))
+    }
+
+    /// An `.mrpack` with the index entries and the extra zip entries given.
+    fn write_pack(dest: &Path, files: serde_json::Value, extra: &[(&str, &[u8])]) {
+        use std::io::Write;
+        let index = serde_json::to_vec(&serde_json::json!({
+            "formatVersion": 1,
+            "game": "minecraft",
+            "versionId": "1",
+            "name": "P",
+            "files": files,
+            "dependencies": { "minecraft": "1.21.1" },
+        }))
+        .unwrap();
+
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(dest).unwrap());
+        let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        zip.start_file("modrinth.index.json", options).unwrap();
+        zip.write_all(&index).unwrap();
+        for (name, bytes) in extra {
+            zip.start_file(*name, options).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+}

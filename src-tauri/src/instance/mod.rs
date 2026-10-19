@@ -3,6 +3,7 @@ pub mod jar;
 pub mod logs;
 pub mod modpack;
 pub mod multiplayer;
+pub mod prism;
 
 use serde::{Deserialize, Serialize};
 
@@ -341,17 +342,34 @@ pub async fn duplicate(paths: &Paths, id: &str, new_name: String) -> Result<Inst
     copy.joined_listing_address = None;
     copy.joined_listing_claimed = false;
 
-    copy_dir(&paths.game_dir(id), &paths.game_dir(&copy.id)).await?;
+    // Nobody is watching this one: duplicating is a command with no job of its
+    // own in the dock.
+    let quiet = crate::net::Progress::silent(format!("duplicate:{id}"));
+    copy_dir(&paths.game_dir(id), &paths.game_dir(&copy.id), &quiet).await?;
     // The copy keeps the original's `icon` and `banner` names, so the files
     // they refer to have to come along or it would point at nothing.
-    let _ = copy_dir(&paths.instance_media(id), &paths.instance_media(&copy.id)).await;
+    let _ = copy_dir(
+        &paths.instance_media(id),
+        &paths.instance_media(&copy.id),
+        &quiet,
+    )
+    .await;
     copy.save(paths).await?;
     Ok(copy)
 }
 
 /// Recursive copy. Instance trees are shallow but can hold thousands of files
 /// (world regions), so this walks iteratively rather than recursing.
-pub async fn copy_dir(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
+///
+/// Counted and stopped per file, because the tree can be tens of thousands of
+/// files and gigabytes of world: a copy that reports nothing and cannot be
+/// cancelled leaves a user watching an empty bar and a Cancel button that does
+/// nothing until it finishes. Callers nobody is watching pass a silent handle.
+pub async fn copy_dir(
+    from: &std::path::Path,
+    to: &std::path::Path,
+    progress: &crate::net::Progress,
+) -> Result<()> {
     let mut stack = vec![(from.to_path_buf(), to.to_path_buf())];
     while let Some((src, dst)) = stack.pop() {
         tokio::fs::create_dir_all(&dst).await?;
@@ -360,12 +378,16 @@ pub async fn copy_dir(from: &std::path::Path, to: &std::path::Path) -> Result<()
             Err(_) => continue,
         };
         while let Some(entry) = entries.next_entry().await? {
+            progress.check_cancelled()?;
             let file_type = entry.file_type().await?;
             let target = dst.join(entry.file_name());
             if file_type.is_dir() {
                 stack.push((entry.path(), target));
             } else if file_type.is_file() {
                 tokio::fs::copy(entry.path(), target).await?;
+                progress
+                    .advance(1, &entry.file_name().to_string_lossy())
+                    .await;
             }
         }
     }

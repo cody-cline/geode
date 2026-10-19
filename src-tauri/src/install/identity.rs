@@ -20,7 +20,7 @@ use crate::paths::Paths;
 ///
 /// The same four the "Identify files" pass reads. `client-mods/` is a server's
 /// folder, and `plugins/` belongs to no instance.
-const INSTANCE_KINDS: [ContentKind; 4] = [
+pub(crate) const INSTANCE_KINDS: [ContentKind; 4] = [
     ContentKind::Mod,
     ContentKind::ResourcePack,
     ContentKind::ShaderPack,
@@ -49,6 +49,14 @@ pub struct PlatformRef {
     pub provider: String,
     pub project_id: String,
     pub version_id: String,
+    /// The release this file belongs to, as people read it — `1.2.3`, not the
+    /// id beside it.
+    ///
+    /// Nothing a pack writes needs it: a pack names a version by its id. It is
+    /// here for the import that writes a content record, which shows a version
+    /// in the mods list and has no other way to learn one — the id in a pack's
+    /// own download URL is not a number anybody can read.
+    pub version_number: String,
     /// The matched file's own download URL, when a lookup gave one.
     ///
     /// `None` for a reference a record claimed rather than a lookup proved,
@@ -127,6 +135,11 @@ pub enum Ask<'a> {
         /// sharer is told, and telling them the wrong one points at the format
         /// when the thing they can act on is the key.
         index: bool,
+        /// Whether a reference spares that pack the bytes
+        /// ([`Carry::spares_bytes`]), which is what the same message promises
+        /// a key would buy. False for a Prism instance zip, where it would be
+        /// a promise the format cannot keep.
+        spares_bytes: bool,
     },
 }
 
@@ -163,6 +176,36 @@ impl<'a> Ask<'a> {
             },
             curseforge_key,
             index: carry.index,
+            spares_bytes: carry.spares_bytes,
+        }
+    }
+
+    /// What an import asks, to give the files that just landed a name.
+    ///
+    /// Modrinth only, and that is not a stage waiting to be finished. Every
+    /// format says where a file came from in a way that needs no hash at all —
+    /// a CurseForge manifest names ids, a packwiz index names a project — and
+    /// an import that read one has already written those records down. A hash
+    /// lookup is for the files whose own format said nothing about them: a jar
+    /// out of an `overrides/` tree, an index entry served from somewhere Geode
+    /// cannot read ids out of, a mod that arrived in a server's pack as bytes.
+    /// Modrinth answers that question without anybody's credentials, which is
+    /// what makes it worth asking on every import rather than only the ones
+    /// where a key happens to be set.
+    ///
+    /// Asking CurseForge too would cost a key the importer may not have and a
+    /// second read of every file that just landed ([`crate::net::digests`]),
+    /// to fill in a name on the mods list. That is a trade for whoever wants
+    /// it, not one to make on everybody's behalf mid-import.
+    pub fn naming(client: &'a reqwest::Client) -> Self {
+        Self::Platforms {
+            client,
+            want: &["modrinth"],
+            curseforge_key: None,
+            // Read only by the message about a missing CurseForge key, which
+            // nothing here asks for.
+            index: true,
+            spares_bytes: true,
         }
     }
 }
@@ -209,6 +252,7 @@ impl Catalogue {
                         provider: "modrinth".into(),
                         project_id: "mr-project".into(),
                         version_id: "mr-version".into(),
+                        version_number: "mr-1.0".into(),
                         // Deliberately not the name on disk: that is the whole
                         // case for taking the matched file's own URL, since
                         // `link_untracked_in` records the on-disk base name
@@ -253,6 +297,7 @@ impl Catalogue {
                         provider: "curseforge".into(),
                         project_id: held.1.to_string(),
                         version_id: held.2.to_string(),
+                        version_number: format!("cf-{}", held.2),
                         // Never a URL, for the reason `curseforge_ref` gives.
                         url: None,
                         distributable: held.3,
@@ -295,6 +340,14 @@ pub struct Carry {
     pub index: bool,
     /// What the pack can name by id.
     pub by_id: ById,
+    /// Whether a reference spares the pack the bytes.
+    ///
+    /// True of every format but a Prism instance zip, where the recipient's
+    /// launcher fetches nothing and every file travels either way — so what a
+    /// reference buys there is a name and an update path, not a smaller zip.
+    /// Read where the sharer is told what a missing CurseForge key costs them,
+    /// which is the one place the difference has to be said out loud.
+    pub spares_bytes: bool,
     /// The pack can say a file is turned off, so a turned-off mod can be
     /// carried under its enabled name instead of travelling as bytes under its
     /// `.disabled` one.
@@ -316,12 +369,14 @@ impl Carry {
     /// switched on is worse than arriving as bytes.
     pub const MRPACK: Self = Self {
         index: true,
+        spares_bytes: true,
         by_id: ById::Nothing,
         off_state: false,
     };
     /// A `.geodepack`: file notes carry both a source and the off state.
     pub const GEODEPACK: Self = Self {
         index: true,
+        spares_bytes: true,
         by_id: ById::AnyFile,
         off_state: true,
     };
@@ -332,8 +387,27 @@ impl Carry {
     /// changing that means changing what a player's import reads.
     pub const SERVER_PACK: Self = Self {
         index: true,
+        spares_bytes: true,
         by_id: ById::AnyFile,
         off_state: false,
+    };
+    /// A Prism instance zip, whose packwiz index carries a Modrinth file as a
+    /// URL and a CurseForge one as the ids Prism resolves at use time.
+    ///
+    /// The one `Carry` where a reference is not an alternative to the bytes:
+    /// Prism's own importer takes the extracted tree as it finds it and
+    /// downloads nothing, so every file travels either way and the index is
+    /// provenance beside it. What this says is therefore which files the
+    /// recipient's launcher will know the name and the update path of — and
+    /// `off_state` is true because a turned-off jar travels under its
+    /// `.disabled` name while its entry names the enabled one, which is how
+    /// Prism matches a resource to its metadata.
+    pub const PRISM: Self = Self {
+        index: true,
+        // The one format where a reference is not an alternative to the bytes.
+        spares_bytes: false,
+        by_id: ById::AnyFile,
+        off_state: true,
     };
     /// A CurseForge pack: a manifest of `{projectID, fileID, required}` and an
     /// overrides tree, and no index at all — so a mod Modrinth alone can name
@@ -344,6 +418,7 @@ impl Carry {
     /// has no choice to make here.
     pub const CFPACK: Self = Self {
         index: false,
+        spares_bytes: true,
         by_id: ById::ModsOnly,
         off_state: true,
     };
@@ -496,7 +571,7 @@ pub async fn for_instance(
 /// player linked in is still theirs to share. A caller whose walk refuses
 /// links — a server's — builds its candidates from that walk instead of
 /// calling this.
-async fn candidates_in(root: &Path, kinds: &[ContentKind]) -> Result<Vec<Candidate>> {
+pub(crate) async fn candidates_in(root: &Path, kinds: &[ContentKind]) -> Result<Vec<Candidate>> {
     use crate::instance::content::{is_content_file, strip_disabled};
 
     let mut out = Vec::new();
@@ -635,6 +710,7 @@ pub async fn identify(
                         provider: r.provider.clone(),
                         project_id: r.project_id.clone(),
                         version_id: r.version_id.clone(),
+                        version_number: r.version_number.clone(),
                         url: None,
                         // Geode installed this file from there once, so it was
                         // downloadable then and nothing here has heard
@@ -652,6 +728,7 @@ pub async fn identify(
         want,
         curseforge_key,
         index,
+        spares_bytes,
     } = ask
     else {
         return Ok(catalogue);
@@ -685,7 +762,18 @@ pub async fn identify(
                         }
                     })
                     .count();
-                if unasked > 0 && index {
+                if unasked > 0 && index && !spares_bytes {
+                    // A Prism instance zip carries every jar whatever names
+                    // it, so a key buys those files a name and an update path
+                    // rather than a smaller zip. Offering the saving here
+                    // would contradict the same export's own summary, which
+                    // says in the next breath that nothing can be left out.
+                    catalogue.trouble.push(format!(
+                        "CurseForge was not asked about {unasked} files nothing else could name, \
+                         because no API key is set — add one in Settings and the ones it has will \
+                         arrive named instead of anonymous"
+                    ));
+                } else if unasked > 0 && index {
                     catalogue.trouble.push(format!(
                         "CurseForge was not asked about {unasked} files nothing else could name, \
                          because no API key is set — add one in Settings and the ones it has will \
@@ -752,6 +840,7 @@ async fn ask_modrinth(client: &reqwest::Client, catalogue: &mut Catalogue) {
                     provider: "modrinth".into(),
                     project_id: version.project_id,
                     version_id: version.id,
+                    version_number: version.version_number,
                     // The matched file's own URL, not one built from ids and
                     // the name on disk: a file renamed since it was installed
                     // has a constructed URL that 404s, and nothing checks it.
@@ -885,6 +974,7 @@ fn curseforge_ref(version: crate::providers::Version) -> PlatformRef {
         provider: "curseforge".into(),
         project_id: version.project_id,
         version_id: version.id,
+        version_number: version.version_number,
         // Always `None`: a CurseForge pack names ids and nothing else, and the
         // recipient resolves the URL with their own key at install time, which
         // is what makes an author's decision today the one that counts rather
@@ -1011,6 +1101,7 @@ mod tests {
                 provider: "modrinth".into(),
                 project_id: "answered-project".into(),
                 version_id: "answered-version".into(),
+                version_number: "answered-1.0".into(),
                 url: Some("https://cdn.modrinth.com/data/answered-project/versions/answered-version/real-name.jar".into()),
                 distributable: true,
             },
@@ -1094,6 +1185,7 @@ mod tests {
                 want: &["modrinth"],
                 curseforge_key: None,
                 index: true,
+                spares_bytes: true,
             },
             &Progress::silent("t"),
         )
@@ -1142,6 +1234,9 @@ mod tests {
             want: &["curseforge"],
             curseforge_key: None,
             index,
+            // A pack that leaves bytes out, which is every format but a Prism
+            // instance zip; the one that does not has a test of its own.
+            spares_bytes: true,
         };
         let about_the_key = |c: &Catalogue| {
             c.trouble
@@ -1545,6 +1640,7 @@ mod tests {
             provider: "spiget".into(),
             project_id: "28140".into(),
             version_id: "487564".into(),
+            version_number: "1.0".into(),
             url: None,
             distributable: true,
         });
@@ -1621,6 +1717,7 @@ mod tests {
                 // the process: the client cannot connect.
                 curseforge_key: Some("$2a$10$not-a-real-key"),
                 index: true,
+                spares_bytes: true,
             },
             &Progress::silent("t"),
         )
@@ -1642,6 +1739,56 @@ mod tests {
             ident.murmur2.is_some(),
             "a key means the fingerprint is worth the second read"
         );
+    }
+
+    /// What a key would buy depends on what the format does with a file it
+    /// cannot name, and for a Prism instance zip that is not "bundle it in":
+    /// every jar travels inside one whatever names it, so the key buys a name
+    /// and an update path. Offering the saving would contradict the summary
+    /// the same export shows the sharer in the next breath.
+    #[tokio::test]
+    async fn the_missing_key_notice_promises_only_what_the_format_can_do() {
+        let (scratch, _) = catalogue_of("prismkey", &[("", "create.jar")]).await;
+        let root = scratch.paths.root.join("game");
+        let candidate = Candidate {
+            kind: ContentKind::Mod,
+            disk_rel: PathBuf::from("mods/create.jar"),
+            file_name: "create.jar".into(),
+            disabled: false,
+        };
+        let client = offline();
+
+        let notice = |catalogue: &Catalogue| {
+            catalogue
+                .trouble
+                .iter()
+                .find(|line| line.contains("no API key"))
+                .cloned()
+                .expect("the sharer is told the key was not there")
+        };
+
+        for (carry, expected, refused) in [
+            (Carry::PRISM, "arrive named instead of anonymous", "bundled"),
+            (
+                Carry::GEODEPACK,
+                "linked instead of bundled in",
+                "anonymous",
+            ),
+        ] {
+            let catalogue = identify(
+                &root,
+                vec![candidate.clone()],
+                &[],
+                Ask::exporting(&client, None, carry),
+                &Progress::silent("t"),
+            )
+            .await
+            .unwrap();
+
+            let line = notice(&catalogue);
+            assert!(line.contains(expected), "{line}");
+            assert!(!line.contains(refused), "{line}");
+        }
     }
 
     /// A file Modrinth has named is still asked about on CurseForge, because
@@ -1680,6 +1827,7 @@ mod tests {
                 want: &["curseforge"],
                 curseforge_key: Some("$2a$10$not-a-real-key"),
                 index: true,
+                spares_bytes: true,
             },
             &Progress::silent("t"),
         )

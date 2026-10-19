@@ -1233,7 +1233,13 @@ mod tests {
         .await
         .unwrap();
         let missing = crate::share::pack::import(
-            &reqwest::Client::new(),
+            // Nothing here is fetched, and the pass that names what arrived
+            // must not go asking: a client that cannot reach anything is what
+            // says so.
+            &reqwest::Client::builder()
+                .proxy(reqwest::Proxy::all("http://127.0.0.1:9").unwrap())
+                .build()
+                .unwrap(),
             &player,
             &mut instance,
             &archive,

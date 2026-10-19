@@ -32,6 +32,7 @@ const FORMATS = {
   geodepack: { ext: "geodepack", filter: "Geode pack", name: "a .geodepack" },
   mrpack: { ext: "mrpack", filter: "Modrinth pack", name: "a .mrpack" },
   curseforge: { ext: "zip", filter: "CurseForge pack", name: "a CurseForge pack" },
+  prism: { ext: "zip", filter: "Prism instance", name: "a Prism instance" },
 } as const;
 
 type Format = keyof typeof FORMATS;
@@ -64,6 +65,32 @@ function exportSummary(format: Format, report: ExportReport): string {
   const bundled =
     embeddedUnknown + embeddedElsewhere + embeddedTurnedOff + embeddedBlocked + embeddedDuplicate;
   const lines: string[] = [];
+  // A Prism instance zip is the one format where a link is not an alternative
+  // to the bytes: Prism's own importer takes the extracted tree as it finds it
+  // and downloads nothing, so every jar travels either way. The same counts
+  // therefore mean something else here — how many mods arrive named, with an
+  // update path, rather than how many the zip did not have to carry — and
+  // saying "linked for the recipient to download" would be a plain lie.
+  if (format === "prism") {
+    if (referenced === 0 && bundled === 0) {
+      lines.push("There were no mods, packs or datapacks to carry.");
+    } else if (bundled === 0) {
+      lines.push(`All ${referenced} named, so Prism can check every one for updates.`);
+    } else {
+      lines.push(`${referenced} named, so Prism can check them for updates.`);
+      lines.push(
+        `${bundled} arrive as plain jars with no update path, because nothing Geode asked could name them or this format has nowhere to record it.`,
+      );
+    }
+    lines.push(
+      "Every jar travels inside the zip: a Prism instance has no way to say \u201cdownload this\u201d. Export .mrpack instead if you want Prism to fetch the mods itself.",
+    );
+    lines.push(...report.trouble);
+    if (report.unnameable.length > 0) {
+      lines.push(`Left out, because a zip cannot carry these names: ${report.unnameable.join(", ")}.`);
+    }
+    return lines.join(" ");
+  }
   if (referenced === 0 && bundled === 0) {
     lines.push("There were no mods, packs or datapacks to carry.");
   } else if (bundled === 0) {
@@ -260,19 +287,22 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
         // backend stands in the signed-in account's name, which is the only
         // answer it holds to whose pack this is.
         return api.exportCurseforgePack(instance.id, dest, null, false);
+      case "prism":
+        return api.exportPrismInstance(instance.id, dest, false);
     }
   }
 
   // The format is picked by which button was pressed, never read back off the
   // file name: the save dialog does not report which filter was chosen, and on
   // Linux it does not add the extension either, so "ForPrism" typed under the
-  // Modrinth filter would come back with no extension at all. And one of the
-  // three saves under a name the format does not own — a CurseForge pack is a
-  // plain .zip. The three differ in what they can say, so guessing wrong
-  // silently changes what the pack contains: a .geodepack names a CurseForge
-  // mod and lets the recipient fetch it, a .mrpack has nowhere to record that
-  // and has to carry the jar, and a CurseForge pack is the same trade the
-  // other way round.
+  // Modrinth filter would come back with no extension at all. And two of the
+  // four save under a name the format does not own — a CurseForge pack and a
+  // Prism instance are both plain .zips. The four differ in what they can say,
+  // so guessing wrong silently changes what the file contains: a .geodepack
+  // names a CurseForge mod and lets the recipient fetch it, a .mrpack has
+  // nowhere to record that and has to carry the jar, a CurseForge pack is the
+  // same trade the other way round, and a Prism instance carries every jar
+  // whatever it can name.
   async function exportPack(format: Format) {
     const { ext, filter, name } = FORMATS[format];
     const chosen = await saveDialog({
@@ -648,6 +678,14 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
             >
               <PackageOpen size={14} />
               Export CurseForge .zip
+            </button>
+            <button
+              className="btn"
+              onClick={() => exportPack("prism")}
+              title="A .zip Prism opens as a full instance — settings, loader and all — with every mod named so Prism can check it for updates. Every jar travels inside it: a Prism instance has no way to say “download this”. Export .mrpack instead if you want Prism to fetch the mods itself"
+            >
+              <PackageOpen size={14} />
+              Export Prism instance
             </button>
             <div style={{ flex: 1 }} />
             <button

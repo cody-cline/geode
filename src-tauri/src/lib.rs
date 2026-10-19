@@ -219,6 +219,7 @@ pub fn run() {
             commands::export_modpack,
             commands::export_geodepack,
             commands::export_curseforge_pack,
+            commands::export_prism_instance,
             commands::get_share_status,
             commands::set_share_settings,
             commands::get_server_share,

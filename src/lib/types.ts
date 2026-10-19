@@ -848,7 +848,8 @@ export interface PackPreview {
   loader: Loader;
   loaderVersion: string;
   fileCount: number;
-  format: string;
+  /** Which of the three things Geode can read this is. */
+  format: "mrpack" | "curseforge" | "prism";
   needsCurseforgeKey: boolean;
 }
 

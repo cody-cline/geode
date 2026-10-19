@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import clsx from "clsx";
-import { FileArchive, Loader2, Search, Users } from "lucide-react";
+import { FileArchive, FolderOpen, Loader2, Search, Users } from "lucide-react";
 
 import Modal from "./Modal";
 import { api } from "../lib/api";
@@ -128,15 +128,28 @@ export default function NewInstanceModal({ onClose }: { onClose: () => void }) {
   async function importPack() {
     const picked = await openDialog({
       multiple: false,
-      filters: [{ name: "Modpack", extensions: ["geodepack", "mrpack", "zip"] }],
+      filters: [
+        { name: "Modpack or instance", extensions: ["geodepack", "mrpack", "zip"] },
+      ],
     });
     if (typeof picked !== "string") return;
+    await importFrom(picked);
+  }
 
+  // A Prism or MultiMC instance folder, read where the user points at it:
+  // Geode never goes looking through another launcher's data directory.
+  async function importFolder() {
+    const picked = await openDialog({ multiple: false, directory: true });
+    if (typeof picked !== "string") return;
+    await importFrom(picked);
+  }
+
+  async function importFrom(picked: string) {
     let preview: PackPreview;
     try {
       preview = await api.previewModpack(picked);
     } catch (e) {
-      reportError("That file is not a modpack", e);
+      reportError("That is not a modpack or an instance", e);
       return;
     }
 
@@ -187,6 +200,18 @@ export default function NewInstanceModal({ onClose }: { onClose: () => void }) {
           <button className="btn btn-ghost" onClick={importPack} disabled={creating}>
             <FileArchive size={15} />
             Import modpack
+          </button>
+          {/* An instance folder rather than a file: a Prism or MultiMC
+              instance is a directory, and a zipped one goes through the
+              button beside this. */}
+          <button
+            className="btn btn-ghost"
+            onClick={importFolder}
+            disabled={creating}
+            title="Import a Prism or MultiMC instance folder"
+          >
+            <FolderOpen size={15} />
+            Import folder
           </button>
           {/* A joined server becomes an instance like any other, so this is
               where someone looking to add one would go looking. */}
