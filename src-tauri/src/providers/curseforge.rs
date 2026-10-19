@@ -13,7 +13,7 @@ use super::{
     VersionFile,
 };
 
-const API: &str = "https://api.curseforge.com/v1";
+pub(crate) const API: &str = "https://api.curseforge.com/v1";
 const MINECRAFT_GAME_ID: u32 = 432;
 
 /// CurseForge's per-game "class" taxonomy.
@@ -24,16 +24,25 @@ fn class_id(kind: ProjectKind) -> u32 {
         ProjectKind::Modpack => 4471,
         ProjectKind::Shader => 6552,
         ProjectKind::DataPack => 6945,
+        ProjectKind::World => 17,
         // Bukkit Plugins — what dev.bukkit.org became once CurseForge absorbed
         // it. Unverified against the live API, which needs the user's key.
         ProjectKind::Plugin => 5,
     }
 }
 
+/// What a project is, from the class CurseForge files it under.
+///
+/// An unknown or absent class reads as a mod, which is what every other
+/// launcher does with one it cannot place: leaving a file in `mods/` is
+/// recoverable, and inventing a folder for it is not.
 fn kind_from_class(class_id: Option<u32>) -> ProjectKind {
     match class_id {
         Some(5) => ProjectKind::Plugin,
         Some(12) => ProjectKind::ResourcePack,
+        // Worlds. Absent here until a pack import needed somewhere other than
+        // `mods/` to put one.
+        Some(17) => ProjectKind::World,
         Some(4471) => ProjectKind::Modpack,
         Some(6552) => ProjectKind::Shader,
         Some(6945) => ProjectKind::DataPack,
@@ -513,6 +522,10 @@ pub async fn support_pairs(
         .collect())
 }
 
+/// How many ids one batch request carries. The endpoints document no cap;
+/// this is a conservative chunk rather than a published limit.
+const IDS_PER_REQUEST: usize = 200;
+
 /// Resolve many projects at once.
 ///
 /// A CurseForge pack manifest identifies its contents by numeric id alone, so
@@ -522,10 +535,23 @@ pub async fn projects_by_ids(
     ids: &[u32],
     api_key: &str,
 ) -> Result<Vec<Project>> {
+    projects_by_ids_at(client, API, ids, api_key).await
+}
+
+/// The same, against a given base URL. Injectable for the reason
+/// [`check_key_at`] is: a test serves the answers itself rather than reaching
+/// the real API with a key no test has.
+pub async fn projects_by_ids_at(
+    client: &reqwest::Client,
+    base: &str,
+    ids: &[u32],
+    api_key: &str,
+) -> Result<Vec<Project>> {
     let mut out = Vec::new();
-    for chunk in ids.chunks(200) {
+    for chunk in ids.chunks(IDS_PER_REQUEST) {
         let body = serde_json::json!({ "modIds": chunk });
-        let resp: Envelope<Vec<CfMod>> = post(client, &format!("{API}/mods"), &body, api_key).await?;
+        let resp: Envelope<Vec<CfMod>> =
+            post(client, &format!("{base}/mods"), &body, api_key).await?;
         out.extend(resp.data.into_iter().map(to_project));
     }
     Ok(out)
@@ -708,6 +734,43 @@ pub async fn file(
     )
     .await?;
     Ok(to_version(resp.data))
+}
+
+/// Resolve many files at once, by file id alone.
+///
+/// The batch counterpart to [`file`], and what a pack import uses: a manifest
+/// names its contents by `{projectID, fileID}` pairs, so resolving them one at
+/// a time made a three-hundred-mod pack three hundred round trips.
+///
+/// A file id the answer leaves out is simply absent from the result — it is
+/// not an error, because one withdrawn file is not a reason to refuse the rest,
+/// and the caller is the only one that knows what it asked for. A refused
+/// *request*, though, fails the whole call: a short answer and "CurseForge
+/// does not have these" are indistinguishable to a caller, and reading a
+/// rejection the second way is how an import ends up quietly short of mods.
+pub async fn files_by_ids(
+    client: &reqwest::Client,
+    file_ids: &[u32],
+    api_key: &str,
+) -> Result<Vec<Version>> {
+    files_by_ids_at(client, API, file_ids, api_key).await
+}
+
+/// The same, against a given base URL.
+pub async fn files_by_ids_at(
+    client: &reqwest::Client,
+    base: &str,
+    file_ids: &[u32],
+    api_key: &str,
+) -> Result<Vec<Version>> {
+    let mut out = Vec::new();
+    for chunk in file_ids.chunks(IDS_PER_REQUEST) {
+        let body = serde_json::json!({ "fileIds": chunk });
+        let resp: Envelope<Vec<CfFile>> =
+            post(client, &format!("{base}/mods/files"), &body, api_key).await?;
+        out.extend(resp.data.into_iter().map(to_version));
+    }
+    Ok(out)
 }
 
 /// What CurseForge is asked in one request. The endpoint documents no cap and

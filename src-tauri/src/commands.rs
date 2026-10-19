@@ -883,8 +883,22 @@ pub async fn install_modpack(
     inst.save(&state.paths).await?;
 
     match result {
-        Ok(()) => {
+        Ok(missing) if missing.is_empty() => {
             progress.finish().await;
+            Ok(view(inst, &state))
+        }
+        // The instance exists and holds most of the pack, so what needs the
+        // user is said through the job rather than returned instead of the
+        // instance — the same rule `import_modpack` states. Returning this as
+        // a failure would invite a retry, and a retry makes a second instance.
+        Ok(missing) => {
+            progress
+                .fail(&format!(
+                    "{} of this pack's files need a hand: {}",
+                    missing.len(),
+                    missing.join(", ")
+                ))
+                .await;
             Ok(view(inst, &state))
         }
         Err(e) => {
@@ -3267,10 +3281,13 @@ pub async fn import_modpack(
             })
         }
         // Named, not carried — so the import ends with a list to act on rather
-        // than an instance that is quietly short of mods.
+        // than an instance that is quietly short of mods. "A hand" rather than
+        // "fetched by hand" because not every line is a download: a world from
+        // a CurseForge pack is on disk already and wants unzipping, and each
+        // line says for itself what it needs.
         Ok(missing) => {
             let detail = format!(
-                "{} file(s) in this pack have to be fetched by hand: {}",
+                "{} of this pack's files need a hand: {}",
                 missing.len(),
                 missing.join(", ")
             );

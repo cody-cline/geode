@@ -471,16 +471,27 @@ pub async fn import(
         } else {
             client.clone()
         };
-        instance::modpack::import_into(&http, paths, instance, archive, curseforge_key, progress)
-            .await?;
-        match &manifest {
-            Some(manifest) => {
+        // Both halves name what the user has to fetch themselves, and both
+        // lists are the same list: a CurseForge file nobody may download and a
+        // reference the recipient's own key could not resolve are the same
+        // problem to whoever reads the report.
+        let mut missing = instance::modpack::import_into(
+            &http,
+            paths,
+            instance,
+            archive,
+            curseforge_key,
+            progress,
+        )
+        .await?;
+        // A plain `.mrpack` has no Geode half.
+        if let Some(manifest) = &manifest {
+            missing.extend(
                 apply_pack(client, paths, instance, archive, manifest, curseforge_key, progress)
-                    .await
-            }
-            // A plain `.mrpack` has no Geode half.
-            None => Ok(Vec::new()),
+                    .await?,
+            );
         }
+        Ok::<_, Error>(missing)
     }
     .await;
 
@@ -614,9 +625,22 @@ pub async fn update(
         // Modrinth; the references do not, since those URLs come from the
         // provider's API rather than from the pack.
         let http = server_pack_client();
-        instance::modpack::import_into(&http, paths, instance, archive, curseforge_key, progress)
-            .await?;
-        resolve_references(client, paths, instance, &manifest, curseforge_key, progress).await
+        // One list, for the reason `import` gives: what either half could not
+        // install is the same thing to the player reading it.
+        let mut missing = instance::modpack::import_into(
+            &http,
+            paths,
+            instance,
+            archive,
+            curseforge_key,
+            progress,
+        )
+        .await?;
+        missing.extend(
+            resolve_references(client, paths, instance, &manifest, curseforge_key, progress)
+                .await?,
+        );
+        Ok::<_, Error>(missing)
     }
     .await;
 
@@ -6188,7 +6212,8 @@ mod tests {
         let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
         zip.start_file("manifest.json", options).unwrap();
         zip.write_all(
-            br#"{"minecraft":{"version":"1.21.1","modLoaders":[]},"name":"S","files":[]}"#,
+            br#"{"manifestType":"minecraftModpack","manifestVersion":1,
+                 "minecraft":{"version":"1.21.1","modLoaders":[]},"name":"S","files":[]}"#,
         )
         .unwrap();
         zip.finish().unwrap();

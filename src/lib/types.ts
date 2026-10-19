@@ -10,13 +10,19 @@ export const LOADERS: { id: Loader; label: string }[] = [
 
 /** `spiget` is SpigotMC, read through the Spiget index. Plugins only. */
 export type Provider = "modrinth" | "curseforge" | "spiget";
+/**
+ * `world` is CurseForge's own class of project and nothing searches for one —
+ * it arrives only when a CurseForge pack turns out to carry a world, which
+ * goes to `saves/` rather than being installed as content.
+ */
 export type ProjectKind =
   | "mod"
   | "modpack"
   | "resourcepack"
   | "shader"
   | "datapack"
-  | "plugin";
+  | "plugin"
+  | "world";
 /**
  * `plugin` only ever applies to a server — instances have no plugins folder.
  * Neither does `clientmod`: a server's Client mods, which it never loads and

@@ -20,6 +20,11 @@ fn kind_facet(kind: ProjectKind) -> &'static str {
         ProjectKind::Shader => "shader",
         ProjectKind::DataPack => "datapack",
         ProjectKind::Plugin => "plugin",
+        // Modrinth has no world project type, so this facet matches nothing —
+        // which is the honest answer. Unreachable from a search in any case:
+        // `ProjectKind::parse` has no name for a world, so nothing can ask
+        // for one.
+        ProjectKind::World => "world",
     }
 }
 

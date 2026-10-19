@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{Error, Result};
+use crate::error::{Context, Error, Result};
 use crate::install::identity::{travel, Ask, Carry, Catalogue, Copied, Identity, Travel};
 use crate::meta::Loader;
 use crate::net::{Download, Progress};
@@ -114,6 +114,12 @@ fn loader_from_dependencies(deps: &HashMap<String, String>) -> (String, Loader, 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CfManifest {
+    /// What this manifest is. Optional here only so that a manifest without it
+    /// parses far enough to be refused by name — see [`check_is_modpack`].
+    #[serde(default)]
+    manifest_type: Option<String>,
+    #[serde(default)]
+    manifest_version: Option<u32>,
     minecraft: CfMinecraft,
     #[serde(default)]
     name: String,
@@ -123,6 +129,48 @@ struct CfManifest {
     files: Vec<CfManifestFile>,
     #[serde(default = "default_overrides")]
     overrides: String,
+}
+
+/// The two fields a CurseForge modpack declares itself with, and the values
+/// [`CfManifestOut`] writes.
+const MODPACK_MANIFEST: &str = "minecraftModpack";
+const MODPACK_MANIFEST_VERSION: u32 = 1;
+
+/// Refuse a `manifest.json` that is not a modpack's.
+///
+/// Nothing read these two fields before, so any JSON with a `minecraft` object
+/// was accepted as a pack — a CurseForge export of something else got as far
+/// as the preview dialog and then failed with whatever its contents happened
+/// to break. Every other launcher rejects such a file outright, and so does
+/// this.
+fn check_is_modpack(manifest: &CfManifest) -> Result<()> {
+    match manifest.manifest_type.as_deref() {
+        Some(MODPACK_MANIFEST) => {}
+        Some(other) => {
+            return Err(Error::msg(format!(
+                "this file's manifest.json says it is a {other}, not a modpack, \
+                 so there is nothing here to install"
+            )))
+        }
+        None => {
+            return Err(Error::msg(
+                "this file's manifest.json does not say what it is — a CurseForge \
+                 modpack declares \"manifestType\": \"minecraftModpack\", and a file \
+                 without it is not a pack any launcher will read",
+            ))
+        }
+    }
+    match manifest.manifest_version {
+        Some(MODPACK_MANIFEST_VERSION) => Ok(()),
+        Some(other) => Err(Error::msg(format!(
+            "this pack's manifest.json is version {other} and Geode reads \
+             version {MODPACK_MANIFEST_VERSION} — it was written by something newer than this"
+        ))),
+        None => Err(Error::msg(
+            "this pack's manifest.json does not say which version it is, so it \
+             cannot be read as a modpack",
+        )),
+    }
 }
 
 fn default_overrides() -> String {
@@ -213,6 +261,49 @@ fn cf_loader_id(loader: Loader, loader_version: &str, mc_version: &str) -> Optio
             interop_loader_version(loader, loader_version, mc_version)
         )
     })
+}
+
+/// Where one of a CurseForge pack's files belongs inside an instance.
+#[derive(Clone, Copy)]
+enum CfPlacement {
+    /// Content Geode tracks, in the folder its kind owns.
+    Tracked(ContentKind),
+    /// A world: `saves/`, where this format's other readers put one, and no
+    /// content record, because a world is not content Geode tracks.
+    Saves,
+    /// Nothing an instance has a place for.
+    Nowhere,
+}
+
+/// Which folder a pack's file goes in, read off its *project*.
+///
+/// A CurseForge manifest states no path — only `{projectID, fileID}` — so the
+/// folder can only come from what the project is. Everything used to be
+/// installed as a [`ContentKind::Mod`] into `mods/`, which is why a pack's
+/// resource packs and shader packs arrived somewhere nothing reads them.
+///
+/// A class that says nothing useful still means `mods/`, because
+/// `kind_from_class` defaults there — the same thing Prism does with a file it
+/// cannot identify, and recoverable in a way that inventing a folder is not.
+fn cf_placement(kind: crate::providers::ProjectKind) -> CfPlacement {
+    use crate::providers::ProjectKind;
+    match kind {
+        ProjectKind::World => CfPlacement::Saves,
+        // `install_kind` says `plugins/` for a plugin, which is an answer
+        // about a *server*: no client reads that folder, `content.rs` says an
+        // instance that somehow has one lists nothing, and `providers/mod.rs`
+        // says a plugin is never installed into an instance at all. So class 5
+        // says nothing useful about a client, which is the `mods/` case —
+        // visible and recoverable, where a folder nothing reads is neither.
+        // Prism has no mapping for class 5 either, and leaves one in `mods/`.
+        ProjectKind::Plugin => CfPlacement::Tracked(ContentKind::Mod),
+        // `install_kind` is the existing answer to "which folder", and already
+        // says `None` for a pack inside a pack.
+        other => match other.install_kind() {
+            Some(kind) => CfPlacement::Tracked(kind),
+            None => CfPlacement::Nowhere,
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -343,6 +434,7 @@ fn read_pack(archive: &Path) -> Result<PackKind> {
     let raw = read_json_entry(entry, "manifest.json")?;
     let manifest: CfManifest =
         serde_json::from_slice(&raw).map_err(|e| Error::json("manifest.json", e))?;
+    check_is_modpack(&manifest)?;
     Ok(PackKind::CurseForge(manifest))
 }
 
@@ -463,6 +555,13 @@ pub async fn index_mods(archive: PathBuf) -> Result<PackMods> {
 }
 
 /// Install a pack into an existing (already created) instance directory.
+///
+/// Returns what the pack named and this did not install, each line naming the
+/// file and what the user has to do with it. That is a list and not an error
+/// on purpose: by the time any of it is known the instance exists and most of
+/// the pack is in it, and an import that comes back as a failure invites a
+/// retry — which makes a second instance. `commands::import_modpack` states
+/// the same rule, and `PackImport.problems` is the shape it reports through.
 pub async fn import_into(
     client: &reqwest::Client,
     paths: &Paths,
@@ -470,7 +569,36 @@ pub async fn import_into(
     archive: &Path,
     curseforge_key: Option<&str>,
     progress: &Progress,
-) -> Result<()> {
+) -> Result<Vec<String>> {
+    import_into_at(
+        client,
+        crate::providers::curseforge::API,
+        paths,
+        instance,
+        archive,
+        curseforge_key,
+        progress,
+    )
+    .await
+}
+
+/// The same, with the CurseForge API base injectable.
+///
+/// Injectable for the reason `curseforge::check_key_at` and
+/// `curseforge::match_fingerprints_at` are: what a CurseForge import does is
+/// decided entirely by what it asks CurseForge and what it makes of the
+/// answer, so a test serves those answers itself rather than reaching the real
+/// API with a key no test has. A `.mrpack` fetches only the URLs its own index
+/// names, so the base does not reach that arm.
+pub async fn import_into_at(
+    client: &reqwest::Client,
+    base: &str,
+    paths: &Paths,
+    instance: &mut Instance,
+    archive: &Path,
+    curseforge_key: Option<&str>,
+    progress: &Progress,
+) -> Result<Vec<String>> {
     let game_dir = paths.game_dir(&instance.id);
     let archive_owned = archive.to_path_buf();
 
@@ -480,6 +608,14 @@ pub async fn import_into(
     })
     .await
     .map_err(|e| Error::msg(format!("reading pack panicked: {e}")))??;
+
+    // Everything the pack named and the import did not install, each carrying
+    // its own reason, reported together at the end. A file nobody is allowed
+    // to fetch, a file CurseForge did not answer for and a world that arrived
+    // as an archive are different problems and the user can act on all of
+    // them, so none is left to a progress line nobody reads. Nothing a
+    // `.mrpack` holds reaches this: its index names its own URLs.
+    let mut left_out: Vec<String> = Vec::new();
 
     match pack {
         PackKind::Modrinth(index) => {
@@ -553,60 +689,185 @@ pub async fn import_into(
                 .stage("Resolving pack contents", manifest.files.len() as u64)
                 .await;
 
+            // Two batched calls for the whole pack, where this was one request
+            // per file: a three-hundred-mod pack was three hundred round
+            // trips. And a failure ends the import — it used to be swallowed
+            // into a progress note, so a key that stopped working part way
+            // through produced an instance quietly short of mods.
+            let file_ids: Vec<u32> = manifest.files.iter().map(|f| f.file_id).collect();
+            let by_file_id: HashMap<u32, crate::providers::Version> =
+                crate::providers::curseforge::files_by_ids_at(client, base, &file_ids, key)
+                    .await
+                    .ctx("asking CurseForge what this pack's files are")?
+                    .into_iter()
+                    .filter_map(|v| v.id.parse::<u32>().ok().map(|id| (id, v)))
+                    .collect();
+
+            // The second endpoint is what makes a file land in the right
+            // folder: a manifest states no path, so the folder comes from the
+            // project. One batched call for the distinct ids, and a project
+            // the answer leaves out simply has no class, which reads as a mod.
+            //
+            // The ids asked about are the `modId`s the files answer returned,
+            // not the `projectID`s the manifest claimed. A manifest is
+            // somebody else's JSON and its pair can be wrong or stale — a
+            // project transferred or merged upstream changes the owner of its
+            // files — and asking about a project that does not own the file
+            // means placing the file by the wrong class while recording the
+            // right project. The per-file endpoint this replaced validated the
+            // pair server-side; the batch one cannot, so the authoritative
+            // answer already on the wire is the one used. In manifest order,
+            // so the request bodies do not depend on a map's iteration order.
+            let mut project_ids: Vec<u32> = Vec::new();
+            for entry in &manifest.files {
+                let Some(id) = by_file_id
+                    .get(&entry.file_id)
+                    .and_then(|v| v.project_id.parse::<u32>().ok())
+                else {
+                    continue;
+                };
+                if !project_ids.contains(&id) {
+                    project_ids.push(id);
+                }
+            }
+            let kinds: HashMap<String, crate::providers::ProjectKind> =
+                crate::providers::curseforge::projects_by_ids_at(client, base, &project_ids, key)
+                    .await
+                    .ctx("asking CurseForge what this pack's mods are")?
+                    .iter()
+                    .map(|p| (p.id.clone(), p.kind))
+                    .collect();
+
             let mut downloads = Vec::new();
             let mut records = Vec::new();
-            let mut blocked = Vec::new();
 
             for entry in &manifest.files {
                 progress.check_cancelled()?;
-                let version = match crate::providers::curseforge::file(
-                    client,
-                    entry.project_id,
-                    entry.file_id,
-                    key,
-                )
-                .await
-                {
-                    Ok(v) => v,
-                    Err(e) => {
-                        progress
-                            .advance(1, &format!("skipped {}: {e}", entry.project_id))
-                            .await;
-                        continue;
-                    }
+
+                // Looked up rather than taken, so a manifest that lists the
+                // same file twice is two copies of one file and not one file
+                // and one phantom.
+                let Some(version) = by_file_id.get(&entry.file_id).cloned() else {
+                    progress
+                        .advance(1, &format!("file {}", entry.file_id))
+                        .await;
+                    left_out.push(format!(
+                        "project {} file {} (CurseForge did not return it — it may have been withdrawn)",
+                        entry.project_id, entry.file_id
+                    ));
+                    continue;
                 };
                 progress.advance(1, &version.name).await;
 
+                // Worked out before the file is, because it is also the advice
+                // for a file Geode may not fetch: a blocked resource pack the
+                // user is told to drop into `mods/` is the very mis-placement
+                // the rest of this is here to stop making.
+                let kind = kinds
+                    .get(&version.project_id)
+                    .copied()
+                    .unwrap_or(crate::providers::ProjectKind::Mod);
+                let placement = cf_placement(kind);
+                let (folder, record_kind) = match placement {
+                    CfPlacement::Tracked(kind) => (kind.folder(), Some(kind)),
+                    CfPlacement::Saves => ("saves", None),
+                    CfPlacement::Nowhere => {
+                        left_out.push(format!(
+                            "{} (a pack inside a pack is not a file an instance holds)",
+                            version.name
+                        ));
+                        continue;
+                    }
+                };
+
                 let Some(file) = version.primary_file() else {
-                    // Author-blocked downloads cannot be fetched on the user's
-                    // behalf; collect them so we can tell them what to do.
-                    blocked.push(version.name.clone());
+                    // The author turned third-party downloads off. Nothing
+                    // here goes looking for another source: a copy from
+                    // anywhere but the author is a mirror, and Geode does not
+                    // route around this.
+                    let by_hand = match placement {
+                        CfPlacement::Saves => {
+                            "unpack it into the instance's saves folder".to_string()
+                        }
+                        _ => format!("drop it into the instance's {folder} folder"),
+                    };
+                    left_out.push(format!(
+                        "{} (its author disabled third-party downloads — download it from \
+                         CurseForge and {by_hand})",
+                        version.name
+                    ));
                     continue;
                 };
 
+                // `required: false` is this format saying the user may do
+                // without the file, and `.disabled` is what that means on
+                // disk — the same thing Prism's importer writes for one. The
+                // record keeps the enabled name, which is how a toggle finds
+                // its provenance again.
+                //
+                // Only for content, since `.disabled` is a convention about
+                // what a loader reads and nothing loads a world.
+                let on_disk = match record_kind {
+                    Some(_) if !entry.required => {
+                        super::content::disabled_name(&file.filename)
+                    }
+                    _ => file.filename.clone(),
+                };
+
+                // The name comes from CurseForge rather than from anything
+                // Geode wrote, so it is held to the same rule as an entry in
+                // somebody else's archive.
+                let rel = Path::new(folder).join(&on_disk);
+                if !crate::paths::is_safe_relative(&rel) {
+                    left_out.push(format!(
+                        "{} (CurseForge calls its file \"{}\", which is not a name Geode \
+                         will write inside an instance)",
+                        version.name, file.filename
+                    ));
+                    continue;
+                }
+
                 downloads.push(
-                    Download::new(file.url.clone(), game_dir.join("mods").join(&file.filename))
+                    Download::new(file.url.clone(), game_dir.join(&rel))
                         .sha1(file.sha1.clone())
                         .size(file.size)
-                        .label(file.filename.clone()),
+                        .label(rel.to_string_lossy().to_string()),
                 );
-                records.push(ContentRecord {
-                    file_name: file.filename.clone(),
-                    kind: ContentKind::Mod,
-                    provider: "curseforge".into(),
-                    project_id: version.project_id.clone(),
-                    version_id: version.id.clone(),
-                    name: version.name.clone(),
-                    version_number: version.version_number.clone(),
-                    slug: None,
-                    icon_url: None,
-                    dependency: !entry.required,
-                    origin: Default::default(),
-                    // Pack manifests carry no dependency graph; the jars do.
-                    requires: None,
-                    side: None,
-                    server_off: false,
-                });
+                // Arriving is not the end of it for a world. Minecraft reads a
+                // world as a directory holding `level.dat` — which is what
+                // Geode's own writer produces — and CurseForge publishes one
+                // as a zip of that directory. Nothing here unpacks it, and
+                // there is no worlds view to show it in, so the file is named
+                // and the user told what it needs: the alternative is an
+                // import that calls itself a success and an empty world list
+                // with no explanation anywhere.
+                if matches!(placement, CfPlacement::Saves) {
+                    left_out.push(format!(
+                        "{} (a world — it is in the instance's saves folder as \"{}\", and the \
+                         game only reads a world as a folder, so unzip it there)",
+                        version.name, on_disk
+                    ));
+                }
+
+                if let Some(kind) = record_kind {
+                    records.push(ContentRecord {
+                        file_name: file.filename.clone(),
+                        kind,
+                        provider: "curseforge".into(),
+                        project_id: version.project_id.clone(),
+                        version_id: version.id.clone(),
+                        name: version.name.clone(),
+                        version_number: version.version_number.clone(),
+                        slug: None,
+                        icon_url: None,
+                        dependency: !entry.required,
+                        origin: Default::default(),
+                        // Pack manifests carry no dependency graph; the jars do.
+                        requires: None,
+                        side: None,
+                        server_off: false,
+                    });
+                }
             }
 
             progress
@@ -620,19 +881,10 @@ pub async fn import_into(
                 manifest.version,
                 Some("curseforge".into()),
             ));
-
-            if !blocked.is_empty() {
-                return Err(Error::msg(format!(
-                    "{} file(s) could not be downloaded because their authors disabled \
-                     third-party downloads. Install them by hand from CurseForge: {}",
-                    blocked.len(),
-                    blocked.join(", ")
-                )));
-            }
         }
     }
 
-    Ok(())
+    Ok(left_out)
 }
 
 /// How many bytes a pack's overrides may unpack to, all together.
@@ -1516,8 +1768,8 @@ async fn write_cfpack(
     };
 
     let mut manifest = CfManifestOut {
-        manifest_type: "minecraftModpack",
-        manifest_version: 1,
+        manifest_type: MODPACK_MANIFEST,
+        manifest_version: MODPACK_MANIFEST_VERSION,
         name: input.name.to_string(),
         version: input.version,
         author: author.to_string(),
@@ -2265,7 +2517,7 @@ mod tests {
     }
 
     const INDEX: &str = r#"{"formatVersion":1,"game":"minecraft","versionId":"1","name":"P","files":[],"dependencies":{"minecraft":"1.21.1"}}"#;
-    const CURSEFORGE: &str = r#"{"minecraft":{"version":"1.21.1","modLoaders":[]},"name":"P","files":[]}"#;
+    const CURSEFORGE: &str = r#"{"manifestType":"minecraftModpack","manifestVersion":1,"minecraft":{"version":"1.21.1","modLoaders":[]},"name":"P","files":[]}"#;
     const MIB: usize = 1024 * 1024;
 
     /// An index is read whole and then parsed, so one that inflates to

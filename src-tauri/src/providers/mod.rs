@@ -54,6 +54,15 @@ pub enum ProjectKind {
     /// the server rather than by the game, and so never installed into an
     /// instance.
     Plugin,
+    /// A saved world, which CurseForge publishes as a class of its own and
+    /// Modrinth does not have at all.
+    ///
+    /// Here because a CurseForge pack's manifest says nothing about where a
+    /// file goes, so the folder is read off the project — and a world read as
+    /// a mod is a zip in `mods/` for a loader to choke on. Nothing searches
+    /// for one: [`ProjectKind::parse`] has no name for it, so no search can
+    /// ask, and it only ever arrives from a class id.
+    World,
 }
 
 impl ProjectKind {
@@ -73,7 +82,8 @@ impl ProjectKind {
     ///
     /// `None` for modpacks: a pack is not a file you drop into an instance, it
     /// *becomes* an instance. Returning `ContentKind::Mod` here — as this used
-    /// to — quietly wrote the pack archive into `mods/`.
+    /// to — quietly wrote the pack archive into `mods/`. `None` for a world
+    /// too: it belongs in `saves/`, which is not content Geode tracks.
     pub fn install_kind(self) -> Option<crate::instance::content::ContentKind> {
         use crate::instance::content::ContentKind;
         match self {
@@ -82,7 +92,7 @@ impl ProjectKind {
             ProjectKind::Shader => Some(ContentKind::ShaderPack),
             ProjectKind::DataPack => Some(ContentKind::DataPack),
             ProjectKind::Plugin => Some(ContentKind::Plugin),
-            ProjectKind::Modpack => None,
+            ProjectKind::Modpack | ProjectKind::World => None,
         }
     }
 }
