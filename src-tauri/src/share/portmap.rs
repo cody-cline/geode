@@ -128,6 +128,11 @@ pub enum Status {
 /// again until the next renewal.
 pub struct PortMapper {
     status: watch::Receiver<Status>,
+    /// Where the router answered from, once it has, and `None` until then.
+    /// Only [`local_address`] wants it: the address this machine shows players
+    /// on its own network is the one facing the router, which is not what the
+    /// default route answers with on a machine holding a VPN open.
+    gateway: watch::Receiver<Option<IpAddr>>,
     /// Tells the task to stop. Dropping it does too, so a mapper dropped
     /// rather than stopped still removes its mapping if the runtime outlives
     /// the removal — but nobody waits to find out.
@@ -157,15 +162,27 @@ impl PortMapper {
     /// test ever asks a real router for anything.
     fn spawn(port: u16, finder: Finder, timings: Timings) -> Self {
         let (publish, status) = watch::channel(Status::Searching);
+        let (found, gateway) = watch::channel(None);
         let (stop, stopped) = oneshot::channel();
         // Tauri's spawn, not Tokio's: this is a plain function that may be
         // called outside any Tokio runtime context, where `tokio::spawn` panics.
-        let task = tauri::async_runtime::spawn(hold(port, finder, timings, publish, stopped));
-        Self { status, stop, task }
+        let task =
+            tauri::async_runtime::spawn(hold(port, finder, timings, publish, found, stopped));
+        Self {
+            status,
+            gateway,
+            stop,
+            task,
+        }
     }
 
     pub fn status(&self) -> watch::Receiver<Status> {
         self.status.clone()
+    }
+
+    /// Where the router was found, for [`local_address`].
+    pub fn gateway(&self) -> watch::Receiver<Option<IpAddr>> {
+        self.gateway.clone()
     }
 
     /// Stop renewing and remove the mapping, giving up after a few seconds —
@@ -188,6 +205,18 @@ impl PortMapper {
     }
 }
 
+/// What the router said when asked, and where it answered from.
+///
+/// The second half is not a detail of the first: with manual router setup
+/// nothing maps a port, so this ask is the only thing that ever finds the
+/// router, and [`local_address`] has no other way to know which of this
+/// machine's addresses faces it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Answer {
+    pub gateway: IpAddr,
+    pub external_ip: IpAddr,
+}
+
 /// Ask the router what its public address is, and change nothing.
 ///
 /// For manual router setup: the admin forwards the port themselves, but Geode
@@ -197,17 +226,21 @@ impl PortMapper {
 /// With no router on the network it takes both searches running out to say
 /// so — over ten seconds — so nothing the admin is waiting on should wait on
 /// this.
-pub async fn read_external_ip() -> std::result::Result<IpAddr, Failure> {
+pub async fn read_external_ip() -> std::result::Result<Answer, Failure> {
     read_external_ip_from(&Finder::lan(), TIMINGS).await
 }
 
 /// [`read_external_ip`] with the router and the timings chosen by the caller,
 /// for the same reason as [`PortMapper::spawn`].
-async fn read_external_ip_from(finder: &Finder, t: Timings) -> Result<IpAddr, Failure> {
+async fn read_external_ip_from(finder: &Finder, t: Timings) -> Result<Answer, Failure> {
     let gateway = finder.find(t.search).await?;
     // A fresh record: whether the router went missing only matters to a
     // task that will try it again.
-    Held::default().external_ip(&gateway, t).await
+    let external_ip = Held::default().external_ip(&gateway, t).await?;
+    Ok(Answer {
+        gateway: gateway.addr.ip(),
+        external_ip,
+    })
 }
 
 /// What an external address means for whether players can connect.
@@ -322,6 +355,48 @@ fn local_toward(gateway: IpAddr) -> std::io::Result<IpAddr> {
     Ok(socket.local_addr()?.ip())
 }
 
+/// This machine's own address on the network it shares with the router, for
+/// the players who are on that network too.
+///
+/// The same question the mapping asks about where to forward to, put to the OS
+/// the same way, and only ever asked toward a router that was really found —
+/// published by the mapping, or answered from by the ask in
+/// [`read_external_ip`]. Asking toward the internet instead would be the
+/// default route, and a machine holding a VPN open routes the internet down
+/// the tunnel: the answer would be its address there, which no player in the
+/// house can reach, offered under a heading saying they can. So no router,
+/// no address — the admin keeps the public one, which is the one that was
+/// working for them anyway.
+///
+/// `None` as well unless the answer really is an address only this network can
+/// reach. Anything else is this machine's public address, a tunnel's, or
+/// loopback — and none of the three is somewhere a player in the house can be
+/// sent.
+pub fn local_address(gateway: Option<IpAddr>) -> Option<IpAddr> {
+    local_from(gateway, local_toward)
+}
+
+/// [`local_address`] with the question put to something other than the OS —
+/// the seam tests use, so that none of them depends on the routing table of
+/// the machine it happens to run on.
+fn local_from(
+    gateway: Option<IpAddr>,
+    ask: impl FnOnce(IpAddr) -> std::io::Result<IpAddr>,
+) -> Option<IpAddr> {
+    ask(gateway?).ok().filter(is_local)
+}
+
+/// Whether an address is one only this network reaches: a private range or a
+/// link-local address. Loopback is not one, however local it looks — a router
+/// answering from this very machine is the one way to get it, and the address
+/// it would put under "On this network" reaches nobody else on that network.
+///
+/// IPv4, because that is all the question is asked of: UPnP-IGD speaks no
+/// other, so the router it is asked toward is always one.
+fn is_local(ip: &IpAddr) -> bool {
+    matches!(ip, IpAddr::V4(v4) if v4.is_private() || v4.is_link_local())
+}
+
 /// The mapping task: map, then renew at half the lease until told to stop,
 /// then remove.
 ///
@@ -337,6 +412,7 @@ async fn hold(
     finder: Finder,
     timings: Timings,
     publish: watch::Sender<Status>,
+    found: watch::Sender<Option<IpAddr>>,
     mut stop: oneshot::Receiver<()>,
 ) {
     let mut held = Held::default();
@@ -351,6 +427,14 @@ async fn hold(
             Err(Halt::Failed(failure)) => Status::Failed(failure),
             Err(Halt::Stopped) => break,
         };
+        // Whether or not the attempt worked: a router that has stopped
+        // answering is still where this machine's own address faces.
+        found.send_if_modified(|current| {
+            let gateway = held.gateway.as_ref().map(|gateway| gateway.addr.ip());
+            let changed = *current != gateway;
+            *current = gateway;
+            changed
+        });
         let wait = if matches!(now, Status::Failed(_)) {
             let wait = retry;
             retry = (retry * 2).min(timings.retry_limit);
@@ -847,6 +931,82 @@ pub(super) mod tests {
         ] {
             assert_eq!(classify(ip(addr)), expected, "{addr}");
         }
+    }
+
+    /// Which address [`local_from`] put the question to, if it asked at all,
+    /// and what it made of the answer.
+    fn asked(
+        gateway: Option<IpAddr>,
+        answer: std::io::Result<IpAddr>,
+    ) -> (Option<IpAddr>, Option<IpAddr>) {
+        let mut toward = None;
+        let found = local_from(gateway, |destination| {
+            toward = Some(destination);
+            answer
+        });
+        (toward, found)
+    }
+
+    /// The address for players on this network is read toward the router, and
+    /// only toward a router that was really found. With none — manual setup
+    /// where the ask went unanswered, or a search that found nothing — the
+    /// question is not asked at all, because the only thing left to ask
+    /// toward is the way out, and on a machine holding a VPN open that is the
+    /// tunnel: an address nobody in the house can reach, offered under a
+    /// heading saying they can.
+    #[test]
+    fn the_local_address_is_only_ever_read_toward_a_router_that_was_found() {
+        let gateway = ip("192.168.1.1");
+        let lan = ip("192.168.1.50");
+
+        assert_eq!(asked(Some(gateway), Ok(lan)), (Some(gateway), Some(lan)));
+        assert_eq!(
+            asked(None, Ok(lan)),
+            (None, None),
+            "the question went somewhere with no router to ask toward"
+        );
+
+        for here in ["10.0.0.4", "172.16.9.9", "192.168.1.50", "169.254.3.3"] {
+            let found = asked(Some(gateway), Ok(ip(here))).1;
+            assert_eq!(found, Some(ip(here)), "{here}");
+        }
+        // Anything else is this machine's address out on the internet, a
+        // tunnel's, or loopback — and no other player on this network reaches
+        // it at any of the three.
+        for away in [
+            "81.2.69.160",
+            "203.0.113.7",
+            "100.72.1.9",
+            "0.0.0.0",
+            "127.0.0.1",
+            "::1",
+        ] {
+            assert_eq!(asked(Some(gateway), Ok(ip(away))).1, None, "{away}");
+        }
+        // No route at all is no address either.
+        assert_eq!(
+            asked(Some(gateway), Err(std::io::Error::other("no route"))).1,
+            None
+        );
+    }
+
+    /// The mapping knows where the router is, and hands that on, so the
+    /// address shown to players on this network is the one facing it.
+    #[tokio::test]
+    async fn a_mapping_hands_on_the_router_it_found() {
+        let router = granting("81.2.69.160").await;
+
+        let mapper = mapper_at(&[router.http_addr()], quick(LEASE));
+        settle(&mapper, |s| matches!(s, Status::Mapped { .. })).await;
+
+        let gateway = *mapper.gateway().borrow();
+        assert_eq!(gateway, Some(ip("127.0.0.1")));
+        // Asked of the OS the way the app asks it: the mock router is on
+        // loopback, so the address facing it is loopback — which is nowhere to
+        // send a player in the house, however local it looks.
+        assert_eq!(local_address(gateway), None);
+
+        mapper.stop().await;
     }
 
     /// The UI's `PortMappingStatus` type is the other half of this shape.
@@ -1395,12 +1555,23 @@ pub(super) mod tests {
 
     /// For manual router setup, where the admin was promised the router is
     /// left alone.
+    ///
+    /// It comes back with where the router answered from as well as what it
+    /// said, because in manual setup nothing else ever finds the router, and
+    /// without it there is no telling which of this machine's addresses faces
+    /// the network it shares with the players in the house.
     #[tokio::test]
     async fn reading_the_external_address_asks_for_it_and_changes_nothing() {
         let router = granting("81.2.69.160").await;
 
         let read = read_external_ip_from(&known(router.http_addr()), quick(LEASE)).await;
-        assert_eq!(read, Ok(ip("81.2.69.160")));
+        assert_eq!(
+            read,
+            Ok(Answer {
+                gateway: ip("127.0.0.1"),
+                external_ip: ip("81.2.69.160"),
+            })
+        );
 
         let asked: Vec<String> = router
             .received_requests()

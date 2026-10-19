@@ -14,8 +14,10 @@ import Modal from "../../components/Modal";
 import StatusNote from "../../components/StatusNote";
 import { api, errorMessage } from "../../lib/api";
 import {
+  addressChangedLine,
   linkPendingReason,
   listenLine,
+  localAddressHint,
   readOutHint,
   replacedPasswordBody,
   routerLine,
@@ -30,7 +32,21 @@ import type { Server, ServerShareView } from "../../lib/types";
 import viewStyles from "../ServerView.module.css";
 import styles from "./ShareTab.module.css";
 
-function CopyButton({ text, what }: { text: string; what: string }) {
+function CopyButton({
+  text,
+  what,
+  label = "Copy",
+  small = false,
+  onCopied,
+}: {
+  text: string;
+  what: string;
+  /** The wording on the button, for one that is not beside what it copies. */
+  label?: string;
+  /** Smaller, for a copy that is secondary to the one above it. */
+  small?: boolean;
+  onCopied?: () => void;
+}) {
   const reportError = useStore((s) => s.reportError);
   const [copied, setCopied] = useState(false);
 
@@ -42,17 +58,20 @@ function CopyButton({ text, what }: { text: string; what: string }) {
 
   return (
     <button
-      className="btn"
+      className={clsx("btn", small && "btn-sm")}
       aria-label={`Copy the ${what}`}
       onClick={() =>
         navigator.clipboard
           .writeText(text)
-          .then(() => setCopied(true))
+          .then(() => {
+            setCopied(true);
+            onCopied?.();
+          })
           .catch((e) => reportError(`Could not copy the ${what}`, e))
       }
     >
       {copied ? <Check size={14} /> : <Copy size={14} />}
-      {copied ? "Copied" : "Copy"}
+      {copied ? "Copied" : label}
     </button>
   );
 }
@@ -81,6 +100,7 @@ export default function ShareTab({ server }: { server: Server }) {
   const [confirming, setConfirming] = useState<"rotate" | "stop" | null>(null);
 
   const hasPublicAddress = Boolean(config?.share.publicAddress);
+  const changed = addressChangedLine(status, share?.lastLinkAddress ?? null);
 
   useEffect(() => {
     loadShareStatus()
@@ -137,6 +157,22 @@ export default function ShareTab({ server }: { server: Server }) {
       api.setServerShareConfig(server.id, include),
     );
     if (view) setShare(view);
+  }
+
+  /**
+   * The admin has taken the link, so Geode can tell them later if the address
+   * it points at has changed. Only this link: the one for this network points
+   * somewhere players elsewhere were never sent.
+   *
+   * A failure here costs nothing but that note, and the copy itself has
+   * already worked, so it is not worth an error in front of the admin.
+   */
+  async function remember() {
+    try {
+      setShare(await api.shareLinkCopied(server.id));
+    } catch {
+      /* the link is on the clipboard either way */
+    }
   }
 
   async function rotate() {
@@ -317,12 +353,20 @@ export default function ShareTab({ server }: { server: Server }) {
                       aria-label="Link for players"
                       onFocus={(e) => e.currentTarget.select()}
                     />
-                    <CopyButton text={share.link} what="link" />
+                    <CopyButton
+                      text={share.link}
+                      what="link"
+                      onCopied={() => void remember()}
+                    />
                   </div>
                   <p className="hint">
                     Send this to players. Opening it shows them the pack in
                     Geode before anything is downloaded.
                   </p>
+                  {/* Only once a link has been taken and the address has moved
+                      on since. Nothing is said before that: an address that
+                      has not changed is not news. */}
+                  {changed && <StatusNote line={changed} />}
                 </>
               ) : (
                 <StatusNote
@@ -362,6 +406,38 @@ export default function ShareTab({ server }: { server: Server }) {
               </div>
               <p className="hint">{readOutHint(status)}</p>
             </div>
+
+            {/* The same machine, reached the short way. A player in the house
+                cannot always be sent out to the router and back, and neither
+                can the admin testing their own link. */}
+            {status?.localAddress && (
+              <div>
+                <span className="label">On this network</span>
+                <div className={styles.readOut}>
+                  <div className={styles.copyRow}>
+                    <code className={styles.code}>{status.localAddress}</code>
+                    <CopyButton
+                      text={status.localAddress}
+                      what="address for this network"
+                    />
+                  </div>
+                  {share.localLink && (
+                    // Smaller than the link above on purpose: that one is what
+                    // players are sent, and this one reaches no further than
+                    // this network.
+                    <div className={styles.actions}>
+                      <CopyButton
+                        small
+                        label="Copy the link for this network"
+                        text={share.localLink}
+                        what="link for this network"
+                      />
+                    </div>
+                  )}
+                </div>
+                <p className="hint">{localAddressHint(status)}</p>
+              </div>
+            )}
 
             <label className={viewStyles.settingToggle}>
               <input

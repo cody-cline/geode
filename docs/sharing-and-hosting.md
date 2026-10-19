@@ -191,6 +191,31 @@ connects straight to the admin's machine. Nothing sits in the middle.
   nowhere else, so that holds while an instance joined from the address exists;
   delete the last one and the next typed join is a first use again. The first
   time is still the weaker case, which is why the link is what admins copy.
+- Beside that link, the Share tab shows **this machine's own address on its
+  network** with the pack port, and a clearly secondary link carrying it, for
+  players in the same house and for the admin trying their own link. Never
+  instead of the public one. The address is the one the OS says faces the
+  router — the same question the mapping asks to tell the router where to
+  forward, asked toward the router UPnP found when there is one and toward the
+  internet at large when none ever was, since a machine holding a VPN open
+  would otherwise answer with its address down the tunnel, which nobody in the
+  house can reach. It is offered only when the answer really is private,
+  link-local or loopback, and only while something is listening. Nothing new
+  has to listen for it: the pack listener already takes every interface, and
+  trust is pinned to the certificate rather than to a host name, so the local
+  link carries the same fingerprint and proves it reached the same machine.
+- When the address links were last taken at is no longer the address Geode
+  sees, the Share tab says so under the link: the links already sent point at
+  the old one and no longer work, and the one above it is the new one. The
+  address is remembered per server in `servers/<id>/share.link.json` and only
+  when the admin takes a link, because before that nobody has been sent one to
+  go stale; it survives restarts, so an address that moved while Geode was
+  closed is still news. Taking the new link clears the note. There is no
+  warning before the address has actually changed and no popup either way: the
+  mapping's renewals and the manual detector re-read the address every half
+  hour, and the note follows the status they announce. What this does not do is
+  move a player's existing instance to the new address — relinking still needs
+  the address the instance was joined at.
 - The router is asked to open the port over UPnP (`portmap.rs`): leased for an
   hour, renewed at half, removed on exit, and retried after ten seconds —
   doubling to a minute — whenever an attempt fails. A router that only grants
@@ -458,7 +483,9 @@ forwarding and made it connect, and a hostile link was dropped.
   is the real test. A router without NAT loopback cannot reach its own public
   address from inside, so an admin trying their own link on their own machine
   can be told the server could not be reached and its port may not be open to
-  the internet, for a link that works for everyone else.
+  the internet, for a link that works for everyone else. The Share tab now says
+  so where that admin meets it, and offers the address on this network — which
+  does work from here — beside the password.
 - Windows may ask to allow Geode through its firewall the first time a server
   is shared. Refused, the router goes on showing the port open while every
   player times out, and only the hints on the Share tab point at it.

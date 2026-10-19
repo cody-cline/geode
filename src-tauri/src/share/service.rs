@@ -21,6 +21,7 @@ use serde::Serialize;
 use tokio::sync::{watch, Mutex};
 
 use crate::config::{PortMapping, ShareConfig};
+use crate::error::Result;
 use crate::events::{self, EventSink};
 use crate::paths::Paths;
 use crate::server::share::ServerShare;
@@ -69,6 +70,12 @@ struct Timings {
     retry_limit: Duration,
     /// [`ESCALATE_AFTER`].
     escalate_after: Duration,
+    /// How often the watcher looks again at this machine's own address on its
+    /// network. Nothing announces that one: a new DHCP lease moves it while
+    /// the mapping, the public address, the port and the certificate stay
+    /// exactly as they were, and a Share tab left open would go on showing an
+    /// address nobody on this network can reach.
+    relook: Duration,
 }
 
 /// The same shape [`portmap`] retries a router with, and for the same reason:
@@ -78,6 +85,7 @@ const TIMINGS: Timings = Timings {
     retry: Duration::from_secs(4),
     retry_limit: Duration::from_secs(60),
     escalate_after: ESCALATE_AFTER,
+    relook: Duration::from_secs(60),
 };
 
 impl Default for Timings {
@@ -111,6 +119,12 @@ pub struct ShareStatus {
     pub mapping: portmap::Status,
     /// The address links are made with, when one is known.
     pub address: Option<String>,
+    /// This machine's own address on the network it is on, with the pack
+    /// port, for the players who are on that network too — and for the admin
+    /// testing their own link, whose router may well refuse to send a
+    /// connection to the public address back in to itself. Beside
+    /// [`ShareStatus::address`], never instead of it.
+    pub local_address: Option<String>,
     /// The certificate fingerprint players pin, as hex.
     pub fingerprint: String,
 }
@@ -157,16 +171,31 @@ struct Detection {
     /// Whether an ask has finished, answered or not.
     asked: bool,
     found: Option<Detected>,
+    /// Where the router answered from. Manual setup holds no mapping, so this
+    /// ask is the only thing that ever finds the router, and
+    /// [`portmap::local_address`] has nothing else to measure this machine's
+    /// own address against.
+    gateway: Option<IpAddr>,
 }
 
 impl Detection {
-    /// After another ask. An address the router gave before is kept when this
-    /// ask went unanswered: one request lost on busy Wi-Fi does not mean the
-    /// address changed, and forgetting it would take a working link away.
-    fn after(self, read: Option<Detected>) -> Self {
+    /// After another ask: where the router answered from, and what it said
+    /// the public address is.
+    ///
+    /// Both are kept when this ask went unanswered: one request lost on busy
+    /// Wi-Fi does not mean the address changed, and forgetting it would take a
+    /// working link away. A router that has stopped answering is also still
+    /// where this machine's own address faces, which is how the mapping treats
+    /// it too.
+    fn after(self, read: Option<(IpAddr, Detected)>) -> Self {
+        let (gateway, found) = match read {
+            Some((gateway, found)) => (Some(gateway), Some(found)),
+            None => (None, None),
+        };
         Self {
             asked: true,
-            found: read.or(self.found),
+            found: found.or(self.found),
+            gateway: gateway.or(self.gateway),
         }
     }
 }
@@ -182,6 +211,45 @@ pub struct ShareService {
     /// on a real network, and asking a real router anything is not theirs to do.
     quiet: bool,
     timings: Timings,
+    local: Local,
+}
+
+/// Where the address for players on this same network comes from.
+#[derive(Clone, Default)]
+enum Local {
+    /// The OS, asked which of this machine's addresses faces the router.
+    #[default]
+    Os,
+    /// Whatever a test says this machine's address is, the router it was asked
+    /// toward and all: the real one is whatever the routing table of the
+    /// machine a test happens to run on says, which is nothing a test can be
+    /// written against — `portmap` covers the question itself. Held behind a
+    /// lock because a test moves it partway, which is the one thing about this
+    /// address that nothing announces.
+    #[cfg(test)]
+    Told(std::sync::Arc<std::sync::Mutex<Option<IpAddr>>>),
+}
+
+impl Local {
+    fn address(&self, gateway: Option<IpAddr>) -> Option<IpAddr> {
+        match self {
+            Local::Os => portmap::local_address(gateway),
+            #[cfg(test)]
+            Local::Told(told) => *told.lock().unwrap(),
+        }
+    }
+}
+
+/// Where the router is, however this setup found it.
+///
+/// Automatic setup has a mapping, which publishes it. Manual setup has no
+/// mapper at all — it is the setup an admin lands in precisely because their
+/// router would not open the port — so the ask that reads the public address
+/// carries where it answered from, and that is the same router. Without
+/// either, nothing: [`portmap::local_address`] says why an address guessed
+/// toward the internet is worse than none.
+fn gateway_of(mapped: Option<IpAddr>, detection: Option<Detection>) -> Option<IpAddr> {
+    mapped.or_else(|| detection.and_then(|detection| detection.gateway))
 }
 
 #[derive(Default)]
@@ -267,7 +335,8 @@ impl ShareService {
     ) {
         let _turn = self.serial.lock().await;
         let config = state.config().await.share;
-        self.reconcile_taking_turn(&state.paths, &config, sink).await;
+        self.reconcile_taking_turn(&state.paths, &config, sink)
+            .await;
     }
 
     /// The same, with the settings given. What tests call; the app goes through
@@ -345,7 +414,9 @@ impl ShareService {
     /// How long to wait after `attempts` failures in a row: the first wait,
     /// doubled by each further failure, up to the ceiling.
     fn backoff(&self, attempts: u32) -> Duration {
-        let doubling = 1u32.checked_shl(attempts.saturating_sub(1)).unwrap_or(u32::MAX);
+        let doubling = 1u32
+            .checked_shl(attempts.saturating_sub(1))
+            .unwrap_or(u32::MAX);
         self.timings
             .retry
             .saturating_mul(doubling)
@@ -478,9 +549,10 @@ impl ShareService {
         let pin = self.pin(paths).await;
         let mut inner = self.inner.lock().await;
 
-        let stale = inner.running.as_ref().is_some_and(|running| {
-            matches!(wanted, Wanted::Stop) || running.port != config.port
-        });
+        let stale = inner
+            .running
+            .as_ref()
+            .is_some_and(|running| matches!(wanted, Wanted::Stop) || running.port != config.port);
         if stale {
             if let Some(running) = inner.running.take() {
                 stop(running).await;
@@ -537,6 +609,11 @@ impl ShareService {
             running.watcher = Some(tokio::spawn(announce(
                 running.mapper.as_ref().map(PortMapper::status),
                 running.detected.clone(),
+                Nearby {
+                    gateway: running.mapper.as_ref().map(PortMapper::gateway),
+                    local: self.local.clone(),
+                    relook: self.timings.relook,
+                },
                 config.clone(),
                 pin,
                 sink.clone(),
@@ -556,7 +633,16 @@ impl ShareService {
     pub async fn status(&self, paths: &Paths, config: &ShareConfig) -> ShareStatus {
         let pin = self.pin(paths).await;
         let inner = self.inner.lock().await;
-        assemble(&inner, config, pin)
+        let running = inner.running.as_ref();
+        let gateway = gateway_of(
+            running
+                .and_then(|running| running.mapper.as_ref())
+                .and_then(|mapper| *mapper.gateway().borrow()),
+            running
+                .and_then(|running| running.detected.as_ref())
+                .map(|detected| *detected.borrow()),
+        );
+        assemble(&inner, config, pin, self.local.address(gateway))
     }
 
     /// The link for a shared server, when there is an address to put in it.
@@ -582,6 +668,49 @@ impl ShareService {
             code: share.code.clone(),
             pin,
         })
+    }
+
+    /// The second link for a shared server: the one a player in the same house
+    /// can click instead of typing this machine's address by hand.
+    ///
+    /// Only ever offered beside the link above, because it reaches no further
+    /// than this network. It carries the same fingerprint, which is what makes
+    /// it as safe as any other link — see [`local_address`].
+    pub async fn local_link_for(
+        &self,
+        paths: &Paths,
+        config: &ShareConfig,
+        share: &ServerShare,
+    ) -> Option<Link> {
+        let status = self.status(paths, config).await;
+        // Read back through the strict parser, like a link off the internet:
+        // nothing here is special enough to skip it. The status only carries
+        // an address while the listener is up, so there is no link to a port
+        // nothing answers on.
+        let address = Address::parse(&status.local_address?, config.port).ok()?;
+        Some(Link {
+            address,
+            code: share.code.clone(),
+            pin: Some(self.pin(paths).await?),
+        })
+    }
+
+    /// Remember the address this server's links are being handed out with, as
+    /// the admin takes one.
+    ///
+    /// Only when they take one: an admin who has sent nobody a link has no
+    /// links to go stale, and nothing should be said to them when the address
+    /// changes.
+    pub async fn remember_link_address(
+        &self,
+        paths: &Paths,
+        config: &ShareConfig,
+        id: &str,
+    ) -> Result<()> {
+        if let Some(address) = self.status(paths, config).await.address {
+            crate::server::share::save_link_address(paths, id, &address).await?;
+        }
+        Ok(())
     }
 
     /// Cut every preview and download whose server is no longer shared as it
@@ -642,9 +771,14 @@ fn detect() -> watch::Receiver<Detection> {
     let (publish, detected) = watch::channel(Detection::default());
     tauri::async_runtime::spawn(async move {
         loop {
-            let read = portmap::read_external_ip().await.ok().map(|ip| Detected {
-                ip,
-                reachability: portmap::classify(ip),
+            let read = portmap::read_external_ip().await.ok().map(|answer| {
+                (
+                    answer.gateway,
+                    Detected {
+                        ip: answer.external_ip,
+                        reachability: portmap::classify(answer.external_ip),
+                    },
+                )
             });
             let wait = if read.is_some() {
                 DETECT_EVERY
@@ -664,14 +798,41 @@ fn detect() -> watch::Receiver<Detection> {
     detected
 }
 
-/// Announce every change in the mapping or the detected address.
+/// Where this machine's own address on its network is asked for, and how
+/// often to ask again. Grouped because nothing announces that address: the
+/// router it faces arrives on a channel, the answer itself does not, so the
+/// watcher is the only thing that can notice it moved.
+struct Nearby {
+    gateway: Option<watch::Receiver<Option<IpAddr>>>,
+    local: Local,
+    relook: Duration,
+}
+
+/// Announce every change in the mapping or the detected address — and this
+/// machine's own address on its network, which no channel here reports, so it
+/// is looked at again on a timer and announced when it has moved.
 async fn announce(
     mut mapping: Option<watch::Receiver<portmap::Status>>,
     mut detected: Option<watch::Receiver<Detection>>,
+    nearby: Nearby,
     config: ShareConfig,
     pin: Option<Pin>,
     sink: Option<EventSink>,
 ) {
+    let Nearby {
+        gateway,
+        local,
+        relook,
+    } = nearby;
+    // What the status the reconcile has just announced said about this
+    // machine's own address, so the first look round is measured against that
+    // rather than against nothing.
+    let mut announced = here(
+        &local,
+        gateway.as_ref().and_then(|g| *g.borrow()),
+        detected.as_ref().map(|d| *d.borrow()),
+        &config,
+    );
     loop {
         let changed = async {
             match (&mut mapping, &mut detected) {
@@ -680,9 +841,18 @@ async fn announce(
                 (None, None) => false,
             }
         };
-        if !changed.await {
-            return;
-        }
+        // Either something said so, or the clock came round: with nothing left
+        // to follow there is nothing to look again for either, and the watcher
+        // is done.
+        let said = tokio::select! {
+            changed = changed => {
+                if !changed {
+                    return;
+                }
+                true
+            }
+            _ = tokio::time::sleep(relook) => false,
+        };
         let current = mapping
             .as_ref()
             .map(|m| m.borrow().clone())
@@ -700,18 +870,53 @@ async fn announce(
             // there is nothing to try again in.
             retry: None,
             address: reachable_address(&config, &current, found).map(|a| a.display()),
+            local_address: here(
+                &local,
+                gateway.as_ref().and_then(|g| *g.borrow()),
+                detection,
+                &config,
+            ),
             mapping: current,
             fingerprint: pin.map(|p| p.to_hex()).unwrap_or_default(),
         };
+        // A look that found the same address as the last announcement is not
+        // news; a change something announced is, whatever it was.
+        if !said && status.local_address == announced {
+            continue;
+        }
+        announced = status.local_address.clone();
         events::emit(&sink, STATUS_EVENT, &status);
     }
 }
 
-fn assemble(inner: &Inner, config: &ShareConfig, pin: Option<Pin>) -> ShareStatus {
+/// This machine's own address on its network, asked afresh: the router may
+/// have been found after the watcher started — by the first mapping, or by the
+/// first ask in manual setup — and the address facing it is the better answer.
+fn here(
+    local: &Local,
+    gateway: Option<IpAddr>,
+    detection: Option<Detection>,
+    config: &ShareConfig,
+) -> Option<String> {
+    local
+        .address(gateway_of(gateway, detection))
+        .and_then(|ip| local_address(ip, config))
+        .map(|a| a.display())
+}
+
+fn assemble(
+    inner: &Inner,
+    config: &ShareConfig,
+    pin: Option<Pin>,
+    local: Option<IpAddr>,
+) -> ShareStatus {
     // Listening means listening on the port the settings name now. A listener
     // left on an old port is not something a link built from these settings
     // could reach.
-    let running = inner.running.as_ref().filter(|running| running.port == config.port);
+    let running = inner
+        .running
+        .as_ref()
+        .filter(|running| running.port == config.port);
     let mapping = running
         .and_then(|running| running.mapper.as_ref())
         .map(|mapper| mapper.status().borrow().clone())
@@ -740,6 +945,12 @@ fn assemble(inner: &Inner, config: &ShareConfig, pin: Option<Pin>) -> ShareStatu
         // address set.
         address: running
             .and_then(|_| reachable_address(config, &mapping, detected))
+            .map(|a| a.display()),
+        // Nor while nothing listens, for the same reason: an address with
+        // nothing behind it is not somewhere a player can be sent.
+        local_address: running
+            .and(local)
+            .and_then(|ip| local_address(ip, config))
             .map(|a| a.display()),
         mapping,
         fingerprint: pin.map(|p| p.to_hex()).unwrap_or_default(),
@@ -791,6 +1002,23 @@ fn reachable_address(
     Address::parse(&std::net::SocketAddr::new(ip, port).to_string(), port).ok()
 }
 
+/// The address players on this same network use, on the pack port.
+///
+/// Safe to hand out as a link of its own because trust is pinned to the
+/// certificate and not to a host name: a player who connects here is held to
+/// the very same fingerprint as one coming in from the internet, so a LAN link
+/// proves it reached this machine exactly as any other link does. The listener
+/// already takes every interface, so nothing new has to listen for it.
+///
+/// Through the same parser as the public address, for the same reason.
+fn local_address(ip: IpAddr, config: &ShareConfig) -> Option<Address> {
+    Address::parse(
+        &std::net::SocketAddr::new(ip, config.port).to_string(),
+        config.port,
+    )
+    .ok()
+}
+
 #[cfg(test)]
 mod tests {
     //! Sharing end to end, over real TLS on loopback: an admin shares a server,
@@ -828,7 +1056,10 @@ mod tests {
         };
         let run = paths.server_run(&server.id);
         let files: Vec<(&str, Vec<u8>)> = vec![
-            ("server.properties", b"enable-rcon=true\nrcon.password=hunter2\n".to_vec()),
+            (
+                "server.properties",
+                b"enable-rcon=true\nrcon.password=hunter2\n".to_vec(),
+            ),
             ("ops.json", br#"[{"name":"admin"}]"#.to_vec()),
             ("config/tokens.toml", b"discord = \"hunter2\"\n".to_vec()),
             ("mods/homemade.jar", fabric_jar("homemade", "*")),
@@ -836,7 +1067,9 @@ mod tests {
         ];
         for (rel, bytes) in files {
             let path = run.join(rel);
-            tokio::fs::create_dir_all(path.parent().unwrap()).await.unwrap();
+            tokio::fs::create_dir_all(path.parent().unwrap())
+                .await
+                .unwrap();
             tokio::fs::write(path, bytes).await.unwrap();
         }
         server.save(paths).await.unwrap();
@@ -853,6 +1086,24 @@ mod tests {
         })
     }
 
+    /// An answer to which of this machine's addresses faces its own network
+    /// that a test can give and then change, since the real one is whatever
+    /// the routing table of the machine it runs on says; `portmap` covers the
+    /// question itself.
+    fn told(local: Option<&str>) -> (Local, std::sync::Arc<std::sync::Mutex<Option<IpAddr>>>) {
+        let cell = std::sync::Arc::new(std::sync::Mutex::new(local.map(|ip| ip.parse().unwrap())));
+        (Local::Told(cell.clone()), cell)
+    }
+
+    /// The same as [`service`], with that answer.
+    fn service_on_network(local: Option<&str>) -> Arc<ShareService> {
+        Arc::new(ShareService {
+            quiet: true,
+            local: told(local).0,
+            ..Default::default()
+        })
+    }
+
     /// The same, retrying a listener in milliseconds rather than a minute:
     /// the first retry after `retry`, doubling to twice that, and the admin
     /// told once `escalate_after` of failing has gone by.
@@ -863,6 +1114,7 @@ mod tests {
                 retry,
                 retry_limit: retry * 2,
                 escalate_after,
+                ..Default::default()
             },
             ..Default::default()
         })
@@ -876,7 +1128,10 @@ mod tests {
     /// player's Geode reads one — so the real parser is in the path.
     fn link(port: u16, code: &Code, pin: Pin) -> Link {
         let written = Link {
-            address: Address::Direct { host: "127.0.0.1".into(), port },
+            address: Address::Direct {
+                host: "127.0.0.1".into(),
+                port,
+            },
             code: code.clone(),
             pin: Some(pin),
         };
@@ -922,7 +1177,9 @@ mod tests {
         let player_scratch = Scratch::new("e2e-join-player");
         let player = player_scratch.paths.clone();
         let archive = player.root.join("incoming.geodepack");
-        join::download(&preview.link, &archive, &Progress::silent("t")).await.unwrap();
+        join::download(&preview.link, &archive, &Progress::silent("t"))
+            .await
+            .unwrap();
 
         let sent = entries(&archive);
         let names: Vec<&str> = sent.iter().map(|(n, _)| n.as_str()).collect();
@@ -933,7 +1190,10 @@ mod tests {
             assert!(names.contains(&jar), "{jar} was not sent: {names:?}");
         }
         for never in ["server.properties", "ops.json", "tokens.toml"] {
-            assert!(!names.iter().any(|n| n.contains(never)), "{never} was sent: {names:?}");
+            assert!(
+                !names.iter().any(|n| n.contains(never)),
+                "{never} was sent: {names:?}"
+            );
         }
         // Belt and braces: the secret appears in no entry's contents either.
         for (name, bytes) in &sent {
@@ -944,7 +1204,9 @@ mod tests {
         }
 
         // And it imports as the server's, through the same path as the app.
-        let described = crate::instance::modpack::preview(archive.clone()).await.unwrap();
+        let described = crate::instance::modpack::preview(archive.clone())
+            .await
+            .unwrap();
         let mut instance = crate::instance::create(
             &player,
             described.name,
@@ -986,9 +1248,14 @@ mod tests {
             Some(crate::instance::jar::Side::Server),
             "the server's classification did not arrive"
         );
-        crate::instance::content::remove_in(&mods, &mut instance.content, ContentKind::Mod, "homemade.jar")
-            .await
-            .expect_err("a player cannot delete the server's mod");
+        crate::instance::content::remove_in(
+            &mods,
+            &mut instance.content,
+            ContentKind::Mod,
+            "homemade.jar",
+        )
+        .await
+        .expect_err("a player cannot delete the server's mod");
 
         host.stop().await;
     }
@@ -1004,14 +1271,18 @@ mod tests {
         let pin = pin_of(&admin).await;
         let original = share.code.clone();
 
-        let err = join::preview(link(port, &Code::generate(), pin)).await.unwrap_err();
+        let err = join::preview(link(port, &Code::generate(), pin))
+            .await
+            .unwrap_err();
         assert!(
             err.to_string().contains("did not accept this password"),
             "{err}"
         );
 
         let impostor = Pin([7u8; 32]);
-        let err = join::preview(link(port, &original, impostor)).await.unwrap_err();
+        let err = join::preview(link(port, &original, impostor))
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("did not prove"), "{err}");
 
         // A new password cuts off the old one on the very next request.
@@ -1056,7 +1327,9 @@ mod tests {
         );
 
         // Nothing but the two paths is served, even with a good connection.
-        let client = crate::share::trust::TrustedClient::new(crate::share::trust::Trust::Pinned(pin)).unwrap();
+        let client =
+            crate::share::trust::TrustedClient::new(crate::share::trust::Trust::Pinned(pin))
+                .unwrap();
         let response = client
             .client
             .get(format!("https://127.0.0.1:{port}/"))
@@ -1096,7 +1369,9 @@ mod tests {
         let preview = join::preview(typed).await.unwrap();
         assert_eq!(preview.verified, join::Verified::FirstUse);
         assert_eq!(preview.link.pin, Some(pin_of(&admin).await));
-        join::download(&preview.link, &archive, &Progress::silent("t")).await.unwrap();
+        join::download(&preview.link, &archive, &Progress::silent("t"))
+            .await
+            .unwrap();
 
         host.stop().await;
     }
@@ -1198,11 +1473,21 @@ mod tests {
         service.reconcile_with(&admin, &config, None).await;
         let status = service.status(&admin, &config).await;
         assert!(status.listening, "{status:?}");
-        assert_eq!(status.mapping, portmap::Status::Off, "manual means the router is left alone");
-        assert_eq!(status.address.as_deref(), Some(format!("127.0.0.1:{first}").as_str()));
+        assert_eq!(
+            status.mapping,
+            portmap::Status::Off,
+            "manual means the router is left alone"
+        );
+        assert_eq!(
+            status.address.as_deref(),
+            Some(format!("127.0.0.1:{first}").as_str())
+        );
         assert!(!port_is_free(first));
 
-        let link = service.link_for(&admin, &config, &share).await.expect("an address is set");
+        let link = service
+            .link_for(&admin, &config, &share)
+            .await
+            .expect("an address is set");
         assert_eq!(link.pin, Some(pin_of(&admin).await));
         join::preview(link).await.unwrap();
 
@@ -1220,10 +1505,17 @@ mod tests {
 
         // A share file that cannot be read is not the same as nothing shared:
         // stopping would cut players off from a server that still is.
-        tokio::fs::write(server_share::path(&admin, &server.id), b"{ not json").await.unwrap();
+        tokio::fs::write(server_share::path(&admin, &server.id), b"{ not json")
+            .await
+            .unwrap();
         service.reconcile_with(&admin, &moved, None).await;
-        assert!(service.status(&admin, &moved).await.listening, "an unreadable share stopped the listener");
-        server_share::save(&admin, &server.id, &share).await.unwrap();
+        assert!(
+            service.status(&admin, &moved).await.listening,
+            "an unreadable share stopped the listener"
+        );
+        server_share::save(&admin, &server.id, &share)
+            .await
+            .unwrap();
 
         // Stopped again: stops, and the port is free.
         server_share::stop(&admin, &server.id).await.unwrap();
@@ -1401,7 +1693,8 @@ mod tests {
         };
 
         assert_eq!(
-            reachable_address(&auto, &mapped("203.0.113.7", Reachability::Public), None).map(|a| a.display()),
+            reachable_address(&auto, &mapped("203.0.113.7", Reachability::Public), None)
+                .map(|a| a.display()),
             Some("203.0.113.7:25590".into())
         );
         for (ip, unreachable) in [
@@ -1409,7 +1702,11 @@ mod tests {
             ("192.168.1.2", Reachability::DoubleNat),
             ("0.0.0.0", Reachability::NoIpv4),
         ] {
-            assert_eq!(reachable_address(&auto, &mapped(ip, unreachable), None), None, "{ip}");
+            assert_eq!(
+                reachable_address(&auto, &mapped(ip, unreachable), None),
+                None,
+                "{ip}"
+            );
         }
         for status in [
             portmap::Status::Off,
@@ -1426,8 +1723,14 @@ mod tests {
             ..auto.clone()
         };
         assert_eq!(
-            reachable_address(&tunnelled, &mapped("203.0.113.7", Reachability::Public), None),
-            Some(Address::Https { url: "https://pack.example.com".into() })
+            reachable_address(
+                &tunnelled,
+                &mapped("203.0.113.7", Reachability::Public),
+                None
+            ),
+            Some(Address::Https {
+                url: "https://pack.example.com".into()
+            })
         );
         // And it is what makes a link possible at all behind CGNAT.
         let behind_cgnat = ShareConfig {
@@ -1435,7 +1738,12 @@ mod tests {
             ..auto
         };
         assert_eq!(
-            reachable_address(&behind_cgnat, &mapped("100.64.1.2", Reachability::Cgnat), None).map(|a| a.display()),
+            reachable_address(
+                &behind_cgnat,
+                &mapped("100.64.1.2", Reachability::Cgnat),
+                None
+            )
+            .map(|a| a.display()),
             Some("mc.example.com:25590".into())
         );
     }
@@ -1450,25 +1758,202 @@ mod tests {
             mapping: PortMapping::Manual,
             public_address: None,
         };
-        let detected = |ip: &str, reachability| Some(Detected { ip: ip.parse().unwrap(), reachability });
+        let detected = |ip: &str, reachability| {
+            Some(Detected {
+                ip: ip.parse().unwrap(),
+                reachability,
+            })
+        };
 
         assert_eq!(
-            reachable_address(&manual_setup, &portmap::Status::Off, detected("203.0.113.7", Reachability::Public))
-                .map(|a| a.display()),
+            reachable_address(
+                &manual_setup,
+                &portmap::Status::Off,
+                detected("203.0.113.7", Reachability::Public)
+            )
+            .map(|a| a.display()),
             Some("203.0.113.7:38033".into()),
             "the forwarded port, not a default"
         );
-        for private in [detected("100.64.1.2", Reachability::Cgnat), detected("192.168.1.2", Reachability::DoubleNat)] {
-            assert_eq!(reachable_address(&manual_setup, &portmap::Status::Off, private), None);
+        for private in [
+            detected("100.64.1.2", Reachability::Cgnat),
+            detected("192.168.1.2", Reachability::DoubleNat),
+        ] {
+            assert_eq!(
+                reachable_address(&manual_setup, &portmap::Status::Off, private),
+                None
+            );
         }
-        assert_eq!(reachable_address(&manual_setup, &portmap::Status::Off, None), None);
-
-        // Automatic setup never uses a detection: the mapping is its source.
-        let auto_setup = ShareConfig { mapping: PortMapping::Auto, ..manual_setup };
         assert_eq!(
-            reachable_address(&auto_setup, &portmap::Status::Off, detected("203.0.113.7", Reachability::Public)),
+            reachable_address(&manual_setup, &portmap::Status::Off, None),
             None
         );
+
+        // Automatic setup never uses a detection: the mapping is its source.
+        let auto_setup = ShareConfig {
+            mapping: PortMapping::Auto,
+            ..manual_setup
+        };
+        assert_eq!(
+            reachable_address(
+                &auto_setup,
+                &portmap::Status::Off,
+                detected("203.0.113.7", Reachability::Public)
+            ),
+            None
+        );
+    }
+
+    /// A player in the same house gets this machine's own address and a link
+    /// that carries it, beside the public one and never instead of it. It is
+    /// also what the admin can try when their own link comes back refused,
+    /// which is what a router that will not loop a connection back in looks
+    /// like.
+    #[tokio::test]
+    async fn players_on_this_network_get_this_machines_own_address_and_a_link_for_it() {
+        let scratch = Scratch::new("e2e-local-link");
+        let admin = scratch.paths.clone();
+        let (server, share) = shared_server(&admin).await;
+        let service = service_on_network(Some("192.168.1.50"));
+
+        let port = free_port();
+        let config = manual(port, Some("203.0.113.7".into()));
+        service.reconcile_with(&admin, &config, None).await;
+
+        let status = service.status(&admin, &config).await;
+        assert_eq!(
+            status.address.as_deref(),
+            Some(format!("203.0.113.7:{port}").as_str()),
+            "the address links are made with changed"
+        );
+        assert_eq!(
+            status.local_address.as_deref(),
+            Some(format!("192.168.1.50:{port}").as_str())
+        );
+
+        // Read back through the parser a link off the internet goes through,
+        // and pinned to the same certificate: that is what lets a player on
+        // this network reach the very machine the public link names.
+        let local = service
+            .local_link_for(&admin, &config, &share)
+            .await
+            .expect("this machine's own address is known");
+        let read_back = Link::parse(&local.to_url()).expect("a link Geode writes parses");
+        assert_eq!(
+            read_back.address,
+            Address::Direct {
+                host: "192.168.1.50".into(),
+                port
+            }
+        );
+        assert_eq!(read_back.pin, Some(pin_of(&admin).await));
+        assert_eq!(read_back.code, share.code);
+
+        let public = service.link_for(&admin, &config, &share).await.unwrap();
+        assert_eq!(
+            public.address,
+            Address::Direct {
+                host: "203.0.113.7".into(),
+                port
+            },
+            "the local address was handed out as the main one"
+        );
+        assert_eq!(public.pin, read_back.pin);
+
+        // Nothing shared, so nothing listens: no address of either kind, since
+        // either would be somewhere a player gets refused.
+        server_share::stop(&admin, &server.id).await.unwrap();
+        service.reconcile_with(&admin, &config, None).await;
+        assert_eq!(service.status(&admin, &config).await.local_address, None);
+        let gone = service.local_link_for(&admin, &config, &share).await;
+        assert!(gone.is_none(), "a link to a port nothing answers on");
+
+        service.shutdown().await;
+    }
+
+    /// A machine with no address of its own that this network could reach says
+    /// so by saying nothing, and the public link is unaffected.
+    #[tokio::test]
+    async fn a_machine_with_no_local_address_offers_no_local_link() {
+        let scratch = Scratch::new("e2e-no-local");
+        let admin = scratch.paths.clone();
+        let (_, share) = shared_server(&admin).await;
+        let service = service_on_network(None);
+
+        let port = free_port();
+        let config = manual(port, Some("203.0.113.7".into()));
+        service.reconcile_with(&admin, &config, None).await;
+
+        let status = service.status(&admin, &config).await;
+        assert!(status.listening, "{status:?}");
+        assert_eq!(status.local_address, None);
+        let none = service.local_link_for(&admin, &config, &share).await;
+        assert!(none.is_none());
+        assert!(
+            service.link_for(&admin, &config, &share).await.is_some(),
+            "the public link went with it"
+        );
+
+        service.shutdown().await;
+    }
+
+    /// What the note about an address that has moved on goes by: the address
+    /// the last link taken points at. Only taking a link writes it, and taking
+    /// one at the address of the day is what clears the note again.
+    #[tokio::test]
+    async fn the_address_links_were_taken_at_is_kept_until_a_link_is_taken_again() {
+        let scratch = Scratch::new("e2e-link-address");
+        let admin = scratch.paths.clone();
+        let (server, _) = shared_server(&admin).await;
+        let service = service();
+
+        let port = free_port();
+        let first = manual(port, Some("203.0.113.7".into()));
+        service.reconcile_with(&admin, &first, None).await;
+
+        // Nothing until a link is taken: an admin who has sent nobody a link
+        // has no links to go stale, and is told nothing when the address
+        // changes.
+        assert_eq!(server_share::link_address(&admin, &server.id).await, None);
+
+        service
+            .remember_link_address(&admin, &first, &server.id)
+            .await
+            .unwrap();
+        let taken = server_share::link_address(&admin, &server.id).await;
+        assert_eq!(taken, Some(format!("203.0.113.7:{port}")));
+        assert_eq!(
+            taken,
+            service.status(&admin, &first).await.address,
+            "a link just taken would read as pointing somewhere stale"
+        );
+
+        // The address moves on, which is the whole of the note's condition:
+        // what links were built from is no longer what Geode sees.
+        let moved = manual(port, Some("198.51.100.4".into()));
+        service.reconcile_with(&admin, &moved, None).await;
+        let now = service.status(&admin, &moved).await.address;
+        assert_eq!(now, Some(format!("198.51.100.4:{port}")));
+        assert_ne!(server_share::link_address(&admin, &server.id).await, now);
+
+        // And taking the new link puts it right.
+        service
+            .remember_link_address(&admin, &moved, &server.id)
+            .await
+            .unwrap();
+        assert_eq!(server_share::link_address(&admin, &server.id).await, now);
+
+        // With nothing shared there is no address to take a link at, and the
+        // last one stands: unsharing is not a link anybody was sent.
+        server_share::stop(&admin, &server.id).await.unwrap();
+        service.reconcile_with(&admin, &moved, None).await;
+        service
+            .remember_link_address(&admin, &moved, &server.id)
+            .await
+            .unwrap();
+        assert_eq!(server_share::link_address(&admin, &server.id).await, now);
+
+        service.shutdown().await;
     }
 
     /// A port something else holds is reported, not a crash.
@@ -1591,7 +2076,10 @@ mod tests {
         // And it came up the way a reconcile leaves it: nothing to say about
         // the port any more, and a link players can use.
         let status = service.status(&admin, &config).await;
-        assert!(status.retry.is_none() && status.listen_error.is_none(), "{status:?}");
+        assert!(
+            status.retry.is_none() && status.listen_error.is_none(),
+            "{status:?}"
+        );
         let link = service
             .link_for(&admin, &config, &share)
             .await
@@ -1619,7 +2107,10 @@ mod tests {
         server_share::stop(&admin, &server.id).await.unwrap();
         service.reconcile_with(&admin, &config, None).await;
         let status = service.status(&admin, &config).await;
-        assert!(status.retry.is_none(), "still trying with nothing shared: {status:?}");
+        assert!(
+            status.retry.is_none(),
+            "still trying with nothing shared: {status:?}"
+        );
         assert!(status.listen_error.is_none(), "{status:?}");
 
         drop(squatter);
@@ -1653,7 +2144,10 @@ mod tests {
         service.reconcile_with(&admin, &moved, None).await;
         let status = service.status(&admin, &moved).await;
         assert!(status.listening, "{status:?}");
-        assert!(status.retry.is_none(), "a retry outlived the port change: {status:?}");
+        assert!(
+            status.retry.is_none(),
+            "a retry outlived the port change: {status:?}"
+        );
         assert_eq!(
             status.mapping,
             portmap::Status::Off,
@@ -1664,7 +2158,10 @@ mod tests {
         // coming free never gets it a second listener.
         drop(squatter);
         tokio::time::sleep(Duration::from_millis(500)).await;
-        assert!(port_is_free(taken), "the superseded retry took the old port");
+        assert!(
+            port_is_free(taken),
+            "the superseded retry took the old port"
+        );
         let link = service.link_for(&admin, &moved, &share).await.unwrap();
         join::preview(link).await.unwrap();
 
@@ -1699,14 +2196,20 @@ mod tests {
 
         // A second attempt, still inside the threshold: more tries, same tone.
         let trying = wait_for_retry(&service, &admin, &config, |r| r.attempts > 1).await;
-        assert!(!trying.needs_you, "escalated before the threshold: {trying:?}");
+        assert!(
+            !trying.needs_you,
+            "escalated before the threshold: {trying:?}"
+        );
 
         // Past it, and the reason is there to name.
         let needing = wait_for_retry(&service, &admin, &config, |r| r.needs_you).await;
         assert!(needing.attempts >= trying.attempts, "{needing:?}");
         let status = service.status(&admin, &config).await;
         assert!(
-            status.listen_error.as_deref().is_some_and(|e| e.contains(&taken.to_string())),
+            status
+                .listen_error
+                .as_deref()
+                .is_some_and(|e| e.contains(&taken.to_string())),
             "{status:?}"
         );
 
@@ -1767,7 +2270,12 @@ mod tests {
         assert_eq!(told[1]["error"], serde_json::Value::Null);
         // And the screens were told to follow along, each attempt.
         assert!(
-            recorder.topics().iter().filter(|t| *t == STATUS_EVENT).count() > 2,
+            recorder
+                .topics()
+                .iter()
+                .filter(|t| *t == STATUS_EVENT)
+                .count()
+                > 2,
             "{:?}",
             recorder.topics()
         );
@@ -1852,7 +2360,10 @@ mod tests {
         let told = listen_notices(&recorder);
         assert_eq!(told.len(), 1, "sharing was said to be back on: {told:?}");
         let status = service.status(&admin, &config).await;
-        assert!(!status.listening && status.listen_error.is_none(), "{status:?}");
+        assert!(
+            !status.listening && status.listen_error.is_none(),
+            "{status:?}"
+        );
 
         service.shutdown().await;
         drop(squatter);
@@ -1895,7 +2406,10 @@ mod tests {
 
         // And long enough past the threshold for a second alert to have been
         // due, had the clock been restarted.
-        wait_for_retry(&service, &admin, &saved, |r| r.attempts >= after.attempts + 4).await;
+        wait_for_retry(&service, &admin, &saved, |r| {
+            r.attempts >= after.attempts + 4
+        })
+        .await;
         let told = listen_notices(&recorder);
         assert_eq!(told.len(), 1, "told a second time: {told:?}");
 
@@ -1928,7 +2442,11 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
         let told = listen_notices(&recorder);
-        assert_eq!(told.len(), 1, "the alert was put off by reconciling: {told:?}");
+        assert_eq!(
+            told.len(),
+            1,
+            "the alert was put off by reconciling: {told:?}"
+        );
 
         service.shutdown().await;
         drop(squatter);
@@ -1947,6 +2465,8 @@ mod tests {
             ip: "198.51.100.4".parse().unwrap(),
             ..public
         };
+        let router: IpAddr = "192.168.1.1".parse().unwrap();
+        let replaced: IpAddr = "10.0.0.1".parse().unwrap();
         let start = Detection::default();
         assert!(!start.asked);
 
@@ -1955,20 +2475,141 @@ mod tests {
             unanswered,
             Detection {
                 asked: true,
-                found: None
+                found: None,
+                gateway: None,
             }
         );
-        let answered = unanswered.after(Some(public));
+        let answered = unanswered.after(Some((router, public)));
         assert_eq!(answered.found, Some(public));
+        assert_eq!(
+            answered.gateway,
+            Some(router),
+            "where the router answered from was thrown away"
+        );
         assert_eq!(
             answered.after(None).found,
             Some(public),
             "one lost ask forgot the address"
         );
         assert_eq!(
-            answered.after(Some(moved)).found,
-            Some(moved),
-            "a new address was not taken"
+            answered.after(None).gateway,
+            Some(router),
+            "one lost ask forgot the router, and with it the address for the house"
         );
+        assert_eq!(
+            answered.after(Some((replaced, moved))),
+            Detection {
+                asked: true,
+                found: Some(moved),
+                gateway: Some(replaced),
+            },
+            "a new address or a new router was not taken"
+        );
+    }
+
+    /// Manual router setup holds no mapping — it is the setup an admin lands
+    /// in because their router would not open the port — so where the router
+    /// is comes from the ask that reads the public address. Without it the
+    /// only thing left to ask toward is the way out, which on a machine
+    /// holding a VPN open answers with the tunnel: see
+    /// [`portmap::local_address`].
+    #[test]
+    fn where_the_router_is_comes_from_the_mapping_or_from_the_ask_that_read_the_address() {
+        let mapped: IpAddr = "192.168.1.1".parse().unwrap();
+        let asked: IpAddr = "192.168.4.1".parse().unwrap();
+        let detection = |gateway: Option<IpAddr>| {
+            Some(Detection {
+                asked: true,
+                found: None,
+                gateway,
+            })
+        };
+
+        // Automatic setup: the mapping publishes it.
+        assert_eq!(gateway_of(Some(mapped), None), Some(mapped));
+        // Manual setup: no mapper at all, and the ask carries it.
+        assert_eq!(gateway_of(None, detection(Some(asked))), Some(asked));
+        // Both, which is a mapping being taken down as the settings change:
+        // the mapping is the one still talking to the router.
+        assert_eq!(
+            gateway_of(Some(mapped), detection(Some(asked))),
+            Some(mapped)
+        );
+        // Nothing has found a router, so there is nothing to ask toward.
+        assert_eq!(gateway_of(None, None), None);
+        assert_eq!(gateway_of(None, detection(None)), None);
+    }
+
+    /// The address for players on this network changes with nothing else: a
+    /// DHCP lease renews and this machine moves while the mapping, the public
+    /// address, the port and the certificate all stay as they were. Nothing
+    /// announces that, so the watcher looks again, and a Share tab left open
+    /// is told rather than going on showing an address nobody can reach.
+    #[tokio::test]
+    async fn an_address_that_moved_on_this_network_is_announced_on_its_own() {
+        let recorder = std::sync::Arc::new(crate::events::Recorder::default());
+        let sink: Option<EventSink> = Some(recorder.clone());
+        let (local, cell) = told(Some("192.168.1.50"));
+        let config = manual(25590, Some("203.0.113.7".into()));
+        let (publish, detected) = watch::channel(Detection::default());
+
+        let watcher = tokio::spawn(announce(
+            None,
+            Some(detected),
+            Nearby {
+                gateway: None,
+                local,
+                relook: Duration::from_millis(20),
+            },
+            config,
+            None,
+            sink,
+        ));
+        let announced = || -> Vec<serde_json::Value> {
+            recorder
+                .events()
+                .into_iter()
+                .filter(|(topic, _)| topic == STATUS_EVENT)
+                .map(|(_, payload)| payload)
+                .collect()
+        };
+
+        // Looking again and finding the same address is not news.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(announced().is_empty(), "{:?}", announced());
+
+        *cell.lock().unwrap() = Some("192.168.1.81".parse().unwrap());
+        let moved = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(last) = announced().last() {
+                    if last["localAddress"] == serde_json::json!("192.168.1.81:25590") {
+                        return last.clone();
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the address that moved was never announced");
+        // The rest of the status is what it was, so nothing else had to change
+        // for this to be told.
+        assert_eq!(moved["address"], serde_json::json!("203.0.113.7:25590"));
+        let so_far = announced().len();
+
+        // And still nothing while it stays put.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(announced().len(), so_far, "{:?}", announced());
+
+        // A change something does announce still goes out as it did.
+        publish.send_replace(Detection::default().after(None));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while announced().len() == so_far {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("an ask that finished was not announced");
+
+        watcher.abort();
     }
 }

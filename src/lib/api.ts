@@ -472,6 +472,9 @@ export const api = {
   unshareServer: (id: string) => invoke<void>("unshare_server", { id }),
   setServerShareConfig: (id: string, includeConfig: boolean) =>
     invoke<ServerShareView>("set_server_share_config", { id, includeConfig }),
+  /** Call this when the admin takes the link, so Geode can tell them later if the address it points at has changed. */
+  shareLinkCopied: (id: string) =>
+    invoke<ServerShareView>("share_link_copied", { id }),
   rotateServerShareCode: (id: string) =>
     invoke<ServerShareView>("rotate_server_share_code", { id }),
 

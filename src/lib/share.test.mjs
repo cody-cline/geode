@@ -7,11 +7,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  addressChangedLine,
   existingLine,
   joinInput,
   joinStep,
   linkPendingReason,
   listenLine,
+  localAddressHint,
   nextJoin,
   outcomeLine,
   parsePort,
@@ -33,6 +35,7 @@ function status(mapping, extra = {}) {
     retry: null,
     mapping,
     address: null,
+    localAddress: null,
     fingerprint: "ab".repeat(32),
     ...extra,
   };
@@ -572,6 +575,57 @@ test("an address that is never coming is not read out as one on its way", () => 
   for (const pending of [status({ state: "searching" }), status(mapped("public")), manual()]) {
     assert.match(readOutHint(pending), /once Geode knows it/);
   }
+});
+
+test("the address for this network says a link tried from here can fail anyway", () => {
+  const here = localAddressHint(
+    status(mapped("public"), { address: "203.0.113.7:25590", localAddress: "192.168.1.50:25590" }),
+  );
+  assert.match(here, /same house or on the same Wi-Fi/);
+  // The failure the admin meets first: their own link, from their own machine.
+  assert.match(here, /this computer included/);
+  assert.match(here, /out to your router and come back in/);
+  // And it is the router, not the share, so nobody goes looking at the port.
+  assert.match(here, /players elsewhere are unaffected/);
+
+  // Through a domain or tunnel the trip is not the router's to refuse, so the
+  // reason names what is actually in the way.
+  const tunnelled = localAddressHint(
+    status(mapped("public"), { address: "https://pack.example.com", localAddress: "192.168.1.50:25590" }),
+  );
+  assert.match(tunnelled, /domain or tunnel/);
+  assert.doesNotMatch(tunnelled, /your router/);
+
+  // No link to try yet: the address is still what players here use, and
+  // nothing is said about trying a link that does not exist.
+  for (const pending of [null, status(mapped("cgnat"), { localAddress: "192.168.1.50:25590" })]) {
+    const hint = localAddressHint(pending);
+    assert.match(hint, /same house or on the same Wi-Fi/);
+    assert.doesNotMatch(hint, /can fail/);
+  }
+});
+
+test("links already sent are called stale only once the address has really moved", () => {
+  const at = (address, extra = {}) => status(mapped("public"), { address, ...extra });
+
+  const moved = addressChangedLine(at("198.51.100.4:25590"), "203.0.113.7:25590");
+  assert.equal(moved.tone, "warn");
+  assert.match(moved.detail, /203\.0\.113\.7:25590/);
+  assert.match(moved.detail, /no longer work/);
+  // The link above is the answer; the instances players already made are not
+  // this note's to promise anything about.
+  assert.match(moved.detail, /link above/);
+  assert.doesNotMatch(moved.detail, /instance/);
+
+  // The same address, so nothing has gone stale — and taking a link at the
+  // address of the day is what puts it here.
+  assert.equal(addressChangedLine(at("203.0.113.7:25590"), "203.0.113.7:25590"), null);
+  // No link ever taken: nobody has been sent one to go stale.
+  assert.equal(addressChangedLine(at("198.51.100.4:25590"), null), null);
+  // And with no address known there is no new link to send instead, so the
+  // note would be a complaint with no answer to it.
+  assert.equal(addressChangedLine(at(null), "203.0.113.7:25590"), null);
+  assert.equal(addressChangedLine(null, "203.0.113.7:25590"), null);
 });
 
 test("first use is the one verification that is not a plain yes", () => {

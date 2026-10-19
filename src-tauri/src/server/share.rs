@@ -182,6 +182,45 @@ pub async fn replace_password(paths: &Paths, id: &str) -> Result<ServerShare> {
     Ok(share)
 }
 
+/// `servers/<id>/share.link.json`, the address this server's links were last
+/// built from. Its own file beside the others for the same reason they are
+/// apart: nothing that writes a server's password has any business rewriting
+/// this, or the other way about.
+fn link_path(paths: &Paths, id: &str) -> std::path::PathBuf {
+    paths.server(id).join("share.link.json")
+}
+
+/// Where this server's links point, so the Share tab can say when the address
+/// has moved on since and the links already sent lead nowhere.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LinkAddress {
+    address: String,
+}
+
+/// The address this server's links were last built from, or `None` when no
+/// link has been taken yet.
+///
+/// A file that cannot be read or parsed is no address either. What it feeds is
+/// a note about addresses; failing the whole Share tab over it would cost the
+/// admin the link as well, and the next link taken writes it afresh.
+pub async fn link_address(paths: &Paths, id: &str) -> Option<String> {
+    let bytes = tokio::fs::read(link_path(paths, id)).await.ok()?;
+    let stored: LinkAddress = serde_json::from_slice(&bytes).ok()?;
+    Some(stored.address)
+}
+
+/// Remember the address this server's links are being handed out with.
+///
+/// Written by rename, like the share itself, so a reader never finds half an
+/// address. Deleting the server takes its whole folder, this with it.
+pub async fn save_link_address(paths: &Paths, id: &str, address: &str) -> Result<()> {
+    let stored = LinkAddress {
+        address: address.to_string(),
+    };
+    super::write_atomic(&link_path(paths, id), &serde_json::to_vec_pretty(&stored)?).await
+}
+
 /// Every server shared right now, reading every `servers/*/share.json`.
 pub async fn list(paths: &Paths) -> Result<Shared> {
     let mut shared = Shared::default();
@@ -443,6 +482,60 @@ mod tests {
             "replacing the password shared the server again"
         );
         assert_eq!(load(&paths, "survival").await.unwrap(), Some(replaced));
+    }
+
+    /// The address a server's links were built from outlives the Geode that
+    /// wrote it — a restart has to find the links already sent still pointing
+    /// where they did — and nothing else that writes the share disturbs it.
+    #[tokio::test]
+    async fn the_address_links_were_built_from_is_read_back_from_disk() {
+        let scratch = scratch("link-address");
+        let paths = scratch.paths.clone();
+        std::fs::create_dir_all(paths.server("survival")).unwrap();
+
+        assert_eq!(link_address(&paths, "survival").await, None);
+        start(&paths, "survival").await.unwrap();
+        assert_eq!(
+            link_address(&paths, "survival").await,
+            None,
+            "sharing a server invented a link nobody has taken"
+        );
+
+        save_link_address(&paths, "survival", "203.0.113.7:25590")
+            .await
+            .unwrap();
+        // A second Paths over the same directory is all a restart has.
+        let restarted = Paths {
+            root: paths.root.clone(),
+        };
+        assert_eq!(
+            link_address(&restarted, "survival").await,
+            Some("203.0.113.7:25590".to_string())
+        );
+
+        // The share's own file is written by stopping, sharing again and a new
+        // password; none of them is news about where links point.
+        stop(&paths, "survival").await.unwrap();
+        replace_password(&paths, "survival").await.unwrap();
+        start(&paths, "survival").await.unwrap();
+        assert_eq!(
+            link_address(&paths, "survival").await,
+            Some("203.0.113.7:25590".to_string())
+        );
+
+        // Taking a link at a new address replaces it outright.
+        save_link_address(&paths, "survival", "198.51.100.4:25590")
+            .await
+            .unwrap();
+        assert_eq!(
+            link_address(&paths, "survival").await,
+            Some("198.51.100.4:25590".to_string())
+        );
+
+        // A file no reader can make sense of is no address, rather than a
+        // Share tab that will not open.
+        std::fs::write(link_path(&paths, "survival"), b"{\"addr").unwrap();
+        assert_eq!(link_address(&paths, "survival").await, None);
     }
 
     /// A share with no server behind it would be a password that opens nothing.

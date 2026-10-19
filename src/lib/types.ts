@@ -617,6 +617,8 @@ export interface ShareStatus {
   mapping: PortMappingStatus;
   /** The address links use: the public address if one is set, else the router's external IP, else null. */
   address: string | null;
+  /** This computer's own address on its network, with the pack port, for players on that network — and for the admin, whose router may refuse to send a connection to `address` back in to itself. Null while nothing listens, or when no local address could be found. */
+  localAddress: string | null;
   /** The certificate fingerprint players' Geode pins, as hex. */
   fingerprint: string;
 }
@@ -650,11 +652,15 @@ export interface ServerShareView {
   code: string;
   /** The `geode://join` link, or null while no address is known to put in it. */
   link: string | null;
+  /** The second link, carrying this computer's own address, for players on the same network. Beside `link`, never instead of it. */
+  localLink: string | null;
   includeConfig: boolean;
   /** False while sharing is stopped; the password is kept. */
   shared: boolean;
   /** Why this server cannot be shared, when it cannot (a proxy, an unsupported loader). */
   unsupported: string | null;
+  /** The address this server's links were last taken at, or null if none has been. Compared with `ShareStatus.address` to say that links already sent lead nowhere. */
+  lastLinkAddress: string | null;
 }
 
 /** What a server says it is sharing, shown before a player imports. */

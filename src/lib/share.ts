@@ -549,6 +549,54 @@ export function readOutHint(status: ShareStatus | null): string {
 }
 
 /**
+ * What this computer's own address on its network is for, beside the password.
+ *
+ * It carries the one thing an admin has to know before they try their own
+ * link: a connection to the public address from inside the network has to
+ * leave the router and come straight back in through it, and plenty of home
+ * routers refuse that. So the admin's own test, from the very machine that is
+ * sharing, can come back "could not be reached" while every player outside
+ * gets through — which reads as a broken port forward when nothing is broken.
+ * Said here because this is the address that does work from here, so the
+ * sentence arrives beside what to do about it.
+ *
+ * With no public address yet there is no link to try, so nothing is said about
+ * trying one.
+ */
+export function localAddressHint(status: ShareStatus | null): string {
+  const here =
+    "For players in the same house or on the same Wi-Fi, and for trying this yourself: this address and the password, or the link beside it.";
+  const address = status?.address ?? null;
+  if (!address) return here;
+  const why = /^https:\/\//i.test(address)
+    ? "the link above goes out to your domain or tunnel and back, and not every setup sends that back in to your own network"
+    : "the link above has to go out to your router and come back in, which many routers will not do";
+  return `${here} Your own link can fail when you open it from this network, this computer included, because ${why}. That is the router, not the share: players elsewhere are unaffected.`;
+}
+
+/**
+ * The links already sent point at an address this computer no longer has.
+ *
+ * Shown only once there is something to compare: an admin who has never taken
+ * a link has sent nobody one, and before Geode knows an address there is no
+ * new link to point at instead. Nothing here is said about the instances
+ * players already made — a link at a new address does not find them, and this
+ * note is not the place to promise it does.
+ */
+export function addressChangedLine(
+  status: ShareStatus | null,
+  lastLinkAddress: string | null,
+): StatusLine | null {
+  const address = status?.address ?? null;
+  if (!address || !lastLinkAddress || address === lastLinkAddress) return null;
+  return {
+    tone: "warn",
+    title: "This computer's address has changed",
+    detail: `The links you have already sent point at ${lastLinkAddress} and no longer work. The link above is the one to send now.`,
+  };
+}
+
+/**
  * How the connection to a server was checked, for the join confirmation.
  *
  * `typed` is whether the player typed the address rather than opening a link.

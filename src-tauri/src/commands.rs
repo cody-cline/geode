@@ -3223,10 +3223,18 @@ pub struct ServerShareView {
     /// The server's password.
     pub code: String,
     pub link: Option<String>,
+    /// The second link, for a player on the admin's own network, so they can
+    /// click rather than type this machine's address. Beside `link`, never
+    /// instead of it: it reaches no further than this network.
+    pub local_link: Option<String>,
     pub include_config: bool,
     /// False while sharing is stopped. The password is kept either way.
     pub shared: bool,
     pub unsupported: Option<String>,
+    /// The address this server's links were last taken at, if the admin has
+    /// taken one. What the Share tab goes by to say the address has moved on
+    /// since, and that those links lead nowhere now.
+    pub last_link_address: Option<String>,
 }
 
 async fn share_view(
@@ -3240,12 +3248,19 @@ async fn share_view(
         .link_for(&state.paths, &config.share, share)
         .await
         .map(|link| link.to_url());
+    let local_link = state
+        .share
+        .local_link_for(&state.paths, &config.share, share)
+        .await
+        .map(|link| link.to_url());
     ServerShareView {
         code: share.code.display(),
         link,
+        local_link,
         include_config: share.include_config,
         shared: share.shared,
         unsupported: share::pack::client_loader(server).err().map(|e| e.to_string()),
+        last_link_address: crate::server::share::link_address(&state.paths, &server.id).await,
     }
 }
 
@@ -3389,6 +3404,26 @@ pub async fn set_server_share_config(
     // A pack already being built or sent was built as the share was, and one
     // with `config/` in it must not keep streaming once config is not sent.
     state.share.cut_revoked(&state.paths).await;
+    Ok(share_view(&state, &server, &share).await)
+}
+
+/// The admin has taken this server's link to send it: remember the address it
+/// points at.
+///
+/// Called when a link is taken and at no other time, because that is when
+/// there start to be links in other people's hands. Geode re-reads the public
+/// address while it shares, and when what it sees is no longer this, the Share
+/// tab says the links already sent lead nowhere and the link above the note is
+/// the one to send now.
+#[tauri::command]
+pub async fn share_link_copied(state: State<'_, AppState>, id: String) -> Result<ServerShareView> {
+    let server = crate::server::load(&state.paths, &id).await?;
+    let share = shared(&state, &id).await?;
+    let config = state.config().await;
+    state
+        .share
+        .remember_link_address(&state.paths, &config.share, &id)
+        .await?;
     Ok(share_view(&state, &server, &share).await)
 }
 
