@@ -211,6 +211,7 @@ pub fn run() {
             commands::import_modpack,
             commands::export_modpack,
             commands::export_geodepack,
+            commands::export_curseforge_pack,
             commands::get_share_status,
             commands::set_share_settings,
             commands::get_server_share,

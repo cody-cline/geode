@@ -3222,6 +3222,58 @@ pub async fn export_modpack(
     result
 }
 
+/// Write an instance out as a CurseForge pack.
+///
+/// `author` is the one thing the format requires that an instance has nowhere
+/// to keep, so the export flow asks for it. With nothing given, the signed-in
+/// account's name stands in — the only answer Geode holds to the question of
+/// whose pack this is.
+#[tauri::command]
+pub async fn export_curseforge_pack(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    dest: String,
+    author: Option<String>,
+    include_saves: bool,
+) -> Result<instance::modpack::ExportReport> {
+    let inst = instance::load(&state.paths, &id).await?;
+    let progress = Progress::new(crate::desktop::sink(app), format!("export:{id}"));
+    let dest = PathBuf::from(dest);
+    let cf_key = state.cf_key().await;
+    let author = match author {
+        Some(author) => author,
+        // Empty when nobody is signed in, which the writer turns into the
+        // "Anonymous" a reader shows for a pack whose author it cannot find.
+        // Nothing is invented here: the report says which name went into the
+        // pack, because it is the sharer's own and it travels with the file.
+        None => AccountsFile::load(&state.paths)
+            .await
+            .ok()
+            .and_then(|file| file.active_account().map(|a| a.username.clone()))
+            .unwrap_or_default(),
+    };
+
+    let result = instance::modpack::export_cfpack(
+        crate::install::identity::Ask::exporting(
+            &state.http,
+            cf_key.as_deref(),
+            crate::install::identity::Carry::CFPACK,
+        ),
+        &state.paths,
+        &inst,
+        dest,
+        &author,
+        include_saves,
+        &progress,
+    )
+    .await;
+    if let Err(e) = &result {
+        progress.fail(&e.to_string()).await;
+    }
+    result
+}
+
 // ---------------------------------------------------------------------------
 // Sharing a server with players
 // ---------------------------------------------------------------------------

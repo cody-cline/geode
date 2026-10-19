@@ -2603,6 +2603,7 @@ mod tests {
                 client: &offline(),
                 want: &["modrinth"],
                 curseforge_key: None,
+                index: true,
             },
             &paths,
             &inst,

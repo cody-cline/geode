@@ -2,8 +2,16 @@
 //!
 //! Two formats matter in practice: Modrinth's `.mrpack` (an index of download
 //! URLs plus an overrides tree) and CurseForge's zip (project/file id pairs
-//! that have to be resolved through their API). Both are supported for import;
-//! export produces `.mrpack`, which is the open one.
+//! that have to be resolved through their API). Both are read and both are
+//! written.
+//!
+//! They differ in what they are able to say, not only in how they say it, so
+//! which one a sharer picks changes what their pack holds: an `.mrpack` carries
+//! a URL and a pair of hashes for anything Modrinth has, a CurseForge pack
+//! carries ids for anything CurseForge has, and what neither can name travels
+//! as bytes. [`crate::install::identity::travel`] is the one place that
+//! decides which of those happens to a file, and [`ExportReport`] is how the
+//! sharer is told.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -162,6 +170,49 @@ fn parse_cf_loader(id: &str) -> (Loader, String) {
         _ => Loader::Vanilla,
     };
     (loader, version.to_string())
+}
+
+/// The loader version other launchers expect, which for Forge is not the one
+/// Geode stores.
+///
+/// Geode keeps Forge's version in the long Maven form it is published under —
+/// `1.20.1-47.2.0` — because `meta::forge` finds a build by filtering Forge's
+/// maven metadata on the `{mc_version}-` prefix, so the prefix is part of what
+/// it reads back. Every pack format wants what follows it: a CurseForge
+/// `modLoaders` id is `forge-47.2.0`, and Prism reads an mrpack's
+/// `dependencies["forge"]` straight into its own Forge version after a plain
+/// string removal, so the long form names a version it cannot resolve.
+/// NeoForge, Fabric and Quilt are stored bare already and pass through.
+///
+/// Nothing here hardcodes a version: the prefix is built from the instance's
+/// own `mc_version`, and a version that does not carry it is left alone.
+fn interop_loader_version<'a>(
+    loader: Loader,
+    loader_version: &'a str,
+    mc_version: &str,
+) -> &'a str {
+    match loader {
+        Loader::Forge => loader_version
+            .strip_prefix(&format!("{mc_version}-"))
+            .unwrap_or(loader_version),
+        _ => loader_version,
+    }
+}
+
+/// The id a CurseForge manifest names a loader by, which
+/// [`parse_cf_loader`] reads back.
+///
+/// `None` for vanilla, whose `modLoaders` array is written empty — what Prism's
+/// own exporter does for an instance with no loader, and what its reader
+/// expects.
+fn cf_loader_id(loader: Loader, loader_version: &str, mc_version: &str) -> Option<String> {
+    (loader != Loader::Vanilla).then(|| {
+        format!(
+            "{}-{}",
+            loader.as_str(),
+            interop_loader_version(loader, loader_version, mc_version)
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -852,11 +903,22 @@ pub struct ExportReport {
     /// is one whose author turned third-party downloads off. Counted apart
     /// because no other format would have linked them either.
     pub embedded_blocked: usize,
+    /// Files whose bytes travelled because the pack already names the same
+    /// file by the same ids — a second copy of a mod under another name.
+    /// Counted apart because nothing was lost and no other format would have
+    /// done better: the mod is named, and the spare copy rides along in
+    /// `overrides/` so the recipient ends up with both.
+    pub embedded_duplicate: usize,
     /// Files that could not go into the pack at all, by the nearest readable
     /// form of their name.
     pub unnameable: Vec<String>,
     /// What could not be asked, in words the user can read.
     pub trouble: Vec<String>,
+    /// Who the pack says wrote it, for a format that requires an author.
+    /// `None` for one that does not ask — there is nothing to tell the sharer
+    /// then. Reported because this is the one thing in a pack that is about
+    /// the sharer rather than the instance, and a name goes out with the file.
+    pub author: Option<String>,
 }
 
 /// Write the instance out as a plain `.mrpack`.
@@ -915,6 +977,21 @@ pub async fn write_instance_pack(
     catalogue: &Catalogue,
     progress: &Progress,
 ) -> Result<ExportReport> {
+    write_mrpack(
+        instance_input(paths, instance, include_saves),
+        dest,
+        half,
+        catalogue,
+        progress,
+    )
+    .await
+}
+
+/// What an instance's own pack carries, and what it leaves behind.
+///
+/// Shared by every format an instance exports as, so what a pack of this
+/// instance holds is one decision rather than one per writer.
+fn instance_input<'a>(paths: &Paths, instance: &'a Instance, include_saves: bool) -> PackInput<'a> {
     let mut skip_dirs: Vec<&'static str> = vec![
         "logs",
         "crash-reports",
@@ -926,7 +1003,7 @@ pub async fn write_instance_pack(
         skip_dirs.push("saves");
     }
 
-    let input = PackInput {
+    PackInput {
         root: paths.game_dir(&instance.id),
         name: &instance.name,
         notes: &instance.notes,
@@ -939,8 +1016,7 @@ pub async fn write_instance_pack(
         loader: instance.loader,
         loader_version: &instance.loader_version,
         walk: Walk::Except(skip_dirs),
-    };
-    write_mrpack(input, dest, half, catalogue, progress).await
+    }
 }
 
 /// Which entries under a pack's root the writer may carry as bytes.
@@ -1092,9 +1168,14 @@ pub async fn write_mrpack(
         Loader::Vanilla => None,
     };
     if let Some(key) = loader_key {
-        index
-            .dependencies
-            .insert(key.into(), input.loader_version.to_string());
+        // The interop form, not the stored one: Prism reads this value straight
+        // into its own loader version, and Geode's own importer takes either —
+        // `installer_url` puts the Minecraft version back when it is absent.
+        index.dependencies.insert(
+            key.into(),
+            interop_loader_version(input.loader, input.loader_version, input.mc_version)
+                .to_string(),
+        );
     }
 
     // What each file does is the catalogue's answer, not the records': a jar
@@ -1196,78 +1277,383 @@ pub async fn write_mrpack(
     progress.stage("Writing pack", 1).await;
 
     let walk = input.walk;
-    let index_json = serde_json::to_vec_pretty(&index)?;
     let GeodeHalf {
         extras, referenced, ..
     } = half;
-    report.unnameable = tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
-        let file = std::fs::File::create(&dest)?;
-        let mut zip = zip::ZipWriter::new(file);
-        let options: zip::write::FileOptions<'_, ()> =
-            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let mut named: Extras = vec![(
+        "modrinth.index.json".to_string(),
+        serde_json::to_vec_pretty(&index)?,
+    )];
+    named.extend(extras);
 
-        zip.start_file("modrinth.index.json", options)?;
-        zip.write_all(&index_json)?;
-
-        for (name, bytes) in &extras {
-            zip.start_file(name.clone(), options)?;
-            zip.write_all(bytes)?;
-        }
-
-        let mut unnameable = Vec::new();
-        let mut stack = vec![game_dir.clone()];
-        while let Some(dir) = stack.pop() {
-            let Ok(entries) = std::fs::read_dir(&dir) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let Ok(rel) = path.strip_prefix(&game_dir) else {
-                    continue;
-                };
-                match walk.step(rel, &entry) {
-                    Step::Skip => continue,
-                    Step::Descend => {
-                        stack.push(path);
-                        continue;
-                    }
-                    Step::Carry => {}
-                }
-                let shown = if players_pack {
-                    pack_rel(rel)
-                } else {
-                    rel.to_path_buf()
-                };
-                if indexed.contains(rel) || carried_by_reference(&referenced, &shown) {
-                    continue;
-                }
-                let root = if players_pack && rel.starts_with(ContentKind::ClientMod.folder()) {
-                    "client-overrides"
-                } else {
-                    "overrides"
-                };
-                // A zip entry name is text. A path that is not UTF-8 would go
-                // in as U+FFFD and name a file nobody can match back, so it is
-                // left out and reported instead — the sharer is told what did
-                // not travel rather than the recipient finding a mangled name.
-                let Some(shown) = shown.to_str() else {
-                    unnameable.push(rel.to_string_lossy().to_string());
-                    continue;
-                };
-                zip.start_file(format!("{root}/{}", shown.replace('\\', "/")), options)?;
-                let mut source = std::fs::File::open(&path)?;
-                std::io::copy(&mut source, &mut zip)?;
-            }
-        }
-
-        zip.finish()?;
-        Ok(unnameable)
+    report.unnameable = tokio::task::spawn_blocking(move || {
+        lay_out(
+            &dest,
+            &game_dir,
+            &walk,
+            Layout {
+                named,
+                carried: indexed,
+                referenced,
+                players_pack,
+            },
+        )
     })
     .await
     .map_err(|e| Error::msg(format!("writing pack panicked: {e}")))??;
 
     progress.finish().await;
     Ok(report)
+}
+
+/// Everything a pack's zip holds besides the files its walk carries as bytes.
+struct Layout {
+    /// Written first, in order: the format's own index or manifest, then a
+    /// `.geodepack`'s `geode/` directory.
+    named: Extras,
+    /// Paths on disk whose bytes the pack already carries by name, so they
+    /// stay out of `overrides/`.
+    carried: std::collections::HashSet<PathBuf>,
+    /// The same, for what a Geode half's notes name: keyed on the enabled file
+    /// name the way records are, so a disabled file matches too.
+    referenced: std::collections::HashSet<PathBuf>,
+    /// A server's pack for its players, where `client-mods/` becomes `mods/`
+    /// and lands under `client-overrides/`.
+    players_pack: bool,
+}
+
+/// Lay a pack out: what it names first, then every file the walk carries that
+/// nothing has named already. Returns the paths that could not travel.
+///
+/// The one place that knows how a pack's zip is put together, so the formats
+/// cannot come to disagree about where an override goes or which files are left
+/// out of one. Blocking, because `zip` is.
+fn lay_out(dest: &Path, game_dir: &Path, walk: &Walk, layout: Layout) -> Result<Vec<String>> {
+    let Layout {
+        named,
+        carried,
+        referenced,
+        players_pack,
+    } = layout;
+
+    let file = std::fs::File::create(dest)?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options: zip::write::FileOptions<'_, ()> =
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+    for (name, bytes) in &named {
+        zip.start_file(name.clone(), options)?;
+        zip.write_all(bytes)?;
+    }
+
+    let mut unnameable = Vec::new();
+    let mut stack = vec![game_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(rel) = path.strip_prefix(game_dir) else {
+                continue;
+            };
+            match walk.step(rel, &entry) {
+                Step::Skip => continue,
+                Step::Descend => {
+                    stack.push(path);
+                    continue;
+                }
+                Step::Carry => {}
+            }
+            let shown = if players_pack {
+                pack_rel(rel)
+            } else {
+                rel.to_path_buf()
+            };
+            if carried.contains(rel) || carried_by_reference(&referenced, &shown) {
+                continue;
+            }
+            let root = if players_pack && rel.starts_with(ContentKind::ClientMod.folder()) {
+                "client-overrides"
+            } else {
+                "overrides"
+            };
+            // A zip entry name is text. A path that is not UTF-8 would go in as
+            // U+FFFD and name a file nobody can match back, so it is left out
+            // and reported instead — the sharer is told what did not travel
+            // rather than the recipient finding a mangled name.
+            let Some(shown) = shown.to_str() else {
+                unnameable.push(rel.to_string_lossy().to_string());
+                continue;
+            };
+            zip.start_file(format!("{root}/{}", shown.replace('\\', "/")), options)?;
+            let mut source = std::fs::File::open(&path)?;
+            std::io::copy(&mut source, &mut zip)?;
+        }
+    }
+
+    zip.finish()?;
+    Ok(unnameable)
+}
+
+// ---------------------------------------------------------------------------
+// Export: a CurseForge pack
+// ---------------------------------------------------------------------------
+
+/// The manifest a CurseForge pack is written from.
+///
+/// Its own type rather than [`CfManifest`] with `Serialize` on it, because the
+/// two are not the same shape: `manifestType` and `manifestVersion` are a hard
+/// reject in every other launcher's reader and two fields Geode's own reader
+/// does not look at, so a pack written from the reader's struct would round
+/// trip through Geode and be refused everywhere else. They are literals here
+/// for the same reason — nothing should be able to pass the wrong one.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CfManifestOut {
+    manifest_type: &'static str,
+    manifest_version: u32,
+    name: String,
+    version: String,
+    /// Required by the format, and never empty: a reader's own default is for
+    /// a *missing* author (Prism: `manifest["author"].toString("Anonymous")`,
+    /// whose default fires only for a value that is not a string), so an empty
+    /// one would show as a blank. [`write_cfpack`] writes the stand-in itself.
+    author: String,
+    overrides: &'static str,
+    minecraft: CfMinecraftOut,
+    files: Vec<CfFileOut>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CfMinecraftOut {
+    version: String,
+    mod_loaders: Vec<CfModLoaderOut>,
+}
+
+#[derive(Debug, Serialize)]
+struct CfModLoaderOut {
+    id: String,
+    primary: bool,
+}
+
+/// One file the recipient fetches by id.
+///
+/// The ids are capitalised `projectID` and `fileID` in the format, which
+/// camelCase gets wrong, so both are renamed by hand — as the reader's
+/// [`CfManifestFile`] does, for the same reason.
+#[derive(Debug, Serialize)]
+struct CfFileOut {
+    #[serde(rename = "projectID")]
+    project_id: u32,
+    #[serde(rename = "fileID")]
+    file_id: u32,
+    required: bool,
+}
+
+/// Write the instance out as a CurseForge pack, which the CurseForge app and
+/// Prism both open.
+///
+/// Every mod CurseForge can name travels as a `{projectID, fileID}` pair the
+/// recipient resolves with their own key, and everything else goes into
+/// `overrides/` as bytes.
+///
+/// What this format cannot carry, which is what the report is for:
+///
+/// - A Modrinth mod CurseForge does not have. There is no slot for a URL and
+///   no slot for a hash, so the jar travels.
+/// - Anything but a mod, as a reference. The manifest names ids and no path,
+///   so the recipient picks a folder by sniffing the downloaded bytes and
+///   leaves what it cannot identify in `mods/` — which is where a shader pack
+///   would land, doing nothing. So a resource pack, shader or data pack
+///   travels as bytes under the path the pack does state.
+/// - A per-side `env`. A CurseForge pack is a client's pack, and nothing in it
+///   says a mod is the server's.
+pub async fn export_cfpack(
+    ask: Ask<'_>,
+    paths: &Paths,
+    instance: &Instance,
+    dest: PathBuf,
+    author: &str,
+    include_saves: bool,
+    progress: &Progress,
+) -> Result<ExportReport> {
+    let catalogue = crate::install::identity::for_instance(ask, paths, instance, progress).await?;
+    write_cfpack(
+        instance_input(paths, instance, include_saves),
+        author,
+        dest,
+        &catalogue,
+        progress,
+    )
+    .await
+}
+
+/// The same writer, from a catalogue already built — which is the seam a
+/// preview uses, and what the tests write packs through.
+async fn write_cfpack(
+    input: PackInput<'_>,
+    author: &str,
+    dest: PathBuf,
+    catalogue: &Catalogue,
+    progress: &Progress,
+) -> Result<ExportReport> {
+    let game_dir = input.root;
+    // The format requires an author and an instance has nowhere to keep one,
+    // so an export can arrive here with nothing. "Anonymous" is what a reader
+    // shows for an author it cannot find, and writing it is what makes that
+    // true: an empty string is a string, so a reader's own default never fires
+    // and the pack would credit a blank.
+    let author = match author.trim() {
+        "" => "Anonymous",
+        named => named,
+    };
+    let mut report = ExportReport {
+        trouble: catalogue.trouble.clone(),
+        author: Some(author.to_string()),
+        ..Default::default()
+    };
+
+    let mut manifest = CfManifestOut {
+        manifest_type: "minecraftModpack",
+        manifest_version: 1,
+        name: input.name.to_string(),
+        version: input.version,
+        author: author.to_string(),
+        overrides: "overrides",
+        minecraft: CfMinecraftOut {
+            version: input.mc_version.to_string(),
+            mod_loaders: cf_loader_id(input.loader, input.loader_version, input.mc_version)
+                .map(|id| CfModLoaderOut { id, primary: true })
+                .into_iter()
+                .collect(),
+        },
+        files: Vec::new(),
+    };
+
+    // Sorted by where the file sits, so exporting the same instance twice is
+    // the same bytes twice — the same reason the mrpack writer sorts.
+    let mut identities: Vec<&Identity> = catalogue.identities().collect();
+    identities.sort_by(|a, b| a.disk_rel.cmp(&b.disk_rel));
+
+    let mut carried: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut credits: Vec<(u32, String)> = Vec::new();
+    for ident in identities {
+        let reference = match travel(ident, Carry::CFPACK) {
+            Travel::Named(reference) => reference,
+            // `Carry::CFPACK` has no index for anything to be linked from, so
+            // this does not arise. Were that ever to change, bytes are the
+            // safe answer rather than a panic in the middle of an export.
+            Travel::Linked(_) => {
+                report.embedded_elsewhere += 1;
+                continue;
+            }
+            // Counted by reason, as the mrpack writer counts them: the sharer
+            // can act on "this format cannot link to where it came from" and
+            // nobody can act on "nothing has this mod".
+            Travel::Copied(why) => {
+                match why {
+                    Copied::Unknown => report.embedded_unknown += 1,
+                    Copied::Elsewhere => report.embedded_elsewhere += 1,
+                    Copied::TurnedOff => report.embedded_turned_off += 1,
+                    Copied::Blocked => report.embedded_blocked += 1,
+                }
+                continue;
+            }
+        };
+
+        // The format names a file by two integers, and every reader types them
+        // that way. A reference whose ids are not numbers is no reference
+        // here, so the bytes travel instead of a pair nothing can read.
+        let (Ok(project_id), Ok(file_id)) = (
+            reference.project_id.parse::<u32>(),
+            reference.version_id.parse::<u32>(),
+        ) else {
+            report.embedded_unknown += 1;
+            continue;
+        };
+
+        // Prism reads `files[]` into a map keyed on the file id
+        // (PackManifest.cpp), so a second entry with the same id silently
+        // replaces the first. Geode meets this for real, since one jar copied
+        // under a second name has the same fingerprint and so the same ids.
+        // The duplicate is left out of the manifest and its bytes travel, so
+        // the recipient still ends up with both files.
+        //
+        // Its own count, and not the format's limit: this pack just linked
+        // that mod, so "it cannot link to where this came from" is the one
+        // thing the sharer must not be told about it.
+        if manifest.files.iter().any(|f| f.file_id == file_id) {
+            report.embedded_duplicate += 1;
+            continue;
+        }
+
+        manifest.files.push(CfFileOut {
+            project_id,
+            file_id,
+            // The nearest this format comes to saying a mod is turned off, and
+            // what its readers turn back into a `.disabled` file.
+            required: !ident.disabled,
+        });
+        credits.push((project_id, ident.file_name.clone()));
+        carried.insert(ident.disk_rel.clone());
+        report.referenced += 1;
+    }
+
+    progress.stage("Writing pack", 1).await;
+
+    let walk = input.walk;
+    let named: Extras = vec![
+        (
+            "manifest.json".to_string(),
+            serde_json::to_vec_pretty(&manifest)?,
+        ),
+        ("modlist.html".to_string(), modlist_html(&credits)),
+    ];
+    report.unnameable = tokio::task::spawn_blocking(move || {
+        lay_out(
+            &dest,
+            &game_dir,
+            &walk,
+            Layout {
+                named,
+                carried,
+                // Only a `.geodepack` has notes for a file to be named in.
+                referenced: std::collections::HashSet::new(),
+                // Never a server's pack for its players: what a share serves
+                // is the mrpack.
+                players_pack: false,
+            },
+        )
+    })
+    .await
+    .map_err(|e| Error::msg(format!("writing pack panicked: {e}")))??;
+
+    progress.finish().await;
+    Ok(report)
+}
+
+/// The credit list a CurseForge pack carries, which nothing reads.
+///
+/// One line per file the manifest names — the ones whose names appear nowhere
+/// else in the zip, since everything carried as bytes is visible in
+/// `overrides/`. The text is the file's own name and the link is the project's
+/// numbered page: a fingerprint answer carries no slug and no author, and a
+/// plain credit beats an invented one. Nothing depends on the link resolving.
+fn modlist_html(credits: &[(u32, String)]) -> Vec<u8> {
+    let mut out = String::from("<ul>\n");
+    for (project_id, file_name) in credits {
+        let name = file_name
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
+        out.push_str(&format!(
+            "<li><a href=\"https://www.curseforge.com/projects/{project_id}\">{name}</a></li>\n"
+        ));
+    }
+    out.push_str("</ul>\n");
+    out.into_bytes()
 }
 
 #[cfg(test)]
@@ -1400,6 +1786,460 @@ mod tests {
             names,
             vec!["modrinth.index.json", "overrides/client-mods/kept.jar"]
         );
+    }
+
+    /// One entry out of a written pack.
+    fn read_entry(archive: &Path, name: &str) -> Vec<u8> {
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(archive).unwrap()).unwrap();
+        let mut out = Vec::new();
+        zip.by_name(name)
+            .unwrap_or_else(|e| panic!("{name}: {e}"))
+            .read_to_end(&mut out)
+            .unwrap();
+        out
+    }
+
+    /// The loader version a pack names is the one other launchers read, which
+    /// for Forge is not the one Geode stores.
+    ///
+    /// Geode keeps the long Maven form (`1.20.1-47.2.0`) because `meta::forge`
+    /// finds a build by filtering on that prefix. Prism reads this key straight
+    /// into its own Forge version after a plain string removal, so a pack
+    /// carrying the long form names a build it cannot resolve. Every other
+    /// loader is stored bare and travels as it is.
+    #[tokio::test]
+    async fn a_packs_loader_version_is_the_one_other_launchers_read() {
+        let scratch = Scratch::new("mrpack-deps");
+        let paths = scratch.paths.clone();
+
+        for (loader, stored, mc, key, expected) in [
+            (Loader::Forge, "1.20.1-47.2.0", "1.20.1", "forge", "47.2.0"),
+            // A version that does not carry the prefix is left alone, so an
+            // instance imported from somebody else's pack exports the string
+            // it arrived with.
+            (Loader::Forge, "47.2.0", "1.20.1", "forge", "47.2.0"),
+            (
+                Loader::NeoForge,
+                "21.1.248",
+                "1.21.1",
+                "neoforge",
+                "21.1.248",
+            ),
+            (
+                Loader::Fabric,
+                "0.16.9",
+                "1.21.1",
+                "fabric-loader",
+                "0.16.9",
+            ),
+        ] {
+            let mut inst = Instance::new("Deps".into(), mc.into(), loader, stored.into());
+            inst.id = format!("deps-{}-{}", loader.as_str(), stored);
+            tokio::fs::create_dir_all(paths.game_dir(&inst.id))
+                .await
+                .unwrap();
+
+            let dest = paths.root.join(format!("{}.mrpack", inst.id));
+            export_mrpack(
+                Ask::Nobody,
+                &paths,
+                &inst,
+                dest.clone(),
+                false,
+                &Progress::silent("t"),
+            )
+            .await
+            .unwrap();
+
+            let index: MrIndex =
+                serde_json::from_slice(&read_entry(&dest, "modrinth.index.json")).unwrap();
+            assert_eq!(
+                index.dependencies.get(key).map(String::as_str),
+                Some(expected),
+                "{loader:?} stored as {stored}"
+            );
+            assert_eq!(
+                index.dependencies.get("minecraft").map(String::as_str),
+                Some(mc)
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Export: a CurseForge pack
+    // -----------------------------------------------------------------------
+
+    /// An instance on disk with each named file written, and a catalogue of
+    /// what is in it. No platform is asked anything: each test says what the
+    /// platforms hold through the catalogue's own stubs, which go in through
+    /// the code a real answer does.
+    async fn cf_fixture(tag: &str, files: &[(&str, &str)]) -> (Scratch, Instance, Catalogue) {
+        let scratch = Scratch::new(&format!("cfpack-{tag}"));
+        let mut inst = Instance::new(
+            "Kitchen Sink".into(),
+            "1.21.1".into(),
+            Loader::Fabric,
+            "0.16.9".into(),
+        );
+        inst.id = format!("cf-{tag}");
+        let game = scratch.paths.game_dir(&inst.id);
+        tokio::fs::create_dir_all(&game).await.unwrap();
+        for (dir, name) in files {
+            let holding = game.join(dir);
+            tokio::fs::create_dir_all(&holding).await.unwrap();
+            tokio::fs::write(holding.join(name), format!("the bytes of {name}"))
+                .await
+                .unwrap();
+        }
+        let catalogue = crate::install::identity::for_instance(
+            Ask::Nobody,
+            &scratch.paths,
+            &inst,
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+        (scratch, inst, catalogue)
+    }
+
+    /// Write the fixture out as a CurseForge pack.
+    async fn cfpack_from(
+        paths: &Paths,
+        inst: &Instance,
+        dest: &Path,
+        catalogue: &Catalogue,
+    ) -> ExportReport {
+        cfpack_credited_to(paths, inst, dest, catalogue, "Somebody").await
+    }
+
+    /// The same, for the one field a pack carries about the sharer rather than
+    /// the instance.
+    async fn cfpack_credited_to(
+        paths: &Paths,
+        inst: &Instance,
+        dest: &Path,
+        catalogue: &Catalogue,
+        author: &str,
+    ) -> ExportReport {
+        write_cfpack(
+            instance_input(paths, inst, false),
+            author,
+            dest.to_path_buf(),
+            catalogue,
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// Everything inside a written pack, by entry name.
+    fn entries(archive: &Path) -> Vec<String> {
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(archive).unwrap()).unwrap();
+        let mut names: Vec<String> = (0..zip.len())
+            .map(|i| zip.by_index(i).unwrap().name().to_string())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// A written pack's manifest as JSON, so what it carries can be asserted
+    /// with its types and not only its values.
+    fn manifest_of(archive: &Path) -> serde_json::Value {
+        serde_json::from_slice(&read_entry(archive, "manifest.json")).unwrap()
+    }
+
+    /// Two of these fields are a hard reject in Prism's reader and neither is
+    /// one Geode's own reader looks at, so a pack written without them would
+    /// round trip through Geode and open nowhere else. The ids are capitalised
+    /// the way the format spells them and typed the way it types them.
+    #[tokio::test]
+    async fn a_curseforge_manifest_is_one_prism_would_accept() {
+        let (scratch, inst, mut catalogue) = cf_fixture("accept", &[("mods", "create.jar")]).await;
+        catalogue.pretend_curseforge_holds(&[("create.jar", 328085, 4593548, true)]);
+        let dest = scratch.paths.root.join("accept.zip");
+        cfpack_from(&scratch.paths, &inst, &dest, &catalogue).await;
+
+        let manifest = manifest_of(&dest);
+        assert_eq!(manifest["manifestType"], "minecraftModpack");
+        assert_eq!(manifest["manifestVersion"], serde_json::json!(1));
+        assert_eq!(manifest["overrides"], "overrides");
+        assert_eq!(manifest["name"], "Kitchen Sink");
+        assert_eq!(manifest["author"], "Somebody");
+        assert_eq!(manifest["minecraft"]["version"], "1.21.1");
+        assert_eq!(
+            manifest["minecraft"]["modLoaders"],
+            serde_json::json!([{ "id": "fabric-0.16.9", "primary": true }])
+        );
+        assert_eq!(
+            manifest["files"],
+            serde_json::json!([{ "projectID": 328085, "fileID": 4593548, "required": true }])
+        );
+    }
+
+    /// The format requires an author and an instance has nowhere to keep one,
+    /// so an export can arrive with nothing to credit. A reader's own default
+    /// does not cover it: Prism reads `manifest["author"].toString("Anonymous")`
+    /// and that default fires only for a value that is not a string, so an
+    /// empty one is shown as a blank. The stand-in is written here instead,
+    /// and the report says which name went into the pack either way, because
+    /// the name is the sharer's own and it travels with the file.
+    #[tokio::test]
+    async fn an_author_nobody_gave_is_the_one_a_reader_shows() {
+        let (scratch, inst, catalogue) = cf_fixture("author", &[("mods", "create.jar")]).await;
+        for (given, written) in [("", "Anonymous"), ("   ", "Anonymous"), ("Ada", "Ada")] {
+            let dest = scratch.paths.root.join(format!("author-{written}.zip"));
+            let report = cfpack_credited_to(&scratch.paths, &inst, &dest, &catalogue, given).await;
+            assert_eq!(manifest_of(&dest)["author"], written, "given {given:?}");
+            assert_eq!(report.author.as_deref(), Some(written), "given {given:?}");
+        }
+    }
+
+    /// The owner's conversion, in the direction this format needs it: a mod
+    /// Geode knows from Modrinth travels as a pair of CurseForge ids, because
+    /// a CurseForge manifest has no slot for a Modrinth download and the jar
+    /// would otherwise be shipped.
+    #[tokio::test]
+    async fn a_modrinth_mod_curseforge_also_has_becomes_an_id_pair() {
+        let (scratch, inst, mut catalogue) = cf_fixture("both", &[("mods", "sodium.jar")]).await;
+        catalogue.pretend_modrinth_holds(&["sodium.jar"]);
+        catalogue.pretend_curseforge_holds(&[("sodium.jar", 394468, 5678, true)]);
+        let dest = scratch.paths.root.join("both.zip");
+        let report = cfpack_from(&scratch.paths, &inst, &dest, &catalogue).await;
+
+        assert_eq!(
+            manifest_of(&dest)["files"],
+            serde_json::json!([{ "projectID": 394468, "fileID": 5678, "required": true }])
+        );
+        assert!(
+            !entries(&dest).contains(&"overrides/mods/sodium.jar".to_string()),
+            "{:?}",
+            entries(&dest)
+        );
+        assert_eq!((report.referenced, bundled(&report)), (1, (0, 0, 0, 0, 0)));
+    }
+
+    /// And the other way: Modrinth naming a mod buys this format nothing, so
+    /// the jar travels — and the sharer is told it is the format's limit
+    /// rather than a mod nobody has.
+    #[tokio::test]
+    async fn a_mod_only_modrinth_has_travels_as_bytes() {
+        let (scratch, inst, mut catalogue) = cf_fixture("mronly", &[("mods", "sodium.jar")]).await;
+        catalogue.pretend_modrinth_holds(&["sodium.jar"]);
+        catalogue.pretend_curseforge_holds(&[]);
+        let dest = scratch.paths.root.join("mronly.zip");
+        let report = cfpack_from(&scratch.paths, &inst, &dest, &catalogue).await;
+
+        assert_eq!(manifest_of(&dest)["files"], serde_json::json!([]));
+        assert!(
+            entries(&dest).contains(&"overrides/mods/sodium.jar".to_string()),
+            "{:?}",
+            entries(&dest)
+        );
+        assert_eq!((report.referenced, bundled(&report)), (0, (0, 1, 0, 0, 0)));
+    }
+
+    /// The distribution rule survives into this writer: a file whose author
+    /// turned third-party downloads off is named by nothing, because a pair of
+    /// ids the recipient cannot resolve is worse than the bytes.
+    #[tokio::test]
+    async fn an_author_blocked_curseforge_match_is_embedded_not_referenced() {
+        let (scratch, inst, mut catalogue) = cf_fixture("blocked", &[("mods", "locked.jar")]).await;
+        catalogue.pretend_curseforge_holds(&[("locked.jar", 111, 222, false)]);
+        let dest = scratch.paths.root.join("blocked.zip");
+        let report = cfpack_from(&scratch.paths, &inst, &dest, &catalogue).await;
+
+        assert_eq!(manifest_of(&dest)["files"], serde_json::json!([]));
+        assert!(
+            entries(&dest).contains(&"overrides/mods/locked.jar".to_string()),
+            "{:?}",
+            entries(&dest)
+        );
+        assert_eq!((report.referenced, bundled(&report)), (0, (0, 0, 0, 1, 0)));
+    }
+
+    /// The one string the whole loader contract rests on, for both the
+    /// CurseForge id and the mrpack dependency it shares a helper with — and
+    /// read back as what it was written from, since Geode is a reader of this
+    /// format too.
+    #[test]
+    fn forge_gets_its_short_version_and_neoforge_its_own() {
+        for (loader, stored, mc, expected) in [
+            (
+                Loader::Forge,
+                "1.20.1-47.2.0",
+                "1.20.1",
+                Some("forge-47.2.0"),
+            ),
+            (Loader::Forge, "47.2.0", "1.20.1", Some("forge-47.2.0")),
+            (
+                Loader::NeoForge,
+                "21.1.248",
+                "1.21.1",
+                Some("neoforge-21.1.248"),
+            ),
+            (Loader::Fabric, "0.16.9", "1.21.1", Some("fabric-0.16.9")),
+            (Loader::Quilt, "0.27.1", "1.21.1", Some("quilt-0.27.1")),
+            // Vanilla writes an empty `modLoaders` array rather than an id.
+            (Loader::Vanilla, "", "1.21.1", None),
+        ] {
+            let id = cf_loader_id(loader, stored, mc);
+            assert_eq!(id.as_deref(), expected, "{loader:?} stored as {stored}");
+            if let Some(id) = id {
+                assert_eq!(
+                    parse_cf_loader(&id),
+                    (
+                        loader,
+                        interop_loader_version(loader, stored, mc).to_string()
+                    )
+                );
+            }
+        }
+    }
+
+    /// Prism reads `files[]` into a map keyed on the file id, so two entries
+    /// with the same id silently become one. One jar copied under a second
+    /// name has the same fingerprint and so the same ids, which is how Geode
+    /// meets this for real. The duplicate's bytes travel instead, so nothing
+    /// is lost either way.
+    ///
+    /// Counted as the duplicate it is and not as the format's limit: this pack
+    /// has just linked that mod, so telling the sharer it "cannot link to
+    /// where it came from" would be a sentence about the one file that proves
+    /// it wrong.
+    #[tokio::test]
+    async fn a_mod_present_twice_is_named_once() {
+        let (scratch, inst, mut catalogue) = cf_fixture(
+            "twice",
+            &[("mods", "create.jar"), ("mods", "create-copy.jar")],
+        )
+        .await;
+        catalogue.pretend_curseforge_holds(&[
+            ("create.jar", 7, 99, true),
+            ("create-copy.jar", 7, 99, true),
+        ]);
+        let dest = scratch.paths.root.join("twice.zip");
+        let report = cfpack_from(&scratch.paths, &inst, &dest, &catalogue).await;
+
+        assert_eq!(
+            manifest_of(&dest)["files"],
+            serde_json::json!([{ "projectID": 7, "fileID": 99, "required": true }])
+        );
+        let names = entries(&dest);
+        let embedded = [
+            "overrides/mods/create.jar",
+            "overrides/mods/create-copy.jar",
+        ]
+        .iter()
+        .filter(|path| names.contains(&path.to_string()))
+        .count();
+        assert_eq!(embedded, 1, "{names:?}");
+        assert_eq!((report.referenced, bundled(&report)), (1, (0, 0, 0, 0, 1)));
+    }
+
+    /// `required: false` is the nearest this format comes to saying a mod is
+    /// turned off, and what its readers turn back into a `.disabled` file. So
+    /// a turned-off mod costs no bytes here, unlike in an `.mrpack`.
+    #[tokio::test]
+    async fn a_turned_off_mod_is_named_as_one_the_recipient_may_skip() {
+        let (scratch, inst, mut catalogue) =
+            cf_fixture("off", &[("mods", "extra.jar.disabled")]).await;
+        catalogue.pretend_curseforge_holds(&[("extra.jar", 5, 55, true)]);
+        let dest = scratch.paths.root.join("off.zip");
+        let report = cfpack_from(&scratch.paths, &inst, &dest, &catalogue).await;
+
+        assert_eq!(
+            manifest_of(&dest)["files"],
+            serde_json::json!([{ "projectID": 5, "fileID": 55, "required": false }])
+        );
+        assert!(
+            !entries(&dest)
+                .iter()
+                .any(|name| name.starts_with("overrides/mods/")),
+            "{:?}",
+            entries(&dest)
+        );
+        assert_eq!((report.referenced, bundled(&report)), (1, (0, 0, 0, 0, 0)));
+    }
+
+    /// Named or carried, never both and never neither — the same assertion the
+    /// mrpack writer has, per file. A resource pack is here because this
+    /// format names no path: a reference would land wherever the recipient's
+    /// sniffing put it, so its bytes travel even though CurseForge names it.
+    #[tokio::test]
+    async fn a_referenced_file_is_never_also_embedded() {
+        let (scratch, inst, mut catalogue) = cf_fixture(
+            "xor",
+            &[
+                ("mods", "named.jar"),
+                ("mods", "unknown.jar"),
+                ("resourcepacks", "pretty.zip"),
+                ("config", "thing.toml"),
+            ],
+        )
+        .await;
+        catalogue
+            .pretend_curseforge_holds(&[("named.jar", 1, 11, true), ("pretty.zip", 2, 22, true)]);
+        let dest = scratch.paths.root.join("xor.zip");
+        let report = cfpack_from(&scratch.paths, &inst, &dest, &catalogue).await;
+
+        let names = entries(&dest);
+        let manifest = manifest_of(&dest);
+        let ids: Vec<u64> = manifest["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["fileID"].as_u64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![11], "only the mod can be named: {manifest}");
+
+        for (path, file_id) in [
+            ("mods/named.jar", Some(11)),
+            ("mods/unknown.jar", None),
+            ("resourcepacks/pretty.zip", None),
+            ("config/thing.toml", None),
+        ] {
+            let embedded = names.contains(&format!("overrides/{path}"));
+            let named = file_id.is_some_and(|id| ids.contains(&id));
+            assert!(
+                embedded != named,
+                "{path}: embedded={embedded} named={named}"
+            );
+        }
+        assert_eq!((report.referenced, bundled(&report)), (1, (1, 1, 0, 0, 0)));
+    }
+
+    /// The two halves agree: a pack this writer wrote is one Geode's own
+    /// reader understands, down to the loader version the id carries.
+    #[tokio::test]
+    async fn geode_reads_back_its_own_curseforge_pack() {
+        let (scratch, mut inst, catalogue) = cf_fixture("roundtrip", &[]).await;
+        inst.mc_version = "1.20.1".into();
+        inst.loader = Loader::Forge;
+        inst.loader_version = "1.20.1-47.2.0".into();
+
+        let dest = scratch.paths.root.join("roundtrip.zip");
+        cfpack_from(&scratch.paths, &inst, &dest, &catalogue).await;
+
+        let preview = preview(dest).await.unwrap();
+        assert_eq!(preview.format, "curseforge");
+        assert_eq!(preview.name, "Kitchen Sink");
+        assert_eq!(preview.mc_version, "1.20.1");
+        assert_eq!(preview.loader, Loader::Forge);
+        assert_eq!(preview.loader_version, "47.2.0");
+        assert_eq!(preview.file_count, 0);
+    }
+
+    /// What the report says travelled as bytes, by reason: nothing named it,
+    /// something did but this format cannot carry a reference to it, it was
+    /// turned off, and its author turned third-party downloads off.
+    fn bundled(report: &ExportReport) -> (usize, usize, usize, usize, usize) {
+        (
+            report.embedded_unknown,
+            report.embedded_elsewhere,
+            report.embedded_turned_off,
+            report.embedded_blocked,
+            report.embedded_duplicate,
+        )
     }
 
     // -----------------------------------------------------------------------

@@ -455,11 +455,22 @@ export const api = {
     invoke<PackPreview>("preview_modpack", { path }),
   importModpack: (path: string, name?: string) =>
     invoke<Instance>("import_modpack", { path, name: name ?? null }),
-  /** Both return what the pack did with the instance's content, so the UI can say it. */
+  /** All three return what the pack did with the instance's content, so the UI can say it. */
   exportModpack: (id: string, dest: string, includeSaves: boolean) =>
     invoke<ExportReport>("export_modpack", { id, dest, includeSaves }),
   exportGeodepack: (id: string, dest: string, includeSaves: boolean) =>
     invoke<ExportReport>("export_geodepack", { id, dest, includeSaves }),
+  /**
+   * `author` is required by the CurseForge format and an instance has nowhere
+   * to keep it, so the export flow asks. Null leaves it to the backend, which
+   * uses the signed-in account's name.
+   */
+  exportCurseforgePack: (
+    id: string,
+    dest: string,
+    author: string | null,
+    includeSaves: boolean,
+  ) => invoke<ExportReport>("export_curseforge_pack", { id, dest, author, includeSaves }),
 
   // Sharing a server with players. Status changes also arrive as the
   // `geode://share-status` event with a ShareStatus payload.

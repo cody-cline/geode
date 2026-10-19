@@ -115,6 +115,18 @@ pub enum Ask<'a> {
         /// hand over when there is nobody to ask — the same reason
         /// [`Ask::Nobody`] is a shape and not an empty list.
         curseforge_key: Option<&'a str>,
+        /// Whether a pack written from this catalogue will have an index
+        /// ([`Carry::index`]), which is the whole of what a missing CurseForge
+        /// key costs. With an index, a file Modrinth names travels as a link
+        /// whatever CurseForge would have said, so the key is only missed for
+        /// the files nothing else names. Without one — a CurseForge pack has
+        /// no index — every file CurseForge might have named travels as bytes
+        /// instead, so the key is missed for all of them.
+        ///
+        /// Read nowhere but that message: it decides which of the two the
+        /// sharer is told, and telling them the wrong one points at the format
+        /// when the thing they can act on is the key.
+        index: bool,
     },
 }
 
@@ -122,13 +134,14 @@ impl<'a> Ask<'a> {
     /// What an export asks: Modrinth always, and CurseForge only where the
     /// pack being written has a channel that can carry a reference to it.
     ///
-    /// Modrinth because its answer is what a pack index carries as a download.
-    /// CurseForge because the Geode half can name a file by its ids — but only
-    /// then, because a CurseForge answer is the one thing here that costs a
-    /// second read of every file in the instance ([`crate::net::digests`]),
-    /// and for a plain `.mrpack` it cannot change what the pack does with a
-    /// single file. The `carry` is the one the writer will use, which is what
-    /// makes asking worth the reading.
+    /// Modrinth always, because its answer is what names a file in a pack
+    /// index — and, for a format with no index, which of the two reasons the
+    /// sharer is given for a jar that travelled as bytes. CurseForge only
+    /// where the pack can name a file by its ids, because a CurseForge answer
+    /// is the one thing here that costs a second read of every file in the
+    /// instance ([`crate::net::digests`]), and for a plain `.mrpack` it cannot
+    /// change what the pack does with a single file. The `carry` is the one
+    /// the writer will use, which is what makes asking worth the reading.
     ///
     /// What a plain `.mrpack` gives up by not asking: a jar Geode has no
     /// record of and CurseForge happens to hold is reported as "nothing could
@@ -143,12 +156,13 @@ impl<'a> Ask<'a> {
     ) -> Self {
         Self::Platforms {
             client,
-            want: if carry.notes {
-                &["modrinth", "curseforge"]
-            } else {
+            want: if carry.by_id == ById::Nothing {
                 &["modrinth"]
+            } else {
+                &["modrinth", "curseforge"]
             },
             curseforge_key,
+            index: carry.index,
         }
     }
 }
@@ -210,19 +224,88 @@ impl Catalogue {
             .collect();
         apply_modrinth(self, &answer, &[]);
     }
+
+    /// Pretend CurseForge was asked and said it holds these files, each by its
+    /// project id, its file id, and whether its author lets anything but
+    /// CurseForge's own app fetch the bytes.
+    ///
+    /// The same shape as [`Self::pretend_modrinth_holds`], and for the same
+    /// reason: only the request is left out, so the answer goes in through the
+    /// [`apply_curseforge`] a real one does and a file left off this list has a
+    /// stored CurseForge claim about it proven stale exactly as a real miss
+    /// would. The fingerprints are made up — a catalogue built with
+    /// [`Ask::Nobody`] never took one — and all they have to do is tell the
+    /// files asked about apart.
+    #[cfg(test)]
+    pub fn pretend_curseforge_holds(&mut self, files: &[(&str, u32, u32, bool)]) {
+        let asking: Vec<(ContentKind, String, u32)> = self
+            .identities()
+            .enumerate()
+            .map(|(nth, i)| (i.kind, i.file_name.clone(), nth as u32))
+            .collect();
+        let answer: HashMap<u32, PlatformRef> = asking
+            .iter()
+            .filter_map(|(_, file_name, fingerprint)| {
+                let held = files.iter().find(|f| f.0 == file_name.as_str())?;
+                Some((
+                    *fingerprint,
+                    PlatformRef {
+                        provider: "curseforge".into(),
+                        project_id: held.1.to_string(),
+                        version_id: held.2.to_string(),
+                        // Never a URL, for the reason `curseforge_ref` gives.
+                        url: None,
+                        distributable: held.3,
+                    },
+                ))
+            })
+            .collect();
+        apply_curseforge(self, &asking, &answer);
+    }
+}
+
+/// Which files a pack's by-id channel can name.
+///
+/// The channel that carries ids rather than a URL, so the recipient resolves
+/// the file with their own credentials and an author's wishes are read today
+/// rather than on the day somebody exported. A `.geodepack`'s file notes are
+/// one; a CurseForge manifest's `files[]` is the other, and they differ in what
+/// they are able to say about a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ById {
+    /// There is no such channel.
+    Nothing,
+    /// Any file, wherever it sits: a `.geodepack`'s note carries the path
+    /// alongside the ids.
+    AnyFile,
+    /// Mods only. A CurseForge manifest names ids and nothing else — no path,
+    /// no name, no hash — so the recipient picks a folder by sniffing the bytes
+    /// and leaves what it cannot identify in `mods/`. A mod is the one kind
+    /// that lands right either way; anything whose folder matters travels as
+    /// bytes instead, where the pack says where it goes.
+    ModsOnly,
 }
 
 /// What the pack being written is able to say, which is what decides whether a
 /// file can travel as a reference instead of as bytes.
 #[derive(Debug, Clone, Copy)]
 pub struct Carry {
-    /// The Geode half can name a source, so a file on a platform the index
-    /// cannot carry travels as ids the recipient resolves with their own
-    /// credentials.
-    pub notes: bool,
-    /// Those notes are read back for the off state too, so a turned-off mod
-    /// can be indexed under its enabled name instead of travelling as bytes
-    /// under its `.disabled` one.
+    /// The pack has a Modrinth index, which carries a file as a URL and a pair
+    /// of hashes that need nobody's credentials at either end.
+    pub index: bool,
+    /// What the pack can name by id.
+    pub by_id: ById,
+    /// The pack can say a file is turned off, so a turned-off mod can be
+    /// carried under its enabled name instead of travelling as bytes under its
+    /// `.disabled` one.
+    ///
+    /// [`travel`] reads this on the index branch alone, because that is the
+    /// only branch with a choice to make: an index entry is a URL the
+    /// recipient fetches, and what arrives is switched on. A by-id channel
+    /// carries the off state beside the id it names — a `.geodepack`'s note
+    /// says so outright, a CurseForge manifest says it with `required: false`
+    /// — so for a file named that way there is nothing to decide here, and
+    /// writing the state is the writer's own job.
     pub off_state: bool,
 }
 
@@ -232,12 +315,14 @@ impl Carry {
     /// turned-off one, because the format has no way to say "off" and arriving
     /// switched on is worse than arriving as bytes.
     pub const MRPACK: Self = Self {
-        notes: false,
+        index: true,
+        by_id: ById::Nothing,
         off_state: false,
     };
     /// A `.geodepack`: file notes carry both a source and the off state.
     pub const GEODEPACK: Self = Self {
-        notes: true,
+        index: true,
+        by_id: ById::AnyFile,
         off_state: true,
     };
     /// A server's pack for its players. Its notes name sources, but a player's
@@ -246,8 +331,21 @@ impl Carry {
     /// turned-off mod therefore still travels as bytes, which arrives off;
     /// changing that means changing what a player's import reads.
     pub const SERVER_PACK: Self = Self {
-        notes: true,
+        index: true,
+        by_id: ById::AnyFile,
         off_state: false,
+    };
+    /// A CurseForge pack: a manifest of `{projectID, fileID, required}` and an
+    /// overrides tree, and no index at all — so a mod Modrinth alone can name
+    /// travels as bytes however well it is known. `required: false` is the
+    /// nearest the format comes to saying a mod is turned off, and is what the
+    /// readers turn back into a `.disabled` file — which the manifest writer
+    /// writes from the file's own off state, since with no index [`travel`]
+    /// has no choice to make here.
+    pub const CFPACK: Self = Self {
+        index: false,
+        by_id: ById::ModsOnly,
+        off_state: true,
     };
 }
 
@@ -265,8 +363,9 @@ pub enum Travel<'a> {
     /// An index entry: a URL and a pair of hashes the recipient fetches with
     /// nobody's credentials.
     Linked(&'a PlatformRef),
-    /// Named in the Geode half and fetched by id, so the recipient's own
-    /// answer about an author's wishes is the one that counts.
+    /// Named by id in the pack's own by-id channel and fetched from there, so
+    /// the recipient's own answer about an author's wishes is the one that
+    /// counts.
     Named(&'a PlatformRef),
     /// Bytes under `overrides/`, for this reason.
     Copied(Copied),
@@ -283,7 +382,8 @@ pub enum Copied {
     /// Nothing could name these bytes.
     Unknown,
     /// A platform does name them, and this pack has no channel that can carry
-    /// a reference to that platform.
+    /// a reference to it — none that reaches that platform, or none that can
+    /// say where this kind of file belongs.
     Elsewhere,
     /// Named, with a channel that could carry it, but this pack has nowhere to
     /// say the file is turned off.
@@ -299,39 +399,80 @@ pub enum Copied {
 /// this out separately would eventually promise something the export then did
 /// differently, and the only reason to show it is that it is true.
 pub fn travel(ident: &Identity, carry: Carry) -> Travel<'_> {
-    // The index first, wherever it can carry the file: it names the bytes it
-    // points at, and needs no credentials at either end.
-    if let Some(reference) = ident.reference("modrinth") {
-        // A turned-off file needs the pack to be able to say so, because a
-        // reference arrives fresh from the platform and switched on. There is
-        // nothing to fall through to: a content record names one platform, so
-        // a file Modrinth knows has no second reference waiting behind it.
-        if ident.disabled && !carry.off_state {
-            return Travel::Copied(Copied::TurnedOff);
+    // The index first, wherever the pack has one: it names the bytes it points
+    // at, and needs no credentials at either end.
+    if carry.index {
+        if let Some(reference) = ident.reference("modrinth") {
+            // A turned-off file needs the pack to be able to say so, because a
+            // reference arrives fresh from the platform and switched on. There
+            // is nothing to fall through to: a content record names one
+            // platform, so a file Modrinth knows has no second reference
+            // waiting behind it.
+            if ident.disabled && !carry.off_state {
+                return Travel::Copied(Copied::TurnedOff);
+            }
+            return Travel::Linked(reference);
         }
-        return Travel::Linked(reference);
     }
-    // Then the Geode half: ids rather than a URL, so the recipient's own answer
-    // about an author's wishes is the one that counts. A note carries the off
-    // state alongside the source it names, so there is nothing more to ask.
-    let named_elsewhere = ident.refs.iter().find(|r| r.provider != "modrinth");
-    match (carry.notes, named_elsewhere) {
+    // Then the by-id channel: ids rather than a URL, so the recipient's own
+    // answer about an author's wishes is the one that counts. It carries the
+    // off state alongside the source it names — a `.geodepack`'s note says so
+    // outright and a CurseForge manifest says it with `required: false` — so
+    // there is nothing more to ask.
+    //
+    // Modrinth is never named here. Where the pack has an index that is where
+    // a Modrinth file belongs, and the format's rule is that the same fact
+    // never lives in both halves; where it has none, neither channel can
+    // resolve one anyway — a `.geodepack`'s import reports any provider but
+    // CurseForge as unfetchable, and a CurseForge manifest has no slot for a
+    // Modrinth file at all.
+    let named = ident.refs.iter().find(|r| r.provider != "modrinth");
+    match (carry.by_id, named) {
         // The one place the distribution rule is enforced, so no writer can
         // get it wrong. An author who turned third-party downloads off has
         // left the recipient a reference nobody can resolve, and the bytes are
-        // better than that. Reported ahead of the format's own limits because
-        // it is the stronger answer: picking another format would not help.
+        // better than that. This arm comes first so that a blocked reference
+        // is never handed to a writer, whatever else is true of the file.
         //
-        // Not a refusal to carry the mod. Where the author published the same
-        // bytes on Modrinth themselves, the branch above has already linked it
-        // from there, which is the author's own release and not a way around
-        // them. What is left here is a file only the blocked copy names.
-        (_, Some(reference)) if !reference.distributable => Travel::Copied(Copied::Blocked),
-        (true, Some(reference)) => Travel::Named(reference),
+        // Which of the two reasons the sharer hears depends on whether
+        // anything else names the same bytes, because that is what decides
+        // whether they can do something about it. Nothing else names them: the
+        // author's decision is the whole story, and no other format would have
+        // linked the file either. Modrinth names them: the author published
+        // those bytes themselves, which a pack with an index has already
+        // linked above — so what reaches here is an index-less format, whose
+        // own limit is the honest reason and the one the sharer can act on by
+        // exporting a format that can carry a Modrinth link.
+        (_, Some(reference)) if !reference.distributable => {
+            Travel::Copied(if ident.reference("modrinth").is_some() {
+                Copied::Elsewhere
+            } else {
+                Copied::Blocked
+            })
+        }
+        (ById::AnyFile, Some(reference)) => Travel::Named(reference),
+        // A CurseForge manifest names ids and no path, so only a mod can be
+        // trusted to land where it belongs. A resource pack, shader or data
+        // pack named that way arrives wherever the recipient's own sniffing
+        // puts it, which for a shader pack is `mods/` — so its bytes travel
+        // instead, under a path the pack does state.
+        //
+        // And only CurseForge's own ids: this channel is a pair of integers
+        // with no room to say which platform they belong to, so the
+        // recipient's key resolves whatever is there as a CurseForge project
+        // and file. Another platform's numeric id would parse and download an
+        // unrelated mod, and the format carries no hash to catch it with.
+        (ById::ModsOnly, Some(reference))
+            if ident.kind == ContentKind::Mod && reference.provider == "curseforge" =>
+        {
+            Travel::Named(reference)
+        }
         // A platform holds this mod and the pack has nowhere to say so. Worth
         // telling apart from a jar nothing knows: the remedy is a format with
-        // a second channel, not hunting for where the mod came from.
-        (false, Some(_)) => Travel::Copied(Copied::Elsewhere),
+        // a channel that fits, not hunting for where the mod came from.
+        _ if named.is_some() || ident.reference("modrinth").is_some() => {
+            Travel::Copied(Copied::Elsewhere)
+        }
         _ => Travel::Copied(Copied::Unknown),
     }
 }
@@ -510,6 +651,7 @@ pub async fn identify(
         client,
         want,
         curseforge_key,
+        index,
     } = ask
     else {
         return Ok(catalogue);
@@ -523,13 +665,37 @@ pub async fn identify(
             // Nothing is guessed from no key, and nothing is quietly embedded
             // either: a mod only CurseForge hosts is one the sharer can link by
             // setting a key, and that is the only part of this they can act on.
+            //
+            // How many files that is depends on what the pack can carry, which
+            // is what [`Ask::Platforms::index`] is for. With an index, a file
+            // Modrinth named is linked from there whatever CurseForge holds, so
+            // only the files nothing else named are the worse for the missing
+            // key. Without one, a Modrinth answer buys the pack nothing and
+            // every file CurseForge might have named is travelling as bytes —
+            // which is the reason the sharer needs to hear, since blaming the
+            // format points them away from the one thing they can change.
             None => {
-                let nameless = catalogue.identities().filter(|i| i.refs.is_empty()).count();
-                if nameless > 0 {
+                let unasked = catalogue
+                    .identities()
+                    .filter(|i| {
+                        if index {
+                            i.refs.is_empty()
+                        } else {
+                            i.reference("curseforge").is_none()
+                        }
+                    })
+                    .count();
+                if unasked > 0 && index {
                     catalogue.trouble.push(format!(
-                        "CurseForge was not asked about {nameless} files nothing else could name, \
+                        "CurseForge was not asked about {unasked} files nothing else could name, \
                          because no API key is set — add one in Settings and the ones it has will \
                          be linked instead of bundled in"
+                    ));
+                } else if unasked > 0 {
+                    catalogue.trouble.push(format!(
+                        "CurseForge was not asked about {unasked} files, because no API key is \
+                         set — this format links only what CurseForge names, so add one in \
+                         Settings and the ones it has will be linked instead of bundled in"
                     ));
                 }
             }
@@ -927,6 +1093,7 @@ mod tests {
                 client: &client,
                 want: &["modrinth"],
                 curseforge_key: None,
+                index: true,
             },
             &Progress::silent("t"),
         )
@@ -949,6 +1116,14 @@ mod tests {
     /// setting a key, which is the one part of this they can act on, so they
     /// are told instead of quietly handed a fatter pack.
     ///
+    /// Which files that covers is the format's question, not the file's. A
+    /// pack with an index links a Modrinth file whatever CurseForge holds, so
+    /// the key is only missed for a file nothing else named; a CurseForge pack
+    /// has no index, so it is missed for every file CurseForge might have
+    /// named — and saying nothing there leaves the sharer reading "this format
+    /// cannot link to where they came from" about mods a key would have
+    /// linked.
+    ///
     /// The client here reaches a port nothing listens on, so a request that
     /// was attempted would fail and be reported in words of its own.
     #[tokio::test]
@@ -962,41 +1137,53 @@ mod tests {
             disabled: false,
         };
         let client = offline();
-        let keyless = Ask::Platforms {
+        let keyless = |index: bool| Ask::Platforms {
             client: &client,
             want: &["curseforge"],
             curseforge_key: None,
+            index,
         };
         let about_the_key = |c: &Catalogue| {
             c.trouble
                 .iter()
                 .any(|line| line.contains("CurseForge") && line.contains("no API key"))
         };
+        let record = a_record("modrinth", "sodium.jar");
 
-        // With a record there is nothing to say: something does name this file,
-        // whatever CurseForge would have answered.
-        let named = identify(
+        // A pack with an index has nothing to say about this file: Modrinth
+        // names it, so it travels as a link and a key would not have changed
+        // that.
+        let indexed = identify(
             &root,
             vec![candidate.clone()],
-            &[&a_record("modrinth", "sodium.jar")],
-            keyless,
+            &[&record],
+            keyless(true),
             &Progress::silent("t"),
         )
         .await
         .unwrap();
-        assert!(!about_the_key(&named), "{:?}", named.trouble);
+        assert!(!about_the_key(&indexed), "{:?}", indexed.trouble);
 
-        // With none, the one platform that might still have had it was not
-        // asked, and the sharer is the one who can change that.
+        // The same file in a pack with no index travels as bytes, because the
+        // one platform this format can link from was never asked.
+        let by_id_only = identify(
+            &root,
+            vec![candidate.clone()],
+            &[&record],
+            keyless(false),
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+        assert!(about_the_key(&by_id_only), "{:?}", by_id_only.trouble);
+
+        // And with nothing naming it at all, the platform that might still
+        // have had it was not asked, whatever the format.
         let nameless = identify(
             &root,
             vec![candidate],
             &[],
-            Ask::Platforms {
-                client: &client,
-                want: &["curseforge"],
-                curseforge_key: None,
-            },
+            keyless(true),
             &Progress::silent("t"),
         )
         .await
@@ -1087,6 +1274,64 @@ mod tests {
         assert!(matches!(
             of("homemade.jar", Carry::MRPACK),
             Some(Travel::Copied(Copied::Unknown))
+        ));
+        // And a CurseForge pack is the same thing the other way round: it can
+        // name the CurseForge mod and has no index to carry the Modrinth one,
+        // which is the format's limit rather than the mod being unknown.
+        assert!(matches!(
+            of("create.jar", Carry::CFPACK),
+            Some(Travel::Named(_))
+        ));
+        assert!(matches!(
+            of("sodium.jar", Carry::CFPACK),
+            Some(Travel::Copied(Copied::Elsewhere))
+        ));
+        assert!(matches!(
+            of("homemade.jar", Carry::CFPACK),
+            Some(Travel::Copied(Copied::Unknown))
+        ));
+    }
+
+    /// A CurseForge manifest names ids and no path, so only a mod can be
+    /// trusted to land where it belongs: the recipient sniffs the bytes and
+    /// leaves what it cannot identify in `mods/`, which is where a shader pack
+    /// would end up doing nothing. Its bytes travel instead, under a path the
+    /// pack does state.
+    #[tokio::test]
+    async fn only_a_mod_can_be_named_by_a_curseforge_manifest() {
+        let scratch = Scratch::new("identity-modsonly");
+        let root = scratch.paths.root.join("game");
+        let mut candidates = Vec::new();
+        for kind in [ContentKind::Mod, ContentKind::ShaderPack] {
+            let dir = root.join(kind.folder());
+            tokio::fs::create_dir_all(&dir).await.unwrap();
+            tokio::fs::write(dir.join("thing.zip"), kind.folder())
+                .await
+                .unwrap();
+            candidates.push(Candidate {
+                kind,
+                disk_rel: PathBuf::from(kind.folder()).join("thing.zip"),
+                file_name: "thing.zip".into(),
+                disabled: false,
+            });
+        }
+        let mut catalogue = identify(&root, candidates, &[], Ask::Nobody, &Progress::silent("t"))
+            .await
+            .unwrap();
+        catalogue.pretend_curseforge_holds(&[("thing.zip", 100, 200, true)]);
+
+        assert!(matches!(
+            catalogue.travel(ContentKind::Mod, "thing.zip", Carry::CFPACK),
+            Some(Travel::Named(_))
+        ));
+        assert!(matches!(
+            catalogue.travel(ContentKind::ShaderPack, "thing.zip", Carry::CFPACK),
+            Some(Travel::Copied(Copied::Elsewhere))
+        ));
+        // The same file in a format whose channel carries a path is named.
+        assert!(matches!(
+            catalogue.travel(ContentKind::ShaderPack, "thing.zip", Carry::GEODEPACK),
+            Some(Travel::Named(_))
         ));
     }
 
@@ -1220,9 +1465,7 @@ mod tests {
     /// A file whose author turned third-party downloads off is still a match —
     /// that is how the sharer gets told why — but no writer can be handed it as
     /// a reference, because the recipient would be left with ids nobody can
-    /// resolve. Where the author published the same bytes on Modrinth
-    /// themselves, the Modrinth branch has already linked it from there, which
-    /// is their own release and not a way around them.
+    /// resolve.
     #[tokio::test]
     async fn an_author_blocked_file_is_never_offered_as_a_reference() {
         let (_scratch, mut catalogue) = catalogue_of("cfblocked", &[("", "locked.jar")]).await;
@@ -1238,13 +1481,83 @@ mod tests {
             !reference.distributable,
             "a blocked match must be recorded as one, so the sharer can be told why"
         );
-        // Every format, including the one that could have carried the ids.
-        for carry in [Carry::GEODEPACK, Carry::MRPACK, Carry::SERVER_PACK] {
+        // Every format, including the two that could have carried the ids.
+        for carry in [
+            Carry::GEODEPACK,
+            Carry::MRPACK,
+            Carry::SERVER_PACK,
+            Carry::CFPACK,
+        ] {
             assert!(
                 matches!(travel(ident, carry), Travel::Copied(Copied::Blocked)),
                 "{carry:?} offered a blocked file as a reference"
             );
         }
+    }
+
+    /// And the reason the sharer is given is the one they can act on.
+    ///
+    /// Where the author published the same bytes on Modrinth themselves, a
+    /// pack with an index links them from there — their own release, not a way
+    /// around them. A pack with no index cannot, so its jar travels for the
+    /// format's reason and not the author's: "nobody can follow a link to
+    /// this" would send the sharer looking for a remedy that does not exist,
+    /// past the one that does.
+    #[tokio::test]
+    async fn a_blocked_file_the_author_also_published_on_modrinth_is_the_formats_limit() {
+        let (_scratch, mut catalogue) = catalogue_of("cfblockedmr", &[("", "both.jar")]).await;
+        catalogue.pretend_modrinth_holds(&["both.jar"]);
+        let asking = vec![(ContentKind::Mod, "both.jar".to_string(), 9)];
+        let answer = [(9, curseforge_ref(a_curseforge_file("cf-both", true)))]
+            .into_iter()
+            .collect();
+        apply_curseforge(&mut catalogue, &asking, &answer);
+
+        let ident = catalogue.get(ContentKind::Mod, "both.jar").unwrap();
+        assert!(!ident.reference("curseforge").unwrap().distributable);
+        for carry in [Carry::GEODEPACK, Carry::MRPACK, Carry::SERVER_PACK] {
+            assert!(
+                matches!(travel(ident, carry), Travel::Linked(_)),
+                "{carry:?} passed over the author's own Modrinth release"
+            );
+        }
+        assert!(
+            matches!(
+                travel(ident, Carry::CFPACK),
+                Travel::Copied(Copied::Elsewhere)
+            ),
+            "a format that cannot carry the Modrinth link blamed the author instead"
+        );
+    }
+
+    /// A by-id channel that names nothing but two integers can only carry the
+    /// platform it belongs to.
+    ///
+    /// A CurseForge manifest has no field for the provider and no hash, so a
+    /// numeric id from somewhere else would be resolved against CurseForge and
+    /// install an unrelated mod with nothing to catch it. A `.geodepack`'s note
+    /// carries the provider's name, so it can say what it means.
+    #[tokio::test]
+    async fn only_curseforge_ids_go_in_a_channel_that_names_no_platform() {
+        let (_scratch, mut catalogue) = catalogue_of("otherprovider", &[("", "plugin.jar")]).await;
+        let ident = catalogue.files.values_mut().next().unwrap();
+        ident.refs.push(PlatformRef {
+            provider: "spiget".into(),
+            project_id: "28140".into(),
+            version_id: "487564".into(),
+            url: None,
+            distributable: true,
+        });
+
+        let ident = catalogue.get(ContentKind::Mod, "plugin.jar").unwrap();
+        assert!(matches!(travel(ident, Carry::GEODEPACK), Travel::Named(_)));
+        assert!(
+            matches!(
+                travel(ident, Carry::CFPACK),
+                Travel::Copied(Copied::Elsewhere)
+            ),
+            "another platform's ids were offered as a CurseForge pair"
+        );
     }
 
     /// A lookup that answered nothing about a file the record named proves that
@@ -1307,6 +1620,7 @@ mod tests {
                 // Shaped like a key and belonging to nobody. It never leaves
                 // the process: the client cannot connect.
                 curseforge_key: Some("$2a$10$not-a-real-key"),
+                index: true,
             },
             &Progress::silent("t"),
         )
@@ -1365,6 +1679,7 @@ mod tests {
                 client: &client,
                 want: &["curseforge"],
                 curseforge_key: Some("$2a$10$not-a-real-key"),
+                index: true,
             },
             &Progress::silent("t"),
         )

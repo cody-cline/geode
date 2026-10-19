@@ -21,6 +21,22 @@ function numberOrNull(value: string): number | null {
 }
 
 /**
+ * The formats an instance exports as: what to save it under, what the save
+ * dialog's filter is called, and what to call the format in a sentence.
+ *
+ * A CurseForge pack is a plain `.zip` — the format has no extension of its own
+ * — so what a pack is saved as and what it is called are no longer the same
+ * string.
+ */
+const FORMATS = {
+  geodepack: { ext: "geodepack", filter: "Geode pack", name: "a .geodepack" },
+  mrpack: { ext: "mrpack", filter: "Modrinth pack", name: "a .mrpack" },
+  curseforge: { ext: "zip", filter: "CurseForge pack", name: "a CurseForge pack" },
+} as const;
+
+type Format = keyof typeof FORMATS;
+
+/**
  * What the export actually did, in the words the recipient's experience turns
  * on. The old copy promised that everything unlinked was "bundled in, jars
  * included", which stopped being true the moment the exporter started asking
@@ -28,15 +44,25 @@ function numberOrNull(value: string): number | null {
  *
  * One sentence per reason, because a single count cannot say which of them
  * applied: "nothing Geode asked has this mod" is something nobody can fix, "this
- * format cannot link to CurseForge" and "this format cannot say a mod is off"
- * are answered by exporting a .geodepack instead, and "the author turned
+ * format cannot link to where it came from" and "this format cannot say a mod is
+ * off" are answered by exporting another format, "a second copy of a mod this
+ * pack already names" costs bytes and nothing else, and "the author turned
  * third-party downloads off" is somebody else's decision that no format gets
- * around.
+ * around — which is why it is counted only where no other platform names the
+ * same bytes. Where one does, the backend reports the format's own limit
+ * instead, because exporting a .geodepack or .mrpack would link it.
  */
-function exportSummary(format: "geodepack" | "mrpack", report: ExportReport): string {
-  const { referenced, embeddedUnknown, embeddedElsewhere, embeddedTurnedOff, embeddedBlocked } =
-    report;
-  const bundled = embeddedUnknown + embeddedElsewhere + embeddedTurnedOff + embeddedBlocked;
+function exportSummary(format: Format, report: ExportReport): string {
+  const {
+    referenced,
+    embeddedUnknown,
+    embeddedElsewhere,
+    embeddedTurnedOff,
+    embeddedBlocked,
+    embeddedDuplicate,
+  } = report;
+  const bundled =
+    embeddedUnknown + embeddedElsewhere + embeddedTurnedOff + embeddedBlocked + embeddedDuplicate;
   const lines: string[] = [];
   if (referenced === 0 && bundled === 0) {
     lines.push("There were no mods, packs or datapacks to carry.");
@@ -55,12 +81,12 @@ function exportSummary(format: "geodepack" | "mrpack", report: ExportReport): st
     }
     if (embeddedElsewhere > 0) {
       lines.push(
-        `${embeddedElsewhere} bundled in because a .${format} cannot link to where they came from.`,
+        `${embeddedElsewhere} bundled in because ${FORMATS[format].name} cannot link to where they came from.`,
       );
     }
     if (embeddedTurnedOff > 0) {
       lines.push(
-        `${embeddedTurnedOff} bundled in because a .${format} cannot record that a mod is turned off.`,
+        `${embeddedTurnedOff} bundled in because ${FORMATS[format].name} cannot record that a mod is turned off.`,
       );
     }
     if (embeddedBlocked > 0) {
@@ -68,8 +94,26 @@ function exportSummary(format: "geodepack" | "mrpack", report: ExportReport): st
         `${embeddedBlocked} bundled in because their author has turned off third-party downloads, so a link would be one nobody could follow.`,
       );
     }
+    if (embeddedDuplicate > 0) {
+      lines.push(
+        `${embeddedDuplicate} bundled in as a second copy of a mod this pack already links.`,
+      );
+    }
   }
   if (format === "geodepack") lines.push("Your settings and artwork travel with it.");
+  if (format === "curseforge") {
+    // The limit worth hearing even when nothing hit it this time: the format
+    // names ids and no folder, so only a mod can be linked and a resource pack
+    // would arrive wherever the recipient's own guess put it.
+    lines.push(
+      "Only mods can be linked in this format, because it records no folder — resource packs, shaders and data packs are always bundled in.",
+    );
+    // The one thing in a pack that is about the sharer rather than the
+    // instance, and the export never asked: the format requires an author, so
+    // the signed-in account's name went in. Said here until the export dialog
+    // asks for it, because a name travels with the file.
+    if (report.author) lines.push(`Credited to ${report.author}.`);
+  }
   lines.push(...report.trouble);
   if (report.unnameable.length > 0) {
     lines.push(`Left out, because a pack cannot carry these names: ${report.unnameable.join(", ")}.`);
@@ -205,33 +249,44 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
     }
   }
 
+  function exportAs(format: Format, dest: string) {
+    switch (format) {
+      case "mrpack":
+        return api.exportModpack(instance.id, dest, false);
+      case "geodepack":
+        return api.exportGeodepack(instance.id, dest, false);
+      case "curseforge":
+        // No author: the dialog that asks for one is not built yet, and the
+        // backend stands in the signed-in account's name, which is the only
+        // answer it holds to whose pack this is.
+        return api.exportCurseforgePack(instance.id, dest, null, false);
+    }
+  }
+
   // The format is picked by which button was pressed, never read back off the
   // file name: the save dialog does not report which filter was chosen, and on
   // Linux it does not add the extension either, so "ForPrism" typed under the
-  // Modrinth filter would come back with no extension at all. The two formats
-  // differ in what they can say — a .geodepack names a CurseForge mod and lets
-  // the recipient fetch it, a .mrpack has nowhere to record that and has to
-  // carry the jar — so guessing wrong silently changes what the pack contains.
-  async function exportPack(format: "geodepack" | "mrpack") {
+  // Modrinth filter would come back with no extension at all. And one of the
+  // three saves under a name the format does not own — a CurseForge pack is a
+  // plain .zip. The three differ in what they can say, so guessing wrong
+  // silently changes what the pack contains: a .geodepack names a CurseForge
+  // mod and lets the recipient fetch it, a .mrpack has nowhere to record that
+  // and has to carry the jar, and a CurseForge pack is the same trade the
+  // other way round.
+  async function exportPack(format: Format) {
+    const { ext, filter, name } = FORMATS[format];
     const chosen = await saveDialog({
-      defaultPath: `${safeFileStem(instance.name)}.${format}`,
-      filters: [
-        format === "geodepack"
-          ? { name: "Geode pack", extensions: ["geodepack"] }
-          : { name: "Modrinth pack", extensions: ["mrpack"] },
-      ],
+      defaultPath: `${safeFileStem(instance.name)}.${ext}`,
+      filters: [{ name: filter, extensions: [ext] }],
     });
     if (!chosen) return;
-    const dest = chosen.toLowerCase().endsWith(`.${format}`) ? chosen : `${chosen}.${format}`;
+    const dest = chosen.toLowerCase().endsWith(`.${ext}`) ? chosen : `${chosen}.${ext}`;
 
     try {
-      const report =
-        format === "mrpack"
-          ? await api.exportModpack(instance.id, dest, false)
-          : await api.exportGeodepack(instance.id, dest, false);
+      const report = await exportAs(format, dest);
       toast({
         kind: "success",
-        title: `Exported as .${format}`,
+        title: `Exported ${name}`,
         body: exportSummary(format, report),
       });
     } catch (e) {
@@ -585,6 +640,14 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
             >
               <PackageOpen size={14} />
               Export .mrpack
+            </button>
+            <button
+              className="btn"
+              onClick={() => exportPack("curseforge")}
+              title="A .zip for the CurseForge app and Prism; mods CurseForge has are linked by id, and everything else — including a Modrinth mod it does not have — is bundled in. The format requires an author, so the pack credits your signed-in account"
+            >
+              <PackageOpen size={14} />
+              Export CurseForge .zip
             </button>
             <div style={{ flex: 1 }} />
             <button

@@ -804,10 +804,14 @@ export interface ExportReport {
   embeddedTurnedOff: number;
   /** Files whose bytes travelled because the only platform naming them has third-party downloads turned off by the author. */
   embeddedBlocked: number;
+  /** Files whose bytes travelled because the pack already names the same file by the same ids: a second copy of a mod it did link. */
+  embeddedDuplicate: number;
   /** Files that could not go into the pack at all, by the nearest readable form of their name. */
   unnameable: string[];
   /** What could not be asked, already in words for the user. */
   trouble: string[];
+  /** Who the pack says wrote it, for a format that requires an author; null for one that does not ask. */
+  author: string | null;
 }
 
 export interface AppInfo {
