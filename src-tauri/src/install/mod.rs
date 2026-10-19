@@ -1,6 +1,7 @@
 //! Turning "I want 1.21.4 with Fabric" into a directory tree the JVM can run.
 
 pub mod content;
+pub mod identity;
 
 use std::collections::HashMap;
 use std::io::Read;

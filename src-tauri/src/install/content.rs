@@ -853,12 +853,16 @@ pub async fn link_untracked_in(
         .await;
 
     let hashes: Vec<String> = pending.iter().map(|(_, _, h)| h.clone()).collect();
+    // Only the hits: here a file nobody answered about and a file Modrinth
+    // does not have come to the same thing, which is that it stays untracked
+    // until the next time this runs.
     let found = crate::providers::modrinth::files_by_hashes(
         client,
         &hashes,
         crate::providers::modrinth::HashAlgorithm::Sha1,
     )
-    .await?;
+    .await?
+    .found;
 
     // One more call turns ids into names and icons.
     let project_ids: Vec<String> = {

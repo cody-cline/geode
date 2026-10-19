@@ -3162,7 +3162,7 @@ pub async fn export_geodepack(
     id: String,
     dest: String,
     include_saves: bool,
-) -> Result<String> {
+) -> Result<instance::modpack::ExportReport> {
     let inst = instance::load(&state.paths, &id).await?;
     let progress = Progress::new(crate::desktop::sink(app), format!("export:{id}"));
     let dest = PathBuf::from(dest);
@@ -3170,13 +3170,19 @@ pub async fn export_geodepack(
     // Failed explicitly rather than returned through `?`: the dock drops a job
     // only when it hears one is done, so a bar left unfinished stays there for
     // the rest of the session.
-    let result =
-        share::pack::export(&state.paths, &inst, dest.clone(), include_saves, &progress).await;
-    if let Err(e) = result {
+    let result = share::pack::export(
+        crate::install::identity::Ask::exporting(&state.http),
+        &state.paths,
+        &inst,
+        dest,
+        include_saves,
+        &progress,
+    )
+    .await;
+    if let Err(e) = &result {
         progress.fail(&e.to_string()).await;
-        return Err(e);
     }
-    Ok(dest.to_string_lossy().to_string())
+    result
 }
 
 #[tauri::command]
@@ -3186,28 +3192,24 @@ pub async fn export_modpack(
     id: String,
     dest: String,
     include_saves: bool,
-) -> Result<String> {
+) -> Result<instance::modpack::ExportReport> {
     let inst = instance::load(&state.paths, &id).await?;
     let progress = Progress::new(crate::desktop::sink(app), format!("export:{id}"));
     let dest = PathBuf::from(dest);
 
-    // Nothing is carried by reference: a plain `.mrpack` has nowhere to record
-    // one, so leaving a file out would lose the mod with nothing to say so.
     let result = instance::modpack::export_mrpack(
+        crate::install::identity::Ask::exporting(&state.http),
         &state.paths,
         &inst,
-        dest.clone(),
+        dest,
         include_saves,
-        Vec::new(),
-        &Default::default(),
         &progress,
     )
     .await;
-    if let Err(e) = result {
+    if let Err(e) = &result {
         progress.fail(&e.to_string()).await;
-        return Err(e);
     }
-    Ok(dest.to_string_lossy().to_string())
+    result
 }
 
 // ---------------------------------------------------------------------------

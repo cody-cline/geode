@@ -18,8 +18,34 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Bumped when this layout changes in a way an older reader would misread.
-pub const FORMAT: u32 = 1;
+/// The newest layout this build understands, and so the highest a pack may
+/// claim before it is refused.
+///
+/// Bumped when the layout changes in a way an older reader would misread.
+/// Format 2 is the `disabled` note on a file the index carries: see
+/// [`format_for`].
+pub const FORMAT: u32 = 2;
+
+/// The layout a reader has to understand to read a pack with these notes,
+/// which is not always the newest one.
+///
+/// Only one thing a note can say is *misread* rather than merely missed by a
+/// format-1 Geode: `disabled` on a file with no `source`. Such a file is in
+/// the index, so it is fetched; a format-1 reader applies the off state only
+/// to files it fetched by id, so it switches nothing off and a mod the sharer
+/// turned off — usually because it crashed — arrives switched on. Claiming 2
+/// makes that reader refuse the pack and say to update, which is the honest
+/// answer.
+///
+/// Every other pack keeps saying 1, because refusing one costs the recipient
+/// every mod in it, and most packs have nothing turned off.
+pub fn format_for(files: &[FileNote]) -> u32 {
+    if files.iter().any(|n| n.disabled && n.source.is_none()) {
+        2
+    } else {
+        1
+    }
+}
 
 /// The file extension.
 ///
@@ -142,6 +168,10 @@ pub struct FileNote {
     /// because it crashed would arrive switched on and crash for the recipient
     /// too. Kept apart from `path`, which stays on the enabled name so the
     /// reference and the exporter's skip set go on matching.
+    ///
+    /// Set for a file the *index* carries as well as one this half sources,
+    /// which is what [`format_for`] exists to version: a format-1 reader
+    /// honours it only in the second case.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disabled: bool,
 }
@@ -237,6 +267,45 @@ mod tests {
     fn a_java_path_is_never_exported() {
         let json = serde_json::to_string(&manifest()).unwrap();
         assert!(!json.to_lowercase().contains("javapath"));
+    }
+
+    /// A pack claims the oldest layout that reads it correctly, because the
+    /// cost of claiming a newer one is that an older Geode refuses the pack
+    /// whole and the recipient gets none of it.
+    ///
+    /// The one note an older reader gets *wrong* is `disabled` on a file it
+    /// fetches from the index: it applies the off state only to files it
+    /// resolved by id, so the mod arrives switched on. That pack says 2.
+    #[test]
+    fn only_a_pack_an_older_reader_would_misread_claims_the_newer_format() {
+        let plain = FileNote {
+            path: "mods/sodium.jar".into(),
+            side: None,
+            source: None,
+            disabled: false,
+        };
+        assert_eq!(format_for(std::slice::from_ref(&plain)), 1);
+
+        // Turned off and sourced here: an older reader writes a reference it
+        // resolved straight to the off name, so nothing is misread.
+        let sourced = FileNote {
+            source: Some(SourceRef {
+                provider: "curseforge".into(),
+                project_id: "1".into(),
+                version_id: "2".into(),
+            }),
+            disabled: true,
+            ..plain.clone()
+        };
+        assert_eq!(format_for(&[sourced]), 1);
+
+        // Turned off and carried by the index: only this layout switches it
+        // back off.
+        let indexed_off = FileNote {
+            disabled: true,
+            ..plain
+        };
+        assert_eq!(format_for(&[indexed_off]), 2);
     }
 
     #[test]

@@ -7,7 +7,7 @@ import Modal from "../../components/Modal";
 import { api } from "../../lib/api";
 import { useStore } from "../../lib/store";
 import { LOADERS } from "../../lib/types";
-import type { Instance, InstanceOverrides } from "../../lib/types";
+import type { ExportReport, Instance, InstanceOverrides } from "../../lib/types";
 
 import viewStyles from "../ServerView.module.css";
 import styles from "./SettingsTab.module.css";
@@ -18,6 +18,49 @@ function numberOrNull(value: string): number | null {
   if (trimmed === "") return null;
   const n = Number(trimmed);
   return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * What the export actually did, in the words the recipient's experience turns
+ * on. The old copy promised that everything unlinked was "bundled in, jars
+ * included", which stopped being true the moment the exporter started asking
+ * Modrinth what it holds — and a count is the cheapest honest answer.
+ *
+ * One sentence per reason, because a single count cannot say which of them
+ * applied: "no platform has this mod" is something nobody can fix, while "this
+ * format cannot link to CurseForge" and "this format cannot say a mod is off"
+ * are answered by exporting a .geodepack instead.
+ */
+function exportSummary(format: "geodepack" | "mrpack", report: ExportReport): string {
+  const { referenced, embeddedUnknown, embeddedElsewhere, embeddedTurnedOff } = report;
+  const bundled = embeddedUnknown + embeddedElsewhere + embeddedTurnedOff;
+  const lines: string[] = [];
+  if (referenced === 0 && bundled === 0) {
+    lines.push("There were no mods, packs or datapacks to carry.");
+  } else if (bundled === 0) {
+    lines.push(`All ${referenced} linked for the recipient to download, nothing bundled in.`);
+  } else {
+    lines.push(`${referenced} linked for the recipient to download.`);
+    if (embeddedUnknown > 0) {
+      lines.push(`${embeddedUnknown} bundled in because no platform has them.`);
+    }
+    if (embeddedElsewhere > 0) {
+      lines.push(
+        `${embeddedElsewhere} bundled in because a .${format} cannot link to where they came from.`,
+      );
+    }
+    if (embeddedTurnedOff > 0) {
+      lines.push(
+        `${embeddedTurnedOff} bundled in because a .${format} cannot record that a mod is turned off.`,
+      );
+    }
+  }
+  if (format === "geodepack") lines.push("Your settings and artwork travel with it.");
+  lines.push(...report.trouble);
+  if (report.unnameable.length > 0) {
+    lines.push(`Left out, because a pack cannot carry these names: ${report.unnameable.join(", ")}.`);
+  }
+  return lines.join(" ");
 }
 
 /**
@@ -168,21 +211,15 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
     const dest = chosen.toLowerCase().endsWith(`.${format}`) ? chosen : `${chosen}.${format}`;
 
     try {
-      if (format === "mrpack") {
-        await api.exportModpack(instance.id, dest, false);
-        toast({
-          kind: "success",
-          title: "Exported as .mrpack",
-          body: "Modrinth content is linked; everything else is bundled in, jars included.",
-        });
-      } else {
-        await api.exportGeodepack(instance.id, dest, false);
-        toast({
-          kind: "success",
-          title: "Exported as .geodepack",
-          body: "Your settings and artwork travel with it, and mods are linked rather than copied.",
-        });
-      }
+      const report =
+        format === "mrpack"
+          ? await api.exportModpack(instance.id, dest, false)
+          : await api.exportGeodepack(instance.id, dest, false);
+      toast({
+        kind: "success",
+        title: `Exported as .${format}`,
+        body: exportSummary(format, report),
+      });
     } catch (e) {
       reportError("Export failed", e);
     }
@@ -530,7 +567,7 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
             <button
               className="btn"
               onClick={() => exportPack("mrpack")}
-              title="For Prism, the Modrinth app and other launchers; jars are bundled in"
+              title="For Prism, the Modrinth app and other launchers; mods Modrinth has are linked, the rest are bundled in"
             >
               <PackageOpen size={14} />
               Export .mrpack

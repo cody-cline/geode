@@ -457,6 +457,23 @@ impl HashAlgorithm {
     }
 }
 
+/// What a hash lookup came back with, and what it never got an answer about.
+///
+/// The two are different facts and a caller that cannot tell them apart gets
+/// the important one wrong. A miss means "Modrinth holds no file with these
+/// bytes", which is enough for a pack writer to stop referencing the file; a
+/// chunk the API turned away means nothing at all, and read as a miss it would
+/// disown every stored link at once and turn a three-hundred mod export into
+/// three hundred jars.
+#[derive(Debug, Default)]
+pub struct Answered {
+    /// The hits, by the hash that was asked about.
+    pub found: std::collections::HashMap<String, (Version, VersionFile)>,
+    /// Hashes in a chunk that was refused — rate-limited, or the API having a
+    /// bad minute. Not misses: nothing is known about these.
+    pub unanswered: Vec<String>,
+}
+
 /// Identify files by hash. This is how a jar with no provenance — dropped in
 /// by hand, or written by a pack index that records only URLs — gets linked
 /// back to the project it came from.
@@ -469,29 +486,39 @@ pub async fn files_by_hashes(
     client: &reqwest::Client,
     hashes: &[String],
     algorithm: HashAlgorithm,
-) -> Result<std::collections::HashMap<String, (Version, VersionFile)>> {
-    let mut found = std::collections::HashMap::new();
+) -> Result<Answered> {
+    hashes_against(&format!("{API}/version_files"), client, hashes, algorithm).await
+}
+
+/// The same, against a given endpoint.
+///
+/// The endpoint is a parameter for one reason: what this does with a chunk it
+/// was turned away on decides whether a file travels as a reference or as
+/// bytes, and that decision is invisible from outside the function. A test
+/// serves the refusal itself rather than trusting the branch by eye.
+async fn hashes_against(
+    endpoint: &str,
+    client: &reqwest::Client,
+    hashes: &[String],
+    algorithm: HashAlgorithm,
+) -> Result<Answered> {
+    let mut answered = Answered::default();
     if hashes.is_empty() {
-        return Ok(found);
+        return Ok(answered);
     }
 
     for chunk in hashes.chunks(500) {
         let body = serde_json::json!({ "hashes": chunk, "algorithm": algorithm.as_str() });
-        let resp = client
-            .post(format!("{API}/version_files"))
-            .json(&body)
-            .send()
-            .await?;
-        // A chunk turned away — rate-limited, or the API having a bad minute —
-        // reads to the caller exactly like a chunk where nothing matched. That
-        // is tolerable while a miss only means "no provenance yet", and will
-        // not be once a miss decides whether a file travels as bytes.
+        let resp = client.post(endpoint).json(&body).send().await?;
         if !resp.status().is_success() {
+            answered.unanswered.extend(chunk.iter().cloned());
             continue;
         }
-        found.extend(matches_in(resp.json().await?, algorithm));
+        answered
+            .found
+            .extend(matches_in(resp.json().await?, algorithm));
     }
-    Ok(found)
+    Ok(answered)
 }
 
 /// One answered chunk turned into the hits it actually carries, kept apart
@@ -638,6 +665,54 @@ mod tests {
     fn the_two_algorithms_are_spelled_the_way_modrinth_takes_them() {
         assert_eq!(HashAlgorithm::Sha1.as_str(), "sha1");
         assert_eq!(HashAlgorithm::Sha512.as_str(), "sha512");
+    }
+
+    /// A chunk the API turned away is reported as unanswered, not folded in
+    /// with the hashes it genuinely holds nothing for. Modrinth allows 300
+    /// requests a minute per address and shares that budget with browsing and
+    /// update checks, so a 429 in the middle of an export is an ordinary
+    /// afternoon — and read as "Modrinth has none of these" it would disown
+    /// every stored link and bundle the whole instance in as bytes.
+    #[tokio::test]
+    async fn a_refused_chunk_is_unanswered_rather_than_a_miss() {
+        use http_body_util::Full;
+        use hyper::body::Bytes;
+        use hyper::service::service_fn;
+        use hyper::{Response, StatusCode};
+        use hyper_util::rt::TokioIo;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/version_files", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let service = service_fn(|_request| async {
+                        Ok::<_, std::convert::Infallible>(
+                            Response::builder()
+                                .status(StatusCode::TOO_MANY_REQUESTS)
+                                .body(Full::new(Bytes::from_static(b"slow down")))
+                                .unwrap(),
+                        )
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(TokioIo::new(tcp), service)
+                        .await;
+                });
+            }
+        });
+
+        let hashes = vec!["a512".to_string(), "b512".to_string()];
+        let answered = hashes_against(
+            &endpoint,
+            &reqwest::Client::new(),
+            &hashes,
+            HashAlgorithm::Sha512,
+        )
+        .await
+        .unwrap();
+
+        assert!(answered.found.is_empty());
+        assert_eq!(answered.unanswered, hashes);
     }
 
     #[test]

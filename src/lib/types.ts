@@ -786,6 +786,22 @@ export interface PackPreview {
   needsCurseforgeKey: boolean;
 }
 
+/** What an export did with the content it found, so a toast can say it rather than promise something. */
+export interface ExportReport {
+  /** Files the recipient fetches themselves, from the index or by id. */
+  referenced: number;
+  /** Files whose bytes travelled because nothing could name them. */
+  embeddedUnknown: number;
+  /** Files whose bytes travelled although a platform names them, because this format cannot carry a reference to it. */
+  embeddedElsewhere: number;
+  /** Files whose bytes travelled only because this format cannot say a mod is turned off. */
+  embeddedTurnedOff: number;
+  /** Files that could not go into the pack at all, by the nearest readable form of their name. */
+  unnameable: string[];
+  /** What could not be asked, already in words for the user. */
+  trouble: string[];
+}
+
 export interface AppInfo {
   version: string;
   dataDir: string;

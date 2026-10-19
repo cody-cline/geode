@@ -84,7 +84,10 @@ itself. New code should take an `EventSink`.
 - **`install/`** turns "I want 1.21.4 with Fabric" into a directory tree the JVM
   can run: libraries, assets, natives. `install/content.rs` is the shared engine
   for installing mods, plugins and packs — used by instances *and* servers, and
-  the place that refuses to replace a server-owned mod.
+  the place that refuses to replace a server-owned mod. `install/identity.rs` is
+  the only place local bytes become a platform reference: it hashes each file
+  once, asks each platform what that file is, and `travel` decides from the
+  answer whether a file goes in a pack as a reference or as bytes.
 - **`java.rs`** finds a usable JVM and downloads a matching Temurin JRE when
   nothing on the system fits (1.16 and below need 8, 1.17 needs 16, 1.18–1.20.4
   need 17, 1.20.5+ need 21).
@@ -173,7 +176,8 @@ The format, and what travels:
   directory: `modrinth.index.json` plus `geode/manifest.json` and `geode/media/`.
   The index instructs; the manifest only annotates. Deleting `geode/` must leave
   a pack Prism installs correctly, and a test enforces that.
-- `pack.rs` — export and import: `source_for` (reference rather than copy),
+- `pack.rs` — export and import: `source_of` (which reference this half names,
+  for the files `install/identity.rs`'s `travel` says the index cannot carry),
   `apply_pack` (resolve those references with the recipient's own key), `update`
   (bring a joined instance up to date from its server), `server_mods`.
 

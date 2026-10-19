@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::install::identity::{travel, Ask, Carry, Catalogue, Copied, Identity, Travel};
 use crate::meta::Loader;
 use crate::net::{Download, Progress};
 use crate::paths::Paths;
@@ -813,37 +814,103 @@ fn carried_by_reference(referenced: &std::collections::HashSet<PathBuf>, rel: &P
 /// Geode half can never drift from the half other launchers read.
 pub type Extras = Vec<(String, Vec<u8>)>;
 
-/// Write the instance out as a `.mrpack`.
+/// The half of a pack only Geode writes, and what having it lets the rest say.
 ///
-/// Content installed from Modrinth becomes an index entry — a URL and a pair of
-/// hashes, not a copy — which is what keeps a pack small and keeps its mods
-/// current. Everything else goes into `overrides/` as bytes, except whatever
-/// the caller names in `referenced`.
+/// One argument rather than three loose ones, because the three are the same
+/// fact: a caller cannot write a `geode/manifest.json` and then tell the writer
+/// the pack has nowhere to record a reference. The default is a plain
+/// `.mrpack` — no extras, nothing referenced, and nothing it can say beyond an
+/// index.
+#[derive(Default)]
+pub struct GeodeHalf {
+    pub extras: Extras,
+    /// Files the manifest names a source for, so their bytes stay out of the
+    /// zip. Keyed the way content records are, on the enabled file name, so a
+    /// disabled file matches too.
+    pub referenced: std::collections::HashSet<PathBuf>,
+    pub carry: Carry,
+}
+
+/// What an export did with the content it found, so the UI can say it rather
+/// than promise something.
+#[derive(Debug, Default, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportReport {
+    /// Files the recipient fetches themselves, from the index or by id.
+    pub referenced: usize,
+    /// Files whose bytes travelled because nothing could name them.
+    pub embedded_unknown: usize,
+    /// Files whose bytes travelled although a platform does name them,
+    /// because this format has no channel that can carry a reference to it.
+    /// Counted apart because the remedy is a different format rather than a
+    /// mod nobody can find.
+    pub embedded_elsewhere: usize,
+    /// Files whose bytes travelled only because this format has nowhere to say
+    /// a mod is turned off.
+    pub embedded_turned_off: usize,
+    /// Files that could not go into the pack at all, by the nearest readable
+    /// form of their name.
+    pub unnameable: Vec<String>,
+    /// What could not be asked, in words the user can read.
+    pub trouble: Vec<String>,
+}
+
+/// Write the instance out as a plain `.mrpack`.
 ///
-/// `referenced` is how a `.geodepack` avoids shipping other people's jars: its
-/// `geode/manifest.json` records a `SourceRef` for each of those paths, so the
-/// recipient fetches them by id through their own credentials. Only a caller
-/// writing that manifest may pass anything here — a plain `.mrpack` has nowhere
-/// to record a reference, so leaving a file out of it would lose the mod with
-/// nothing anywhere to say so. The set is keyed the way the content records
-/// are, on the enabled file name, so a disabled file matches too.
+/// Every file Modrinth can name by hash becomes an index entry — a URL and a
+/// pair of hashes, not a copy — whatever the instance's own records happen to
+/// say. Everything else goes into `overrides/` as bytes, and the report says
+/// how many of each, because a plain `.mrpack` has no second channel to
+/// explain itself with.
 ///
 /// It would be possible to put a CurseForge download URL straight into the
-/// index — the four-host allowlist in Modrinth's format is enforced by their
-/// *upload* validator, not by readers, and Prism imports any URL it is given.
-/// We do not, because a URL baked into a pack keeps working after an author
-/// turns third-party downloads off, while a reference resolved at import time
-/// sees that decision. The recipient's answer should be today's, not the one
-/// that was true when somebody else exported.
+/// index: the four-host allowlist in Modrinth's format is enforced by their
+/// *upload* validator, not by readers. We do not, for two reasons. A URL baked
+/// into a pack keeps working after an author turns third-party downloads off,
+/// while a reference resolved at import time sees that decision — the
+/// recipient's answer should be today's, not the one that was true when
+/// somebody else exported. And Prism no longer takes any URL it is given:
+/// since 11.1.0 a pack imported from a file goes through an untrusted-mods
+/// dialog listing every index URL that is not https on `cdn.modrinth.com`,
+/// whose OK unlocks after three seconds and whose decline abandons the whole
+/// import. Embedded jars are listed there too, which is a reason to reference
+/// rather than carry — never a reason to reference from the wrong host.
 pub async fn export_mrpack(
+    ask: Ask<'_>,
     paths: &Paths,
     instance: &Instance,
     dest: PathBuf,
     include_saves: bool,
-    extras: Extras,
-    referenced: &std::collections::HashSet<PathBuf>,
     progress: &Progress,
-) -> Result<()> {
+) -> Result<ExportReport> {
+    let catalogue = crate::install::identity::for_instance(ask, paths, instance, progress).await?;
+    write_instance_pack(
+        paths,
+        instance,
+        dest,
+        include_saves,
+        GeodeHalf::default(),
+        &catalogue,
+        progress,
+    )
+    .await
+}
+
+/// The same writer, for a caller that has already built the catalogue and has
+/// a Geode half to go with it.
+///
+/// A `.geodepack` needs the catalogue before the pack is written — its
+/// manifest must not name a source for a file the index is carrying — so it
+/// builds one and hands it here.
+pub async fn write_instance_pack(
+    paths: &Paths,
+    instance: &Instance,
+    dest: PathBuf,
+    include_saves: bool,
+    half: GeodeHalf,
+    catalogue: &Catalogue,
+    progress: &Progress,
+) -> Result<ExportReport> {
     let mut skip_dirs: Vec<&'static str> = vec![
         "logs",
         "crash-reports",
@@ -867,10 +934,9 @@ pub async fn export_mrpack(
         mc_version: &instance.mc_version,
         loader: instance.loader,
         loader_version: &instance.loader_version,
-        content: instance.content.iter().collect(),
         walk: Walk::Except(skip_dirs),
     };
-    write_mrpack(input, dest, extras, referenced, progress).await
+    write_mrpack(input, dest, half, catalogue, progress).await
 }
 
 /// Which entries under a pack's root the writer may carry as bytes.
@@ -962,9 +1028,6 @@ pub struct PackInput<'a> {
     pub mc_version: &'a str,
     pub loader: Loader,
     pub loader_version: &'a str,
-    /// Records the index may draw Modrinth entries from. A record left out of
-    /// this list is never indexed, whatever it says.
-    pub content: Vec<&'a ContentRecord>,
     pub walk: Walk,
 }
 
@@ -993,12 +1056,16 @@ fn pack_rel(rel: &Path) -> PathBuf {
 pub async fn write_mrpack(
     input: PackInput<'_>,
     dest: PathBuf,
-    extras: Extras,
-    referenced: &std::collections::HashSet<PathBuf>,
+    half: GeodeHalf,
+    catalogue: &Catalogue,
     progress: &Progress,
-) -> Result<()> {
+) -> Result<ExportReport> {
     let game_dir = input.root;
     let players_pack = matches!(input.walk, Walk::Only { .. });
+    let mut report = ExportReport {
+        trouble: catalogue.trouble.clone(),
+        ..Default::default()
+    };
 
     let mut index = MrIndex {
         format_version: 1,
@@ -1026,60 +1093,75 @@ pub async fn write_mrpack(
             .insert(key.into(), input.loader_version.to_string());
     }
 
-    // Only Modrinth files get indexed. Anything else either travels as a
-    // reference in the Geode half, when the caller is writing one, or as bytes
-    // in `overrides/` — see `export_mrpack`'s notes for why not a URL.
+    // What each file does is the catalogue's answer, not the records': a jar
+    // Modrinth can name by hash is indexed whatever Geode happens to have
+    // written down about it, and a record Modrinth has disowned is not.
+    //
+    // Sorted by where the file sits, so exporting the same instance twice is
+    // the same bytes twice. The catalogue is a map, and the record order that
+    // used to decide this no longer comes into it.
+    let mut identities: Vec<&Identity> = catalogue.identities().collect();
+    identities.sort_by(|a, b| a.disk_rel.cmp(&b.disk_rel));
+
     let mut indexed: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-    for record in &input.content {
-        if record.provider != "modrinth" {
-            continue;
-        }
-        let disk_rel = PathBuf::from(record.kind.folder()).join(&record.file_name);
-        let full = game_dir.join(&disk_rel);
-        // Under a walk that follows no links, the index does not either: a
-        // link named like a record would otherwise have its target hashed and
-        // described, beside a real turned-off twin that is carried anyway.
-        if players_pack {
-            let is_file = tokio::fs::symlink_metadata(&full)
-                .await
-                .is_ok_and(|meta| meta.is_file());
-            if !is_file {
+    for ident in identities {
+        let reference = match travel(ident, half.carry) {
+            Travel::Linked(reference) => reference,
+            // Named in the Geode half, which the caller wrote and whose paths
+            // reach the walk through `half.referenced`.
+            Travel::Named(_) => {
+                report.referenced += 1;
                 continue;
             }
-        }
-        // The size and both SHA hashes from one streaming pass, rather than a
-        // read of the whole file into memory per hash. Both hashes go in,
-        // because the readers disagree about which is optional: Modrinth
-        // refuses an upload without sha512, and Prism reads it with
-        // `requireString` and no fallback — so a pack carrying only sha1 is
-        // one no other launcher will open. No murmur2: this index names
-        // Modrinth files and nothing here can use a CurseForge fingerprint,
-        // and asking for one would read every file in the instance twice.
-        let Ok(digests) = crate::net::digests(&full, false).await else {
-            continue;
+            // Counted by reason. "Nothing has this mod" and "this format
+            // cannot link to where it came from" are different things to be
+            // told, and only the first of them is nobody's fault.
+            Travel::Copied(why) => {
+                match why {
+                    Copied::Unknown => report.embedded_unknown += 1,
+                    Copied::Elsewhere => report.embedded_elsewhere += 1,
+                    Copied::TurnedOff => report.embedded_turned_off += 1,
+                }
+                continue;
+            }
         };
 
         // Where it belongs — the folder, then what the jar itself says, then
         // the listing — so a pack installed on a server does not drag a
         // renderer along with it.
-        let probe = full.clone();
+        let probe = game_dir.join(&ident.disk_rel);
         let jar_side = tokio::task::spawn_blocking(move || crate::instance::jar::read(&probe))
             .await
             .ok()
             .flatten()
             .and_then(|meta| meta.side);
-        let side = crate::instance::content::side_of(record.kind, jar_side, record.side);
-        let rel = if players_pack {
-            pack_rel(&disk_rel)
-        } else {
-            disk_rel.clone()
-        };
+        let side = crate::instance::content::side_of(ident.kind, jar_side, ident.listed_side);
 
+        // A player's game has no `client-mods/`: there they are ordinary mods.
+        let folder = if players_pack && ident.kind == ContentKind::ClientMod {
+            ContentKind::Mod.folder()
+        } else {
+            ident.kind.folder()
+        };
         index.files.push(MrFile {
-            path: rel.to_string_lossy().replace('\\', "/"),
+            // Built from the folder and the enabled name rather than converted
+            // from a path: Modrinth types this field as UTF-8, and a lossy
+            // conversion names a file no reader will ever write. A name that is
+            // not UTF-8 never becomes a candidate, and the walk below is the
+            // one place that reports it.
+            //
+            // The enabled name, even for a file that is turned off: a
+            // reference arrives fresh from the platform, and the Geode half's
+            // note is what switches it back off. A pack that cannot say that
+            // carries the bytes instead — see `Carry`.
+            path: format!("{folder}/{}", ident.file_name),
+            // Both hashes, of the local bytes, because the readers disagree
+            // about which is optional: Modrinth refuses an upload without
+            // sha512, and Prism reads it with `requireString` and no fallback,
+            // so a pack carrying only sha1 is one no other launcher will open.
             hashes: [
-                ("sha1".to_string(), digests.sha1),
-                ("sha512".to_string(), digests.sha512),
+                ("sha1".to_string(), ident.sha1.clone()),
+                ("sha512".to_string(), ident.sha512.clone()),
             ]
             .into_iter()
             .collect(),
@@ -1087,23 +1169,33 @@ pub async fn write_mrpack(
             // with a default of "unsupported", so a file that leaves it out
             // is a file Prism silently declines to install.
             env: Some(env_for(Some(side))),
-            downloads: vec![format!(
-                "https://cdn.modrinth.com/data/{}/versions/{}/{}",
-                record.project_id,
-                record.version_id,
-                urlencoding::encode(&record.file_name)
-            )],
-            file_size: Some(digests.size),
+            // The matched file's own URL when a lookup gave one. Without a
+            // lookup there is only the record's ids and the name on disk, so
+            // the URL is built from them — which is what every Geode pack
+            // carried before the matcher existed, and what an offline export
+            // still has to fall back on.
+            downloads: vec![reference.url.clone().unwrap_or_else(|| {
+                format!(
+                    "https://cdn.modrinth.com/data/{}/versions/{}/{}",
+                    reference.project_id,
+                    reference.version_id,
+                    urlencoding::encode(&ident.file_name)
+                )
+            })],
+            file_size: Some(ident.size),
         });
-        indexed.insert(disk_rel);
+        indexed.insert(ident.disk_rel.clone());
+        report.referenced += 1;
     }
 
     progress.stage("Writing pack", 1).await;
 
     let walk = input.walk;
     let index_json = serde_json::to_vec_pretty(&index)?;
-    let referenced = referenced.clone();
-    tokio::task::spawn_blocking(move || -> Result<()> {
+    let GeodeHalf {
+        extras, referenced, ..
+    } = half;
+    report.unnameable = tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
         let file = std::fs::File::create(&dest)?;
         let mut zip = zip::ZipWriter::new(file);
         let options: zip::write::FileOptions<'_, ()> =
@@ -1117,6 +1209,7 @@ pub async fn write_mrpack(
             zip.write_all(bytes)?;
         }
 
+        let mut unnameable = Vec::new();
         let mut stack = vec![game_dir.clone()];
         while let Some(dir) = stack.pop() {
             let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -1148,21 +1241,28 @@ pub async fn write_mrpack(
                 } else {
                     "overrides"
                 };
-                let name = format!("{root}/{}", shown.to_string_lossy().replace('\\', "/"));
-                zip.start_file(name, options)?;
+                // A zip entry name is text. A path that is not UTF-8 would go
+                // in as U+FFFD and name a file nobody can match back, so it is
+                // left out and reported instead — the sharer is told what did
+                // not travel rather than the recipient finding a mangled name.
+                let Some(shown) = shown.to_str() else {
+                    unnameable.push(rel.to_string_lossy().to_string());
+                    continue;
+                };
+                zip.start_file(format!("{root}/{}", shown.replace('\\', "/")), options)?;
                 let mut source = std::fs::File::open(&path)?;
                 std::io::copy(&mut source, &mut zip)?;
             }
         }
 
         zip.finish()?;
-        Ok(())
+        Ok(unnameable)
     })
     .await
     .map_err(|e| Error::msg(format!("writing pack panicked: {e}")))??;
 
     progress.finish().await;
-    Ok(())
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -1233,12 +1333,11 @@ mod tests {
         for include_saves in [false, true] {
             let dest = paths.root.join(format!("walk-{include_saves}.mrpack"));
             export_mrpack(
+                Ask::Nobody,
                 &paths,
                 &inst,
                 dest.clone(),
                 include_saves,
-                Vec::new(),
-                &Default::default(),
                 &Progress::silent("t"),
             )
             .await
@@ -1279,12 +1378,11 @@ mod tests {
 
         let dest = paths.root.join("own.mrpack");
         export_mrpack(
+            Ask::Nobody,
             &paths,
             &inst,
             dest.clone(),
             false,
-            Vec::new(),
-            &Default::default(),
             &Progress::silent("t"),
         )
         .await

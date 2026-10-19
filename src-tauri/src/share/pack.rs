@@ -9,18 +9,33 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
+use crate::install::identity::{self, travel, Ask, Carry, Catalogue, Travel};
+use crate::instance::modpack::ExportReport;
 use crate::instance::{self, Instance};
 use crate::net::Progress;
 use crate::paths::Paths;
 
-use super::manifest::{FileNote, Kind, Manifest, Profile, SourceRef, EXTENSION, FORMAT};
+use super::manifest::{
+    format_for, FileNote, Kind, Manifest, Profile, SourceRef, EXTENSION, FORMAT,
+};
 
 /// Build the Geode half of a pack for an instance.
-pub async fn manifest_for(paths: &Paths, instance: &Instance) -> Manifest {
+///
+/// The catalogue comes in rather than being built here because the two halves
+/// must agree: a file the index is carrying must not also be named a source
+/// here, or the recipient would fetch it twice — once by URL and once by id,
+/// the second needing a key for a file Modrinth hosts.
+pub async fn manifest_for(paths: &Paths, instance: &Instance, catalogue: &Catalogue) -> Manifest {
     let media = paths.instance_media(&instance.id);
+    let files = notes_for(
+        &paths.game_dir(&instance.id),
+        &instance.content.iter().collect::<Vec<_>>(),
+        catalogue,
+    )
+    .await;
 
     Manifest {
-        geode_format: FORMAT,
+        geode_format: format_for(&files),
         kind: Kind::Instance,
         profile: Profile {
             name: instance.name.clone(),
@@ -37,11 +52,7 @@ pub async fn manifest_for(paths: &Paths, instance: &Instance) -> Manifest {
         icon: artwork(&media, instance.icon.as_ref()),
         banner: artwork(&media, instance.banner.as_ref()),
         source: instance.pack.clone(),
-        files: notes_for(
-            &paths.game_dir(&instance.id),
-            &instance.content.iter().collect::<Vec<_>>(),
-        )
-        .await,
+        files,
         // An instance's pack has no revision: only a server's is checked for
         // changes.
         revision: None,
@@ -88,6 +99,7 @@ fn sanitise(file_name: &str, ext: &str) -> String {
 async fn notes_for(
     game_dir: &Path,
     records: &[&instance::content::ContentRecord],
+    catalogue: &Catalogue,
 ) -> Vec<FileNote> {
     let mut out = Vec::new();
 
@@ -107,24 +119,54 @@ async fn notes_for(
             .ok()
             .flatten()
             .and_then(|meta| meta.side);
-        let source = source_for(record);
+        // `Carry::GEODEPACK` because these notes *are* the Geode half: writing
+        // them is what makes the pack one, and `export_with` tells the index
+        // writer the same.
+        let travel = catalogue.travel(record.kind, &record.file_name, Carry::GEODEPACK);
+        let source = source_of(travel.as_ref());
+
+        // A file the recipient fetches rather than unpacks arrives fresh from
+        // its platform, switched on, so one that is turned off has to be told.
+        // A file carried as bytes keeps its `.disabled` name on the way
+        // through and says it that way.
+        let fetched = matches!(travel, Some(Travel::Named(_) | Travel::Linked(_)));
+        let turned_off = disabled && fetched;
 
         // Only files with something to say are recorded. A pack whose mods all
         // come from Modrinth and all run on both sides carries no notes at all,
         // which is the difference between a manifest that annotates and one
         // that repeats.
-        if side.is_none() && source.is_none() {
+        if side.is_none() && source.is_none() && !turned_off {
             continue;
         }
         out.push(FileNote {
             path: rel.to_string_lossy().replace('\\', "/"),
             side,
-            // Only a reference needs telling. A file carried as bytes keeps its
-            // `.disabled` name on the way through, and a note written for its
-            // side alone would be saying it twice.
-            disabled: disabled && source.is_some(),
+            disabled: turned_off,
             source,
         });
+    }
+
+    // The off state is a fact about the files, not about the records. A jar
+    // dropped into `mods/` by hand and switched off in Geode has no record at
+    // all — `set_enabled` only renames it — and the index carries it under its
+    // enabled name all the same, so without a note of its own it would arrive
+    // switched on. Which is worse than not sending it: the sharer turned it
+    // off for a reason.
+    for ident in catalogue.identities() {
+        if !ident.disabled || !matches!(travel(ident, Carry::GEODEPACK), Travel::Linked(_)) {
+            continue;
+        }
+        let path = format!("{}/{}", ident.kind.folder(), ident.file_name);
+        match out.iter_mut().find(|note| note.path == path) {
+            Some(note) => note.disabled = true,
+            None => out.push(FileNote {
+                path,
+                side: None,
+                disabled: true,
+                source: None,
+            }),
+        }
     }
     out
 }
@@ -161,22 +203,20 @@ fn disabled_rel(rel: &Path) -> Option<PathBuf> {
 ///
 /// Modrinth content is deliberately absent: the index already carries it as a
 /// URL and a pair of hashes, and the rule this format rests on is that the same
-/// fact never lives in both halves. A record with no provider or no ids — a jar
-/// dragged in by hand — gets nothing, and so stays an embedded override, which
-/// is the one case where there is genuinely no link to give.
-fn source_for(record: &instance::content::ContentRecord) -> Option<SourceRef> {
-    if record.provider.is_empty()
-        || record.provider == "modrinth"
-        || record.project_id.is_empty()
-        || record.version_id.is_empty()
-    {
-        return None;
+/// fact never lives in both halves. Which half a file belongs to is decided
+/// once, in [`crate::install::identity::travel`] — what it calls `Linked` is
+/// the index's, and only what it calls `Named` is named here. A jar nothing can
+/// name gets nothing, and so stays an embedded override, which is the one case
+/// where there is genuinely no link to give.
+fn source_of(travel: Option<&Travel<'_>>) -> Option<SourceRef> {
+    match travel {
+        Some(Travel::Named(reference)) => Some(SourceRef {
+            provider: reference.provider.clone(),
+            project_id: reference.project_id.clone(),
+            version_id: reference.version_id.clone(),
+        }),
+        _ => None,
     }
-    Some(SourceRef {
-        provider: record.provider.clone(),
-        project_id: record.project_id.clone(),
-        version_id: record.version_id.clone(),
-    })
 }
 
 /// Everything that goes in `geode/`, ready for the mrpack writer.
@@ -225,22 +265,46 @@ async fn extras_from(
 
 /// Write a pack that another launcher can open and Geode can open exactly.
 pub async fn export(
+    ask: Ask<'_>,
     paths: &Paths,
     instance: &Instance,
     dest: PathBuf,
     include_saves: bool,
     progress: &Progress,
-) -> Result<()> {
-    let manifest = manifest_for(paths, instance).await;
-    let extras = extras_for(paths, instance, &manifest).await?;
+) -> Result<ExportReport> {
+    let catalogue = identity::for_instance(ask, paths, instance, progress).await?;
+    export_with(paths, instance, dest, include_saves, &catalogue, progress).await
+}
 
-    instance::modpack::export_mrpack(
+/// The same, from a catalogue already built.
+///
+/// Both halves are written from the one catalogue, which is what stops them
+/// disagreeing about which files the recipient is expected to fetch. It is
+/// also the seam a preview uses: the counts it shows come from the very
+/// catalogue the export then writes from, so it cannot promise one thing and
+/// do another.
+pub async fn export_with(
+    paths: &Paths,
+    instance: &Instance,
+    dest: PathBuf,
+    include_saves: bool,
+    catalogue: &Catalogue,
+    progress: &Progress,
+) -> Result<ExportReport> {
+    let manifest = manifest_for(paths, instance, catalogue).await;
+    let half = instance::modpack::GeodeHalf {
+        extras: extras_for(paths, instance, &manifest).await?,
+        referenced: referenced(&manifest),
+        carry: Carry::GEODEPACK,
+    };
+
+    instance::modpack::write_instance_pack(
         paths,
         instance,
         dest,
         include_saves,
-        extras,
-        &referenced(&manifest),
+        half,
+        catalogue,
         progress,
     )
     .await
@@ -1094,7 +1158,39 @@ async fn apply_pack(
 ) -> Result<Vec<String>> {
     apply(manifest, instance);
     extract_media(paths, instance, archive, manifest).await?;
-    resolve_references(client, paths, instance, manifest, curseforge_key, progress).await
+    let missing =
+        resolve_references(client, paths, instance, manifest, curseforge_key, progress).await?;
+    switch_off_what_the_notes_say(paths, instance, manifest).await?;
+    Ok(missing)
+}
+
+/// Turn off the files the pack said were turned off.
+///
+/// A file carried as bytes arrives under its own `.disabled` name and needs
+/// nothing, and a reference resolved by id is written straight to the off name.
+/// What is left is a file the index carried: it arrives fresh from its
+/// platform, switched on, and the note is the only thing that remembers the
+/// sharer had it off.
+///
+/// A file the note names that is not there is nothing to do — the import may
+/// have been told to fetch it and failed — and so is one already off.
+async fn switch_off_what_the_notes_say(
+    paths: &Paths,
+    instance: &Instance,
+    manifest: &Manifest,
+) -> Result<()> {
+    use instance::content::{content_dir, either_name_in, set_enabled_in};
+
+    for note in manifest.files.iter().filter(|note| note.disabled) {
+        let Some((kind, base, _)) = content_file(&note.path) else {
+            continue;
+        };
+        let dir = content_dir(paths, &instance.id, kind);
+        if let Some((name, true)) = either_name_in(&dir, &base).await {
+            set_enabled_in(&dir, &name, false).await?;
+        }
+    }
+    Ok(())
 }
 
 /// Copy the pack's artwork out of `geode/` and point the instance at it.
@@ -1459,6 +1555,26 @@ impl<'a> ServerMods<'a> {
             .copied()
             .find(|r| r.kind == kind && r.file_name == base)
     }
+
+    /// Every carried file as the catalogue wants to be told about it.
+    ///
+    /// Built from the walk rather than from the records, because the walk is
+    /// what decides what the pack sends: a jar dropped in by hand is a mod,
+    /// and a record whose file is a link or is gone names nothing.
+    fn candidates(&self) -> Vec<identity::Candidate> {
+        self.carried
+            .iter()
+            .map(|rel| {
+                let (kind, base, enabled, _) = self.about(rel);
+                identity::Candidate {
+                    kind,
+                    disk_rel: rel.clone(),
+                    file_name: base.to_string(),
+                    disabled: !enabled,
+                }
+            })
+            .collect()
+    }
 }
 
 /// List what of a server's `mods/` and `client-mods/` goes to its players:
@@ -1573,7 +1689,7 @@ async fn server_mods<'a>(
 /// Every mod the index cannot point at is noted with where to get it, and
 /// whether the server had it turned off. A mod for both sides that travels in
 /// the index or as bytes has nothing to say.
-fn server_notes(mods: &ServerMods) -> Vec<FileNote> {
+fn server_notes(mods: &ServerMods, catalogue: &Catalogue) -> Vec<FileNote> {
     use instance::content::ContentKind;
     use instance::jar::Side;
 
@@ -1593,7 +1709,7 @@ fn server_notes(mods: &ServerMods) -> Vec<FileNote> {
         if !enabled && mods.carried.contains(&path.with_file_name(base)) {
             continue;
         }
-        let source = mods.shared_record_for(kind, base).and_then(source_for);
+        let source = source_of(catalogue.travel(kind, base, Carry::SERVER_PACK).as_ref());
         if side == Side::Both && source.is_none() {
             continue;
         }
@@ -1815,9 +1931,21 @@ pub async fn export_server(
     // finds changed. The other way round would be a change nobody ever sees.
     let revision = server_revision(paths, server, &mods, include_config).await?;
 
+    // Records only, and so no client and no network. This runs inside the share
+    // host's download handler under `MAX_BUILDS`, and `server_revision` is
+    // computed from the same records both here and in `server_pack_info`, which
+    // several tests assert must agree. A lookup that succeeded in one and not
+    // the other would advertise a revision the pack does not have and push an
+    // update to every player — and every online/offline flip would do it again.
+    // A server gains references at `link_untracked_server_content`, where
+    // records are saved.
+    let catalogue =
+        identity::identify(&run, mods.candidates(), &mods.shared, Ask::Nobody, progress).await?;
+
     let media = paths.server_media(&server.id);
+    let files = server_notes(&mods, &catalogue);
     let manifest = Manifest {
-        geode_format: FORMAT,
+        geode_format: format_for(&files),
         kind: Kind::Server,
         profile: Profile {
             name: server.name.clone(),
@@ -1835,7 +1963,7 @@ pub async fn export_server(
         // treat — it as that pack when it is not. A joined instance says where
         // it came from through `joined` instead.
         source: None,
-        files: server_notes(&mods),
+        files,
         revision: Some(revision),
     };
     let extras = extras_from(
@@ -1865,13 +1993,21 @@ pub async fn export_server(
         mc_version: &server.mc_version,
         loader,
         loader_version: &loader_version,
-        content: mods.shared,
         walk: instance::modpack::Walk::Only {
             trees,
             files: mods.carried,
         },
     };
-    instance::modpack::write_mrpack(input, dest, extras, &referenced(&manifest), progress).await
+    let half = instance::modpack::GeodeHalf {
+        extras,
+        referenced: referenced(&manifest),
+        carry: Carry::SERVER_PACK,
+    };
+    // The report is for somebody choosing what to send. Nobody is here: this
+    // pack is built on demand for whoever presented the share code.
+    instance::modpack::write_mrpack(input, dest, half, &catalogue, progress)
+        .await
+        .map(|_| ())
 }
 
 /// `My Pack 1.2` becomes `My Pack 1.2.geodepack`.
@@ -2080,6 +2216,15 @@ mod tests {
         (scratch, inst)
     }
 
+    /// The catalogue an export builds when nothing is asked: the records are
+    /// the only answer, which is what every export had before a matcher
+    /// existed, and so is the baseline these tests measure against.
+    async fn from_records(paths: &Paths, inst: &Instance) -> Catalogue {
+        identity::for_instance(Ask::Nobody, paths, inst, &Progress::silent("t"))
+            .await
+            .unwrap()
+    }
+
     /// Everything inside an exported pack, by entry name.
     fn entries(archive: &Path) -> Vec<String> {
         let file = std::fs::File::open(archive).unwrap();
@@ -2099,7 +2244,7 @@ mod tests {
         let paths = scratch.paths.clone();
         inst.content = vec![record("curseforge", "create.jar", ContentKind::Mod)];
 
-        let manifest = manifest_for(&paths, &inst).await;
+        let manifest = manifest_for(&paths, &inst, &from_records(&paths, &inst).await).await;
         let note = manifest.note("mods/create.jar").expect("a note was written");
         assert_eq!(
             note.source,
@@ -2111,7 +2256,7 @@ mod tests {
         );
 
         let dest = paths.root.join("out.geodepack");
-        export(&paths, &inst, dest.clone(), false, &Progress::silent("t")).await.unwrap();
+        export(Ask::Nobody, &paths, &inst, dest.clone(), false, &Progress::silent("t")).await.unwrap();
         let names = entries(&dest);
 
         assert!(
@@ -2135,7 +2280,7 @@ mod tests {
         let paths = scratch.paths.clone();
         inst.content = vec![record("curseforge", "create.jar", ContentKind::Mod)];
 
-        let manifest = manifest_for(&paths, &inst).await;
+        let manifest = manifest_for(&paths, &inst, &from_records(&paths, &inst).await).await;
         assert!(
             manifest.note("mods/create.jar").is_some_and(|n| n.source.is_some()),
             "a disabled file still has a source: {:?}",
@@ -2143,7 +2288,7 @@ mod tests {
         );
 
         let dest = paths.root.join("off.geodepack");
-        export(&paths, &inst, dest.clone(), false, &Progress::silent("t")).await.unwrap();
+        export(Ask::Nobody, &paths, &inst, dest.clone(), false, &Progress::silent("t")).await.unwrap();
         let names = entries(&dest);
         assert!(
             !names.iter().any(|n| n.contains("create.jar")),
@@ -2169,7 +2314,7 @@ mod tests {
         // writes a record for at all.
         inst.content = vec![record("", "homemade.jar", ContentKind::Mod)];
 
-        let manifest = manifest_for(&paths, &inst).await;
+        let manifest = manifest_for(&paths, &inst, &from_records(&paths, &inst).await).await;
         for path in ["mods/homemade.jar", "mods/no-record-at-all.jar"] {
             assert!(
                 manifest.note(path).is_none_or(|n| n.source.is_none()),
@@ -2178,7 +2323,7 @@ mod tests {
         }
 
         let dest = paths.root.join("hand.geodepack");
-        export(&paths, &inst, dest.clone(), false, &Progress::silent("t")).await.unwrap();
+        export(Ask::Nobody, &paths, &inst, dest.clone(), false, &Progress::silent("t")).await.unwrap();
         let names = entries(&dest);
         for path in ["mods/homemade.jar", "mods/no-record-at-all.jar"] {
             assert!(
@@ -2201,7 +2346,7 @@ mod tests {
             record("curseforge", "deleted-by-hand.jar", ContentKind::Mod),
         ];
 
-        let manifest = manifest_for(&paths, &inst).await;
+        let manifest = manifest_for(&paths, &inst, &from_records(&paths, &inst).await).await;
         assert!(manifest.note("mods/present.jar").is_some());
         assert!(
             manifest.note("mods/deleted-by-hand.jar").is_none(),
@@ -2218,7 +2363,7 @@ mod tests {
         let paths = scratch.paths.clone();
         inst.content = vec![record("modrinth", "sodium.jar", ContentKind::Mod)];
 
-        let manifest = manifest_for(&paths, &inst).await;
+        let manifest = manifest_for(&paths, &inst, &from_records(&paths, &inst).await).await;
         assert!(manifest.files.iter().all(|n| n.source.is_none()), "{:?}", manifest.files);
     }
 
@@ -2245,10 +2390,11 @@ mod tests {
             record("", "homemade.jar", ContentKind::Mod),
         ];
 
-        let manifest = manifest_for(&paths, &inst).await;
+        let manifest = manifest_for(&paths, &inst, &from_records(&paths, &inst).await).await;
         let dest = paths.root.join("inv.geodepack");
-        export(&paths, &inst, dest.clone(), false, &Progress::silent("t")).await.unwrap();
+        export(Ask::Nobody, &paths, &inst, dest.clone(), false, &Progress::silent("t")).await.unwrap();
         let names = entries(&dest);
+        let index = index_of(&dest);
 
         for (dir, file) in [
             ("mods", "from-cf.jar"),
@@ -2259,44 +2405,438 @@ mod tests {
             let path = format!("{dir}/{file}");
             let embedded = names.contains(&format!("overrides/{path}"));
             let referenced = manifest.note(&path).is_some_and(|n| n.source.is_some());
-            // A Modrinth file is in neither: the index carries it. Everything
-            // else must be in exactly one of the two.
-            let indexed = path == "mods/from-mr.jar";
+            // Read off the pack rather than assumed, because which files the
+            // index carries is no longer a fact about the records.
+            let indexed = index.files.iter().any(|f| f.path == path);
             assert!(
-                embedded ^ referenced || indexed,
-                "{path}: embedded={embedded} referenced={referenced}"
+                [embedded, referenced, indexed].iter().filter(|x| **x).count() == 1,
+                "{path}: embedded={embedded} referenced={referenced} indexed={indexed}"
             );
-            assert!(!(embedded && referenced), "{path} is in the pack twice over");
         }
     }
 
-    /// A plain `.mrpack` has nowhere to record a reference, so it must keep
-    /// carrying the bytes — leaving a file out of one loses the mod with
-    /// nothing anywhere to say so.
+    /// A plain `.mrpack` written from a catalogue the test built. No Geode
+    /// half, so the index is the only place this pack can name anything.
+    async fn mrpack_from(
+        paths: &Paths,
+        inst: &Instance,
+        dest: &Path,
+        catalogue: &Catalogue,
+    ) -> ExportReport {
+        instance::modpack::write_instance_pack(
+            paths,
+            inst,
+            dest.to_path_buf(),
+            false,
+            instance::modpack::GeodeHalf::default(),
+            catalogue,
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// What the report says travelled as bytes, by reason: nothing named it,
+    /// something did but this format cannot link to it, and it was turned off.
+    fn bundled(report: &ExportReport) -> (usize, usize, usize) {
+        (
+            report.embedded_unknown,
+            report.embedded_elsewhere,
+            report.embedded_turned_off,
+        )
+    }
+
+    /// The index a pack carries.
+    fn index_of(archive: &Path) -> instance::modpack::MrIndex {
+        serde_json::from_slice(&read_entry(archive, "modrinth.index.json")).unwrap()
+    }
+
+    /// A plain `.mrpack` has nowhere to record a reference by id, so a mod only
+    /// CurseForge has must keep travelling as bytes — leaving it out of one
+    /// loses the mod with nothing anywhere to say so.
     #[tokio::test]
     async fn a_plain_mrpack_still_embeds_what_it_cannot_reference() {
         let (scratch, mut inst) = fixture("plain", &[("mods", "create.jar")]).await;
         let paths = scratch.paths.clone();
         inst.content = vec![record("curseforge", "create.jar", ContentKind::Mod)];
 
+        // Asked and not found, which is the case: this jar is on CurseForge
+        // and nowhere else.
+        let mut catalogue = from_records(&paths, &inst).await;
+        catalogue.pretend_modrinth_holds(&[]);
+
         let dest = paths.root.join("plain.mrpack");
-        crate::instance::modpack::export_mrpack(
-            &paths,
-            &inst,
-            dest.clone(),
-            false,
-            Vec::new(),
-            &Default::default(),
-            &Progress::silent("t"),
-        )
-        .await
-        .unwrap();
+        let report = mrpack_from(&paths, &inst, &dest, &catalogue).await;
 
         assert!(
             entries(&dest).contains(&"overrides/mods/create.jar".to_string()),
             "{:?}",
             entries(&dest)
         );
+        assert!(index_of(&dest).files.is_empty(), "nothing can be indexed");
+        // And the reason the sharer is given is the format's, not the mod's:
+        // CurseForge has this jar, an `.mrpack` just cannot say so.
+        assert_eq!((report.referenced, bundled(&report)), (0, (0, 1, 0)));
+    }
+
+    /// The owner's request, in one test: a jar Geode knows as CurseForge
+    /// content travels as a reference because Modrinth holds the same bytes.
+    /// Its record used to be the gate, and so a pack imported from CurseForge
+    /// shipped every jar it had.
+    #[tokio::test]
+    async fn a_curseforge_jar_modrinth_also_hosts_is_linked_not_embedded() {
+        let (scratch, mut inst) = fixture("both", &[("mods", "create.jar")]).await;
+        let paths = scratch.paths.clone();
+        inst.content = vec![record("curseforge", "create.jar", ContentKind::Mod)];
+
+        let mut catalogue = from_records(&paths, &inst).await;
+        catalogue.pretend_modrinth_holds(&["create.jar"]);
+
+        let dest = paths.root.join("both.geodepack");
+        let report = export_with(&paths, &inst, dest.clone(), false, &catalogue, &Progress::silent("t"))
+            .await
+            .unwrap();
+
+        let index = index_of(&dest);
+        assert_eq!(
+            index.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+            vec!["mods/create.jar"]
+        );
+        let names = entries(&dest);
+        assert!(
+            !names.contains(&"overrides/mods/create.jar".to_string()),
+            "the jar was embedded as well: {names:?}"
+        );
+        // And not named in both halves: the recipient would fetch it twice,
+        // the second time needing a CurseForge key for a file Modrinth hosts.
+        let manifest = read_manifest(&dest).unwrap().unwrap();
+        assert!(
+            manifest.note("mods/create.jar").is_none_or(|n| n.source.is_none()),
+            "{:?}",
+            manifest.files
+        );
+        assert_eq!((report.referenced, bundled(&report)), (1, (0, 0, 0)));
+    }
+
+    /// A record is no longer the gate. A jar somebody dropped in by hand is
+    /// linked too, as long as the bytes are published somewhere.
+    #[tokio::test]
+    async fn a_jar_with_no_record_at_all_is_linked_when_its_hash_matches() {
+        let (scratch, inst) = fixture("norecord", &[("mods", "sodium.jar")]).await;
+        let paths = scratch.paths.clone();
+        assert!(inst.content.is_empty());
+
+        let mut catalogue = from_records(&paths, &inst).await;
+        catalogue.pretend_modrinth_holds(&["sodium.jar"]);
+
+        let dest = paths.root.join("norecord.mrpack");
+        mrpack_from(&paths, &inst, &dest, &catalogue).await;
+
+        let index = index_of(&dest);
+        assert_eq!(
+            index.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+            vec!["mods/sodium.jar"]
+        );
+        // The matched file's own URL. There is no record here to build one
+        // from, and even with one the uploaded name need not be the name on
+        // disk — which is what made the constructed URL worth replacing.
+        assert_eq!(
+            index.files[0].downloads,
+            vec!["https://cdn.modrinth.com/data/mr-project/versions/mr-version/uploaded-sodium.jar"]
+        );
+        assert!(
+            !entries(&dest).contains(&"overrides/mods/sodium.jar".to_string()),
+            "{:?}",
+            entries(&dest)
+        );
+    }
+
+    /// A record Modrinth has disowned — the jar was patched, replaced or
+    /// renamed since — must not become an index entry. The entry's hashes come
+    /// from the local bytes while its URL would come from the record, so every
+    /// launcher reading the pack would fail its checksum.
+    #[tokio::test]
+    async fn a_stale_record_is_embedded_rather_than_indexed() {
+        let (scratch, mut inst) = fixture("stale-mr", &[("mods", "patched.jar")]).await;
+        let paths = scratch.paths.clone();
+        inst.content = vec![record("modrinth", "patched.jar", ContentKind::Mod)];
+
+        let mut catalogue = from_records(&paths, &inst).await;
+        catalogue.pretend_modrinth_holds(&[]);
+
+        let dest = paths.root.join("stale.mrpack");
+        let report = mrpack_from(&paths, &inst, &dest, &catalogue).await;
+
+        assert!(index_of(&dest).files.is_empty(), "the stale record was indexed");
+        assert!(
+            entries(&dest).contains(&"overrides/mods/patched.jar".to_string()),
+            "{:?}",
+            entries(&dest)
+        );
+        assert_eq!((report.referenced, bundled(&report)), (0, (1, 0, 0)));
+    }
+
+    /// Nothing asked, nothing concluded: an export with no lookup writes the
+    /// pack the records describe, with the URL built from their ids, which is
+    /// exactly what every export did before the matcher existed. An offline
+    /// export must still produce a pack that works.
+    #[tokio::test]
+    async fn an_offline_export_still_writes_a_valid_pack() {
+        let (scratch, mut inst) =
+            fixture("offline", &[("mods", "sodium.jar"), ("mods", "create.jar")]).await;
+        let paths = scratch.paths.clone();
+        inst.content = vec![
+            record("modrinth", "sodium.jar", ContentKind::Mod),
+            record("curseforge", "create.jar", ContentKind::Mod),
+        ];
+
+        // The client is the one that reaches a port nothing listens on, so the
+        // lookup fails rather than being skipped — the harder case of the two,
+        // and the one a user with no internet actually hits.
+        let dest = paths.root.join("offline.geodepack");
+        let catalogue = identity::for_instance(
+            Ask::Platforms {
+                client: &offline(),
+                want: &["modrinth"],
+            },
+            &paths,
+            &inst,
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+        let report = export_with(&paths, &inst, dest.clone(), false, &catalogue, &Progress::silent("t"))
+            .await
+            .unwrap();
+
+        let index = index_of(&dest);
+        assert_eq!(index.files.len(), 1, "{:?}", index.files);
+        assert_eq!(index.files[0].path, "mods/sodium.jar");
+        assert_eq!(
+            index.files[0].downloads,
+            vec!["https://cdn.modrinth.com/data/proj-1/versions/ver-1/sodium.jar"]
+        );
+        // The CurseForge jar still travels as ids in the Geode half.
+        let manifest = read_manifest(&dest).unwrap().unwrap();
+        assert!(manifest.note("mods/create.jar").is_some_and(|n| n.source.is_some()));
+        assert_eq!(report.referenced, 2);
+        assert_eq!(
+            report.trouble.len(),
+            1,
+            "the user is told Modrinth could not be asked: {:?}",
+            report.trouble
+        );
+    }
+
+    /// An index that stays uploadable to Modrinth and openable in Prism as it
+    /// grows: both hashes on every file, a size, an `env` naming both sides, a
+    /// safe relative path, and a canonical URL on an allowlisted host.
+    #[tokio::test]
+    async fn an_exported_index_is_still_one_modrinth_would_accept() {
+        let (scratch, mut inst) = fixture(
+            "valid",
+            &[("mods", "sodium.jar"), ("mods", "matched.jar"), ("config", "x.toml")],
+        )
+        .await;
+        let paths = scratch.paths.clone();
+        inst.content = vec![record("modrinth", "sodium.jar", ContentKind::Mod)];
+
+        let mut catalogue = from_records(&paths, &inst).await;
+        catalogue.pretend_modrinth_holds(&["sodium.jar", "matched.jar"]);
+
+        let dest = paths.root.join("valid.mrpack");
+        mrpack_from(&paths, &inst, &dest, &catalogue).await;
+
+        let index = index_of(&dest);
+        assert_eq!(index.format_version, 1);
+        assert_eq!(index.game, "minecraft");
+        assert_eq!(index.files.len(), 2, "{:?}", index.files);
+        for file in &index.files {
+            assert!(file.hashes.contains_key("sha1"), "{file:?}");
+            assert!(file.hashes.contains_key("sha512"), "{file:?}");
+            assert!(file.file_size.is_some(), "{file:?}");
+            let env = file.env.as_ref().expect("an env pair");
+            assert!(!env.client.is_empty() && !env.server.is_empty(), "{env:?}");
+            let path = Path::new(&file.path);
+            assert!(crate::paths::is_safe_relative(path), "{}", file.path);
+            assert!(!file.path.starts_with('/') && !file.path.contains('\\'));
+            let url = file.downloads.first().expect("a download");
+            let parsed = url::Url::parse(url).expect("a URL");
+            assert_eq!(parsed.as_str(), url, "not canonical: {url}");
+            assert!(
+                matches!(
+                    parsed.host_str(),
+                    Some("cdn.modrinth.com" | "github.com" | "raw.githubusercontent.com" | "gitlab.com")
+                ),
+                "off Modrinth's allowlist: {url}"
+            );
+        }
+    }
+
+    /// A file whose name is not text cannot be an index path and cannot be a
+    /// zip entry either. It is named to the sharer rather than written as
+    /// U+FFFD, which would be a name no reader could ever match back.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_non_utf8_path_is_reported_rather_than_mangled() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let (scratch, inst) = fixture("badname", &[("mods", "fine.jar")]).await;
+        let paths = scratch.paths.clone();
+        let mods = paths.game_dir(&inst.id).join("mods");
+        let name = std::ffi::OsStr::from_bytes(b"sodium\xff.jar");
+        tokio::fs::write(mods.join(name), b"not really a jar").await.unwrap();
+
+        let dest = paths.root.join("badname.mrpack");
+        let report = mrpack_from(&paths, &inst, &dest, &from_records(&paths, &inst).await).await;
+
+        assert_eq!(report.unnameable.len(), 1, "{:?}", report.unnameable);
+        let names = entries(&dest);
+        assert!(
+            names.iter().all(|n| !n.contains('\u{fffd}')),
+            "a mangled name went into the pack: {names:?}"
+        );
+        // And the rest of the pack still went, including its neighbour.
+        assert!(names.contains(&"overrides/mods/fine.jar".to_string()), "{names:?}");
+    }
+
+    /// A turned-off mod travels per what each format can say. A `.geodepack`
+    /// indexes it under its enabled name and switches it back off from its
+    /// note, so it costs no bytes. A plain `.mrpack` has nowhere to say "off",
+    /// and arriving switched on is worse than arriving as bytes.
+    #[tokio::test]
+    async fn a_turned_off_mod_is_referenced_in_a_geodepack_and_embedded_in_an_mrpack() {
+        let (scratch, mut inst) = fixture("off", &[("mods", "heavy.jar.disabled")]).await;
+        let paths = scratch.paths.clone();
+        inst.content = vec![record("modrinth", "heavy.jar", ContentKind::Mod)];
+
+        let mut catalogue = from_records(&paths, &inst).await;
+        catalogue.pretend_modrinth_holds(&["heavy.jar"]);
+
+        let geode = paths.root.join("off.geodepack");
+        export_with(&paths, &inst, geode.clone(), false, &catalogue, &Progress::silent("t"))
+            .await
+            .unwrap();
+        assert_eq!(
+            index_of(&geode).files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+            vec!["mods/heavy.jar"],
+            "indexed under the name it will have once it is on"
+        );
+        let manifest = read_manifest(&geode).unwrap().unwrap();
+        assert!(
+            manifest.note("mods/heavy.jar").is_some_and(|n| n.disabled),
+            "nothing says to switch it back off"
+        );
+        // And the pack says which layout reads it, because a Geode that
+        // predates this would fetch the mod from the index and leave it on.
+        assert_eq!(manifest.geode_format, 2);
+        assert!(
+            entries(&geode).iter().all(|n| !n.contains("heavy.jar")),
+            "{:?}",
+            entries(&geode)
+        );
+
+        let plain = paths.root.join("off.mrpack");
+        let report = mrpack_from(&paths, &inst, &plain, &catalogue).await;
+        assert!(index_of(&plain).files.is_empty(), "an mrpack cannot say 'off'");
+        assert!(
+            entries(&plain).contains(&"overrides/mods/heavy.jar.disabled".to_string()),
+            "{:?}",
+            entries(&plain)
+        );
+        // And the sharer hears the real reason: Modrinth has this mod.
+        assert_eq!((report.referenced, bundled(&report)), (0, (0, 0, 1)));
+    }
+
+    /// The off state is a fact about the files, not about the records. A jar
+    /// dropped into `mods/` by hand and switched off has no record at all —
+    /// switching a mod off only renames the file — and the index carries it
+    /// under its enabled name regardless, so without a note of its own it
+    /// would arrive switched on.
+    #[tokio::test]
+    async fn a_turned_off_jar_with_no_record_is_noted_as_off_too() {
+        let (scratch, inst) = fixture("offhand", &[("mods", "heavy.jar.disabled")]).await;
+        let paths = scratch.paths.clone();
+        assert!(inst.content.is_empty(), "nothing wrote this jar down");
+
+        let mut catalogue = from_records(&paths, &inst).await;
+        catalogue.pretend_modrinth_holds(&["heavy.jar"]);
+
+        let dest = paths.root.join("offhand.geodepack");
+        export_with(
+            &paths,
+            &inst,
+            dest.clone(),
+            false,
+            &catalogue,
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            index_of(&dest)
+                .files
+                .iter()
+                .map(|f| f.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["mods/heavy.jar"]
+        );
+        assert!(
+            read_manifest(&dest)
+                .unwrap()
+                .unwrap()
+                .note("mods/heavy.jar")
+                .is_some_and(|n| n.disabled),
+            "nothing says to switch it back off: {:?}",
+            read_manifest(&dest).unwrap().unwrap().files
+        );
+        // The bytes stayed out, so the note is the only thing that can.
+        assert!(
+            entries(&dest).iter().all(|n| !n.contains("heavy.jar")),
+            "{:?}",
+            entries(&dest)
+        );
+    }
+
+    /// The other half of the same rule: a mod indexed under its enabled name
+    /// arrives switched on unless something turns it off, and the note is the
+    /// only thing that remembers.
+    #[tokio::test]
+    async fn a_mod_the_pack_had_turned_off_arrives_turned_off() {
+        let (scratch, mut inst) = fixture("offtrip", &[("mods", "heavy.jar.disabled")]).await;
+        let paths = scratch.paths.clone();
+        inst.content = vec![record("modrinth", "heavy.jar", ContentKind::Mod)];
+        let mut catalogue = from_records(&paths, &inst).await;
+        catalogue.pretend_modrinth_holds(&["heavy.jar"]);
+
+        let archive = paths.root.join("offtrip.geodepack");
+        export_with(&paths, &inst, archive.clone(), false, &catalogue, &Progress::silent("t"))
+            .await
+            .unwrap();
+
+        // The index entry is a download, which this test does not do; what it
+        // proves is that a file that landed switched on ends up off.
+        let mut into = fresh("offtrip-in");
+        let mods = paths.game_dir(&into.id).join("mods");
+        tokio::fs::create_dir_all(&mods).await.unwrap();
+        tokio::fs::write(mods.join("heavy.jar"), b"not really a jar").await.unwrap();
+
+        let manifest = read_manifest(&archive).unwrap().unwrap();
+        apply_pack(
+            &offline(),
+            &paths,
+            &mut into,
+            &archive,
+            &manifest,
+            None,
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+
+        assert!(mods.join("heavy.jar.disabled").is_file(), "it arrived switched on");
+        assert!(!mods.join("heavy.jar").exists());
     }
 
     // -----------------------------------------------------------------------
@@ -2325,7 +2865,7 @@ mod tests {
         inst.icon = Some("icon.png".into());
 
         let dest = paths.root.join("round.geodepack");
-        export(&paths, &inst, dest.clone(), false, &Progress::silent("t"))
+        export(Ask::Nobody, &paths, &inst, dest.clone(), false, &Progress::silent("t"))
             .await
             .unwrap();
 
@@ -2367,7 +2907,7 @@ mod tests {
         inst.content = vec![record("", "homemade.jar", ContentKind::Mod)];
 
         let dest = paths.root.join("full.geodepack");
-        export(&paths, &inst, dest.clone(), false, &Progress::silent("t"))
+        export(Ask::Nobody, &paths, &inst, dest.clone(), false, &Progress::silent("t"))
             .await
             .unwrap();
 
@@ -2395,7 +2935,7 @@ mod tests {
         inst.content = vec![record("", "private-anticheat.jar", ContentKind::Mod)];
 
         let dest = paths.root.join("server.geodepack");
-        export(&paths, &inst, dest.clone(), false, &Progress::silent("t"))
+        export(Ask::Nobody, &paths, &inst, dest.clone(), false, &Progress::silent("t"))
             .await
             .unwrap();
         rewrite_pack(&dest, |m| m.kind = Kind::Server, &[]);
@@ -2439,7 +2979,7 @@ mod tests {
         ));
 
         let personal = paths.root.join("jvm-personal.geodepack");
-        export(&paths, &inst, personal.clone(), false, &Progress::silent("t")).await.unwrap();
+        export(Ask::Nobody, &paths, &inst, personal.clone(), false, &Progress::silent("t")).await.unwrap();
         let hostile = paths.root.join("jvm-server.geodepack");
         std::fs::copy(&personal, &hostile).unwrap();
         rewrite_pack(&hostile, |m| m.kind = Kind::Server, &[]);
@@ -2525,7 +3065,7 @@ mod tests {
         inst.content = vec![record("", "homemade.jar", ContentKind::Mod)];
 
         let dest = paths.root.join("personal.geodepack");
-        export(&paths, &inst, dest.clone(), false, &Progress::silent("t"))
+        export(Ask::Nobody, &paths, &inst, dest.clone(), false, &Progress::silent("t"))
             .await
             .unwrap();
 
@@ -2558,7 +3098,7 @@ mod tests {
             record("curseforge", "fine.jar", ContentKind::Mod),
         ];
 
-        let manifest = manifest_for(&paths, &inst).await;
+        let manifest = manifest_for(&paths, &inst, &from_records(&paths, &inst).await).await;
         assert!(manifest.note("mods/crashes.jar").is_some_and(|n| n.disabled), "{:?}", manifest.files);
         assert!(manifest.note("mods/fine.jar").is_some_and(|n| !n.disabled), "{:?}", manifest.files);
         assert_eq!(disabled_rel(Path::new("mods/crashes.jar")), Some(PathBuf::from("mods/crashes.jar.disabled")));
@@ -2573,7 +3113,7 @@ mod tests {
         let (scratch, inst) = fixture("art", &[("config", "x.toml")]).await;
         let paths = scratch.paths.clone();
         let dest = paths.root.join("art.geodepack");
-        export(&paths, &inst, dest.clone(), false, &Progress::silent("t"))
+        export(Ask::Nobody, &paths, &inst, dest.clone(), false, &Progress::silent("t"))
             .await
             .unwrap();
         rewrite_pack(
@@ -2607,7 +3147,7 @@ mod tests {
         let (scratch, inst) = fixture("big", &[("config", "x.toml")]).await;
         let paths = scratch.paths.clone();
         let dest = paths.root.join("big.geodepack");
-        export(&paths, &inst, dest.clone(), false, &Progress::silent("t"))
+        export(Ask::Nobody, &paths, &inst, dest.clone(), false, &Progress::silent("t"))
             .await
             .unwrap();
         rewrite_pack(
@@ -2658,7 +3198,7 @@ mod tests {
         let (scratch, inst) = fixture("unsafe", &[("config", "x.toml")]).await;
         let paths = scratch.paths.clone();
         let dest = paths.root.join("unsafe.geodepack");
-        export(&paths, &inst, dest.clone(), false, &Progress::silent("t"))
+        export(Ask::Nobody, &paths, &inst, dest.clone(), false, &Progress::silent("t"))
             .await
             .unwrap();
         rewrite_pack(
@@ -2863,6 +3403,37 @@ mod tests {
     fn sorted(mut names: Vec<String>) -> Vec<String> {
         names.sort();
         names
+    }
+
+    /// A server's pack is built from records alone: no client reaches
+    /// `export_server`, so there is nothing for it to look up. Its index names
+    /// the Modrinth mods with the URL built from their ids, and the revision it
+    /// carries is the one `server_pack_info` advertises. A lookup that
+    /// succeeded in one and not the other would advertise a revision the pack
+    /// does not have and push an update to every player — and every
+    /// online/offline flip would do it again. What the pack holds is pinned by
+    /// `a_server_pack_carries_every_mod_and_nothing_else`.
+    #[tokio::test]
+    async fn a_servers_pack_is_built_without_touching_the_network() {
+        let (scratch, server) = server_fixture("norecon", false).await;
+        let paths = scratch.paths.clone();
+        let dest = paths.root.join("norecon.geodepack");
+        export_server(&paths, &server, dest.clone(), &Progress::silent("t")).await.unwrap();
+
+        let index = index_of(&dest);
+        let sodium = index
+            .files
+            .iter()
+            .find(|f| f.path == "mods/sodium-mr.jar")
+            .expect("the Modrinth mod is indexed");
+        assert_eq!(
+            sodium.downloads,
+            vec!["https://cdn.modrinth.com/data/proj-1/versions/ver-1/sodium-mr.jar"]
+        );
+
+        let info = server_pack_info(&paths, &server).await.unwrap();
+        let manifest = read_manifest(&dest).unwrap().expect("a Geode pack");
+        assert_eq!(manifest.revision, Some(info.revision));
     }
 
     /// The allowlist, end to end. Every jar in `mods/` goes — the admin's own,
@@ -5112,7 +5683,7 @@ mod tests {
         let (scratch, inst) = fixture("personal-update", &[("mods", "homemade.jar")]).await;
         let paths = scratch.paths.clone();
         let pack = paths.root.join("personal.geodepack");
-        export(&paths, &inst, pack.clone(), false, &Progress::silent("t"))
+        export(Ask::Nobody, &paths, &inst, pack.clone(), false, &Progress::silent("t"))
             .await
             .unwrap();
 

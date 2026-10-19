@@ -9,6 +9,7 @@ import type {
   ContentItem,
   ContentKind,
   DeviceCodeStart,
+  ExportReport,
   GameVersion,
   ImportScan,
   InstallReport,
@@ -454,10 +455,11 @@ export const api = {
     invoke<PackPreview>("preview_modpack", { path }),
   importModpack: (path: string, name?: string) =>
     invoke<Instance>("import_modpack", { path, name: name ?? null }),
+  /** Both return what the pack did with the instance's content, so the UI can say it. */
   exportModpack: (id: string, dest: string, includeSaves: boolean) =>
-    invoke<string>("export_modpack", { id, dest, includeSaves }),
+    invoke<ExportReport>("export_modpack", { id, dest, includeSaves }),
   exportGeodepack: (id: string, dest: string, includeSaves: boolean) =>
-    invoke<string>("export_geodepack", { id, dest, includeSaves }),
+    invoke<ExportReport>("export_geodepack", { id, dest, includeSaves }),
 
   // Sharing a server with players. Status changes also arrive as the
   // `geode://share-status` event with a ShareStatus payload.
