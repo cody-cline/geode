@@ -134,6 +134,15 @@ Microsoft client IDs are per-application and Mojang-approved individually.
 Both are user-supplied, or compiled into a private build from a gitignored
 `.env`. Never commit either, and never add a shared fallback key.
 
+**The queue lives in a shared doc, and its status is yours to keep true.**
+What to build next is tracked at
+<https://claude.ai/code/artifact/2cb49bb1-98b1-44b8-8646-bd91f006d25f>, one row
+per item with a status chip: Done, In progress, Not started. Move the chip when
+the work moves — to In progress when you pick an item up, to Done when it is
+merged — in the same sitting, not at the end of a long session. A row whose chip
+disagrees with the code is worse than no row, because it is read as fact. An
+item the owner asks for that has no row gets one.
+
 **The theme is the blue-slate palette** in `src/styles/global.css`
 (`--bg: #0b0f14`). It was rethemed once and reverted; do not change it
 unprompted. Use the existing CSS variables rather than literal colours.
