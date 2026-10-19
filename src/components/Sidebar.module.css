@@ -147,6 +147,14 @@
   flex-shrink: 0;
 }
 
+/* The warning colour the rest of the app uses for something the user has to
+   act on, at the size of the running dot it sits beside. */
+.staleLink {
+  display: flex;
+  color: var(--warn);
+  flex-shrink: 0;
+}
+
 .footer {
   padding-top: 10px;
   margin-top: 8px;

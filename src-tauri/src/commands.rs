@@ -455,7 +455,7 @@ pub async fn set_server_image(
         server.banner = next;
     }
     server.save(&state.paths).await?;
-    Ok(server_view(server, &state))
+    Ok(server_view(server, &state).await)
 }
 
 #[tauri::command]
@@ -1302,9 +1302,18 @@ pub struct ServerView {
     /// instance's are.
     pub icon_path: Option<String>,
     pub banner_path: Option<String>,
+    /// The address this server's links were last taken at, while it is shared.
+    /// What the lists compare against the address Geode can see now, to badge a
+    /// server whose links have gone stale without opening its Share tab.
+    pub last_link_address: Option<String>,
 }
 
-fn server_view(server: crate::server::Server, state: &AppState) -> ServerView {
+/// Costs one small read per server — `share.json`, then `share.link.json` for
+/// the shared ones — on top of the `server.json` the list has already read. The
+/// list is a folder of servers, not a feed, so that stays in the noise; a
+/// separate command would have cost the same reads and left the list able to
+/// disagree with itself between refreshes.
+async fn server_view(server: crate::server::Server, state: &AppState) -> ServerView {
     let media = state.paths.server_media(&server.id);
     ServerView {
         icon_path: media_path(&media, &server.icon),
@@ -1317,6 +1326,8 @@ fn server_view(server: crate::server::Server, state: &AppState) -> ServerView {
         kind_name: server.kind.display_name().to_string(),
         has_world: !server.kind.is_proxy(),
         mod_loader: server.kind.mod_loader().map(str::to_string),
+        last_link_address: crate::server::share::shared_link_address(&state.paths, &server.id)
+            .await,
         // Moved last, so the capabilities above can still read it.
         server,
     }
@@ -1752,19 +1763,17 @@ pub async fn server_versions(state: State<'_, AppState>, kind: String) -> Result
 
 #[tauri::command]
 pub async fn list_servers(state: State<'_, AppState>) -> Result<Vec<ServerView>> {
-    Ok(crate::server::list(&state.paths)
-        .await?
-        .into_iter()
-        .map(|s| server_view(s, &state))
-        .collect())
+    let servers = crate::server::list(&state.paths).await?;
+    let mut views = Vec::with_capacity(servers.len());
+    for server in servers {
+        views.push(server_view(server, &state).await);
+    }
+    Ok(views)
 }
 
 #[tauri::command]
 pub async fn get_server(state: State<'_, AppState>, id: String) -> Result<ServerView> {
-    Ok(server_view(
-        crate::server::load(&state.paths, &id).await?,
-        &state,
-    ))
+    Ok(server_view(crate::server::load(&state.paths, &id).await?, &state).await)
 }
 
 /// Create the server and put its jar in place.
@@ -1788,7 +1797,7 @@ pub async fn create_server(
     match result {
         Ok(()) => {
             progress.finish().await;
-            Ok(server_view(server, &state))
+            Ok(server_view(server, &state).await)
         }
         Err(e) => {
             // The folder stays: a server with no jar is something the UI can
@@ -1855,7 +1864,7 @@ pub async fn update_server(
         server.schedules = schedules;
     }
     server.save(&state.paths).await?;
-    Ok(server_view(server, &state))
+    Ok(server_view(server, &state).await)
 }
 
 /// Record that the user accepted Mojang's EULA, and write `eula.txt`.
@@ -1866,7 +1875,7 @@ pub async fn update_server(
 pub async fn accept_server_eula(state: State<'_, AppState>, id: String) -> Result<ServerView> {
     let mut server = crate::server::load(&state.paths, &id).await?;
     crate::server::accept_eula(&state.paths, &mut server).await?;
-    Ok(server_view(server, &state))
+    Ok(server_view(server, &state).await)
 }
 
 /// Install Cardboard, which lets a Fabric server load Bukkit plugins.
@@ -1958,7 +1967,7 @@ pub async fn add_cardboard(
     }
     progress.finish().await;
 
-    Ok(server_view(server, &state))
+    Ok(server_view(server, &state).await)
 }
 
 /// A server that started, and the mods moved out of its Mods first.
@@ -5054,6 +5063,40 @@ mod tests {
             manifest["profile"]["javaArgs"] = "   ".into();
         });
         refuse_java_args(&archive).await.unwrap();
+    }
+
+    /// The sidebar and the Servers screen badge a server whose links point at
+    /// an address this machine no longer has, so the list's own payload has to
+    /// carry the address they were taken at — and stop carrying it the moment
+    /// sharing stops, which is when there is nothing left to re-send.
+    #[tokio::test]
+    async fn the_server_list_carries_the_address_links_were_taken_at() {
+        let scratch = Scratch::new("list-link-address");
+        let paths = scratch.paths.clone();
+        let (server, _) = shared_server(&paths).await;
+        let state = AppState::new(paths.clone(), crate::config::Config::default());
+
+        let view = server_view(server.clone(), &state).await;
+        assert_eq!(
+            view.last_link_address, None,
+            "a share nobody has taken a link from named an address"
+        );
+
+        crate::server::share::save_link_address(&paths, &server.id, "203.0.113.7:25590")
+            .await
+            .unwrap();
+        let view = server_view(server.clone(), &state).await;
+        assert_eq!(
+            view.last_link_address,
+            Some("203.0.113.7:25590".to_string())
+        );
+
+        crate::server::share::stop(&paths, &server.id).await.unwrap();
+        let view = server_view(server, &state).await;
+        assert_eq!(
+            view.last_link_address, None,
+            "a stopped share still offered the list an address to badge"
+        );
     }
 }
 

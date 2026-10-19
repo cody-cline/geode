@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import clsx from "clsx";
 import {
+  AlertTriangle,
   Clock,
   Cpu,
   Loader2,
@@ -15,6 +16,7 @@ import InstanceIcon from "../components/InstanceIcon";
 import NewServerModal from "../components/NewServerModal";
 import { api } from "../lib/api";
 import { hashHue, relativeTime } from "../lib/format";
+import { OLD_ADDRESS_LABEL, linksPointAtOldAddress } from "../lib/share";
 import { useStore } from "../lib/store";
 import type { Server } from "../lib/types";
 
@@ -151,6 +153,7 @@ function ServerCard({
   const refreshServers = useStore((s) => s.refreshServers);
   const reportError = useStore((s) => s.reportError);
   const progress = useStore((s) => s.progress[`server:${server.id}`]);
+  const shareStatus = useStore((s) => s.shareStatus);
 
   const [busy, setBusy] = useState(false);
   const hue = hashHue(server.id);
@@ -228,6 +231,20 @@ function ServerCard({
               <Cpu size={11} />
               {server.settings.memoryMb} MB
             </span>
+            {/* Among the server's other facts rather than over its artwork, so
+                the grid keeps one silhouette. Clicking it opens the server,
+                which is where the link to send instead is. */}
+            {linksPointAtOldAddress(shareStatus, server.lastLinkAddress) && (
+              <span
+                className="badge badge-warn"
+                role="img"
+                title={OLD_ADDRESS_LABEL}
+                aria-label={OLD_ADDRESS_LABEL}
+              >
+                <AlertTriangle size={11} aria-hidden="true" />
+                Old address
+              </span>
+            )}
           </span>
         </span>
       </button>

@@ -210,6 +210,21 @@ pub async fn link_address(paths: &Paths, id: &str) -> Option<String> {
     Some(stored.address)
 }
 
+/// The address this server's links were last taken at, for a server list that
+/// has not loaded the share — `None` as soon as sharing stops.
+///
+/// Stopping answers `None` because the warning this feeds is about links in
+/// other people's hands: a stopped share serves nobody, so there is nothing to
+/// tell the admin to re-send. The Share tab asks `link_address` instead; it has
+/// the share in hand already and says which case it is in for itself.
+pub async fn shared_link_address(paths: &Paths, id: &str) -> Option<String> {
+    let share = load(paths, id).await.ok().flatten()?;
+    if !share.shared {
+        return None;
+    }
+    link_address(paths, id).await
+}
+
 /// Remember the address this server's links are being handed out with.
 ///
 /// Written by rename, like the share itself, so a reader never finds half an

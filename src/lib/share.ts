@@ -581,20 +581,43 @@ export function localAddressHint(status: ShareStatus | null): string {
 }
 
 /**
- * The links already sent point at an address this computer no longer has.
+ * Whether the links already sent point at an address this computer no longer
+ * has. `lastLinkAddress` comes from the backend and is null unless the server
+ * is shared and a link has actually been taken.
  *
- * Shown only once there is something to compare: an admin who has never taken
- * a link has sent nobody one, and before Geode knows an address there is no
- * new link to point at instead. Nothing here is said about the instances
- * players already made — a link at a new address does not find them, and this
- * note is not the place to promise it does.
+ * The one comparison behind both the sentence on the Share tab and the badge on
+ * the server lists, so the two can never disagree about whether a link has gone
+ * stale. True only once there is something to compare: an admin who has never
+ * taken a link has sent nobody one, and before Geode knows an address there is
+ * no new link to point at instead.
+ */
+export function linksPointAtOldAddress(
+  status: ShareStatus | null,
+  lastLinkAddress: string | null,
+): boolean {
+  const address = status?.address ?? null;
+  return Boolean(address && lastLinkAddress && address !== lastLinkAddress);
+}
+
+/**
+ * What the badge on a server's row and card says, for hovering and for a
+ * screen reader. Here rather than in the two lists, so one warning cannot come
+ * to be worded two ways.
+ */
+export const OLD_ADDRESS_LABEL = "The links you sent point at an old address";
+
+/**
+ * The sentence under the link when the address has moved on.
+ *
+ * Nothing here is said about the instances players already made — a link at a
+ * new address does not find them, and this note is not the place to promise it
+ * does.
  */
 export function addressChangedLine(
   status: ShareStatus | null,
   lastLinkAddress: string | null,
 ): StatusLine | null {
-  const address = status?.address ?? null;
-  if (!address || !lastLinkAddress || address === lastLinkAddress) return null;
+  if (!linksPointAtOldAddress(status, lastLinkAddress)) return null;
   return {
     tone: "warn",
     title: "This computer's address has changed",

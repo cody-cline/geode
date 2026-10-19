@@ -84,6 +84,10 @@ export default function ShareTab({ server }: { server: Server }) {
   const config = useStore((s) => s.config);
   const status = useStore((s) => s.shareStatus);
   const loadShareStatus = useStore((s) => s.loadShareStatus);
+  // The sidebar and the Servers cards badge a stale link from the server
+  // list's own payload, so a change made here has to be asked for again or
+  // the badge goes on saying what was true before.
+  const refreshServers = useStore((s) => s.refreshServers);
   const navigate = useStore((s) => s.navigate);
   const toast = useStore((s) => s.toast);
   const reportError = useStore((s) => s.reportError);
@@ -149,6 +153,9 @@ export default function ShareTab({ server }: { server: Server }) {
     if (view) {
       setShare(view);
       loadShareStatus().catch(() => {});
+      // Sharing again keeps the address the last link was taken at, so a
+      // server that was already stale is stale again the moment it is shared.
+      void refreshServers();
     }
   }
 
@@ -170,6 +177,10 @@ export default function ShareTab({ server }: { server: Server }) {
   async function remember() {
     try {
       setShare(await api.shareLinkCopied(server.id));
+      // The address just written is the one the badge compares, so without
+      // this the badge never appears for a first link and never clears for a
+      // replacement.
+      void refreshServers();
     } catch {
       /* the link is on the clipboard either way */
     }
@@ -207,6 +218,9 @@ export default function ShareTab({ server }: { server: Server }) {
           setShareError(errorMessage(e));
         });
       loadShareStatus().catch(() => {});
+      // A share nobody can download from has no links worth re-sending, so
+      // the badge has to go with it.
+      void refreshServers();
     }
   }
 

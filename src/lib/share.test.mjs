@@ -5,8 +5,10 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 
 import {
+  OLD_ADDRESS_LABEL,
   addressChangedLine,
   arrivalLine,
   driveLine,
@@ -15,6 +17,7 @@ import {
   joinStep,
   linkKind,
   linkPendingReason,
+  linksPointAtOldAddress,
   listenLine,
   localAddressHint,
   nextJoin,
@@ -634,6 +637,93 @@ test("links already sent are called stale only once the address has really moved
   // note would be a complaint with no answer to it.
   assert.equal(addressChangedLine(at(null), "203.0.113.7:25590"), null);
   assert.equal(addressChangedLine(null, "203.0.113.7:25590"), null);
+});
+
+test("the badge on a server list and the sentence under its link agree", () => {
+  const at = (address) => status(mapped("public"), { address });
+
+  // The one case there is a badge for: a link was taken, and the address it
+  // was taken at is not the one this computer has now.
+  assert.equal(
+    linksPointAtOldAddress(at("198.51.100.4:25590"), "203.0.113.7:25590"),
+    true,
+  );
+  // Nothing has moved.
+  assert.equal(
+    linksPointAtOldAddress(at("203.0.113.7:25590"), "203.0.113.7:25590"),
+    false,
+  );
+  // No link taken — and a server that is not shared reaches this the same way,
+  // because the backend names an address only while it is shared.
+  assert.equal(linksPointAtOldAddress(at("198.51.100.4:25590"), null), false);
+  // No address known, so there is no new link to badge the old one against.
+  assert.equal(linksPointAtOldAddress(at(null), "203.0.113.7:25590"), false);
+  assert.equal(linksPointAtOldAddress(null, "203.0.113.7:25590"), false);
+
+  // One comparison, so a badge and a sentence can never disagree.
+  for (const [address, taken] of [
+    ["198.51.100.4:25590", "203.0.113.7:25590"],
+    ["203.0.113.7:25590", "203.0.113.7:25590"],
+    ["198.51.100.4:25590", null],
+    [null, "203.0.113.7:25590"],
+  ]) {
+    assert.equal(
+      linksPointAtOldAddress(at(address), taken),
+      addressChangedLine(at(address), taken) !== null,
+    );
+  }
+
+  // The label the badge carries for a screen reader says which way round it is:
+  // the links are old, not the address the Share tab now shows.
+  assert.match(OLD_ADDRESS_LABEL, /links you sent/);
+  assert.match(OLD_ADDRESS_LABEL, /old address/);
+});
+
+// The badge's two halves have different lifetimes: the address Geode can see
+// now arrives as an event, while `lastLinkAddress` only ever reaches the
+// sidebar and the Servers cards inside the `list_servers` payload the store
+// caches. Nothing polls and no event reloads that list, so a Share tab handler
+// that changes what the payload would say has to ask for it again — or the
+// badge misses the change it exists for and then keeps claiming it after the
+// admin has done what it asked. There is no DOM or React renderer under
+// `npm test`, so the invariant is checked where it is written.
+test("every share change the lists badge also refreshes the server list", async () => {
+  const source = await readFile(
+    new URL("../views/server/ShareTab.tsx", import.meta.url),
+    "utf8",
+  );
+
+  // The three calls that change what `list_servers` answers for
+  // `lastLinkAddress`: taking a link writes the address, and sharing or
+  // stopping decides whether it is reported at all.
+  const changesTheList = [
+    "api.shareServer(",
+    "api.unshareServer(",
+    "api.shareLinkCopied(",
+  ];
+
+  // Every handler is `async function` at the component's own indentation, and
+  // closes with the first `}` back at it.
+  const handlers = source.split("\n  async function ").slice(1);
+  const covered = [];
+  for (const handler of handlers) {
+    const name = handler.slice(0, handler.indexOf("("));
+    const body = handler.slice(0, handler.indexOf("\n  }"));
+    for (const call of changesTheList) {
+      if (!body.includes(call)) continue;
+      covered.push(call);
+      assert.match(
+        body,
+        /refreshServers\(\)/,
+        `${name}() calls ${call}) without refreshing the server list, so the stale-address badge cannot follow it`,
+      );
+    }
+  }
+  assert.deepEqual(
+    covered.sort(),
+    [...changesTheList].sort(),
+    "a call that changes what the server list says moved out of a handler, or was renamed",
+  );
 });
 
 test("first use is the one verification that is not a plain yes", () => {

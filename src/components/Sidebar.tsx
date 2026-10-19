@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import clsx from "clsx";
 import {
+  AlertTriangle,
   Boxes,
   ClipboardList,
   Compass,
@@ -17,6 +18,7 @@ import InstanceIcon from "./InstanceIcon";
 import NewInstanceModal from "./NewInstanceModal";
 import NewServerModal from "./NewServerModal";
 import { hashHue, initials } from "../lib/format";
+import { OLD_ADDRESS_LABEL, linksPointAtOldAddress } from "../lib/share";
 import { useStore } from "../lib/store";
 import type { Route } from "../lib/store";
 
@@ -29,6 +31,7 @@ export default function Sidebar() {
   const servers = useStore((s) => s.servers);
   const accounts = useStore((s) => s.accounts);
   const progress = useStore((s) => s.progress);
+  const shareStatus = useStore((s) => s.shareStatus);
 
   const [creating, setCreating] = useState(false);
   const [creatingServer, setCreatingServer] = useState(false);
@@ -197,6 +200,18 @@ export default function Sidebar() {
                 className={styles.runningDot}
                 fill="currentColor"
               />
+            )}
+            {/* Beside the running dot rather than instead of it: a server can
+                be up and still be handing out an address it has moved off. */}
+            {linksPointAtOldAddress(shareStatus, server.lastLinkAddress) && (
+              <span
+                className={styles.staleLink}
+                role="img"
+                title={OLD_ADDRESS_LABEL}
+                aria-label={OLD_ADDRESS_LABEL}
+              >
+                <AlertTriangle size={12} aria-hidden="true" />
+              </span>
             )}
           </button>
         ))}

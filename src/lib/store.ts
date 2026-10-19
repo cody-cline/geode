@@ -278,6 +278,12 @@ export const useStore = create<State>((set, get) => ({
       get().refreshInstances(),
       get().refreshServers(),
       get().refreshAccounts(),
+      // The server lists badge a share whose address has moved, so they need
+      // the address now without waiting for a Share tab to be opened: the
+      // backend announces it when it changes, and a change that happened while
+      // the app was shut is announced to nobody. Quiet on failure — the Share
+      // tab asks again and has somewhere to say so.
+      get().loadShareStatus().catch(() => {}),
     ]);
 
     await listen<ProgressEvent>("geode://progress", ({ payload }) => {

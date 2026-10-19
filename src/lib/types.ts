@@ -272,6 +272,12 @@ export interface Server {
    * `mohist`. `null` when it takes no mods at all.
    */
   modLoader?: string | null;
+  /**
+   * The address this server's links were last taken at, while it is shared;
+   * null otherwise. Compared with `ShareStatus.address` to badge a server whose
+   * links have gone stale, without opening its Share tab.
+   */
+  lastLinkAddress: string | null;
 }
 
 /**
