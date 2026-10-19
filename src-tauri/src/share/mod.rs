@@ -1,6 +1,6 @@
 //! Sharing a setup with somebody else.
 //!
-//! Two paths, sharing one format.
+//! Three paths, sharing one format.
 //!
 //! A **personal pack** is a file. You export a `.geodepack` and hand it over
 //! however you already hand files to people. Geode uploads it nowhere and
@@ -19,18 +19,30 @@
 //! certificate, so a player's Geode will only ever download jars from the
 //! machine the admin meant.
 //!
-//! The rule underneath both paths is that **bytes are a last resort**. A mod
+//! A **pack in the sharer's own Google Drive** is the third shape, for the
+//! case the file is awkward and there is no server to reach: a laptop is not
+//! up when somebody gets round to installing the pack, so the bytes wait in
+//! Drive instead. [`crate::drive`] uploads the pack and makes that one file
+//! readable by anyone with the link; [`packlink`] is the `geode://pack` link,
+//! which carries where the bytes are and the SHA-256 they must hash to and
+//! nothing else; [`fetch`] downloads them with no credentials at all and
+//! verifies that hash before the importer sees the archive. Geode still hosts
+//! nothing: the file sits in the sharer's own Drive, under their own quota.
+//!
+//! The rule underneath all three paths is that **bytes are a last resort**. A mod
 //! that exists on a provider is carried as its reference and hashes, not as
 //! itself, which keeps a pack small, keeps its mods current, and keeps Geode
 //! out of the business of redistributing other people's work.
 
 pub mod code;
+pub mod fetch;
 pub mod host;
 pub mod identity;
 pub mod join;
 pub mod link;
 pub mod manifest;
 pub mod pack;
+pub mod packlink;
 pub mod portmap;
 pub mod service;
 pub mod trust;

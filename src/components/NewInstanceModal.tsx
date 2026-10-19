@@ -150,19 +150,27 @@ export default function NewInstanceModal({ onClose }: { onClose: () => void }) {
 
     setCreating(true);
     try {
-      const instance = await api.importModpack(picked);
+      const { instance, problems } = await api.importModpack(picked);
       await refresh();
-      toast({
-        kind: "success",
-        title: `Imported ${instance.name}`,
-        body: `${preview.fileCount} files, Minecraft ${preview.mcVersion}.`,
-      });
+      // An instance was made either way, so it is opened either way; what the
+      // import could not fetch is reported beside it rather than in place of
+      // it, because importing again would only make a second one.
+      if (problems.length === 0) {
+        toast({
+          kind: "success",
+          title: `Imported ${instance.name}`,
+          body: `${preview.fileCount} files, Minecraft ${preview.mcVersion}.`,
+        });
+      } else {
+        reportError(`Imported ${instance.name}, with problems`, problems.join(" "));
+      }
       navigate({ view: "instance", id: instance.id });
       onClose();
     } catch (e) {
-      // A partial import still leaves a usable instance, so refresh regardless.
+      // Nothing was made: an import that gets as far as an instance comes back
+      // as an outcome, problems and all.
       await refresh();
-      reportError("Import finished with problems", e);
+      reportError("Could not import that pack", e);
     } finally {
       setCreating(false);
     }

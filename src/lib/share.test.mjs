@@ -8,14 +8,22 @@ import assert from "node:assert/strict";
 
 import {
   addressChangedLine,
+  arrivalLine,
+  driveLine,
   existingLine,
   joinInput,
   joinStep,
+  linkKind,
   linkPendingReason,
   listenLine,
   localAddressHint,
   nextJoin,
+  nextPack,
   outcomeLine,
+  packShareMessage,
+  packStep,
+  publicLinkLine,
+  publishSummary,
   parsePort,
   readOutHint,
   replacedPasswordBody,
@@ -681,4 +689,159 @@ test("a password replaced while sharing is stopped is not sent before sharing ag
   assert.equal(replacedPasswordBody(true), "Send players the new link or password.");
   // The new link reaches nothing until the server is shared again.
   assert.match(replacedPasswordBody(false), /^Share the server again, then send players the new link or password\.$/);
+});
+
+// ---------------------------------------------------------------------------
+// Sharing a pack through Google Drive
+// ---------------------------------------------------------------------------
+
+function report(over = {}) {
+  return {
+    referenced: 0,
+    embeddedUnknown: 0,
+    embeddedElsewhere: 0,
+    embeddedTurnedOff: 0,
+    unnameable: [],
+    trouble: [],
+    ...over,
+  };
+}
+
+function driveStatus(over = {}) {
+  return {
+    configured: true,
+    connected: true,
+    needsReconnect: false,
+    account: "someone@example.com",
+    folderName: "Geode Packs",
+    folderUrl: "https://drive.google.com/drive/folders/folder-1",
+    ...over,
+  };
+}
+
+test("linkKind tells the two kinds of link apart and refuses anything else", () => {
+  assert.equal(linkKind("geode://join?addr=203.0.113.7:25590&code=7K2QF9XWMP"), "join");
+  assert.equal(linkKind("geode://pack?drive=abc&h=" + "ab".repeat(32)), "pack");
+  // Case and one trailing slash are the only forgiveness, the same as the
+  // parser in Rust.
+  assert.equal(linkKind("GEODE://PACK?drive=abc"), "pack");
+  assert.equal(linkKind("geode://pack/?drive=abc"), "pack");
+  assert.equal(linkKind("  geode://pack?drive=abc  "), "pack");
+  for (const junk of [
+    "geode://packs?drive=abc",
+    "geode://",
+    "https://pack.example.com",
+    "",
+    "geode://@pack?drive=abc",
+  ]) {
+    assert.equal(linkKind(junk), null, junk);
+  }
+});
+
+test("the same pack link twice opens one dialog", () => {
+  const first = nextPack(null, "geode://pack?drive=a&h=1", 1);
+  assert.equal(nextPack(first, "geode://pack?drive=a&h=1", 2), first);
+  const second = nextPack(first, "geode://pack?drive=b&h=2", 2);
+  assert.notEqual(second, first);
+  assert.equal(second.seq, 2);
+});
+
+test("packStep walks look, download, import, done and offers import once", () => {
+  const view = { source: "drive", host: "drive.google.com", hash: "ab".repeat(32) };
+  const arrival = { stage: "s", preview: { name: "Survival" } };
+  const instance = { id: "i", name: "Survival" };
+  assert.equal(packStep(null, null, null), "look");
+  assert.equal(packStep(view, null, null), "download");
+  assert.equal(packStep(view, arrival, null), "import");
+  assert.equal(packStep(view, arrival, instance), "done");
+  // Once an instance exists there is nothing to offer, whatever else is in
+  // hand: importing again would make a second one.
+  assert.equal(packStep(null, null, instance), "done");
+});
+
+test("the arrival line names the source parsing proved, not one the link claimed", () => {
+  assert.match(
+    arrivalLine({ source: "drive", host: "drive.google.com", hash: "" }).title,
+    /Google Drive/,
+  );
+  assert.match(
+    arrivalLine({ source: "url", host: "files.example.com", hash: "" }).title,
+    /files\.example\.com/,
+  );
+});
+
+test("the share message puts the Geode link first and ends on who can download it", () => {
+  const message = packShareMessage({
+    name: "Survival with Create",
+    link: "geode://pack?drive=1A2b3C&h=" + "ab".repeat(32),
+    fileUrl: "https://drive.google.com/file/d/1A2b3C/view",
+    size: "18.4 MB",
+  });
+  const lines = message.split("\n");
+  assert.match(lines[0], /^Survival with Create — a Minecraft pack for Geode$/);
+  const geodeAt = lines.findIndex((line) => line.startsWith("geode://pack"));
+  const driveAt = lines.findIndex((line) => line.startsWith("https://drive.google.com"));
+  assert.ok(geodeAt > 0, "the message carries the geode:// link");
+  assert.ok(driveAt > geodeAt, "the plain link should follow the geode:// one");
+  assert.match(message, /\(18\.4 MB\)/);
+  assert.equal(lines[lines.length - 1], "Anyone with these links can download it.");
+  assert.match(message, /\.mrpack any launcher can open/);
+});
+
+test("publishSummary says references and published bytes apart", () => {
+  const [references, bytes] = publishSummary(
+    report({ referenced: 31, embeddedUnknown: 2 }),
+  );
+  assert.match(references, /31 files travel as a reference/);
+  assert.match(bytes, /2 files travel as bytes/);
+  assert.match(bytes, /no provider could name them/);
+  assert.match(bytes, /Uploading publishes those copies/);
+
+  // One of each reads as one of each.
+  const single = publishSummary(report({ referenced: 1, embeddedTurnedOff: 1 }));
+  assert.match(single[0], /1 file travels as a reference/);
+  assert.match(single[1], /because it is turned off/);
+
+  // Nothing to say is said rather than left blank.
+  assert.deepEqual(publishSummary(report()), ["This pack carries no mods at all."]);
+});
+
+test("publishSummary names the files that could not go in while there are few enough", () => {
+  const few = publishSummary(report({ unnameable: ["mods/odd.jar", "mods/older.jar"] }));
+  assert.match(few[0], /mods\/odd\.jar/);
+  assert.match(few[0], /mods\/older\.jar/);
+
+  const many = publishSummary(report({ unnameable: Array.from({ length: 9 }, (_, i) => `m${i}.jar`) }));
+  assert.match(many[0], /^9 files could not go in at all\.$/);
+
+  // Trouble the export ran into is carried through, ended properly.
+  const [trouble] = publishSummary(report({ trouble: ["CurseForge was not asked"] }));
+  assert.equal(trouble, "CurseForge was not asked.");
+});
+
+test("the public-link check reads as a confirmation or as a warning", () => {
+  assert.equal(publicLinkLine("served").tone, "ok");
+  assert.match(publicLinkLine("served").title, /serves the pack/);
+  assert.equal(publicLinkLine("webPage").tone, "warn");
+  assert.match(publicLinkLine("webPage").detail, /Import a pack/);
+  assert.equal(publicLinkLine("unknown").tone, "info");
+});
+
+test("the Drive line tells not configured, not connected and reconnect apart", () => {
+  assert.match(driveLine(driveStatus({ configured: false })).title, /Not configured/);
+  assert.match(
+    driveLine(driveStatus({ configured: false })).detail,
+    /export a \.geodepack and hand it over/,
+  );
+  assert.match(driveLine(driveStatus({ connected: false })).title, /Not connected/);
+  const stale = driveLine(driveStatus({ connected: false, needsReconnect: true }));
+  assert.match(stale.title, /Reconnect/);
+  // The seven-day trap is named where it will be read.
+  assert.match(stale.detail, /seven days/);
+  assert.match(stale.detail, /Publish app/);
+  const connected = driveLine(driveStatus());
+  assert.match(connected.title, /Connected as someone@example\.com/);
+  assert.match(connected.detail, /Geode Packs/);
+  assert.match(connected.detail, /cannot see anything else/);
+  assert.match(driveLine(driveStatus({ account: null })).title, /^Connected$/);
 });

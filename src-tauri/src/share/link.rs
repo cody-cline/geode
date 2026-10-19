@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 
 use super::code::Code;
+use super::packlink::PackLink;
 
 /// The scheme links are registered under.
 pub const SCHEME: &str = "geode";
@@ -36,7 +37,7 @@ pub const SCHEME: &str = "geode";
 ///
 /// A link Geode writes is a few hundred bytes. The cap is there so that a
 /// pasted or forwarded megabyte is refused before any of it is looked at.
-const MAX_LEN: usize = 2048;
+pub(super) const MAX_LEN: usize = 2048;
 
 /// Where a server's pack is served from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -244,6 +245,46 @@ impl Link {
     }
 }
 
+/// A `geode://` link of either kind, as it arrives from outside.
+///
+/// There are two: a [`Link`] to a server that is up now, and a
+/// [`PackLink`] to a pack sitting somewhere. They arrive through the same
+/// handler, the same parked slot and the same event, so the thing that tells
+/// them apart is one function with tests on both sides — rather than a check
+/// spread across the deep-link handler and the webview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Opened {
+    Join(Link),
+    Pack(PackLink),
+}
+
+impl Opened {
+    /// Read whichever kind of link this is, as strictly as that kind is read.
+    ///
+    /// Only the host is looked at here, by the same text comparison each
+    /// parser makes for itself — and the parser it picks checks the front
+    /// again, so nothing rests on this one being the careful one.
+    pub fn parse(input: &str) -> Result<Self> {
+        let (front, _) = input.split_once('?').unwrap_or((input, ""));
+        let front = front.strip_suffix('/').unwrap_or(front);
+        if front.eq_ignore_ascii_case(&format!("{SCHEME}://pack")) {
+            return PackLink::parse(input).map(Opened::Pack);
+        }
+        // Anything else goes to the join parser, which refuses it by name:
+        // "this is not a Geode join link" is what a mistyped link should say,
+        // and a link that is neither kind is likeliest to be a mistyped join.
+        Link::parse(input).map(Opened::Join)
+    }
+
+    /// The normalised form, which is the only form that reaches the webview.
+    pub fn to_url(&self) -> String {
+        match self {
+            Opened::Join(link) => link.to_url(),
+            Opened::Pack(link) => link.to_url(),
+        }
+    }
+}
+
 /// [`Address::parse`], where `default_port: None` means the port is required.
 fn parse_address(input: &str, default_port: Option<u16>) -> Result<Address> {
     if input.is_empty() {
@@ -373,7 +414,7 @@ fn bad_port() -> Error {
 /// argument becomes two on the way into a process; `|`, which the Windows
 /// single-instance plugin splits forwarded arguments on; and everything past
 /// ASCII, which nothing Geode writes contains.
-fn is_plain(text: &str) -> bool {
+pub(super) fn is_plain(text: &str) -> bool {
     text.bytes().all(|b| b.is_ascii_graphic() && b != b'|')
 }
 
@@ -383,7 +424,7 @@ fn is_plain(text: &str) -> bool {
 /// `addr=https://pack.example.com` stay readable, and a `&`, `=`, `+`, `%` or
 /// `#` in a URL's path cannot end the value early or turn into something else
 /// on the way back.
-fn encode_value(value: &str) -> String {
+pub(super) fn encode_value(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for b in value.bytes() {
         if b.is_ascii_alphanumeric() || b"-._~:/".contains(&b) {
@@ -960,5 +1001,32 @@ mod tests {
             })
         );
         assert_eq!(serde_json::from_value::<Link>(json).unwrap(), domain);
+    }
+
+    /// One handler, one parked slot and one event carry both kinds of link, so
+    /// what tells them apart is tested on both sides. A mistake here shows as
+    /// the wrong dialog for a link somebody clicked.
+    #[test]
+    fn a_join_link_and_a_pack_link_each_go_to_their_own_parser() {
+        let join = direct_link("203.0.113.7:25590");
+        let pack = format!("geode://pack?drive=1A2b3C&h={EMPTY_SHA256}");
+
+        assert_eq!(
+            Opened::parse(&join).unwrap(),
+            Opened::Join(Link::parse(&join).unwrap())
+        );
+        assert_eq!(
+            Opened::parse(&pack).unwrap(),
+            Opened::Pack(super::super::packlink::PackLink::parse(&pack).unwrap())
+        );
+        // And each normalises through its own writer.
+        assert_eq!(Opened::parse(&join).unwrap().to_url(), join);
+        assert_eq!(Opened::parse(&pack).unwrap().to_url(), pack);
+
+        // A pack link is not a join link, and neither is anything else.
+        assert!(Link::parse(&pack).is_err(), "a pack link is not a join link");
+        for junk in ["geode://packs?drive=a", "geode://", "https://pack.example.com"] {
+            assert!(Opened::parse(junk).is_err(), "{junk:?} should be refused");
+        }
     }
 }

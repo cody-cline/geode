@@ -165,7 +165,7 @@ impl AccountsFile {
 }
 
 /// Write a file only the owning user can read.
-async fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) async fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     tokio::fs::write(path, bytes).await?;
     #[cfg(unix)]
     {

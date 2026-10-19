@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 
 import JoinModal from "./components/JoinModal";
+import PackLinkModal from "./components/PackLinkModal";
 import Sidebar from "./components/Sidebar";
 import ProgressDock from "./components/ProgressDock";
 import Toasts from "./components/Toasts";
@@ -21,6 +22,8 @@ export default function App() {
   const init = useStore((s) => s.init);
   const join = useStore((s) => s.join);
   const closeJoin = useStore((s) => s.closeJoin);
+  const pack = useStore((s) => s.pack);
+  const closePack = useStore((s) => s.closePack);
 
   useEffect(() => {
     void init();
@@ -71,6 +74,7 @@ export default function App() {
           Keyed by request, so a different link replaces the dialog outright
           instead of stacking a second one or inheriting the first's state. */}
       {join && <JoinModal key={join.seq} request={join} onClose={closeJoin} />}
+      {pack && <PackLinkModal key={pack.seq} request={pack} onClose={closePack} />}
       <Toasts />
     </div>
   );

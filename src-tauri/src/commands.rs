@@ -36,6 +36,7 @@ pub struct ConfigPatch {
     pub java_args: Option<String>,
     pub java_path: Option<Option<String>>,
     pub client_id: Option<Option<String>>,
+    pub google_client_id: Option<Option<String>>,
     pub theme: Option<String>,
     pub accent: Option<String>,
     pub hide_on_launch: Option<bool>,
@@ -60,6 +61,9 @@ pub async fn set_config(
     }
     if let Some(v) = patch.client_id {
         config.client_id = v.filter(|s| !s.trim().is_empty());
+    }
+    if let Some(v) = patch.google_client_id {
+        config.google_client_id = v.filter(|s| !s.trim().is_empty());
     }
     if let Some(v) = patch.theme {
         config.theme = v;
@@ -3077,18 +3081,37 @@ pub async fn cancel_task(state: State<'_, AppState>, id: String) -> Result<bool>
 // Modpacks
 // ---------------------------------------------------------------------------
 
+/// An import that got as far as creating the instance.
+///
+/// The same shape, and the same rule, as [`JoinOutcome`]: a pack that names a
+/// mod this Geode cannot fetch — a CurseForge file with no key for it, or one
+/// whose author turned third-party downloads off — still makes an instance,
+/// and a list of what needs the user is beside it rather than instead of it.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackImport {
+    pub instance: InstanceView,
+    pub problems: Vec<String>,
+}
+
 #[tauri::command]
 pub async fn preview_modpack(path: String) -> Result<instance::modpack::PackPreview> {
     instance::modpack::preview(PathBuf::from(path)).await
 }
 
+/// Import a pack file, and report what it could not fetch *beside* the
+/// instance rather than instead of it.
+///
+/// The same rule as a join: errors before the instance exists are errors, and
+/// once it exists what went wrong is a list to act on — an import that came
+/// back as a failure invited a retry, and a retry makes a second instance.
 #[tauri::command]
 pub async fn import_modpack(
     app: AppHandle,
     state: State<'_, AppState>,
     path: String,
     name: Option<String>,
-) -> Result<InstanceView> {
+) -> Result<PackImport> {
     let archive = PathBuf::from(&path);
     let preview = instance::modpack::preview(archive.clone()).await?;
     let config = state.config().await;
@@ -3130,7 +3153,10 @@ pub async fn import_modpack(
     match missing {
         Ok(missing) if missing.is_empty() => {
             progress.finish().await;
-            Ok(view(inst, &state))
+            Ok(PackImport {
+                instance: view(inst, &state),
+                problems: Vec::new(),
+            })
         }
         // Named, not carried — so the import ends with a list to act on rather
         // than an instance that is quietly short of mods.
@@ -3141,7 +3167,10 @@ pub async fn import_modpack(
                 missing.join(", ")
             );
             progress.fail(&detail).await;
-            Err(Error::msg(detail))
+            Ok(PackImport {
+                instance: view(inst, &state),
+                problems: vec![detail],
+            })
         }
         Err(e) => {
             progress.fail(&e.to_string()).await;
@@ -4942,4 +4971,402 @@ mod tests {
         assert!(refused.to_string().contains("unexpected path"), "{refused}");
         assert!(share.exists(), "the guard ran after something was removed");
     }
+
+    /// The webview is never the parser: a link goes through the same strict
+    /// reader as one off the internet, and what comes back is what parsing
+    /// proved rather than anything the link said about itself.
+    #[tokio::test]
+    async fn a_pack_link_is_read_by_the_parser_and_not_by_the_window() {
+        let hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+        let drive = preview_pack_link(format!("geode://pack?drive=1A2b3C4d&h={hash}"))
+            .await
+            .unwrap();
+        assert_eq!(drive.source, "drive");
+        assert_eq!(drive.host, "drive.google.com");
+        assert_eq!(drive.hash, hash);
+
+        let url = preview_pack_link(format!(
+            "  geode://pack?url=https://files.example.com/a.geodepack&h={hash}  "
+        ))
+        .await
+        .unwrap();
+        assert_eq!(url.source, "url");
+        assert_eq!(url.host, "files.example.com");
+
+        for junk in [
+            "geode://pack?drive=1A2b3C4d".to_string(),
+            format!("geode://pack?drive=../../etc/passwd&h={hash}"),
+            format!("geode://pack?url=http://files.example.com/a.geodepack&h={hash}"),
+            format!("geode://join?addr=203.0.113.7:25590&code=7K2QF9XWMP&pin={hash}"),
+            format!("geode://pack?drive=1A2b3C4d&h={hash}&name=Survival"),
+        ] {
+            assert!(
+                preview_pack_link(junk.clone()).await.is_err(),
+                "{junk} was taken for a pack link"
+            );
+        }
+    }
+
+    /// A pack arriving from a link may not ask to start the game with extra
+    /// Java arguments. `share/join.rs` gives the reason for a server's pack and
+    /// it holds here too: "Java arguments are a way to run code
+    /// (`-javaagent:`) that no mod count in the join preview would show". A
+    /// file the user went and found is a different thing, and keeps the
+    /// setting.
+    #[tokio::test]
+    async fn a_pack_from_a_link_may_not_ask_for_java_arguments() {
+        let scratch = Scratch::new("pack-link-java-args");
+        let paths = &scratch.paths;
+        let inst = instance::create(
+            paths,
+            "Survival".into(),
+            "1.21.1".into(),
+            Loader::Fabric,
+            "0.16.9".into(),
+        )
+        .await
+        .unwrap();
+        let archive = paths.root.join("survival.geodepack");
+        share::pack::export(
+            crate::install::identity::Ask::Nobody,
+            paths,
+            &inst,
+            archive.clone(),
+            false,
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+
+        // As exported by an instance that never set any, nothing is asked.
+        refuse_java_args(&archive).await.unwrap();
+
+        rewrite_entry(&archive, share::manifest::Manifest::PATH, |manifest| {
+            manifest["profile"]["javaArgs"] = "-javaagent:/tmp/anything.jar".into();
+        });
+        let said = refuse_java_args(&archive).await.unwrap_err().to_string();
+        assert!(said.contains("extra Java arguments"), "{said}");
+        assert!(said.contains("import it yourself"), "{said}");
+
+        // Blank is not asking for anything, and must not read as a refusal.
+        rewrite_entry(&archive, share::manifest::Manifest::PATH, |manifest| {
+            manifest["profile"]["javaArgs"] = "   ".into();
+        });
+        refuse_java_args(&archive).await.unwrap();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sharing a pack through Google Drive
+// ---------------------------------------------------------------------------
+
+/// A pack link as the strict parser read it, before anything is fetched.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackLinkView {
+    /// `drive` or `url`.
+    pub source: String,
+    /// The host the pack will come from — proved by parsing, never a name the
+    /// link supplied.
+    pub host: String,
+    pub hash: String,
+}
+
+/// A pack downloaded from a link, waiting for the person to say yes.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackArrival {
+    pub stage: String,
+    pub preview: instance::modpack::PackPreview,
+}
+
+#[tauri::command]
+pub async fn drive_status(state: State<'_, AppState>) -> Result<crate::drive::DriveStatus> {
+    let config = state.config().await;
+    crate::drive::status(&state.paths, &config).await
+}
+
+/// Connect a Google account.
+///
+/// Blocks while the user is on Google's page, exactly as
+/// [`complete_microsoft_login`] blocks while they are on Microsoft's. Its
+/// cancel flag goes under the fixed id `drive:connect`, so the dialog's Cancel
+/// is the `cancel_task` command that already exists — there is at most one
+/// connect at a time.
+#[tauri::command]
+pub async fn connect_drive(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<crate::drive::DriveStatus> {
+    let config = state.config().await;
+    let client_id = crate::drive::client_id(&config).ok_or_else(|| {
+        Error::msg(
+            "Sharing a pack through Google Drive needs your own Google client ID. \
+             Add one in Settings — see the README for how to make one.",
+        )
+    })?;
+    let endpoints = crate::drive::Endpoints::google();
+    let (authorization, url) = crate::drive::begin(&endpoints, &client_id).await?;
+
+    // Opening a browser is an app-shell detail, so the library hands back the
+    // address and this opens it. Returning here drops `authorization`, which
+    // closes the loopback port Google would send the browser back to — so this
+    // must not offer the address to paste, because nothing would be listening
+    // when it landed. Connecting again binds a new port and a new address.
+    if let Err(e) = tauri_plugin_opener::OpenerExt::opener(&app).open_url(&url, None::<&str>) {
+        return Err(Error::msg(format!(
+            "Geode could not open your browser ({e}), so there is nothing waiting for a sign-in.              Set a default browser on this machine, then press Connect again."
+        )));
+    }
+
+    // Silent: there is nothing to report until the user comes back, and the
+    // only thing this handle is for is the cancel flag.
+    let progress = Progress::silent("drive:connect");
+    state.register_cancel(progress.id(), progress.cancel_flag());
+    let outcome = crate::drive::finish(
+        &state.http,
+        &state.paths,
+        &endpoints,
+        &client_id,
+        crate::drive::client_secret(&config).as_deref(),
+        authorization,
+        &progress,
+    )
+    .await;
+    state.clear_cancel(progress.id());
+    outcome
+}
+
+#[tauri::command]
+pub async fn disconnect_drive(state: State<'_, AppState>) -> Result<crate::drive::Disconnected> {
+    let config = state.config().await;
+    crate::drive::disconnect(
+        &state.http,
+        &state.paths,
+        &crate::drive::Endpoints::google(),
+        &config,
+    )
+    .await
+}
+
+/// Saved apart from the other settings, the same as the CurseForge key, so a
+/// field Google calls a secret is never part of a routine round-trip.
+#[tauri::command]
+pub async fn set_google_client_secret(
+    state: State<'_, AppState>,
+    secret: Option<String>,
+) -> Result<bool> {
+    let mut config = state.config().await;
+    config.google_client_secret = secret
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string());
+    config.save(&state.paths).await?;
+    let has_secret = config.google_client_secret.is_some();
+    state.set_config(config).await;
+    Ok(has_secret)
+}
+
+/// Export the pack that is about to be published, and say what it did.
+///
+/// The same export `export_geodepack` runs, so the counts the dialog shows are
+/// the ones the export actually produced. This is the step that makes "see what
+/// you are publishing" true rather than promised.
+#[tauri::command]
+pub async fn stage_drive_pack(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    include_saves: bool,
+) -> Result<crate::drive::StagedPack> {
+    let inst = instance::load(&state.paths, &id).await?;
+    let (stage, dest) = crate::drive::stage(&state.paths).await?;
+    let progress = Progress::new(crate::desktop::sink(app), format!("export:{id}"));
+    state.register_cancel(progress.id(), progress.cancel_flag());
+    let cf_key = state.cf_key().await;
+
+    let report = share::pack::export(
+        crate::install::identity::Ask::exporting(
+            &state.http,
+            cf_key.as_deref(),
+            crate::install::identity::Carry::GEODEPACK,
+        ),
+        &state.paths,
+        &inst,
+        dest.clone(),
+        include_saves,
+        &progress,
+    )
+    .await;
+    state.clear_cancel(progress.id());
+
+    let report = match report {
+        Ok(report) => report,
+        Err(e) => {
+            // Failed explicitly: the dock drops a job only when it hears one
+            // is done, so a bar left unfinished stays for the session.
+            progress.fail(&e.to_string()).await;
+            return Err(e);
+        }
+    };
+    progress.finish().await;
+
+    Ok(crate::drive::StagedPack {
+        stage,
+        name: inst.name,
+        size: tokio::fs::metadata(&dest).await?.len(),
+        sha256: crate::net::sha256_file(&dest).await?,
+        report,
+    })
+}
+
+/// Upload a staged pack and make it readable by anyone with the link.
+///
+/// Takes the staging id, never a path: a command that took a path would let
+/// the webview ask Geode to upload any file on the disk.
+#[tauri::command]
+pub async fn upload_drive_pack(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    stage: String,
+    name: String,
+) -> Result<crate::drive::DriveShare> {
+    let config = state.config().await;
+    let progress = Progress::new(crate::desktop::sink(app), format!("drive-upload:{stage}"));
+    state.register_cancel(progress.id(), progress.cancel_flag());
+
+    let outcome = crate::drive::upload_pack(
+        &state.http,
+        &state.paths,
+        &crate::drive::Endpoints::google(),
+        &config,
+        &stage,
+        &name,
+        &progress,
+    )
+    .await;
+    state.clear_cancel(progress.id());
+
+    match outcome {
+        Ok(share) => {
+            progress.finish().await;
+            Ok(share)
+        }
+        Err(e) => {
+            progress.fail(&e.to_string()).await;
+            Err(e)
+        }
+    }
+}
+
+/// Read a pack link, as strictly as a join link is read, before anything is
+/// fetched. The webview is never the parser.
+#[tauri::command]
+pub async fn preview_pack_link(link: String) -> Result<PackLinkView> {
+    let parsed = share::packlink::PackLink::parse(link.trim())?;
+    Ok(PackLinkView {
+        source: parsed.source.kind().to_string(),
+        host: parsed.source.host(),
+        hash: parsed.hash.to_hex(),
+    })
+}
+
+/// Download the pack a link names, check it against the link's own
+/// fingerprint, and read what is in it.
+///
+/// Re-parses the link, because a link is hostile until the parser accepts it
+/// and one that came back out of the webview is no better than one that went
+/// in. Nothing is imported here: the archive sits in the directory `lib.rs`
+/// clears at startup until the person says yes.
+#[tauri::command]
+pub async fn fetch_pack_link(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    link: String,
+) -> Result<PackArrival> {
+    let parsed = share::packlink::PackLink::parse(link.trim())?;
+    let stage = uuid::Uuid::new_v4().to_string();
+    let archive = share::join::incoming_dir(&state.paths).join(format!("{stage}.geodepack"));
+
+    // One pack arrives at a time, because there is one dialog — so the id is
+    // fixed and the Cancel it offers is the `cancel_task` that already exists.
+    let progress = Progress::new(crate::desktop::sink(app), "pack-link");
+    state.register_cancel(progress.id(), progress.cancel_flag());
+    let outcome = fetch_and_read(&parsed, &archive, &progress).await;
+    state.clear_cancel(progress.id());
+
+    match outcome {
+        Ok(preview) => {
+            progress.finish().await;
+            Ok(PackArrival { stage, preview })
+        }
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&archive).await;
+            progress.fail(&e.to_string()).await;
+            Err(e)
+        }
+    }
+}
+
+async fn fetch_and_read(
+    link: &share::packlink::PackLink,
+    archive: &std::path::Path,
+    progress: &Progress,
+) -> Result<instance::modpack::PackPreview> {
+    share::fetch::pack(&link.source, &link.hash, archive, progress).await?;
+    instance::modpack::preview(archive.to_path_buf()).await
+}
+
+/// Import a pack that arrived from a link, through the ordinary importer.
+///
+/// One thing a pack from a link may not do that a file the user chose may: ask
+/// for Java arguments. `share::pack::apply` lets a personal pack's manifest set
+/// `memoryMb` and `javaArgs`, and `share/join.rs` already says why that matters
+/// — "Java arguments are a way to run code (`-javaagent:`) that no mod count in
+/// the join preview would show". A pack somebody sent a link to is in exactly
+/// that position, where a file the user went and found is not. Memory is left
+/// alone: a silly heap is a bad launch, not code execution.
+///
+/// The cleaner home for this is a parameter on `apply`, in `share/pack.rs`. It
+/// is here so the rule exists now, and that move is a follow-up.
+#[tauri::command]
+pub async fn import_pack_stage(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    stage: String,
+    name: Option<String>,
+) -> Result<PackImport> {
+    let stage = uuid::Uuid::parse_str(stage.trim())
+        .map_err(|_| Error::msg("that is not a pack Geode downloaded"))?;
+    let archive = share::join::incoming_dir(&state.paths).join(format!("{stage}.geodepack"));
+    if !tokio::fs::try_exists(&archive).await.unwrap_or(false) {
+        return Err(Error::msg(
+            "that pack is not here any more — open the link again",
+        ));
+    }
+    refuse_java_args(&archive).await?;
+
+    let path = archive.to_string_lossy().to_string();
+    let outcome = import_modpack(app, state, path, name).await;
+    // Imported or not, the download has served its purpose.
+    let _ = tokio::fs::remove_file(&archive).await;
+    outcome
+}
+
+async fn refuse_java_args(archive: &std::path::Path) -> Result<()> {
+    let probe = archive.to_path_buf();
+    let manifest = tokio::task::spawn_blocking(move || share::pack::read_manifest(&probe))
+        .await
+        .map_err(|e| Error::msg(format!("reading the pack's manifest panicked: {e}")))??;
+    let asks = manifest
+        .and_then(|manifest| manifest.profile.java_args)
+        .is_some_and(|args| !args.trim().is_empty());
+    if asks {
+        return Err(Error::msg(
+            "this pack asks to start the game with extra Java arguments, which a pack from a \
+             link is not allowed to do — download the file and import it yourself if you trust \
+             whoever sent it",
+        ));
+    }
+    Ok(())
 }

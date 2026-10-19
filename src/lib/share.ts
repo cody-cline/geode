@@ -4,10 +4,16 @@
 // the app's extensionless imports.
 
 import type {
+  DriveStatus,
   ExistingInstance,
+  ExportReport,
+  Instance,
   JoinInput,
   JoinOutcome,
   JoinPreview,
+  PackArrival,
+  PackLinkView,
+  PublicCheck,
   ShareStatus,
 } from "./types";
 
@@ -638,4 +644,235 @@ export function verificationLine(verified: JoinPreview["verified"], typed: boole
           "There was nothing to check this server against, so Geode trusts the certificate it saw. Importing remembers it with the instance, and typing this address again is checked against it for as long as an instance joined from it is still there: a different certificate is refused. A link from the server's admin is checked from the very first connection, so prefer one when you can.",
       };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Sharing a pack through Google Drive
+// ---------------------------------------------------------------------------
+
+/**
+ * Which kind of `geode://` link this is, or null for neither.
+ *
+ * One handler, one parked slot and one event carry both kinds, so this is the
+ * one place that chooses which dialog opens. Only the host is read: the real
+ * parsing is strict and happens in Rust, and a link the webview thinks is a
+ * pack link is still refused there if it is not one.
+ */
+export function linkKind(raw: string): "join" | "pack" | null {
+  const front = raw.trim().split("?")[0].replace(/\/$/, "").toLowerCase();
+  if (front === "geode://join") return "join";
+  if (front === "geode://pack") return "pack";
+  return null;
+}
+
+/** One pack dialog's worth of intent: the link it was opened with. */
+export interface PackRequest {
+  /** Unique for the session, so a replaced dialog remounts from scratch. */
+  seq: number;
+  link: string;
+}
+
+/**
+ * The pack dialog after a link arrives.
+ *
+ * The same rule as `nextJoin`: a different link replaces the dialog, the same
+ * link again — the parked copy and the event both delivering it, or StrictMode
+ * running an effect twice — leaves it alone, so a download in progress is not
+ * thrown away and started over.
+ */
+export function nextPack(
+  current: PackRequest | null,
+  link: string,
+  seq: number,
+): PackRequest {
+  if (current && link === current.link) return current;
+  return { seq, link };
+}
+
+/**
+ * Where the pack dialog is up to.
+ *
+ * Nothing is fetched until the link has been read in Rust, and nothing is
+ * imported until the bytes have been downloaded and their hash has matched —
+ * so each step is named by what has actually come back, not by what was
+ * pressed. Once there is an instance there is nothing left to offer:
+ * importing again would make a second one.
+ */
+export function packStep(
+  view: PackLinkView | null,
+  arrival: PackArrival | null,
+  instance: Instance | null,
+): "look" | "download" | "import" | "done" {
+  if (instance) return "done";
+  if (arrival) return "import";
+  return view ? "download" : "look";
+}
+
+/** Where a pack link's bytes come from, in words. */
+export function sourceName(view: PackLinkView): string {
+  return view.source === "drive" ? "Google Drive" : view.host;
+}
+
+/** What the receiving dialog says before anything is downloaded. */
+export function arrivalLine(view: PackLinkView): StatusLine {
+  return {
+    tone: "info",
+    title: `A pack from ${sourceName(view)}`,
+    detail:
+      "Geode will download it to see what is in it, check it against the fingerprint in the link, and show you before anything is installed. Nothing is imported until you say so.",
+  };
+}
+
+/**
+ * What an export did with the instance's content, for the moment before it is
+ * published.
+ *
+ * A pack that carries somebody else's jar as bytes is about to be put on a
+ * public URL, which is a redistribution decision and not just a transfer. So
+ * the counts the export actually produced are shown — not a promise about what
+ * usually happens — and the files that could not go in at all are named while
+ * there are few enough to read.
+ */
+export function publishSummary(report: ExportReport): string[] {
+  const lines: string[] = [];
+  const embedded =
+    report.embeddedUnknown + report.embeddedElsewhere + report.embeddedTurnedOff;
+  if (report.referenced > 0) {
+    lines.push(
+      `${report.referenced} ${report.referenced === 1 ? "file travels" : "files travel"} as a reference, fetched by whoever installs the pack.`,
+    );
+  }
+  if (embedded > 0) {
+    const why: string[] = [];
+    if (report.embeddedUnknown > 0) {
+      why.push(`${report.embeddedUnknown} because no provider could name ${report.embeddedUnknown === 1 ? "it" : "them"}`);
+    }
+    if (report.embeddedElsewhere > 0) {
+      why.push(`${report.embeddedElsewhere} because this format cannot carry a reference to ${report.embeddedElsewhere === 1 ? "it" : "them"}`);
+    }
+    if (report.embeddedTurnedOff > 0) {
+      why.push(`${report.embeddedTurnedOff} because ${report.embeddedTurnedOff === 1 ? "it is" : "they are"} turned off`);
+    }
+    lines.push(
+      `${embedded} ${embedded === 1 ? "file travels" : "files travel"} as bytes — ${why.join(", ")}. Uploading publishes ${embedded === 1 ? "that copy" : "those copies"}.`,
+    );
+  }
+  if (report.unnameable.length > 0) {
+    const named =
+      report.unnameable.length <= 5
+        ? `: ${report.unnameable.join(", ")}`
+        : "";
+    lines.push(
+      `${report.unnameable.length} ${report.unnameable.length === 1 ? "file" : "files"} could not go in at all${named}.`,
+    );
+  }
+  for (const trouble of report.trouble) lines.push(sentence(trouble));
+  if (lines.length === 0) lines.push("This pack carries no mods at all.");
+  return lines;
+}
+
+/** Said once, where the link is made, because it cannot be taken back. */
+export const PUBLIC_LINK_WARNING =
+  "Uploading publishes this file. Anyone with the link can download it, and that cannot be undone for anyone who already has — delete the file in your Drive to stop the link working.";
+
+/**
+ * What the sharing machine found when it fetched its own public link.
+ *
+ * Drive's download endpoint is undocumented and interposes a virus-scan
+ * warning page above some size nobody has published, so this is the one thing
+ * in this transport that can only be found out by trying it. Better the sharer
+ * finds out than the person they sent it to.
+ */
+export function publicLinkLine(check: PublicCheck): StatusLine {
+  switch (check) {
+    case "served":
+      return {
+        tone: "ok",
+        title: "Checked — the link serves the pack",
+        detail:
+          "Geode fetched the link from this computer with nobody signed in, which is what whoever you send it to will get.",
+      };
+    case "webPage":
+      return {
+        tone: "warn",
+        title: "Google answered with a web page for this link",
+        detail:
+          "Anyone you send it to will have to open the Drive link in a browser, download the file, and use Add instance → Import a pack. This happens with large packs; a smaller one usually downloads straight away.",
+      };
+    case "unknown":
+      return {
+        tone: "info",
+        title: "The link could not be checked from here",
+        detail:
+          "The pack is uploaded and shared. Geode could not fetch the link itself to see what a stranger gets, so try the link yourself before sending it on.",
+      };
+  }
+}
+
+/** What a sharer pastes wherever they are sending it. */
+export interface PackMessage {
+  name: string;
+  link: string;
+  fileUrl: string;
+  /** Already formatted: this file may not import `fileSize`, only types. */
+  size: string;
+}
+
+/**
+ * The message, geode:// link first.
+ *
+ * The plain Drive link is in the body so somebody without Geode can still get
+ * the file, and it is the link Drive itself returned rather than one Geode
+ * assembled. The last line is the one place the public-link fact is stated, and
+ * it sits in the message as well as in the dialog so it travels with the thing
+ * being shared.
+ */
+export function packShareMessage(message: PackMessage): string {
+  return [
+    `${message.name} — a Minecraft pack for Geode`,
+    "",
+    "Open this in Geode to install it:",
+    message.link,
+    "",
+    `Or download the file (${message.size}):`,
+    message.fileUrl,
+    "",
+    "It is a .geodepack — a .mrpack any launcher can open.",
+    "Anyone with these links can download it.",
+  ].join("\n");
+}
+
+/** The line Settings shows for the Drive connection. */
+export function driveLine(status: DriveStatus): StatusLine {
+  if (!status.configured) {
+    return {
+      tone: "info",
+      title: "Not configured",
+      detail:
+        "Sharing a pack through Drive needs your own Google client ID. Offline sharing works without one: export a .geodepack and hand it over.",
+    };
+  }
+  if (status.needsReconnect) {
+    return {
+      tone: "warn",
+      title: "Reconnect needed",
+      detail:
+        "Google will not accept this connection again. If your OAuth client is still in Testing, Google expires every authorization after seven days — press Publish app in Google's Audience screen and connect again.",
+    };
+  }
+  if (!status.connected) {
+    return {
+      tone: "info",
+      title: "Not connected",
+      detail:
+        "Press Connect to sign in to Google in your browser. Geode only ever sees the files it creates in your Drive.",
+    };
+  }
+  return {
+    tone: "ok",
+    title: status.account ? `Connected as ${status.account}` : "Connected",
+    detail: status.folderName
+      ? `Packs you share go into ${status.folderName} in your Drive. Geode cannot see anything else there.`
+      : "Geode cannot see anything in your Drive but the files it created there.",
+  };
 }

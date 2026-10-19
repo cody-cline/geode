@@ -556,6 +556,10 @@ export interface Config {
   hasCurseforgeKey: boolean;
   /** True when the key came from GEODE_CURSEFORGE_KEY at build time. */
   curseforgeKeyFromBuild: boolean;
+  /** The Google OAuth client id for Drive sharing. In the clear, like `clientId`: it rides in the URL the browser opens. */
+  googleClientId: string | null;
+  /** Google calls it a secret, so it is redacted — even though a Desktop app's is not confidential. */
+  hasGoogleClientSecret: boolean;
   /** How players reach this machine for shared servers' packs. */
   share: ShareSettings;
 }
@@ -812,6 +816,71 @@ export interface ExportReport {
   trouble: string[];
   /** Who the pack says wrote it, for a format that requires an author; null for one that does not ask. */
   author: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Sharing a pack through Google Drive
+// ---------------------------------------------------------------------------
+
+export interface DriveStatus {
+  /** A Google client id is set, so connecting is possible at all. */
+  configured: boolean;
+  connected: boolean;
+  /** Google refused the connection for good. Most often an OAuth client left in Testing, which expires every authorization after seven days. */
+  needsReconnect: boolean;
+  /** Who Google said this is. Null when Drive did not say. */
+  account: string | null;
+  folderName: string | null;
+  folderUrl: string | null;
+}
+
+/** A Google connection Geode has forgotten, and what Google said when asked to let go of it too. */
+export interface Disconnected {
+  status: DriveStatus;
+  /** False when Google could not be reached, or refused: the grant is still listed under the user's Third-party access, and only they can remove it. */
+  revoked: boolean;
+}
+
+/** A pack exported and waiting to be uploaded. `stage` is an id, not a path. */
+export interface StagedPack {
+  stage: string;
+  name: string;
+  size: number;
+  sha256: string;
+  /** What the export actually did, from the export itself. */
+  report: ExportReport;
+}
+
+/** Whether a public link really serves the pack, as the sharing machine found out by fetching it. */
+export type PublicCheck = "served" | "webPage" | "unknown";
+
+export interface DriveShare {
+  /** The `geode://pack` link. */
+  link: string;
+  /** Drive's own `webViewLink`, for somebody with no Geode. */
+  fileUrl: string;
+  size: number;
+  publicCheck: PublicCheck;
+}
+
+/** A pack link as the strict parser in Rust read it. The webview never parses one itself. */
+export interface PackLinkView {
+  source: "drive" | "url";
+  /** The host the pack will be fetched from — proved by parsing, not claimed by the link. */
+  host: string;
+  hash: string;
+}
+
+/** An import that got as far as creating the instance. The same rule as a join: what it could not fetch is a list beside the instance, not a failure to retry — retrying would make a second instance. */
+export interface PackImport {
+  instance: Instance;
+  problems: string[];
+}
+
+/** A pack downloaded from a link and waiting to be imported. */
+export interface PackArrival {
+  stage: string;
+  preview: PackPreview;
 }
 
 export interface AppInfo {

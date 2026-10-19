@@ -2,8 +2,8 @@ import { create } from "zustand";
 import { listen } from "@tauri-apps/api/event";
 
 import { api, errorMessage } from "./api";
-import { nextJoin, sentence } from "./share";
-import type { JoinRequest } from "./share";
+import { linkKind, nextJoin, nextPack, sentence } from "./share";
+import type { JoinRequest, PackRequest } from "./share";
 import type {
   Account,
   Config,
@@ -112,11 +112,18 @@ interface State {
   openJoin: (link?: string | null) => void;
   closeJoin: () => void;
 
+  /** The pack dialog, the same way. A link opens one or the other, never both. */
+  pack: PackRequest | null;
+  closePack: () => void;
+  /** Dispatch a `geode://` link to whichever dialog it belongs to. */
+  openLink: (raw: string) => void;
+
   init: () => Promise<void>;
 }
 
 let toastSeq = 0;
 let joinSeq = 0;
+let packSeq = 0;
 
 /**
  * Whether the one-time setup has run.
@@ -239,6 +246,25 @@ export const useStore = create<State>((set, get) => ({
   },
   closeJoin: () => set({ join: null }),
 
+  pack: null,
+  closePack: () => set({ pack: null }),
+  // The one place a link chooses its dialog. `linkKind` reads only the host;
+  // the real parsing is strict and happens in Rust, on the way in and again
+  // on anything that comes back out of the window.
+  openLink: (raw) => {
+    if (linkKind(raw) !== "pack") {
+      get().openJoin(raw);
+      return;
+    }
+    const current = get().pack;
+    const pack = nextPack(current, raw, packSeq + 1);
+    if (pack === current) return;
+    packSeq = pack.seq;
+    // A pack link replaces a join dialog rather than stacking over it: the
+    // user clicked one link, so one thing should be asking them about it.
+    set({ pack, join: null });
+  },
+
   init: async () => {
     // React's StrictMode mounts, unmounts and mounts again in development, so
     // this runs twice. Every `listen` below is registered for the lifetime of
@@ -347,14 +373,14 @@ export const useStore = create<State>((set, get) => ({
     // one or the other — and if by both, `openJoin` sees the same link twice
     // and opens one dialog.
     await listen<string>("geode://join-link", ({ payload }) => {
-      get().openJoin(payload);
+      get().openLink(payload);
       // Clear any parked copy too, so a reload of the window does not find
       // this link waiting and offer the same join again.
       api.takePendingJoin().catch(() => {});
     });
     try {
       const pending = await api.takePendingJoin();
-      if (pending) get().openJoin(pending);
+      if (pending) get().openLink(pending);
     } catch (e) {
       get().reportError("Could not read the link Geode was opened with", e);
     }

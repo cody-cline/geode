@@ -114,12 +114,30 @@ off, while an id resolved at import time sees that decision.
 The other half — import reading `geode/manifest.json` and resolving those
 references through the recipient's own key — is item 5, and is now done too.
 
-### 2. Where the bytes go — settled by removing the question
+### 2. Where the bytes go — settled, then reopened on one path
 
 **Personal packs are a file, and nothing more.** Export a `.geodepack`, hand it
-over however you already hand people files. Geode uploads nothing and hosts
-nothing. There is no share code for a personal pack and no upload backend to
-build.
+over however you already hand people files. That still works, with no account
+and nothing configured, and it is still the first answer.
+
+**Since then, one path out of this section has been built: the user's own
+Google Drive** (`src-tauri/src/drive/`, and `share/packlink.rs` plus
+`share/fetch.rs` for the receiving half). The findings below predicted it — "any
+durable hosting means an account per sharer" — and rejected it on the grounds
+that asking somebody to provision a bucket is a worse product than giving them
+the file. The reopening is narrow and specific: a Google account is the one such
+account most people already have, and there is no bucket to provision. It was
+reopened on the owner's instruction, knowing the record below.
+
+What it does not change: Geode still hosts nothing and still has no account of
+its own, the bytes sit in the *sharer's* Drive under their own quota, and a
+`geode://pack` link is read by a parser as strict as the join one and verified
+against a SHA-256 the link carries before the importer sees a byte. What it does
+cost is written down honestly in `drive/mod.rs` and `share/fetch.rs`: the
+recipient's download uses an endpoint **Google documents nowhere**, so it is
+judged on what comes back rather than believed, and it refuses cleanly to the
+Drive link and the existing file importer when Drive answers with its
+virus-scan warning page instead.
 
 This was arrived at the hard way, and the findings are worth keeping so nobody
 re-opens it:
@@ -141,10 +159,18 @@ re-opens it:
   provision a bucket so Geode can hand them back a file they could have sent
   themselves is a worse product than giving them the file.
 
-If this is ever revisited, the two paths that actually work are a user-supplied
-S3 bucket (R2: 10 GB, egress free, presigned URLs valid 1 second to 7 days,
-revocable by deleting the object) and peer-to-peer from the sharing machine.
-The second is what the server path already does.
+If this is ever revisited again, the two paths that actually work are a
+user-supplied S3 bucket (R2: 10 GB, egress free, presigned URLs valid 1 second
+to 7 days, revocable by deleting the object) and peer-to-peer from the sharing
+machine. The second is what the server path already does; the third, now built,
+is the user's own Drive, which is the "account per sharer" conclusion with the
+provisioning step removed because the account already exists.
+
+One property an S3 bucket has and Drive does not, worth knowing before
+preferring one: an `anyone` permission in Drive cannot expire — Drive's own
+reference says `expirationTime` applies only to `user` and `group` permissions —
+so the only way to revoke a Drive link is to delete the file, while a presigned
+URL expires by itself.
 
 ### 3. Sharing a server with its players — **done**
 

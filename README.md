@@ -192,6 +192,54 @@ Or bake it in at build time with `GEODE_CLIENT_ID=... npm run tauri build`.
 
 **Neither:** offline accounts work immediately for single-player and LAN.
 
+### Sharing a pack through Google Drive needs your own Google client
+
+Handing somebody a `.geodepack` file still works with none of this, and is
+still the simplest thing: export it, send the file. Drive is for the case the
+file is awkward — you are not in the same room, and your laptop will be shut
+when they get round to installing it.
+
+Connected, *Share to Drive* on an instance exports the pack, uploads it to a
+folder of its own in **your** Drive, makes that one file readable by anyone with
+the link, and hands you a message to paste: a `geode://` link for people who
+have Geode, and the plain Drive link in the body for people who do not.
+Opening the `geode://` link downloads the pack, checks it against the
+fingerprint the link carries, shows what is in it, and installs it only when
+the person says so.
+
+Google issues OAuth client IDs per application, so there is no shared ID to
+ship — the same position as the Azure ID above and the CurseForge key below.
+
+1. Create a project at the [Google Cloud console](https://console.cloud.google.com/).
+2. *APIs & Services → Library →* **Google Drive API** *→ Enable*.
+3. *Google Auth Platform → Audience*: user type **External**, then press
+   **Publish app**.
+4. *Data access*: add the scope `https://www.googleapis.com/auth/drive.file`.
+   It is a non-sensitive scope, so there is nothing to submit for review.
+5. *Clients → Create client →* application type **Desktop app**.
+6. Paste the Client ID into *Settings → Google Drive*.
+
+Or bake it in at build time with `GEODE_GOOGLE_CLIENT_ID=... npm run tauri build`.
+
+**Do not skip step 3.** While the app's publishing status is Testing, Google
+expires every authorization seven days after it is given, and the connection
+then stops working for no visible reason. Publishing your own client needs no
+review for this scope; you will see Google's "unverified app" screen once,
+which is expected for a client you made yourself.
+
+Two things worth knowing before you use it:
+
+- **Geode asks for one scope, `drive.file`, which reaches only files Geode
+  itself created.** It cannot see the rest of your Drive. Google classes that
+  scope as non-sensitive for exactly this reason.
+- **Anyone with the link can download the pack**, and that cannot be taken back
+  from anyone who already has it. Deleting the file in Drive is what stops the
+  link working. Geode says so where the link is made, and in the message
+  itself.
+- Geode does not need the client secret. A Desktop app is a public client and
+  Google's own parameter tables mark it optional. There is a field for one in
+  case connecting fails with `invalid_client`.
+
 ### CurseForge needs your own API key
 
 CurseForge issues keys per developer and their terms state a key is

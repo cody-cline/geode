@@ -20,7 +20,7 @@
 //! because an AppImage or a dev build has no installer to do it and the file
 //! it points at can move.
 //!
-//! A link is hostile until [`Link::parse`] accepts it: any web page can
+//! A link is hostile until [`Opened::parse`] accepts it: any web page can
 //! navigate to `geode://`, and any local process can start Geode with an
 //! argument or call the running copy. Only the normalised form ever reaches
 //! the webview, and nothing here acts on it — the window shows the player what
@@ -32,7 +32,7 @@ use tauri::{AppHandle, Manager, State};
 use tauri_plugin_deep_link::DeepLinkExt;
 
 use crate::events::Events;
-use crate::share::link::Link;
+use crate::share::link::Opened;
 use crate::state::AppState;
 
 /// The event a link is announced on. Payload: the normalised link string.
@@ -73,7 +73,7 @@ pub fn start(app: &tauri::App) {
 /// Take one link from outside: validate it, park it, announce it, and bring
 /// the window forward so the player sees what they opened.
 pub fn open(app: &AppHandle, raw: &str) {
-    let link = match Link::parse(raw) {
+    let link = match Opened::parse(raw) {
         Ok(link) => link.to_url(),
         Err(e) => {
             // Not the link itself: it carries a share code, which is a secret.

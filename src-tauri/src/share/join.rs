@@ -22,7 +22,7 @@ use super::trust::{Trust, TrustedClient};
 /// The most a pack download may be. Packs name their mods rather than carry
 /// them, so a real one is megabytes. This bounds the download alone; what the
 /// archive expands to on import is bounded separately, where it is extracted.
-const MAX_PACK_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub(super) const MAX_PACK_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// The most any other reply may be: a pack description, or a refusal saying
 /// why. Both are a few hundred bytes of JSON. These are held in memory to be
@@ -427,7 +427,7 @@ async fn read_reply(response: reqwest::Response, progress: &Progress) -> Result<
 /// chunk arrives would leave a cancel waiting on the server too — for as long
 /// as the read timeout while it is quiet, and indefinitely against one that
 /// sends a byte just often enough to stay inside it.
-async fn unless_cancelled<T>(
+pub(super) async fn unless_cancelled<T>(
     progress: &Progress,
     work: impl std::future::Future<Output = T>,
 ) -> Result<T> {

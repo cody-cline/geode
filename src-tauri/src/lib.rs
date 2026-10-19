@@ -5,6 +5,7 @@ pub mod connector;
 pub mod deeplink;
 pub mod diagnostics;
 pub mod desktop;
+pub mod drive;
 pub mod error;
 pub mod events;
 pub mod install;
@@ -78,6 +79,12 @@ pub fn run() {
             // Cleared to completion here, before any link can start a new
             // join whose archive a slower sweep would then delete mid-download.
             tauri::async_runtime::block_on(crate::share::join::clear_incoming(
+                &app.state::<AppState>().paths,
+            ));
+            // And a pack staged for an upload that never happened, for the
+            // same reason: one pack is staged at a time and nothing can still
+            // be using the last one.
+            tauri::async_runtime::block_on(crate::drive::clear_staged(
                 &app.state::<AppState>().paths,
             ));
             // Only once the state is managed: links are parked in it.
@@ -223,6 +230,15 @@ pub fn run() {
             commands::preview_join,
             commands::join_server,
             commands::relink_joined_instance,
+            commands::drive_status,
+            commands::connect_drive,
+            commands::disconnect_drive,
+            commands::set_google_client_secret,
+            commands::stage_drive_pack,
+            commands::upload_drive_pack,
+            commands::preview_pack_link,
+            commands::fetch_pack_link,
+            commands::import_pack_stage,
             deeplink::take_pending_join,
         ])
         .build(tauri::generate_context!())

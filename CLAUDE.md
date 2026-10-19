@@ -17,7 +17,7 @@ Knowing which of these a change belongs to is most of navigating this codebase.
 | **Instances** | `instance/`, `install/`, `launch/`, `meta/`, `auth/`, `java.rs` | A playable client: a Minecraft version, a loader, mods, worlds. Installed, then launched as a JVM. |
 | **Servers** | `server/` (14 files) | A server Geode installs, runs, and talks to over stdin. 14 kinds (`ServerKind`), backups, scheduled tasks, `server.properties`, a command probe. |
 | **Plans** | `plan/` | A *versionless* list of mods. You collect mods first; the resolver works out afterwards which loader and Minecraft version can run all of them. |
-| **Shares** | `share/` (11 files), `deeplink.rs` | Two shapes: a `.geodepack` file you hand over, and a server serving its pack to its own players over TLS, joined by a `geode://join` link. Carries provider content **by reference**, not by copying bytes. |
+| **Shares** | `share/` (13 files), `drive/`, `deeplink.rs` | Three shapes: a `.geodepack` file you hand over, a server serving its pack to its own players over TLS (`geode://join`), and a pack put in the sharer's own Google Drive (`geode://pack`). Carries provider content **by reference**, not by copying bytes. |
 
 Content for both instances and servers comes from `providers/` — Modrinth,
 CurseForge and SpigotMC (via Spiget), federated at query time into one list.
@@ -73,7 +73,7 @@ reads Sinytra Connector's real files for exactly this reason. The same trap in
 reverse: a server kind's mod loader is a fact about that software, not a guess
 (Banner is Fabric-based, not NeoForge — `ServerKind::mod_loader`).
 
-**`commands.rs` stays thin: validate, delegate, return.** 115 of the 116
+**`commands.rs` stays thin: validate, delegate, return.** 125 of the 126
 `#[tauri::command]` functions live there (the odd one out is
 `deeplink::take_pending_join`), and logic belongs in the module that owns it so
 the headless path can reach it too. A new command must be added in **two**

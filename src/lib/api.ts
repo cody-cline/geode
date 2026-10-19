@@ -4,13 +4,18 @@ import type {
   AppInfo,
   BackupInfo,
   BuildReport,
+  CommandNode,
   Config,
   ConnectorSupport,
   ContentItem,
   ContentKind,
   DeviceCodeStart,
+  Disconnected,
+  DriveShare,
+  DriveStatus,
   ExportReport,
   GameVersion,
+  GitStatus,
   ImportScan,
   InstallReport,
   Instance,
@@ -20,10 +25,13 @@ import type {
   JoinLink,
   JoinOutcome,
   JoinPreview,
-  PackInfo,
   KeyCheck,
   LinkReport,
   LogFile,
+  PackArrival,
+  PackImport,
+  PackInfo,
+  PackLinkView,
   PackPreview,
   Plan,
   PlanMod,
@@ -32,19 +40,18 @@ import type {
   ProjectKind,
   ProjectVersion,
   Provider,
+  Schedule,
   SearchQuery,
   SearchResults,
-  Schedule,
   Server,
   ServerBuildReport,
-  CommandNode,
-  GitStatus,
   ServerKindInfo,
   ServerProperty,
   ServerSettings,
   ServerShareView,
   ShareSettings,
   ShareStatus,
+  StagedPack,
   UpdateCandidate,
 } from "./types";
 
@@ -453,8 +460,9 @@ export const api = {
   // Modpacks
   previewModpack: (path: string) =>
     invoke<PackPreview>("preview_modpack", { path }),
+  /** Makes the instance and reports what it could not fetch beside it. Progress id `import:<instance id>`. */
   importModpack: (path: string, name?: string) =>
-    invoke<Instance>("import_modpack", { path, name: name ?? null }),
+    invoke<PackImport>("import_modpack", { path, name: name ?? null }),
   /** All three return what the pack did with the instance's content, so the UI can say it. */
   exportModpack: (id: string, dest: string, includeSaves: boolean) =>
     invoke<ExportReport>("export_modpack", { id, dest, includeSaves }),
@@ -471,6 +479,29 @@ export const api = {
     author: string | null,
     includeSaves: boolean,
   ) => invoke<ExportReport>("export_curseforge_pack", { id, dest, author, includeSaves }),
+
+  // Google Drive. Connecting opens the user's browser and blocks until they
+  // come back, the way completeMicrosoftLogin does; cancel it with
+  // cancelTask("drive:connect").
+  driveStatus: () => invoke<DriveStatus>("drive_status"),
+  connectDrive: () => invoke<DriveStatus>("connect_drive"),
+  /** Forgets the connection whatever Google answers, and says whether Google accepted the revoke. */
+  disconnectDrive: () => invoke<Disconnected>("disconnect_drive"),
+  /** Separate from setConfig so a secret is never part of a routine settings round-trip. */
+  setGoogleClientSecret: (secret: string | null) =>
+    invoke<boolean>("set_google_client_secret", { secret }),
+  /** Export the pack and report what travelled, before anything is published. Progress id `export:<id>`. */
+  stageDrivePack: (id: string, includeSaves: boolean) =>
+    invoke<StagedPack>("stage_drive_pack", { id, includeSaves }),
+  /** Upload a staged pack and make it readable by anyone with the link. Progress id `drive-upload:<stage>`. */
+  uploadDrivePack: (stage: string, name: string) =>
+    invoke<DriveShare>("upload_drive_pack", { stage, name }),
+  /** The strict parse, in Rust, before anything is fetched. */
+  previewPackLink: (link: string) => invoke<PackLinkView>("preview_pack_link", { link }),
+  /** Download the pack a link names, verify its hash, and read what is in it. Progress id `pack-link` — fixed, because there is one dialog at a time and the webview has to be able to cancel an id it never saw. */
+  fetchPackLink: (link: string) => invoke<PackArrival>("fetch_pack_link", { link }),
+  importPackStage: (stage: string, name?: string) =>
+    invoke<PackImport>("import_pack_stage", { stage, name: name ?? null }),
 
   // Sharing a server with players. Status changes also arrive as the
   // `geode://share-status` event with a ShareStatus payload.

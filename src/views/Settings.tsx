@@ -4,6 +4,7 @@ import clsx from "clsx";
 import {
   AlertTriangle,
   Check,
+  Cloud,
   Coffee,
   Download,
   ExternalLink,
@@ -14,15 +15,23 @@ import {
   Palette,
   Share2,
   Trash2,
+  Unplug,
   UserRound,
 } from "lucide-react";
 
 import AccountsModal from "../components/AccountsModal";
 import { api } from "../lib/api";
 import { hashHue, initials } from "../lib/format";
-import { DEFAULT_SHARE_PORT, parsePort } from "../lib/share";
+import { DEFAULT_SHARE_PORT, driveLine, parsePort } from "../lib/share";
 import { useStore } from "../lib/store";
-import type { AppInfo, JavaInstall, KeyCheck, ShareSettings } from "../lib/types";
+import StatusNote from "../components/StatusNote";
+import type {
+  AppInfo,
+  DriveStatus,
+  JavaInstall,
+  KeyCheck,
+  ShareSettings,
+} from "../lib/types";
 
 import styles from "./Settings.module.css";
 
@@ -32,6 +41,7 @@ const TABS = [
   { id: "accounts", label: "Accounts", icon: UserRound },
   { id: "sources", label: "Mod sources", icon: KeyRound },
   { id: "sharing", label: "Server sharing", icon: Share2 },
+  { id: "drive", label: "Google Drive", icon: Cloud },
   { id: "about", label: "About", icon: Info },
 ] as const;
 
@@ -97,6 +107,7 @@ export default function Settings() {
           {tab === "accounts" && <AccountsSettings update={update} />}
           {tab === "sources" && <Sources />}
           {tab === "sharing" && <SharingSettings />}
+          {tab === "drive" && <DriveSettings update={update} />}
           {tab === "about" && <About />}
         </div>
       </div>
@@ -104,7 +115,9 @@ export default function Settings() {
   );
 }
 
-type Updater = (patch: Record<string, unknown>) => void;
+// Returns the save, so a panel that has to read something back after it can
+// wait for it. Handlers that only fire and forget ignore the promise.
+type Updater = (patch: Record<string, unknown>) => Promise<void>;
 
 function Appearance({ update }: { update: Updater }) {
   const config = useStore((s) => s.config)!;
@@ -516,6 +529,289 @@ function AccountsSettings({ update }: { update: Updater }) {
       </section>
 
       {managing && <AccountsModal onClose={() => setManaging(false)} />}
+    </div>
+  );
+}
+
+/**
+ * Connecting a Google account so a pack can be shared as one link.
+ *
+ * Two sentences here are load-bearing and should not be softened. The scope is
+ * per-file, so Geode cannot see the rest of the user's Drive — that is a fact
+ * about what Google grants, not a promise about this code. And an OAuth client
+ * left in **Testing** has its authorizations expired by Google every seven
+ * days, which arrives later as a connection that stopped working for no
+ * visible reason; pressing Publish app is what prevents it.
+ */
+function DriveSettings({ update }: { update: Updater }) {
+  const config = useStore((s) => s.config)!;
+  const loadConfig = useStore((s) => s.loadConfig);
+  const toast = useStore((s) => s.toast);
+  const reportError = useStore((s) => s.reportError);
+
+  const [status, setStatus] = useState<DriveStatus | null>(null);
+  const [clientId, setClientId] = useState(config.googleClientId ?? "");
+  const [secret, setSecret] = useState("");
+  const [connecting, setConnecting] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api
+      .driveStatus()
+      .then(setStatus)
+      .catch((e) => reportError("Could not read the Google Drive connection", e));
+  }, [reportError]);
+
+  async function connect() {
+    setConnecting(true);
+    try {
+      // Blocks while the user is in their browser, the way Microsoft sign-in
+      // does. Cancel is the ordinary cancel_task command.
+      setStatus(await api.connectDrive());
+      toast({ kind: "success", title: "Connected to Google Drive" });
+    } catch (e) {
+      reportError("Could not connect to Google Drive", e);
+    } finally {
+      setConnecting(false);
+    }
+  }
+
+  async function disconnect() {
+    setBusy(true);
+    try {
+      // The connection is forgotten whatever Google answered, so the toast
+      // says which of the two happened: somebody disconnecting to get the
+      // grant gone must not be left believing it is.
+      const gone = await api.disconnectDrive();
+      setStatus(gone.status);
+      toast({
+        kind: "info",
+        title: "Disconnected from Google Drive",
+        body: gone.revoked
+          ? "Packs you already shared stay in your Drive, and their links keep working until you delete the files."
+          : "Google could not be reached to revoke Geode's access, so remove Geode yourself at myaccount.google.com → Third-party access. Packs you already shared stay in your Drive.",
+      });
+    } catch (e) {
+      reportError("Could not disconnect", e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Saved first, then read: `drive_status` reads the config the save writes,
+  // and reading it in parallel came back "not configured" more often than not
+  // — leaving Connect greyed out, Save greyed out by its own success, and
+  // nothing on screen to press.
+  async function saveClientId() {
+    await update({ googleClientId: clientId.trim() || null });
+    try {
+      setStatus(await api.driveStatus());
+    } catch (e) {
+      reportError("Could not read the Google Drive connection", e);
+    }
+  }
+
+  async function saveSecret(value: string | null) {
+    setBusy(true);
+    try {
+      await api.setGoogleClientSecret(value);
+      await loadConfig();
+      setSecret("");
+      toast({
+        kind: "success",
+        title: value ? "Client secret saved" : "Client secret removed",
+      });
+    } catch (e) {
+      reportError("Could not save the client secret", e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className={styles.form}>
+      <section className={styles.section}>
+        <h2 className={styles.sectionTitle}>Sharing a pack through your Drive</h2>
+        {status && <StatusNote line={driveLine(status)} busy={connecting} />}
+
+        {status?.folderUrl && (
+          <div className={styles.calloutLinks}>
+            <button className="btn btn-sm" onClick={() => void openUrl(status.folderUrl!)}>
+              <ExternalLink size={13} />
+              {status.folderName ?? "Open the folder in Drive"}
+            </button>
+          </div>
+        )}
+
+        <div className={styles.inlineRow}>
+          {status?.connected ? (
+            <button className="btn btn-danger" onClick={() => void disconnect()} disabled={busy}>
+              {busy ? <Loader2 size={13} className="spin" /> : <Unplug size={13} />}
+              Disconnect
+            </button>
+          ) : (
+            <button
+              className="btn btn-primary"
+              onClick={() => void connect()}
+              disabled={!status?.configured || connecting}
+            >
+              {connecting && <Loader2 size={13} className="spin" />}
+              {status?.needsReconnect ? "Reconnect" : "Connect"}
+            </button>
+          )}
+          {connecting && (
+            <button className="btn" onClick={() => void api.cancelTask("drive:connect")}>
+              Cancel
+            </button>
+          )}
+        </div>
+
+        <p className="hint">
+          Sharing uploads a <code>.geodepack</code> to a folder of its own in
+          your Drive and gives you one message to paste: a{" "}
+          <code>geode://</code> link for people with Geode, and the plain Drive
+          link for people without. Anyone holding either can download that
+          file, so delete it in Drive when you want the link to stop working.
+          Disconnecting asks Google to revoke Geode&apos;s access and says so if
+          Google did not answer; you can also remove it yourself at{" "}
+          <em>myaccount.google.com → Third-party access</em>.
+        </p>
+      </section>
+
+      <section className={styles.section}>
+        <h2 className={styles.sectionTitle}>Your own Google client</h2>
+        <div className={styles.callout}>
+          <p>
+            Google issues OAuth client IDs per application, and Geode ships no
+            API keys — the same position as the Azure ID for Microsoft sign-in
+            and the CurseForge key. You create one, once, and it belongs to you.
+            It takes a few minutes and costs nothing.
+          </p>
+          <ol className={styles.steps}>
+            <li>Create a project at the Google Cloud console.</li>
+            <li>
+              <em>APIs &amp; Services → Library → Google Drive API → Enable</em>.
+            </li>
+            <li>
+              <em>Google Auth Platform → Audience</em>: user type{" "}
+              <strong>External</strong>, then press <strong>Publish app</strong>.
+            </li>
+            <li>
+              <em>Data access</em>: add the scope{" "}
+              <code>.../auth/drive.file</code>. It is a non-sensitive scope, so
+              there is nothing to submit for review.
+            </li>
+            <li>
+              <em>Clients → Create client</em>: application type{" "}
+              <strong>Desktop app</strong>.
+            </li>
+            <li>Paste the Client ID below.</li>
+          </ol>
+          <p className={styles.calloutNote}>
+            <strong>Do not skip step 3.</strong> While the app&apos;s publishing
+            status is Testing, Google expires every authorization seven days
+            after you give it, and the connection then stops working for no
+            visible reason. Publishing your own client needs no review for this
+            scope; you will see Google&apos;s &ldquo;unverified app&rdquo;
+            screen once, which is expected for a client you made yourself.
+          </p>
+          <p className={styles.calloutNote}>
+            Geode asks for one scope only:{" "}
+            <code>https://www.googleapis.com/auth/drive.file</code>, which
+            reaches <em>only files Geode itself created</em>. Geode cannot see
+            the rest of your Drive, and nothing here can widen that.
+          </p>
+          <p className={styles.calloutNote}>
+            You can compile an ID into a private build instead of pasting it:{" "}
+            <code>GEODE_GOOGLE_CLIENT_ID=… npm run tauri build</code>.
+          </p>
+          <div className={styles.calloutLinks}>
+            <button
+              className="btn btn-sm"
+              onClick={() => void openUrl("https://console.cloud.google.com/auth/clients")}
+            >
+              <ExternalLink size={13} />
+              Google Cloud console
+            </button>
+            <button
+              className="btn btn-sm"
+              onClick={() =>
+                void openUrl(
+                  "https://developers.google.com/identity/protocols/oauth2/native-app",
+                )
+              }
+            >
+              <ExternalLink size={13} />
+              How the desktop flow works
+            </button>
+          </div>
+        </div>
+
+        <div className={styles.field}>
+          <label className="label" htmlFor="google-client-id">
+            Client ID
+          </label>
+          <div className={styles.inlineRow}>
+            <input
+              id="google-client-id"
+              className="input"
+              value={clientId}
+              placeholder="000000000000-xxxxxxxx.apps.googleusercontent.com"
+              spellCheck={false}
+              autoComplete="off"
+              onChange={(e) => setClientId(e.target.value)}
+            />
+            <button
+              className="btn"
+              onClick={() => void saveClientId()}
+              disabled={clientId.trim() === (config.googleClientId ?? "")}
+            >
+              Save
+            </button>
+          </div>
+          <p className="hint">
+            Not a secret: it rides in the address your own browser opens.
+          </p>
+        </div>
+
+        <div className={styles.field}>
+          <label className="label" htmlFor="google-client-secret">
+            Client secret — only if connecting fails
+          </label>
+          <div className={styles.inlineRow}>
+            <input
+              id="google-client-secret"
+              className="input"
+              type="password"
+              value={secret}
+              placeholder={
+                config.hasGoogleClientSecret ? "•••••••••••••••• (stored)" : "Not needed"
+              }
+              autoComplete="off"
+              onChange={(e) => setSecret(e.target.value)}
+            />
+            <button
+              className="btn btn-primary"
+              onClick={() => void saveSecret(secret.trim())}
+              disabled={!secret.trim() || busy}
+            >
+              {busy && <Loader2 size={13} className="spin" />}
+              Save
+            </button>
+            {config.hasGoogleClientSecret && (
+              <button className="btn btn-danger" onClick={() => void saveSecret(null)} disabled={busy}>
+                Remove
+              </button>
+            )}
+          </div>
+          <p className="hint">
+            A Desktop app is a public client, so Google&apos;s own documentation
+            marks this optional and Geode does not send one. If connecting fails
+            with <code>invalid_client</code>, paste the string Google showed
+            beside the ID here.
+          </p>
+        </div>
+      </section>
     </div>
   );
 }
