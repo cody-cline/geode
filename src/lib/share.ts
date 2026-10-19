@@ -14,6 +14,8 @@ import type {
   PackArrival,
   PackLinkView,
   PublicCheck,
+  PackInfo,
+  ServerShareView,
   ShareStatus,
 } from "./types";
 
@@ -123,6 +125,70 @@ export function existingLine(existing: ExistingInstance): StatusLine {
     title: `Already joined as ${existing.name}`,
     detail,
   };
+}
+
+/**
+ * What importing will add to the player's multiplayer list, for the join
+ * dialog — or null when the server named nothing to add.
+ *
+ * Worth saying before they press Import rather than after: it is the one thing
+ * an import writes outside the instance's own mods, and it is the answer to
+ * "I have the pack, now where do I actually connect?". A server on a Geode too
+ * old to send a listing, or an admin who set none, says nothing here, and the
+ * player gets what they got before: the pack, and an address to ask for.
+ */
+export function listingLine(info: PackInfo): StatusLine | null {
+  if (!info.listing) return null;
+  // Opening straight into the server is quick play, which the launch emits
+  // only where the version's own manifest declares the feature. Promising it
+  // on a version that has never had it would be promising a title screen.
+  const andPlay = opensStraightIntoAServer(info.mcVersion)
+    ? ", and points Play straight at it."
+    : `. Play cannot open straight into a server before Minecraft 1.20, so on ${info.mcVersion} pick it from the Multiplayer screen.`;
+  return {
+    tone: "info",
+    title: `${info.listing.name} will be added to your server list`,
+    detail: `Importing adds ${info.listing.name} at ${info.listing.address} to this instance's multiplayer list${andPlay} Your own servers are left alone. Close Minecraft first if it is open — the game rewrites that list when it closes.`,
+  };
+}
+
+/**
+ * Whether this version can be launched straight into a server.
+ *
+ * The launch asks the version's own manifest for the `is_quick_play_multiplayer`
+ * feature rather than reading the number, so this is the dialog's nearest
+ * answer to the same question: 1.20 is where Mojang added it, and a version
+ * this cannot read as a release — a snapshot — is not promised it either.
+ */
+function opensStraightIntoAServer(mcVersion: string): boolean {
+  const release = /^1\.(\d+)(\D|$)/.exec(mcVersion.trim());
+  return release ? Number(release[1]) >= 20 : false;
+}
+
+/**
+ * What the admin needs to know about the two addresses, for the Share tab.
+ *
+ * They are easy to confuse and the cost of confusing them is a server list
+ * full of rows that cannot connect: packs come down Geode's own port, which is
+ * the same for every server this machine shares, while Minecraft connects to
+ * this server's own `server-port`. So the hint names both and says which is
+ * which, and says plainly when Geode could not work the game address out —
+ * which is every `https://` share address, since a tunnel in front of the pack
+ * port says nothing about where the game's port is.
+ */
+export function gameAddressHint(share: ServerShareView): string {
+  const pack = share.packAddress;
+  const packSentence = pack
+    ? `Packs come down ${pack}, which is Geode's port and the same for every server you share.`
+    : "Packs come down Geode's own port, which is the same for every server you share.";
+
+  if (share.listing) {
+    return `${packSentence} Players connect to ${share.listing.address} to play. Change it here if you move the server or forward a different port; players get the change the next time they press Play, with nothing downloaded.`;
+  }
+  if (share.suggested.address) {
+    return `${packSentence} Geode has filled in this server's own server-port for the game address — check it is the one you forwarded, then save it.`;
+  }
+  return `${packSentence} Geode cannot work out the game address from that, so type the one players put into Minecraft's Add Server.`;
 }
 
 /** A finished import's problems, headed the way the join dialog shows them. */

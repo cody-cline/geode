@@ -102,7 +102,9 @@ itself. New code should take an `EventSink`.
 - **`instance/`** owns instance CRUD and what an instance holds: `content.rs`
   (tracked content records, `Origin` for whose mod it is, `Sharing` marks),
   `jar.rs` (reading a jar for its name and which `Side` it runs on),
-  `modpack.rs` (`.mrpack` and CurseForge zip import/export), `logs.rs`.
+  `modpack.rs` (`.mrpack` and CurseForge zip import/export), `logs.rs`,
+  `multiplayer.rs` (the player's own `servers.dat`, added to without losing a
+  byte of it — the same rule as `server/properties.rs`, in binary).
 - **`connector.rs`** is Sinytra Connector support — running Fabric mods on
   Forge/NeoForge. The canonical example of reading support from what upstream
   actually publishes, as *pairs*, rather than trusting the union of two arrays.
@@ -361,6 +363,13 @@ they are not guessable, and because the failure is usually silent or late.
 - **Never write a download URL into `geode/manifest.json`.** The index is what
   other software reads; duplicating the fact lets the two disagree
   (`share/manifest.rs`).
+- **`servers.dat` is uncompressed NBT, and `level.dat` beside it is gzip.** Not
+  the same answer for the two files. A row in it also holds keys Geode will
+  never know — a real list on this machine carries No Chat Reports' own — so
+  rows are kept as the bytes they arrived as and never rebuilt from a known-key
+  list, and a file that does not parse whole is never written to
+  (`instance/multiplayer.rs`). Related: the pack port is not the game address,
+  and must never reach a player's list.
 - **Downloads write a `.part` sibling and rename on success,** so an interrupted
   run leaves no truncated jar that looks complete next launch (`net.rs`).
 - **`latest.log` is never deleted or pruned** — the server has it open

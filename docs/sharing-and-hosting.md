@@ -406,6 +406,72 @@ connects straight to the admin's machine. Nothing sits in the middle.
   two preparing at once would update it twice over each other's files; a second
   Play is told the instance is already starting, and the server-side mods
   switch is refused for the same reason.
+- The server goes into the player's **multiplayer list**, so a join ends at a
+  server they can click rather than a title screen and an empty list. The admin
+  sets two things on the Share tab: how players see the server (defaulting to
+  its own name) and the address players connect to **for the game**, which is
+  not the address the pack came down — packs use Geode's own port, the game
+  uses the server's `server-port`, and they can differ in host as well. Geode
+  suggests the pair from the share address's host and the server's own
+  `server-port` read from `server.properties`, and suggests nothing at all
+  when the share address is an `https://` tunnel, when there is none, or when
+  `server-port` is `0`: a tunnel in front of the pack port says nothing about
+  where the game's port is, so the admin is asked rather than guessed at. The
+  address goes through the same validator as the public address setting
+  (`link::game_address`, which both now share), refuses an `https://` URL, and
+  is stored with Minecraft's own port left off so the string matches what a
+  player would have typed by hand.
+- The pair travels two ways: in `geode/manifest.json` as `listing`, which is
+  what a `.geodepack` handed over as a file carries and what is authority at
+  import; and in the server's description, which is authority afterwards
+  because it is current. It is deliberately **not** part of the revision, so
+  renaming a server or correcting its port reaches every player on their next
+  Play with nothing downloaded — putting it in the revision would re-download
+  the whole pack, hand-added jars included, for a cosmetic change. It does
+  **not** bump the manifest format either: an older Geode ignores the field and
+  adds no row, which is a miss rather than a misread, and refusing the pack
+  would cost that recipient every mod in it.
+- `servers.dat` is read and written back **byte for byte** except for the one
+  row that is the server's (`instance/multiplayer.rs`). It is uncompressed NBT
+  — not the same answer as `level.dat`, which is gzip — holding a `servers`
+  list of compounds. A row carries keys Geode will never know: the documented
+  set is `name`, `ip`, `icon`, `hidden`, `acceptTextures` and
+  `acceptedCodeOfConduct`, `hideAddress` is one the game wrote for five
+  versions and then stopped, and two of the real lists this was checked against
+  carry `preventsChatReports`, which is a mod's. So no row is ever rebuilt from
+  a known-key list: the file is walked by tag type, every other row is kept as
+  the bytes it arrived as, and our own row's other keys are copied through in
+  place. The player's order is never changed and our row goes at the end. A
+  file that does not parse whole — truncated, compressed, trailing bytes,
+  nested deeper than the reader goes, not NBT — is an error and is left exactly
+  as it was, and the output is parsed again before the rename. Our own strings
+  are written in Java's modified UTF-8, so a name with an emoji in it is not
+  mojibake.
+- The row is found again by **address**, remembered on the instance as
+  `joined_listing_address`, because Minecraft reads a row into an object of
+  known keys and writes only those back — a marker key of Geode's own would be
+  destroyed the first time the player edited their list. So: the row at the
+  address last written for this instance is renamed or moved in place; else a
+  row already at the address the server names now is claimed and keeps the name
+  the player gave it; else a row is added. Addresses are compared as addresses,
+  not as strings, so `play.example.com` and `play.example.com:25565` are one
+  server rather than two rows.
+- *Whose* row it is is remembered beside the address, as
+  `joined_listing_claimed`, and a claimed one is never handed back as the row
+  to edit: it is found by its address and claimed again on every Play, so the
+  name the player gave it survives all of them rather than only the first. For
+  the same reason, a server that moves onto an address the list already has a
+  row for claims that row instead of moving ours onto it as well — that would
+  leave two rows for one server, and nothing here ever takes a row away, so
+  ours is left at an address that no longer answers for the player to keep or
+  delete.
+- Importing also sets `quick_play_server`, and the launch now emits
+  `--quickPlayMultiplayer` only when the version's own manifest declares the
+  `is_quick_play_multiplayer` feature — 1.20 does, 1.19.4 does not, and 1.12.2
+  has no `arguments` object at all. Before this the flag was pushed on
+  unconditionally, which handed older versions an argument they had never heard
+  of. Pre-1.20 gets no flag and no substitute: the row in the list is the
+  answer there, and it works on every version.
 - What stops the game and what does not. An update the server says is due has
   to finish: a client that does not match its server cannot join it, so a
   download or an import that fails or is cancelled stops the launch, and the
@@ -535,6 +601,36 @@ forwarding and made it connect, and a hostile link was dropped.
 - Forge 1.12.2 and older also loads jars from `mods/<version>/`. A server's
   pack takes only the jars directly in `mods/` and `client-mods/`, so those are
   not sent, and nothing says so; move them up a level to share them.
+- Minecraft rewrites `servers.dat` whole from memory when it closes, so a row
+  written underneath a running game is thrown away. Play reconciles before it
+  launches, so this is only reachable by pressing Play on an instance that is
+  already running; it then writes nothing and says to close the game and press
+  Play again. It says that only when the address has moved, which includes the
+  first time — a server merely renamed waits for the next Play without a word,
+  because the row is there and works and is only called what it was before.
+- A player who deletes the row gets it back on their next Play, since every
+  Play reconciles the list whether anything changed or not, and a player who
+  edits the row's address gets one duplicate, once. Both follow from having no
+  durable marker inside the row, since the game would destroy one; there is no
+  tombstone, deliberately, because an admin who has moved the server is exactly
+  the case where the player does want the new address.
+- A rename or a move reaches a player on their next Play, through the
+  description — which is cached for five seconds per server
+  (`PREVIEW_FRESH`), so a Play inside that window still sees the old pair and
+  the one after it sees the new. An admin who renames a server while players
+  are in-game changes nothing for them until they restart.
+- The server's icon is **not** written into the row. `servers.dat` takes a
+  base64 PNG and the game wants exactly 64x64, there is no image crate in
+  `Cargo.toml`, an admin's artwork is an arbitrary aspect ratio, and each icon
+  adds about 12 KB to the row — and the game fills `icon` in itself from the
+  server's status ping, which is how every icon in the real lists this was
+  checked against got there. Writing one would be redundant as well as a
+  stretched picture.
+- The listing is written on the admin's side and read on the player's, but the
+  two now live in two carriers (the manifest at import, the description after).
+  If `export_server` and `server_pack_info` ever disagree, the row and the pack
+  disagree — harmless, since the row is inert data, but the precedence rule has
+  to stay written down.
 
 ### 4. The container
 

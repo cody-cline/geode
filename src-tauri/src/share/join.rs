@@ -969,6 +969,7 @@ mod tests {
             server_kind: "fabric".into(),
             revision: String::new(),
             server_id: String::new(),
+            listing: None,
         }
     }
 

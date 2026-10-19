@@ -11,12 +11,13 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Result};
 use crate::install::identity::{self, travel, Ask, Carry, Catalogue, Travel};
 use crate::instance::modpack::ExportReport;
+use crate::instance::multiplayer::Wrote;
 use crate::instance::{self, Instance};
 use crate::net::Progress;
 use crate::paths::Paths;
 
 use super::manifest::{
-    format_for, FileNote, Kind, Manifest, Profile, SourceRef, EXTENSION, FORMAT,
+    format_for, FileNote, Kind, Listing, Manifest, Profile, SourceRef, EXTENSION, FORMAT,
 };
 
 /// Build the Geode half of a pack for an instance.
@@ -56,6 +57,9 @@ pub async fn manifest_for(paths: &Paths, instance: &Instance, catalogue: &Catalo
         // An instance's pack has no revision: only a server's is checked for
         // changes.
         revision: None,
+        // Nor a listing: there is no server behind a personal pack to put in
+        // anybody's multiplayer list.
+        listing: None,
     }
 }
 
@@ -1158,10 +1162,70 @@ async fn apply_pack(
 ) -> Result<Vec<String>> {
     apply(manifest, instance);
     extract_media(paths, instance, archive, manifest).await?;
+    add_to_the_multiplayer_list(paths, instance, manifest).await;
     let missing =
         resolve_references(client, paths, instance, manifest, curseforge_key, progress).await?;
     switch_off_what_the_notes_say(paths, instance, manifest).await?;
     Ok(missing)
+}
+
+/// Put the server in this instance's multiplayer list, and point Play at it.
+///
+/// The whole point of joining a server is to play on it, and until now an
+/// import left the player at a title screen with an empty Multiplayer list and
+/// the only address they had ever been shown being the pack port — which is
+/// not the game's and does not work there.
+///
+/// Only a server's pack has anybody to list. A pack from a Geode too old to
+/// carry a listing, or an admin who has not set one, adds no row and says
+/// nothing: that is the graceful degrade, and it is why the manifest format is
+/// not bumped for this.
+///
+/// A failure is not reported and does not stop the import. The address is only
+/// recorded once the row is really there, so the next Play — which reconciles
+/// this from the server's own description, and has somewhere to put a notice —
+/// tries again and tells the player if it still cannot.
+async fn add_to_the_multiplayer_list(paths: &Paths, instance: &mut Instance, manifest: &Manifest) {
+    if manifest.kind != Kind::Server {
+        return;
+    }
+    // Checked rather than trusted: this came off the network, and a name that
+    // would garble somebody's server list is better dropped than written.
+    let Some(listing) = manifest.listing.as_ref().and_then(|l| l.checked().ok()) else {
+        return;
+    };
+    let game_dir = paths.game_dir(&instance.id);
+    let previous = our_row(instance).map(str::to_string);
+    if let Ok(wrote) = instance::multiplayer::ensure(
+        &game_dir,
+        &listing.name,
+        &listing.address,
+        previous.as_deref(),
+    )
+    .await
+    {
+        listed(instance, &listing.address, wrote);
+    }
+}
+
+/// Record the address this instance's row stands at and whose row it is, and
+/// send Play straight there on the versions of the game that have the flag.
+pub(crate) fn listed(instance: &mut Instance, address: &str, wrote: Wrote) {
+    instance.joined_listing_address = Some(address.to_string());
+    instance.joined_listing_claimed = wrote == Wrote::Claimed;
+    instance.overrides.quick_play_server = Some(address.to_string());
+}
+
+/// The row [`instance::multiplayer::ensure`] should find again for this
+/// instance, and nothing when that row is the player's own.
+///
+/// A row they wrote keeps the name they gave it, so it is never handed back as
+/// one of ours to rename — it is claimed again by its address, every Play.
+pub(crate) fn our_row(instance: &Instance) -> Option<&str> {
+    if instance.joined_listing_claimed {
+        return None;
+    }
+    instance.joined_listing_address.as_deref()
 }
 
 /// Turn off the files the pack said were turned off.
@@ -1750,6 +1814,13 @@ pub async fn server_pack_info(
         server_kind: server.kind.as_str().to_string(),
         revision,
         server_id: server.id.clone(),
+        // Read here as well as written into the pack, and on purpose: this is
+        // the endpoint a joined instance asks on every Play, so a rename or a
+        // move reaches its players with nothing downloaded. The manifest is
+        // authority at import — it is in the bytes the player received, and
+        // it is the only carrier a `.geodepack` handed over as a file has —
+        // and this is authority afterwards, because it is current.
+        listing: listing_for(paths, &server.id).await?,
     })
 }
 
@@ -1762,6 +1833,20 @@ async fn sends_config(paths: &Paths, id: &str) -> Result<bool> {
     Ok(crate::server::share::load(paths, id)
         .await?
         .is_some_and(|share| share.shared && share.include_config))
+}
+
+/// How this server should appear in its players' multiplayer list, if the
+/// admin has said.
+///
+/// Read fresh from the share file for the same reason as `sends_config`, and
+/// checked again on the way out rather than trusted: the file is on disk, and
+/// a listing that would garble a player's list is better dropped here than
+/// sent to everybody.
+pub(crate) async fn listing_for(paths: &Paths, id: &str) -> Result<Option<Listing>> {
+    Ok(crate::server::share::load(paths, id)
+        .await?
+        .and_then(|share| share.listing)
+        .and_then(|listing| listing.checked().ok()))
 }
 
 /// The SHA-1 of a file, or nothing when it is no longer there to read.
@@ -1965,6 +2050,10 @@ pub async fn export_server(
         source: None,
         files,
         revision: Some(revision),
+        // Carried so a player who imports this pack from a file — with no
+        // server to ask afterwards — still gets the row. A pack served over
+        // the wire is kept in step by the description instead.
+        listing: listing_for(paths, &server.id).await?,
     };
     let extras = extras_from(
         &media,
@@ -2049,6 +2138,7 @@ mod tests {
             source: None,
             files: Vec::new(),
             revision: None,
+            listing: None,
         }
     }
 
@@ -3043,6 +3133,7 @@ mod tests {
             source: None,
             files: Vec::new(),
             revision: None,
+            listing: None,
         };
         let dest = paths.root.join("cancel.geodepack");
         write_pack(&dest, &index, &manifest, &[("overrides/mods/private.jar", b"private")]);
@@ -3229,6 +3320,208 @@ mod tests {
         assert!(missing.iter().any(|m| m.contains("not a safe path")), "{missing:?}");
     }
 
+    /// What the admin sets travels in the pack, and in the description beside
+    /// it — but only for a server, because a personal pack has no server
+    /// behind it to put in anybody's list.
+    #[tokio::test]
+    async fn an_exported_server_pack_carries_the_admins_listing_and_an_instance_pack_never_does() {
+        let (scratch, server) = server_fixture("listing", false).await;
+        let paths = scratch.paths.clone();
+
+        // Nothing set yet: no listing in either carrier, which is what an
+        // older admin's Geode also sends.
+        let dest = paths.root.join("plain.geodepack");
+        export_server(&paths, &server, dest.clone(), &Progress::silent("t")).await.unwrap();
+        assert_eq!(read_manifest(&dest).unwrap().unwrap().listing, None);
+        assert_eq!(server_pack_info(&paths, &server).await.unwrap().listing, None);
+
+        // Set, and in both.
+        let mut share = crate::server::share::load(&paths, &server.id).await.unwrap().unwrap();
+        let listing = Listing {
+            name: "Survival Club".into(),
+            address: "play.example.com:25566".into(),
+        };
+        share.listing = Some(listing.clone());
+        crate::server::share::save(&paths, &server.id, &share).await.unwrap();
+
+        let dest = paths.root.join("listed.geodepack");
+        export_server(&paths, &server, dest.clone(), &Progress::silent("t")).await.unwrap();
+        let manifest = read_manifest(&dest).unwrap().unwrap();
+        assert_eq!(manifest.listing, Some(listing.clone()));
+        assert_eq!(
+            server_pack_info(&paths, &server).await.unwrap().listing,
+            Some(listing)
+        );
+        // And it is an addition, not a new layout: a pack carrying one still
+        // claims the format an older Geode reads.
+        assert_eq!(manifest.geode_format, 1);
+
+        // A listing that would garble somebody's list is dropped on the way
+        // out rather than sent to every player.
+        share.listing = Some(Listing {
+            name: "Bad\nName".into(),
+            address: "play.example.com".into(),
+        });
+        crate::server::share::save(&paths, &server.id, &share).await.unwrap();
+        let dest = paths.root.join("garbled.geodepack");
+        export_server(&paths, &server, dest.clone(), &Progress::silent("t")).await.unwrap();
+        assert_eq!(read_manifest(&dest).unwrap().unwrap().listing, None);
+        assert_eq!(server_pack_info(&paths, &server).await.unwrap().listing, None);
+
+        // A personal pack never carries one.
+        let instance_manifest = manifest_for(&paths, &instance(), &Catalogue::default()).await;
+        assert_eq!(instance_manifest.listing, None);
+    }
+
+    /// The whole point of the feature, through the app's own import sequence:
+    /// the server is in the instance's multiplayer list when the import
+    /// finishes, and Play is pointed at the same address.
+    ///
+    /// The instance's pack is turned into a server's the way the other import
+    /// tests here do it, so nothing is fetched. Put the share address in the
+    /// listing instead of the game address and the pack port lands in the
+    /// player's list, which the last assertion is watching for.
+    #[tokio::test]
+    async fn importing_a_server_pack_adds_the_row_and_points_quick_play_at_it() {
+        let (scratch, inst) = fixture("listed", &[("mods", "homemade.jar")]).await;
+        let paths = scratch.paths.clone();
+        let personal = paths.root.join("listed-personal.geodepack");
+        export(Ask::Nobody, &paths, &inst, personal.clone(), false, &Progress::silent("t"))
+            .await
+            .unwrap();
+
+        // No listing: no row, and Play points nowhere. This is also what an
+        // older admin's Geode sends, and what an admin who has not set one
+        // sends — the graceful degrade, rather than an error.
+        let unlisted = paths.root.join("unlisted.geodepack");
+        std::fs::copy(&personal, &unlisted).unwrap();
+        rewrite_pack(&unlisted, |m| m.kind = Kind::Server, &[]);
+        let mut plain = fresh("unlisted-joined");
+        import_offline(&paths, &mut plain, &unlisted).await.unwrap();
+        assert_eq!(plain.joined_listing_address, None);
+        assert_eq!(plain.overrides.quick_play_server, None);
+        assert!(
+            !instance::multiplayer::file(&paths.game_dir(&plain.id)).exists(),
+            "a pack with no listing wrote a multiplayer list"
+        );
+
+        // With one: the row, and Play pointed at it.
+        let listed_pack = paths.root.join("listed-server.geodepack");
+        std::fs::copy(&personal, &listed_pack).unwrap();
+        rewrite_pack(
+            &listed_pack,
+            |m| {
+                m.kind = Kind::Server;
+                m.listing = Some(Listing {
+                    name: "Survival Club".into(),
+                    address: "play.example.com:25566".into(),
+                });
+            },
+            &[],
+        );
+
+        let mut joined = fresh("listed-joined");
+        import_offline(&paths, &mut joined, &listed_pack).await.unwrap();
+        assert_eq!(
+            joined.joined_listing_address.as_deref(),
+            Some("play.example.com:25566")
+        );
+        assert_eq!(
+            joined.overrides.quick_play_server.as_deref(),
+            Some("play.example.com:25566")
+        );
+
+        let list = tokio::fs::read(instance::multiplayer::file(&paths.game_dir(&joined.id)))
+            .await
+            .expect("no multiplayer list was written");
+        let text = String::from_utf8_lossy(&list);
+        assert!(text.contains("Survival Club"), "the name is not in the list");
+        assert!(text.contains("play.example.com:25566"), "the address is not in the list");
+        // The pack port is Geode's own and the game has nothing listening on
+        // it: it must never reach a player's list.
+        assert!(!text.contains("25590"), "the pack port reached the list");
+
+        // And a personal pack carrying one adds nothing: there is no server
+        // behind it, so a listing in it was not written by Geode.
+        let pretend = paths.root.join("listed-personal-claim.geodepack");
+        std::fs::copy(&personal, &pretend).unwrap();
+        rewrite_pack(
+            &pretend,
+            |m| {
+                m.listing = Some(Listing {
+                    name: "Not A Server".into(),
+                    address: "play.example.com".into(),
+                })
+            },
+            &[],
+        );
+        let mut personal_import = fresh("personal-joined");
+        import_offline(&paths, &mut personal_import, &pretend).await.unwrap();
+        assert_eq!(personal_import.joined_listing_address, None);
+        assert!(
+            !instance::multiplayer::file(&paths.game_dir(&personal_import.id)).exists(),
+            "a personal pack wrote a multiplayer list"
+        );
+    }
+
+    /// A row the player already had at that address is claimed by the import
+    /// and recorded as theirs, which is what keeps the name they gave it
+    /// through the Plays after it.
+    ///
+    /// Break it by recording a claimed row as one Geode wrote and the next
+    /// reconcile cannot tell it from ours: it renames their row to the
+    /// admin's.
+    #[tokio::test]
+    async fn importing_claims_a_row_the_player_already_had_and_records_it_as_theirs() {
+        let (scratch, inst) = fixture("claimed", &[("mods", "homemade.jar")]).await;
+        let paths = scratch.paths.clone();
+        let pack = paths.root.join("claimed-server.geodepack");
+        export(Ask::Nobody, &paths, &inst, pack.clone(), false, &Progress::silent("t"))
+            .await
+            .unwrap();
+        rewrite_pack(
+            &pack,
+            |m| {
+                m.kind = Kind::Server;
+                m.listing = Some(Listing {
+                    name: "Survival Club".into(),
+                    address: "play.example.com".into(),
+                });
+            },
+            &[],
+        );
+
+        // Theirs, added by hand before the import, spelled the way they typed
+        // it rather than the way the admin's listing spells it.
+        let mut joined = fresh("claimed-joined");
+        instance::multiplayer::ensure(
+            &paths.game_dir(&joined.id),
+            "My Server",
+            "PLAY.example.com:25565",
+            None,
+        )
+        .await
+        .unwrap();
+
+        import_offline(&paths, &mut joined, &pack).await.unwrap();
+        let list = tokio::fs::read(instance::multiplayer::file(&paths.game_dir(&joined.id)))
+            .await
+            .expect("their list went missing");
+        let text = String::from_utf8_lossy(&list);
+        assert!(text.contains("My Server"), "the import took their name: {text}");
+        assert!(!text.contains("Survival Club"), "the import took their name: {text}");
+        assert!(
+            joined.joined_listing_claimed,
+            "their row was recorded as one of Geode's, so the next Play renames it"
+        );
+        // Still the row this instance is reached by, and Play still goes there.
+        assert_eq!(joined.joined_listing_address.as_deref(), Some("play.example.com"));
+        assert_eq!(
+            joined.overrides.quick_play_server.as_deref(),
+            Some("play.example.com")
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Helpers for building and bending packs
     // -----------------------------------------------------------------------
@@ -3340,6 +3633,7 @@ mod tests {
             &ServerShare {
                 code: crate::share::code::Code::generate(),
                 include_config,
+                listing: None,
                 shared: true,
             },
         )
@@ -3763,6 +4057,8 @@ mod tests {
                 server_kind: "fabric".into(),
                 revision: info.revision.clone(),
                 server_id: "srv-info".into(),
+                // No listing set on this server, so none is described.
+                listing: None,
             }
         );
         assert_eq!(info.revision.len(), 64, "{}", info.revision);
@@ -4624,6 +4920,7 @@ mod tests {
         let share = |include_config| ServerShare {
             code: crate::share::code::Code::generate(),
             include_config,
+            listing: None,
             shared: true,
         };
 
@@ -4722,7 +5019,43 @@ mod tests {
         tokio::fs::write(paths.server_media(&server.id).join("icon.png"), b"NEW PNG")
             .await
             .unwrap();
+        // The listing, which reaches a player's game but is not content: it
+        // rides the description instead, so a rename or a move lands on their
+        // next Play with nothing downloaded. Put it in the revision and every
+        // player — hand-added jars and all — re-downloads the pack because the
+        // admin corrected a port.
+        crate::server::share::save(
+            &paths,
+            &server.id,
+            &ServerShare {
+                listing: Some(Listing {
+                    name: "Survival Club".into(),
+                    address: "play.example.com:25566".into(),
+                }),
+                ..share(true)
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(revision_of(&paths, &server).await, unmoved);
+        crate::server::share::save(
+            &paths,
+            &server.id,
+            &ServerShare {
+                listing: Some(Listing {
+                    name: "Survival Club 2".into(),
+                    address: "moved.example.com".into(),
+                }),
+                ..share(true)
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            revision_of(&paths, &server).await,
+            unmoved,
+            "renaming or moving the server in players' lists re-downloads the pack"
+        );
 
         crate::server::share::save(&paths, &server.id, &share(false))
             .await

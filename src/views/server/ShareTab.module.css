@@ -63,3 +63,17 @@
 .secret {
   color: var(--warn);
 }
+
+/* The two listing fields side by side on a wide pane, stacked when there is
+   not room — the name is usually short and the address is not. */
+.pair {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+  gap: 12px;
+}
+
+@media (max-width: 720px) {
+  .pair {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

@@ -964,7 +964,7 @@ fn assemble(
 /// Otherwise only an address the router reported *and* that is actually public
 /// is offered — a link built from a carrier-grade NAT address would be a link
 /// that cannot work, handed out as if it could.
-fn reachable_address(
+pub(crate) fn reachable_address(
     config: &ShareConfig,
     mapping: &portmap::Status,
     detected: Option<Detected>,
@@ -1052,6 +1052,7 @@ mod tests {
         let share = ServerShare {
             code: Code::generate(),
             include_config: false,
+            listing: None,
             shared: true,
         };
         let run = paths.server_run(&server.id);
@@ -1155,13 +1156,28 @@ mod tests {
     async fn a_player_joins_a_shared_server_end_to_end() {
         let admin_scratch = Scratch::new("e2e-join");
         let admin = admin_scratch.paths.clone();
-        let (_, share) = shared_server(&admin).await;
+        let (server, mut share) = shared_server(&admin).await;
+        // How the admin wants players to see this server. The game address,
+        // not the pack's: this server's packs come down the loopback port the
+        // host below binds, and Minecraft connects to 25566.
+        share.listing = Some(crate::share::manifest::Listing {
+            name: "Survival Club".into(),
+            address: "play.example.com:25566".into(),
+        });
+        server_share::save(&admin, &server.id, &share).await.unwrap();
+
         let host = Host::start(admin.clone(), 0, None).await.unwrap();
         let link = link(host.local_addr.port(), &share.code, pin_of(&admin).await);
 
         // What the player is shown before deciding.
         let preview = join::preview(link.clone()).await.unwrap();
         assert_eq!(preview.info.name, "Survival");
+        // The listing crossed the wire in the description, which is what
+        // keeps the row in step on every later Play.
+        assert_eq!(
+            preview.info.listing.as_ref().map(|l| (l.name.as_str(), l.address.as_str())),
+            Some(("Survival Club", "play.example.com:25566"))
+        );
         assert_eq!(preview.info.mc_version, "1.21.1");
         assert_eq!(preview.info.loader, "fabric");
         assert_eq!(preview.info.loader_version, "0.16.9");
@@ -1256,6 +1272,29 @@ mod tests {
         )
         .await
         .expect_err("a player cannot delete the server's mod");
+
+        // And the server is in the player's multiplayer list, with Play
+        // pointed at it — so the import ends at a server they can join rather
+        // than a title screen and an empty list.
+        assert_eq!(
+            instance.joined_listing_address.as_deref(),
+            Some("play.example.com:25566")
+        );
+        assert_eq!(
+            instance.overrides.quick_play_server.as_deref(),
+            Some("play.example.com:25566")
+        );
+        let list = std::fs::read(crate::instance::multiplayer::file(
+            &player.game_dir(&instance.id),
+        ))
+        .expect("no multiplayer list was written");
+        let text = String::from_utf8_lossy(&list);
+        assert!(text.contains("Survival Club"), "{text}");
+        assert!(text.contains("play.example.com:25566"), "{text}");
+        // The port this very pack came down is Geode's, and the game has
+        // nothing listening on it.
+        let pack_port = host.local_addr.port().to_string();
+        assert!(!text.contains(&pack_port), "the pack port reached the list: {text}");
 
         host.stop().await;
     }
@@ -1557,6 +1596,7 @@ mod tests {
         let other_share = ServerShare {
             code: Code::generate(),
             include_config: false,
+            listing: None,
             shared: true,
         };
         server_share::save(&admin, &other.id, &other_share)

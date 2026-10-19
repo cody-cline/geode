@@ -34,6 +34,15 @@ pub struct ServerShare {
     /// secrets as readily as they hold anything a player needs.
     #[serde(default)]
     pub include_config: bool,
+    /// How this server should appear in its players' multiplayer list: the
+    /// name they see, and the address the *game* connects to. `None` until the
+    /// admin sets it, and then no row is written for anybody.
+    ///
+    /// Here rather than in `server.json` for the same reason the password is:
+    /// nothing but sharing writes this file, and a long job that loaded the
+    /// server minutes ago cannot undo an address the admin corrected since.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listing: Option<crate::share::manifest::Listing>,
     /// Whether players can download the pack now. Stop sharing turns this off
     /// and keeps the password, so it is the same when the server is shared
     /// again. Not written: which of the two files the share is in says it, so a
@@ -44,6 +53,90 @@ pub struct ServerShare {
 
 fn shared_by_default() -> bool {
     true
+}
+
+/// What to put in the admin's two fields before they have said anything.
+///
+/// A suggestion, not a setting: nothing is written until the admin saves it,
+/// and an address Geode cannot work out is left blank and asked for rather
+/// than guessed at. Guessing here would hand every player an address that
+/// does not answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Suggestion {
+    /// The server's own name, which is what players would expect to see.
+    pub name: String,
+    /// The game address, worked out from the share address's host and the
+    /// server's own `server-port`. `None` when there is nothing to work it
+    /// out from — see [`suggest`].
+    pub address: Option<String>,
+}
+
+/// The pair to offer the admin for this server.
+///
+/// The address comes from two things Geode already knows, and from neither of
+/// them alone:
+///
+/// - the **host** of the share address, because that is the machine players
+///   reach — but never its port, which is Geode's own and not the game's;
+/// - the server's own **`server-port`**, read from its `server.properties`,
+///   because that is the port the game listens on.
+///
+/// Nothing is suggested when the share address is an `https://` tunnel: a
+/// tunnel in front of the pack port says nothing whatever about where
+/// Minecraft's TCP port is, and the admin is asked instead. Nor when there is
+/// no share address at all, nor when `server-port` is `0`, which means "any
+/// free port" and so names no address to give anybody.
+pub async fn suggest(
+    paths: &Paths,
+    server: &crate::server::Server,
+    share_address: Option<&crate::share::link::Address>,
+) -> Suggestion {
+    Suggestion {
+        name: server.name.clone(),
+        address: suggest_address(paths, &server.id, share_address).await,
+    }
+}
+
+async fn suggest_address(
+    paths: &Paths,
+    id: &str,
+    share_address: Option<&crate::share::link::Address>,
+) -> Option<String> {
+    let crate::share::link::Address::Direct { host, .. } = share_address? else {
+        return None;
+    };
+    let port = game_port(paths, id).await?;
+    let text = if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    };
+    // Through the same validator the admin's own typing goes through, so a
+    // router reporting something unusable produces no suggestion rather than
+    // a bad one — and Minecraft's own port comes back off the end.
+    crate::share::link::game_address(&text).ok()
+}
+
+/// The port this server listens on for the game, from its own
+/// `server.properties`.
+///
+/// A server that has never started has no such file yet, and 25565 is what it
+/// will write there on its first boot — so that, rather than nothing, is the
+/// answer for one not yet run.
+async fn game_port(paths: &Paths, id: &str) -> Option<u16> {
+    let properties = crate::server::properties::read(paths, id)
+        .await
+        .unwrap_or_default();
+    match properties.iter().find(|p| p.key == "server-port") {
+        Some(property) => property
+            .value
+            .trim()
+            .parse::<u16>()
+            .ok()
+            .filter(|port| *port != 0),
+        None => Some(crate::share::link::GAME_PORT),
+    }
 }
 
 /// What sharing looks like across every server.
@@ -133,6 +226,7 @@ pub async fn start(paths: &Paths, id: &str) -> Result<ServerShare> {
             let share = ServerShare {
                 code: crate::share::code::Code::generate(),
                 include_config: false,
+                listing: None,
                 shared: true,
             };
             save(paths, id, &share).await?;
@@ -301,6 +395,7 @@ mod tests {
         let share = ServerShare {
             code: Code::generate(),
             include_config: true,
+            listing: None,
             shared: true,
         };
         save(&paths, "survival", &share).await.unwrap();
@@ -441,6 +536,7 @@ mod tests {
         let leaked = ServerShare {
             code: Code::generate(),
             include_config: true,
+            listing: None,
             shared: true,
         };
         save(&paths, &server.id, &leaked).await.unwrap();
@@ -450,6 +546,7 @@ mod tests {
         let replaced = ServerShare {
             code: Code::generate(),
             include_config: false,
+            listing: None,
             shared: true,
         };
         save(&paths, &server.id, &replaced).await.unwrap();
@@ -561,6 +658,7 @@ mod tests {
         let share = ServerShare {
             code: Code::generate(),
             include_config: false,
+            listing: None,
             shared: true,
         };
         save(&paths, "nowhere", &share).await.unwrap_err();
@@ -582,11 +680,13 @@ mod tests {
         let b = ServerShare {
             code: Code::generate(),
             include_config: false,
+            listing: None,
             shared: true,
         };
         let a = ServerShare {
             code: Code::generate(),
             include_config: true,
+            listing: None,
             shared: true,
         };
         save(&paths, "b-shared", &b).await.unwrap();
@@ -603,5 +703,110 @@ mod tests {
             vec![("a-shared".to_string(), a), ("b-shared".to_string(), b)]
         );
         assert_eq!(shared.unreadable, vec!["torn".to_string()]);
+    }
+
+    /// The listing is the server's, like its password: it survives stopping,
+    /// sharing again and a replaced password, because each of those is about
+    /// who may download and not about where the server is.
+    #[tokio::test]
+    async fn a_listing_survives_stopping_sharing_again_and_a_new_password() {
+        let scratch = scratch("listing");
+        let paths = scratch.paths.clone();
+        std::fs::create_dir_all(paths.server("survival")).unwrap();
+
+        let listing = crate::share::manifest::Listing {
+            name: "§aSurvival".into(),
+            address: "play.example.com:25566".into(),
+        };
+        let first = start(&paths, "survival").await.unwrap();
+        assert_eq!(first.listing, None, "sharing invented a listing");
+
+        let shared = ServerShare {
+            listing: Some(listing.clone()),
+            ..first
+        };
+        save(&paths, "survival", &shared).await.unwrap();
+        assert_eq!(
+            load(&paths, "survival").await.unwrap().unwrap().listing,
+            Some(listing.clone())
+        );
+
+        stop(&paths, "survival").await.unwrap();
+        assert_eq!(
+            load(&paths, "survival").await.unwrap().unwrap().listing,
+            Some(listing.clone()),
+            "stopping lost the listing"
+        );
+        let replaced = replace_password(&paths, "survival").await.unwrap();
+        assert_eq!(replaced.listing, Some(listing.clone()));
+        let again = start(&paths, "survival").await.unwrap();
+        assert_eq!(again.listing, Some(listing));
+    }
+
+    /// The game address is suggested from the share address's **host** and the
+    /// server's **own** `server-port` — never from the share port, which is
+    /// Geode's and would hand players a port nothing is listening on.
+    ///
+    /// Use `config.share.port` here instead and 25590 appears, which is what
+    /// the first assertion is looking for.
+    #[tokio::test]
+    async fn the_game_address_is_suggested_from_the_share_host_and_the_servers_own_port() {
+        use crate::share::link::Address;
+        use crate::server::{Server, ServerKind};
+
+        let scratch = scratch("suggest");
+        let paths = scratch.paths.clone();
+        let server = Server::new("Survival".into(), ServerKind::Fabric, "1.21.1".into());
+        server.save(&paths).await.unwrap();
+
+        // The share address, on Geode's own port.
+        let share_address = Address::parse("203.0.113.7:25590", 25590).unwrap();
+        let at = |address: Option<&Address>| {
+            let (paths, server) = (paths.clone(), server.clone());
+            let address = address.cloned();
+            async move { suggest(&paths, &server, address.as_ref()).await }
+        };
+
+        // Never started, so no server.properties: 25565 is what it will write
+        // there on its first boot, and Minecraft's own port is left off.
+        let fresh = at(Some(&share_address)).await;
+        assert_eq!(fresh.name, "Survival");
+        assert_eq!(fresh.address.as_deref(), Some("203.0.113.7"));
+
+        // Once it has a port of its own, that is the port.
+        let run = paths.server_run(&server.id);
+        tokio::fs::create_dir_all(&run).await.unwrap();
+        let properties = |text: &str| std::fs::write(run.join("server.properties"), text).unwrap();
+        properties("#Minecraft server properties\nserver-port=25566\nmotd=Hi\n");
+        let moved = at(Some(&share_address)).await;
+        assert_eq!(moved.address.as_deref(), Some("203.0.113.7:25566"));
+        assert!(
+            !moved.address.as_deref().unwrap().contains("25590"),
+            "the share port reached the game address"
+        );
+
+        // `0` is "any free port", which is no address to give anybody.
+        properties("server-port=0\n");
+        assert_eq!(at(Some(&share_address)).await.address, None);
+
+        // An https tunnel in front of the pack port says nothing about where
+        // Minecraft's own port is, so the admin is asked rather than guessed
+        // at — and so they are with no share address at all.
+        properties("server-port=25566\n");
+        let tunnel = Address::parse("https://pack.example.com", 25590).unwrap();
+        assert_eq!(at(Some(&tunnel)).await.address, None);
+        assert_eq!(at(None).await.address, None);
+
+        // An address a router reported that nobody could connect to produces
+        // no suggestion rather than a bad one.
+        let unusable = Address::parse("0.0.0.0:25590", 25590).unwrap();
+        assert_eq!(at(Some(&unusable)).await.address, None);
+
+        // IPv6 keeps its brackets, so the game can tell address from port.
+        let v6 = Address::parse("[2001:db8::5]:25590", 25590).unwrap();
+        assert_eq!(
+            at(Some(&v6)).await.address.as_deref(),
+            Some("[2001:db8::5]:25566")
+        );
     }
 }

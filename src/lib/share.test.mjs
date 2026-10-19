@@ -13,6 +13,7 @@ import {
   arrivalLine,
   driveLine,
   existingLine,
+  gameAddressHint,
   joinInput,
   joinStep,
   linkKind,
@@ -20,6 +21,7 @@ import {
   linksPointAtOldAddress,
   listenLine,
   localAddressHint,
+  listingLine,
   nextJoin,
   nextPack,
   outcomeLine,
@@ -934,4 +936,98 @@ test("the Drive line tells not configured, not connected and reconnect apart", (
   assert.match(connected.detail, /Geode Packs/);
   assert.match(connected.detail, /cannot see anything else/);
   assert.match(driveLine(driveStatus({ account: null })).title, /^Connected$/);
+});
+
+function described(listing, mcVersion = "1.21.1") {
+  return {
+    name: "Survival",
+    mcVersion,
+    loader: "fabric",
+    loaderVersion: "0.16.9",
+    mods: 4,
+    serverMods: 0,
+    serverKind: "fabric",
+    revision: "r1",
+    serverId: "survival",
+    listing,
+  };
+}
+
+function shareView(extra = {}) {
+  return {
+    code: "GEODE-ABCDE-FGHJK",
+    link: null,
+    includeConfig: false,
+    shared: true,
+    unsupported: null,
+    listing: null,
+    suggested: { name: "Survival", address: null },
+    packAddress: null,
+    ...extra,
+  };
+}
+
+test("a player is told what importing adds to their server list, and only when there is one", () => {
+  const line = listingLine(described({ name: "Survival Club", address: "play.example.com:25566" }));
+  assert.equal(line.tone, "info");
+  assert.match(line.title, /Survival Club/);
+  assert.match(line.detail, /play\.example\.com:25566/);
+  // Their own servers are not touched, and the game rewrites the list when it
+  // closes — both things a player needs before pressing Import, not after.
+  assert.match(line.detail, /own servers are left alone/);
+  assert.match(line.detail, /Close Minecraft first/);
+
+  // Play opens straight into the server only where the version's own manifest
+  // declares quick play, which 1.19.4 and older never did — so an older pack
+  // is told where the row is instead of being promised a jump.
+  assert.match(line.detail, /points Play straight at it/);
+  const old = listingLine(
+    described({ name: "Survival Club", address: "play.example.com:25566" }, "1.19.4"),
+  );
+  assert.doesNotMatch(old.detail, /points Play straight at it/);
+  assert.match(old.detail, /1\.19\.4/);
+  assert.match(old.detail, /Multiplayer screen/);
+  // A snapshot is not a release number this can read, so it is promised
+  // nothing either.
+  const snapshot = listingLine(described({ name: "Survival Club", address: "s" }, "23w31a"));
+  assert.doesNotMatch(snapshot.detail, /points Play straight at it/);
+
+  // A server on a Geode too old to send one, or an admin who set none, says
+  // nothing at all rather than promising something that will not happen.
+  assert.equal(listingLine(described(null)), null);
+  assert.equal(listingLine(described(undefined)), null);
+});
+
+test("the admin is told which address is the pack's and which one players play on", () => {
+  // Saved: both named, and what happens when it changes.
+  const saved = gameAddressHint(
+    shareView({
+      packAddress: "203.0.113.7:25590",
+      listing: { name: "Survival Club", address: "play.example.com:25566" },
+    }),
+  );
+  assert.match(saved, /203\.0\.113\.7:25590/);
+  assert.match(saved, /Geode's port/);
+  assert.match(saved, /play\.example\.com:25566/);
+  assert.match(saved, /nothing downloaded/);
+
+  // Suggested but not saved: the admin is asked to check it, because a
+  // forwarded port is something only they know.
+  const suggested = gameAddressHint(
+    shareView({
+      packAddress: "203.0.113.7:25590",
+      suggested: { name: "Survival", address: "203.0.113.7:25566" },
+    }),
+  );
+  assert.match(suggested, /check it is the one you forwarded/);
+
+  // Nothing to suggest — an https tunnel, or no public address at all — so
+  // the admin is asked rather than given a guess.
+  const asked = gameAddressHint(shareView({ packAddress: "https://pack.example.com" }));
+  assert.match(asked, /cannot work out the game address/);
+  assert.match(asked, /Add Server/);
+  // And with no pack address either, the sentence still stands on its own.
+  const nothing = gameAddressHint(shareView());
+  assert.match(nothing, /Geode's own port/);
+  assert.match(nothing, /cannot work out the game address/);
 });

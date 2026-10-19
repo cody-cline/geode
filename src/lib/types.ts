@@ -96,6 +96,13 @@ export interface Instance {
   joinedRevision?: string | null;
   /** The joined server's id on the admin's machine, kept apart from its password. */
   joinedServerId?: string | null;
+  /**
+   * The game address this instance's row in servers.dat was last written at,
+   * which is how a rename or a move edits that row rather than adding another.
+   */
+  joinedListingAddress?: string | null;
+  /** Whether that row is the player's own, claimed rather than written, so its name is left alone. */
+  joinedListingClaimed?: boolean;
   /** Added by the backend view layer. */
   running: boolean;
   modCount: number;
@@ -657,6 +664,32 @@ export interface SharePackFailed {
   error: string;
 }
 
+/**
+ * How a server appears in its players' multiplayer list: the name they see,
+ * and the address the *game* connects to.
+ *
+ * That address is not the one packs come down. Packs use Geode's own port;
+ * Minecraft connects to the server's server-port, and the two can differ in
+ * host as well as port.
+ */
+export interface Listing {
+  name: string;
+  /** `play.example.com`, or `play.example.com:25566`. Minecraft's own port is left off. */
+  address: string;
+}
+
+/** What to offer the admin before they have set a listing. */
+export interface ListingSuggestion {
+  /** The server's own name. */
+  name: string;
+  /**
+   * A game address worked out from the share address's host and the server's
+   * own server-port — `null` when it cannot be worked out, which is when the
+   * admin has to be asked rather than given a guess.
+   */
+  address: string | null;
+}
+
 export interface ServerShareView {
   /** The server's password, `GEODE-XXXXX-XXXXX`, for reading out or typing. */
   code: string;
@@ -671,6 +704,11 @@ export interface ServerShareView {
   unsupported: string | null;
   /** The address this server's links were last taken at, or null if none has been. Compared with `ShareStatus.address` to say that links already sent lead nowhere. */
   lastLinkAddress: string | null;
+  /** Set by the admin; `null` means no row is written into anybody's list. */
+  listing: Listing | null;
+  suggested: ListingSuggestion;
+  /** The address packs come down, shown beside the game address so the two are not confused. */
+  packAddress: string | null;
 }
 
 /** What a server says it is sharing, shown before a player imports. */
@@ -687,6 +725,12 @@ export interface PackInfo {
   revision: string;
   /** The server's id on the admin's machine; empty from an older Geode. */
   serverId: string;
+  /**
+   * How the server should appear in the player's multiplayer list. Shown
+   * before they import, and re-read on every Play so a rename or a move keeps
+   * the row in step. `null` from an older Geode, or an admin who set none.
+   */
+  listing: Listing | null;
 }
 
 /** A parsed join link. Opaque to the UI: take it from a preview and pass it back to `joinServer`. */

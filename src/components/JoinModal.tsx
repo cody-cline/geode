@@ -10,6 +10,7 @@ import {
   existingLine,
   joinInput,
   joinStep,
+  listingLine,
   outcomeLine,
   verificationLine,
 } from "../lib/share";
@@ -192,6 +193,8 @@ export default function JoinModal({
 
   const info = preview?.info;
   const loader = info ? softwareName(info.loader) : "";
+  /** What importing will add to the player's multiplayer list, if anything. */
+  const willList = info ? listingLine(info) : null;
 
   if (step === "done") {
     return (
@@ -405,8 +408,17 @@ export default function JoinModal({
               <dd>{info.mods === 0 ? "None" : info.mods}</dd>
               <dt>Server</dt>
               <dd>{softwareName(info.serverKind)}</dd>
-              <dt>Address</dt>
+              {/* Two addresses, named apart. The pack comes from the first;
+                  the game connects to the second, and a player who reads one
+                  for the other types a port nothing answers on. */}
+              <dt>Pack from</dt>
               <dd className={styles.mono}>{preview.address}</dd>
+              {info.listing && (
+                <>
+                  <dt>Play on</dt>
+                  <dd className={styles.mono}>{info.listing.address}</dd>
+                </>
+              )}
             </dl>
           </div>
 
@@ -430,6 +442,10 @@ export default function JoinModal({
           )}
 
           <StatusNote line={verificationLine(preview.verified, typed)} />
+
+          {/* Said before Import rather than after: it is the one thing an
+              import writes outside the instance's own folders. */}
+          {willList && <StatusNote line={willList} />}
 
           {preview.existing && <StatusNote line={existingLine(preview.existing)} />}
 

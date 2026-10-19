@@ -517,6 +517,9 @@ export const api = {
   /** Call this when the admin takes the link, so Geode can tell them later if the address it points at has changed. */
   shareLinkCopied: (id: string) =>
     invoke<ServerShareView>("share_link_copied", { id }),
+  /** How this server appears in players' multiplayer lists. An empty name means the server's own. */
+  setServerListing: (id: string, name: string, address: string) =>
+    invoke<ServerShareView>("set_server_listing", { id, name, address }),
   rotateServerShareCode: (id: string) =>
     invoke<ServerShareView>("rotate_server_share_code", { id }),
 

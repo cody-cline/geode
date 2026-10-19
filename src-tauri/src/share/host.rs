@@ -282,6 +282,16 @@ pub struct PackInfo {
     /// this.
     #[serde(default)]
     pub server_id: String,
+    /// How the server should appear in its players' multiplayer list: shown to
+    /// a player before they import, and re-read on every Play afterwards.
+    ///
+    /// This is the carrier that keeps the row in step. It is deliberately
+    /// *not* part of `revision`: a rename would otherwise re-download the
+    /// whole pack for every player, and the revision already leaves the
+    /// server's own name out for that very reason. `None` from a Geode older
+    /// than this, and from an admin who has not set one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listing: Option<super::manifest::Listing>,
 }
 
 /// A running pack server.
@@ -1296,6 +1306,7 @@ pub(super) mod tests {
             &ServerShare {
                 code: code.clone(),
                 include_config: false,
+                listing: None,
                 shared: true,
             },
         )
@@ -1575,6 +1586,7 @@ pub(super) mod tests {
         ServerShare {
             code: code.clone(),
             include_config: false,
+            listing: None,
             shared: true,
         }
     }
@@ -1767,6 +1779,7 @@ pub(super) mod tests {
         let without = shared_with(&code);
         let with = ServerShare {
             include_config: true,
+            listing: None,
             ..without.clone()
         };
         let shared = |share: &ServerShare| Shared {
@@ -2217,6 +2230,7 @@ pub(super) mod tests {
             server_kind: "fabric".into(),
             revision: "r".into(),
             server_id: "survival".into(),
+            listing: None,
         }
     }
 
@@ -2688,6 +2702,7 @@ pub(super) mod tests {
         let replaced = ServerShare {
             code: Code::generate(),
             include_config: false,
+            listing: None,
             shared: true,
         };
         crate::server::share::save(&scratch.paths, &server.id, &replaced)

@@ -482,7 +482,7 @@ impl Server {
 /// file beside the target, so the rename stays on one filesystem, and reach
 /// the disk before the rename, so a crash leaves the old file rather than an
 /// empty new one.
-async fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+pub(crate) async fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     use std::sync::atomic::{AtomicU64, Ordering};
     use tokio::io::AsyncWriteExt;
 

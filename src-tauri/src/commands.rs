@@ -2809,11 +2809,19 @@ async fn bring_up_to_date(
     if learned_id {
         inst.joined_server_id = Some(info.server_id.clone());
     }
+
+    // The player's multiplayer list, kept in step from the description just
+    // read — before the early return below, and so on every Play rather than
+    // only when a download is due. A rename or a move is not a content
+    // change, and the listing is deliberately left out of the revision so
+    // that renaming a server does not re-download its pack for every player.
+    let mut notices = reconcile_listing(state, inst, &info).await;
+
     if !update_due(inst.joined_revision.as_deref(), &info.revision) {
         if learned_id {
             save_learned_id(&state.paths, &inst.id, &info.server_id).await?;
         }
-        return Ok(Vec::new());
+        return Ok(notices);
     }
 
     let archive =
@@ -2857,7 +2865,6 @@ async fn bring_up_to_date(
     inst.joined_revision = Some(report.revision.clone().unwrap_or(info.revision));
     save_update(&state.paths, inst).await?;
 
-    let mut notices = Vec::new();
     if !report.turned_off.is_empty() {
         notices.push(own_copies_off(&report.turned_off));
     }
@@ -2885,6 +2892,98 @@ async fn save_update(paths: &crate::paths::Paths, updated: &Instance) -> Result<
     inst.pack = updated.pack.clone();
     inst.joined_server_id = updated.joined_server_id.clone();
     inst.joined_revision = updated.joined_revision.clone();
+    inst.save(paths).await
+}
+
+/// Keep this instance's row in the player's multiplayer list in step with the
+/// server it was joined from.
+///
+/// The admin renaming the server, or moving it to a new address, edits the row
+/// rather than adding a second one — `instance::multiplayer` spells out how
+/// the row is recognised again and why it is remembered on this side. A server
+/// with no listing set, or one on a Geode too old to send one, changes nothing
+/// and says nothing.
+///
+/// Returns what the player should hear about once the game is on its way, so
+/// nothing here stops a launch: a row that could not be written leaves them
+/// with a playable instance and one address to type by hand.
+async fn reconcile_listing(
+    state: &AppState,
+    inst: &mut Instance,
+    info: &share::host::PackInfo,
+) -> Vec<String> {
+    // Checked rather than trusted. This came off the network, and a name that
+    // would garble somebody's server list is better dropped than written.
+    let Some(listing) = info.listing.as_ref().and_then(|l| l.checked().ok()) else {
+        return Vec::new();
+    };
+    let settled = inst.joined_listing_address.as_deref() == Some(listing.address.as_str());
+
+    // Nothing is written underneath a running game. Minecraft holds the list
+    // in memory and rewrites `servers.dat` whole from it when the player
+    // changes their servers, so a row added now is thrown away then.
+    //
+    // Play reconciles before it launches, so this can only be reached by
+    // pressing Play on an instance that is already running. It is said only
+    // when the address has moved — which includes the first time, when there
+    // is no row yet — because that is the change worth interrupting somebody
+    // for. A rename on its own waits for the next Play without a word: the
+    // row is there and it works, it is only called what it was called before.
+    if state.games.is_running(&inst.id) {
+        if settled {
+            return Vec::new();
+        }
+        return vec![format!(
+            "Close Minecraft and press Play again to get {} into your multiplayer list — \
+             the game rewrites that list when it closes, so adding it now would not last.",
+            listing.name
+        )];
+    }
+
+    let game_dir = state.paths.game_dir(&inst.id);
+    let wrote = match instance::multiplayer::ensure(
+        &game_dir,
+        &listing.name,
+        &listing.address,
+        share::pack::our_row(inst),
+    )
+    .await
+    {
+        Ok(wrote) => wrote,
+        Err(e) => {
+            return vec![format!(
+                "{} could not be added to this instance's multiplayer list, so add it by hand: {} at {}. {e}",
+                listing.name, listing.name, listing.address
+            )]
+        }
+    };
+
+    // Only once the row is really there, and only when it has moved or changed
+    // hands: pointing Play somewhere new is the player's business, and a server
+    // that was merely renamed has not moved anywhere.
+    let claimed = wrote == instance::multiplayer::Wrote::Claimed;
+    if settled && claimed == inst.joined_listing_claimed {
+        return Vec::new();
+    }
+    share::pack::listed(inst, &listing.address, wrote);
+    // A save that fails leaves the row written and only the note of where it
+    // stands missing. The next Play finds that row by its address and claims
+    // it, so there is nothing here a player would ever see.
+    let _ = save_listing(&state.paths, inst).await;
+    Vec::new()
+}
+
+/// Record where this instance's row stands and where Play goes, and nothing
+/// else.
+///
+/// Narrow for the same reason as [`save_learned_id`]: the launch loaded its
+/// copy of the instance before any of this ran, and a name or a setting the
+/// player changed since is not this command's to put back.
+async fn save_listing(paths: &crate::paths::Paths, updated: &Instance) -> Result<()> {
+    let mut inst = instance::load(paths, &updated.id).await?;
+    inst.joined_listing_address = updated.joined_listing_address.clone();
+    inst.joined_listing_claimed = updated.joined_listing_claimed;
+    inst.overrides.quick_play_server = updated.overrides.quick_play_server.clone();
     inst.save(paths).await
 }
 
@@ -3335,6 +3434,16 @@ pub struct ServerShareView {
     /// taken one. What the Share tab goes by to say the address has moved on
     /// since, and that those links lead nowhere now.
     pub last_link_address: Option<String>,
+    /// How this server appears in its players' multiplayer list, once the
+    /// admin has said. `None` means no row is written for anybody.
+    pub listing: Option<share::manifest::Listing>,
+    /// What to offer them before they have: the server's own name, and a game
+    /// address worked out from what is already known — or nothing to put in
+    /// that field, when it cannot be worked out.
+    pub suggested: crate::server::share::Suggestion,
+    /// The address packs come down, shown beside the game address so the two
+    /// cannot be mistaken for each other. `None` while none is known.
+    pub pack_address: Option<String>,
 }
 
 async fn share_view(
@@ -3353,6 +3462,13 @@ async fn share_view(
         .local_link_for(&state.paths, &config.share, share)
         .await
         .map(|link| link.to_url());
+    // The address this machine is reachable at, whether or not the listener is
+    // up: a link needs one that works *now*, but a suggestion for a settings
+    // field is only "what would this be", and withholding it while the
+    // listener is down would ask the admin to type what Geode knows.
+    let status = state.share.status(&state.paths, &config.share).await;
+    let reachable =
+        share::service::reachable_address(&config.share, &status.mapping, status.detected);
     ServerShareView {
         code: share.code.display(),
         link,
@@ -3361,7 +3477,47 @@ async fn share_view(
         shared: share.shared,
         unsupported: share::pack::client_loader(server).err().map(|e| e.to_string()),
         last_link_address: crate::server::share::link_address(&state.paths, &server.id).await,
+        listing: share.listing.clone(),
+        suggested: crate::server::share::suggest(&state.paths, server, reachable.as_ref()).await,
+        pack_address: reachable.map(|address| address.display()),
     }
+}
+
+/// Set how this server appears in its players' multiplayer list.
+///
+/// An empty name means the server's own, rather than an empty row. The address
+/// is the one players type into Minecraft's Add Server, which is **not** the
+/// address packs come down — [`share::link::game_address`] is what refuses the
+/// confusions, including an `https://` share address pasted in by mistake.
+///
+/// Players hear about a change on their next Play, through the server's own
+/// description, with nothing downloaded: a rename is not a reason to send
+/// everybody a pack again.
+#[tauri::command]
+pub async fn set_server_listing(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+    address: String,
+) -> Result<ServerShareView> {
+    let server = crate::server::load(&state.paths, &id).await?;
+    let mut share = crate::server::share::load(&state.paths, &id)
+        .await?
+        .ok_or_else(|| Error::msg("this server has not been shared yet — share it first"))?;
+
+    let name = match name.trim() {
+        "" => server.name.clone(),
+        typed => typed.to_string(),
+    };
+    share.listing = Some(
+        share::manifest::Listing {
+            name,
+            address,
+        }
+        .checked()?,
+    );
+    crate::server::share::save(&state.paths, &id, &share).await?;
+    Ok(share_view(&state, &server, &share).await)
 }
 
 /// Start or stop the pack server to match what is shared now.
@@ -3427,18 +3583,12 @@ fn check_public_address(address: &str, port: u16) -> Result<()> {
         .map_err(|e| Error::msg(format!("that public address cannot be used: {e}")))?;
 
     // An address nobody else can connect to: every player would reach their
-    // own machine, or nothing.
-    if let share::link::Address::Direct { host, .. } = &parsed {
-        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-            let unusable = ip.is_unspecified()
-                || ip.is_multicast()
-                || matches!(ip, std::net::IpAddr::V4(v4) if v4.is_broadcast());
-            if unusable {
-                return Err(Error::msg(format!(
-                    "{ip} is not an address players can connect to — use this machine's public address, or a domain or tunnel"
-                )));
-            }
-        }
+    // own machine, or nothing. The same test a game address is held to, so
+    // the two cannot drift apart.
+    if let Some(ip) = parsed.unreachable_ip() {
+        return Err(Error::msg(format!(
+            "{ip} is not an address players can connect to — use this machine's public address, or a domain or tunnel"
+        )));
     }
 
     // Built into a real link and read back, exactly as a player's Geode will:
@@ -3881,7 +4031,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let share = ServerShare { code: Code::generate(), include_config: false, shared: true };
+        let share = ServerShare { code: Code::generate(), include_config: false, listing: None, shared: true };
         crate::server::share::save(paths, &server.id, &share).await.unwrap();
         (server, share)
     }
@@ -5097,6 +5247,312 @@ mod tests {
             view.last_link_address, None,
             "a stopped share still offered the list an address to badge"
         );
+    }
+
+    /// An instance joined from a server, with a multiplayer list of the
+    /// player's own already in it.
+    async fn joined_instance(paths: &Paths, id: &str) -> Instance {
+        let mut inst = instance::create(
+            paths,
+            id.into(),
+            "1.21.1".into(),
+            crate::meta::Loader::Fabric,
+            "0.16.9".into(),
+        )
+        .await
+        .unwrap();
+        inst.id = id.to_string();
+        inst.joined = Some(Link {
+            address: Address::Direct { host: "127.0.0.1".into(), port: 25590 },
+            code: Code::generate(),
+            pin: Some(Pin([1; 32])),
+        });
+        inst.save(paths).await.unwrap();
+        inst
+    }
+
+    fn described_with(listing: Option<share::manifest::Listing>) -> share::host::PackInfo {
+        share::host::PackInfo {
+            name: "Survival".into(),
+            mc_version: "1.21.1".into(),
+            loader: "fabric".into(),
+            loader_version: "0.16.9".into(),
+            mods: 1,
+            server_mods: 0,
+            server_kind: "fabric".into(),
+            revision: "r1".into(),
+            server_id: "survival".into(),
+            listing,
+        }
+    }
+
+    fn listing(name: &str, address: &str) -> share::manifest::Listing {
+        share::manifest::Listing {
+            name: name.into(),
+            address: address.into(),
+        }
+    }
+
+    fn list_text(paths: &Paths, id: &str) -> String {
+        let file = instance::multiplayer::file(&paths.game_dir(id));
+        String::from_utf8_lossy(&std::fs::read(file).unwrap_or_default()).to_string()
+    }
+
+    fn rows(paths: &Paths, id: &str) -> usize {
+        let text = list_text(paths, id);
+        text.matches("hidden").count()
+    }
+
+    /// The admin renaming the server, or moving it, edits the one row rather
+    /// than adding another beside it — and a description with no listing in
+    /// it, which is what an older admin's Geode sends, changes nothing.
+    ///
+    /// Reconcile only when an update is due — the obvious shortcut — and the
+    /// row stays at the old address, because a rename deliberately does not
+    /// move the revision.
+    #[tokio::test]
+    async fn a_renamed_server_moves_the_row_instead_of_adding_a_second() {
+        let player = Scratch::new("cmd-listing-step");
+        let paths = player.paths.clone();
+        let state = AppState::new(paths.clone(), crate::config::Config::default());
+        let mut inst = joined_instance(&paths, "joined").await;
+
+        // A description from a Geode too old to carry one touches nothing.
+        assert!(reconcile_listing(&state, &mut inst, &described_with(None)).await.is_empty());
+        assert_eq!(inst.joined_listing_address, None);
+        assert!(!instance::multiplayer::file(&paths.game_dir("joined")).exists());
+
+        // The first description that carries one writes the row.
+        let first = described_with(Some(listing("Survival", "play.example.com")));
+        assert!(reconcile_listing(&state, &mut inst, &first).await.is_empty());
+        assert_eq!(inst.joined_listing_address.as_deref(), Some("play.example.com"));
+        assert_eq!(inst.overrides.quick_play_server.as_deref(), Some("play.example.com"));
+        assert_eq!(rows(&paths, "joined"), 1);
+        assert!(list_text(&paths, "joined").contains("Survival"));
+        // Written where the launch can read it back, not only onto the copy
+        // the launch is holding.
+        assert_eq!(
+            instance::load(&paths, "joined").await.unwrap().joined_listing_address.as_deref(),
+            Some("play.example.com")
+        );
+
+        // The same description again writes nothing and says nothing.
+        let before = std::fs::read(instance::multiplayer::file(&paths.game_dir("joined"))).unwrap();
+        assert!(reconcile_listing(&state, &mut inst, &first).await.is_empty());
+        assert_eq!(
+            std::fs::read(instance::multiplayer::file(&paths.game_dir("joined"))).unwrap(),
+            before
+        );
+
+        // Renamed and moved: one row, at the new address, under the new name.
+        let moved = described_with(Some(listing("Survival Reborn", "moved.example.com:25566")));
+        assert!(reconcile_listing(&state, &mut inst, &moved).await.is_empty());
+        assert_eq!(rows(&paths, "joined"), 1, "a move added a second row");
+        let text = list_text(&paths, "joined");
+        assert!(text.contains("Survival Reborn"), "{text}");
+        assert!(text.contains("moved.example.com:25566"), "{text}");
+        assert!(!text.contains("play.example.com"), "the old address is still there: {text}");
+        assert_eq!(
+            inst.overrides.quick_play_server.as_deref(),
+            Some("moved.example.com:25566")
+        );
+
+        // A name a player's list could not show is dropped rather than
+        // written, and nothing else moves with it.
+        let garbled = described_with(Some(listing("Bad\nName", "moved.example.com:25566")));
+        assert!(reconcile_listing(&state, &mut inst, &garbled).await.is_empty());
+        assert!(list_text(&paths, "joined").contains("Survival Reborn"));
+    }
+
+    /// A row the player added by hand keeps the name they gave it on every
+    /// Play, not only the first one.
+    ///
+    /// Break it by recording a claimed row as one of Geode's and the next Play
+    /// cannot tell it from ours: it renames their row to the admin's name and
+    /// rewrites the address they typed.
+    #[tokio::test]
+    async fn a_row_the_player_added_by_hand_keeps_their_name_on_every_play() {
+        let player = Scratch::new("cmd-listing-claimed");
+        let paths = player.paths.clone();
+        let state = AppState::new(paths.clone(), crate::config::Config::default());
+        let mut inst = joined_instance(&paths, "claimed").await;
+
+        // Theirs, added before they ever joined: their own name for it, and
+        // the address spelled the way they typed it.
+        instance::multiplayer::ensure(
+            &paths.game_dir("claimed"),
+            "My Server",
+            "play.example.com",
+            None,
+        )
+        .await
+        .unwrap();
+
+        let info = described_with(Some(listing("Survival Club", "play.example.com")));
+        for play in 1..=2 {
+            assert!(reconcile_listing(&state, &mut inst, &info).await.is_empty());
+            let text = list_text(&paths, "claimed");
+            assert!(text.contains("My Server"), "play {play} took their name: {text}");
+            assert!(!text.contains("Survival Club"), "play {play} took their name: {text}");
+            assert_eq!(rows(&paths, "claimed"), 1, "play {play} added a second row");
+        }
+
+        // Play still goes there, and the row is remembered as theirs — which
+        // is what keeps the Play after this one off it as well.
+        assert_eq!(
+            inst.overrides.quick_play_server.as_deref(),
+            Some("play.example.com")
+        );
+        assert!(inst.joined_listing_claimed);
+        assert!(
+            instance::load(&paths, "claimed").await.unwrap().joined_listing_claimed,
+            "whose row it is was not written where the next launch reads it"
+        );
+    }
+
+    /// Minecraft rewrites `servers.dat` whole from memory when it closes, so a
+    /// row added underneath a running game is thrown away then. Nothing is
+    /// written, and the player is told why.
+    #[tokio::test]
+    async fn the_row_is_not_written_while_the_game_is_running_and_the_player_is_told() {
+        let player = Scratch::new("cmd-listing-running");
+        let paths = player.paths.clone();
+        let state = AppState::new(paths.clone(), crate::config::Config::default());
+        let mut inst = joined_instance(&paths, "playing").await;
+        state
+            .games
+            .insert("playing".into(), crate::launch::RunningGame::none_really());
+
+        let info = described_with(Some(listing("Survival", "play.example.com")));
+        let notices = reconcile_listing(&state, &mut inst, &info).await;
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("Close Minecraft"), "{}", notices[0]);
+        assert!(notices[0].contains("Survival"), "{}", notices[0]);
+        assert!(
+            !instance::multiplayer::file(&paths.game_dir("playing")).exists(),
+            "a list was written under a running game"
+        );
+        assert_eq!(inst.joined_listing_address, None);
+
+        // Once the game is closed, the next Play lands it.
+        state.games.remove("playing");
+        assert!(reconcile_listing(&state, &mut inst, &info).await.is_empty());
+        assert_eq!(rows(&paths, "playing"), 1);
+
+        // And with the row already where it should be, pressing Play on a
+        // running instance says nothing: there is nothing waiting to land.
+        state
+            .games
+            .insert("playing".into(), crate::launch::RunningGame::none_really());
+        assert!(reconcile_listing(&state, &mut inst, &info).await.is_empty());
+    }
+
+    /// Through the whole of Play, over real TLS on loopback: the row lands
+    /// **while no update is due and nothing is downloaded**, because the
+    /// listing rides the description and is deliberately not part of the
+    /// revision.
+    ///
+    /// This is the one that pins the ordering. Reconcile below the
+    /// `update_due` early return instead of above it — the obvious shortcut —
+    /// and an instance already holding the server's content never gets a row
+    /// at all, because a listing does not move the revision.
+    ///
+    /// Only the first Play is here. A second would be answered from the
+    /// description the host worked out for this one, which it reuses for
+    /// `PREVIEW_FRESH`, so what a rename does to the row is pinned by
+    /// `a_renamed_server_moves_the_row_instead_of_adding_a_second` instead —
+    /// without five seconds of waiting in the suite.
+    #[tokio::test]
+    async fn the_row_lands_on_a_play_with_no_update_due_and_no_download() {
+        let admin = Scratch::new("cmd-step-admin");
+        let (server, mut share) = shared_server(&admin.paths).await;
+        let listed = |name: &str, address: &str| share::manifest::Listing {
+            name: name.into(),
+            address: address.into(),
+        };
+        share.listing = Some(listed("Survival Club", "play.example.com"));
+        crate::server::share::save(&admin.paths, &server.id, &share).await.unwrap();
+
+        let host = share::host::Host::start(admin.paths.clone(), 0, None).await.unwrap();
+        let pin = share::identity::Identity::load_or_create(&admin.paths)
+            .await
+            .unwrap()
+            .pin();
+        let written = Link {
+            address: Address::Direct { host: "127.0.0.1".into(), port: host.local_addr.port() },
+            code: share.code.clone(),
+            pin: Some(pin),
+        };
+        // Through the real parser, as a player's Geode reads one.
+        let link = Link::parse(&written.to_url()).unwrap();
+
+        let player = Scratch::new("cmd-step-player");
+        let paths = player.paths.clone();
+        let state = AppState::new(paths.clone(), crate::config::Config::default());
+        let mut inst = joined_instance(&paths, "stepping").await;
+        inst.joined = Some(link);
+        // Already holding the server's current content, so no update is due
+        // and nothing should be downloaded by any of this.
+        let current = share::pack::server_pack_info(&admin.paths, &server).await.unwrap();
+        inst.joined_revision = Some(current.revision.clone());
+        inst.save(&paths).await.unwrap();
+
+        let notices = bring_up_to_date(&state, &mut inst, &Progress::silent("t"))
+            .await
+            .unwrap();
+        assert!(notices.is_empty(), "{notices:?}");
+        assert_eq!(rows(&paths, "stepping"), 1);
+        assert!(list_text(&paths, "stepping").contains("Survival Club"));
+        assert_eq!(
+            inst.joined_revision.as_deref(),
+            Some(current.revision.as_str()),
+            "the pack was downloaded for a listing"
+        );
+
+        // Recorded where the launch can read it back, not only onto the copy
+        // the launch is holding.
+        assert_eq!(
+            instance::load(&paths, "stepping").await.unwrap().joined_listing_address.as_deref(),
+            Some("play.example.com")
+        );
+
+        // And renaming or moving the server leaves the revision where it is,
+        // so none of this ever costs a player a download.
+        share.listing = Some(listed("Survival Reborn", "moved.example.com:25566"));
+        crate::server::share::save(&admin.paths, &server.id, &share).await.unwrap();
+        assert_eq!(
+            share::pack::server_pack_info(&admin.paths, &server).await.unwrap().revision,
+            current.revision,
+            "a rename moved the revision, so every player re-downloads the pack"
+        );
+
+        host.stop().await;
+    }
+
+    /// A list Geode cannot read is left alone, and the player is given the
+    /// server's name and address to add by hand rather than a failed launch.
+    #[tokio::test]
+    async fn a_list_that_cannot_be_read_stops_nothing_and_is_reported() {
+        let player = Scratch::new("cmd-listing-broken");
+        let paths = player.paths.clone();
+        let state = AppState::new(paths.clone(), crate::config::Config::default());
+        let mut inst = joined_instance(&paths, "broken").await;
+
+        let file = instance::multiplayer::file(&paths.game_dir("broken"));
+        tokio::fs::write(&file, b"this is not NBT at all").await.unwrap();
+
+        let info = described_with(Some(listing("Survival", "play.example.com")));
+        let notices = reconcile_listing(&state, &mut inst, &info).await;
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("play.example.com"), "{}", notices[0]);
+        assert!(notices[0].contains("by hand"), "{}", notices[0]);
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            b"this is not NBT at all",
+            "a list Geode could not read was written over"
+        );
+        // Nothing recorded, so the next Play tries again.
+        assert_eq!(inst.joined_listing_address, None);
     }
 }
 

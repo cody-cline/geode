@@ -15,6 +15,7 @@ import StatusNote from "../../components/StatusNote";
 import { api, errorMessage } from "../../lib/api";
 import {
   addressChangedLine,
+  gameAddressHint,
   linkPendingReason,
   listenLine,
   localAddressHint,
@@ -100,11 +101,37 @@ export default function ShareTab({ server }: { server: Server }) {
   const [share, setShare] = useState<ServerShareView | null | undefined>(undefined);
   const [shareError, setShareError] = useState<string | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<"share" | "config" | "rotate" | "stop" | null>(null);
+  const [busy, setBusy] = useState<
+    "share" | "config" | "listing" | "rotate" | "stop" | null
+  >(null);
   const [confirming, setConfirming] = useState<"rotate" | "stop" | null>(null);
+  /**
+   * The two listing fields while the admin is editing them. `null` means they
+   * have not touched them, so what is shown is what the backend last said —
+   * the stored pair, or its suggestion.
+   */
+  const [editing, setEditing] = useState<{ name: string; address: string } | null>(null);
 
   const hasPublicAddress = Boolean(config?.share.publicAddress);
   const changed = addressChangedLine(status, share?.lastLinkAddress ?? null);
+
+  /**
+   * What the two listing fields hold: the admin's edits, else the saved pair,
+   * else the suggestion. A suggested address of null leaves the field empty,
+   * which is the honest answer when Geode cannot work one out.
+   */
+  const fields =
+    editing ??
+    (share
+      ? {
+          name: share.listing?.name ?? share.suggested.name,
+          address: share.listing?.address ?? share.suggested.address ?? "",
+        }
+      : null);
+  const listingChanged =
+    Boolean(share) &&
+    Boolean(fields) &&
+    (fields!.name !== share!.listing?.name || fields!.address !== share!.listing?.address);
 
   useEffect(() => {
     loadShareStatus()
@@ -183,6 +210,24 @@ export default function ShareTab({ server }: { server: Server }) {
       void refreshServers();
     } catch {
       /* the link is on the clipboard either way */
+    }
+  }
+
+  async function saveListing() {
+    if (!fields) return;
+    const view = await run("listing", "Could not save how players see this server", () =>
+      api.setServerListing(server.id, fields.name, fields.address),
+    );
+    if (view) {
+      setShare(view);
+      // Back to showing what the backend says, which is the saved pair
+      // normalised — `play.example.com:25565` comes back without the port.
+      setEditing(null);
+      toast({
+        kind: "success",
+        title: "Saved",
+        body: `Players get ${view.listing?.name ?? server.name} in their server list the next time they press Play.`,
+      });
     }
   }
 
@@ -405,7 +450,9 @@ export default function ShareTab({ server }: { server: Server }) {
                 needs both, and outside a link the address — its port above
                 all — is shown nowhere else. */}
             <div>
-              <span className="label">Address and password</span>
+              {/* "Pack", because the game address is a field of its own just
+                  below and an unqualified "address" is the confusion itself. */}
+              <span className="label">Pack address and password</span>
               <div className={styles.readOut}>
                 {status?.address && (
                   <div className={styles.copyRow}>
@@ -450,6 +497,73 @@ export default function ShareTab({ server }: { server: Server }) {
                   )}
                 </div>
                 <p className="hint">{localAddressHint(status)}</p>
+              </div>
+            )}
+
+            {/* The game address, beside the pack address above rather than
+                anywhere else, because the one mistake this screen can cause is
+                an admin reading the pack port as the one players connect on. */}
+            {fields && (
+              <div>
+                <span className="label">In players&apos; server lists</span>
+                <div className={styles.pair}>
+                  <div>
+                    <label className="label" htmlFor="listing-name">
+                      Server name
+                    </label>
+                    <input
+                      id="listing-name"
+                      className="input"
+                      value={fields.name}
+                      placeholder={share.suggested.name}
+                      maxLength={64}
+                      spellCheck={false}
+                      disabled={busy !== null}
+                      onChange={(e) =>
+                        setEditing({ ...fields, name: e.target.value })
+                      }
+                      onKeyDown={(e) => e.key === "Enter" && void saveListing()}
+                    />
+                  </div>
+                  <div>
+                    <label className="label" htmlFor="listing-address">
+                      Game address
+                    </label>
+                    <input
+                      id="listing-address"
+                      className={clsx("input", styles.mono)}
+                      value={fields.address}
+                      placeholder="play.example.com:25565"
+                      spellCheck={false}
+                      autoComplete="off"
+                      disabled={busy !== null}
+                      onChange={(e) =>
+                        setEditing({ ...fields, address: e.target.value })
+                      }
+                      onKeyDown={(e) => e.key === "Enter" && void saveListing()}
+                    />
+                  </div>
+                </div>
+                <p className="hint">{gameAddressHint(share)}</p>
+                {listingChanged && (
+                  <div className={styles.actions}>
+                    <button
+                      className="btn btn-primary"
+                      onClick={() => void saveListing()}
+                      disabled={busy !== null || !fields.address.trim()}
+                    >
+                      {busy === "listing" && <Loader2 size={14} className="spin" />}
+                      Save
+                    </button>
+                    <button
+                      className="btn"
+                      onClick={() => setEditing(null)}
+                      disabled={busy !== null}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                )}
               </div>
             )}
 

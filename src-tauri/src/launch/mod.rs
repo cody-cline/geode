@@ -197,9 +197,36 @@ pub fn build_plan(
     args.push(version.main_class.clone());
 
     // --- Game ---
+    // Quick play is not a flag to push on the end: it is a *feature* the
+    // version's own manifest declares, with its own conditional argument in
+    // the game args. So the feature is turned on and the manifest emits the
+    // flag itself — which means a version that does not have quick play gets
+    // no flag at all, rather than an argument its own argument parser has
+    // never heard of.
+    //
+    // Checked against Mojang's manifests: 1.20 declares
+    // `is_quick_play_multiplayer`, 1.19.4 does not, and 1.12.2 has no
+    // `arguments` object whatever. Pre-1.20 gets no substitute, and needs
+    // none — the row in `servers.dat` is the answer there, and that works on
+    // every version.
+    //
+    // Set only for the game args, after the classpath and the JVM args are
+    // settled, so no library's own rules are disturbed by it.
+    let mut game_features = features.clone();
+    if let Some(server) = instance
+        .overrides
+        .quick_play_server
+        .as_deref()
+        .map(str::trim)
+        .filter(|server| !server.is_empty())
+    {
+        game_features.insert("is_quick_play_multiplayer".into(), true);
+        vars.insert("quickPlayMultiplayer".into(), server.to_string());
+    }
+
     match (&version.arguments, &version.minecraft_arguments) {
         (Some(arguments), _) if !arguments.game.is_empty() => {
-            args.extend(collect_args(&arguments.game, &vars, &features));
+            args.extend(collect_args(&arguments.game, &vars, &game_features));
         }
         (_, Some(legacy)) => {
             args.extend(legacy.split_whitespace().map(|a| substitute(a, &vars)));
@@ -214,13 +241,6 @@ pub fn build_plan(
         args.push(width.to_string());
         args.push("--height".into());
         args.push(height.to_string());
-    }
-
-    if let Some(server) = &instance.overrides.quick_play_server {
-        if !server.trim().is_empty() {
-            args.push("--quickPlayMultiplayer".into());
-            args.push(server.clone());
-        }
     }
 
     Ok(LaunchPlan {
@@ -253,6 +273,17 @@ pub struct RunningGame {
 impl RunningGame {
     pub fn request_stop(&self) {
         let _ = self.kill.send(true);
+    }
+
+    /// A game registered as running with no process behind it, so a test can
+    /// exercise what Geode refuses to do while one is open.
+    #[cfg(test)]
+    pub fn none_really() -> Self {
+        Self {
+            pid: 0,
+            started_at: std::time::Instant::now(),
+            kill: tokio::sync::watch::channel(false).0,
+        }
     }
 }
 
@@ -433,6 +464,96 @@ mod tests {
     fn handles_unterminated_placeholder() {
         let vars = HashMap::new();
         assert_eq!(substitute("${oops", &vars), "${oops");
+    }
+
+    /// The plan for an instance pointed at a server, on a given version.
+    ///
+    /// `game_args` is the version's own `arguments.game`, in Mojang's JSON, so
+    /// the fixture under test is the shape the real manifests are in rather
+    /// than one of ours.
+    fn plan_for(game_args: serde_json::Value, quick_play: Option<&str>) -> Vec<String> {
+        let version: VersionJson = serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "mainClass": "net.minecraft.client.main.Main",
+            "arguments": { "game": game_args, "jvm": [] },
+        }))
+        .unwrap();
+
+        let mut instance = crate::instance::Instance::new(
+            "Joined".into(),
+            "1.21.1".into(),
+            Loader::Fabric,
+            "0.16.9".into(),
+        );
+        instance.overrides.quick_play_server = quick_play.map(str::to_string);
+
+        let installed = Installed {
+            version_id: "test".into(),
+            version,
+            java: PathBuf::from("/usr/bin/java"),
+            natives_dir: PathBuf::from("/natives"),
+            client_jar: PathBuf::from("/client.jar"),
+            log_config: None,
+        };
+        let session = Session {
+            username: "Steve".into(),
+            uuid: "u".into(),
+            access_token: "t".into(),
+            user_type: "msa",
+        };
+        build_plan(
+            &Paths {
+                root: PathBuf::from("/geode"),
+            },
+            &Config::default(),
+            &instance,
+            &installed,
+            &session,
+        )
+        .unwrap()
+        .args
+    }
+
+    /// The flag comes from the version's own manifest, so a version that does
+    /// not have quick play is passed nothing rather than an argument it has
+    /// never heard of.
+    ///
+    /// Taken from Mojang's own manifests: 1.20 carries this conditional,
+    /// 1.19.4 carries none. Push the flag unconditionally instead — which is
+    /// what this used to do — and the second half of this test fails.
+    #[test]
+    fn quick_play_is_passed_only_by_a_version_that_declares_it() {
+        let declares_it = serde_json::json!([
+            "--username",
+            "${auth_player_name}",
+            {
+                "rules": [{ "action": "allow", "features": { "is_quick_play_multiplayer": true } }],
+                "value": ["--quickPlayMultiplayer", "${quickPlayMultiplayer}"]
+            }
+        ]);
+        let args = plan_for(declares_it.clone(), Some("play.example.com"));
+        let at = args.iter().position(|a| a == "--quickPlayMultiplayer");
+        assert!(at.is_some(), "the flag was not passed: {args:?}");
+        assert_eq!(args[at.unwrap() + 1], "play.example.com");
+
+        // 1.19.4's shape: an `arguments` object with no quick play in it.
+        let does_not = serde_json::json!(["--username", "${auth_player_name}"]);
+        let args = plan_for(does_not, Some("play.example.com"));
+        assert!(
+            !args.iter().any(|a| a.contains("quickPlay")),
+            "a version without quick play was passed it anyway: {args:?}"
+        );
+        // And not the address on its own either, which would be a stray
+        // positional argument.
+        assert!(!args.iter().any(|a| a == "play.example.com"), "{args:?}");
+
+        // An instance pointed at nothing passes nothing, on either version.
+        for shape in [declares_it, serde_json::json!([])] {
+            for server in [None, Some(""), Some("   ")] {
+                let args = plan_for(shape.clone(), server);
+                assert!(!args.iter().any(|a| a.contains("quickPlay")), "{args:?}");
+            }
+        }
     }
 
     #[test]

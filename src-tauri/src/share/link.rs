@@ -33,6 +33,10 @@ use super::packlink::PackLink;
 /// The scheme links are registered under.
 pub const SCHEME: &str = "geode";
 
+/// The port Minecraft connects on when an address names none. Nothing to do
+/// with the port packs come down — see [`game_address`].
+pub const GAME_PORT: u16 = 25565;
+
 /// The longest link or address read, in bytes.
 ///
 /// A link Geode writes is a few hundred bytes. The cap is there so that a
@@ -141,6 +145,73 @@ impl Address {
             Address::Https { url } => url.clone(),
         }
     }
+
+    /// The IP in this address that nobody else could connect to, if that is
+    /// what it is.
+    ///
+    /// Unspecified (`0.0.0.0`, `::`), multicast, and the IPv4 broadcast
+    /// address all parse perfectly well and name no machine a player could
+    /// reach — each one would send every player to their own computer, or to
+    /// nothing. A host *name* is not judged here: where it points is the
+    /// DNS's business and may be right tomorrow.
+    pub fn unreachable_ip(&self) -> Option<std::net::IpAddr> {
+        let Address::Direct { host, .. } = self else {
+            return None;
+        };
+        let ip = host.parse::<std::net::IpAddr>().ok()?;
+        let unusable = ip.is_unspecified()
+            || ip.is_multicast()
+            || matches!(ip, std::net::IpAddr::V4(v4) if v4.is_broadcast());
+        unusable.then_some(ip)
+    }
+}
+
+/// The address players put in Minecraft's own Add Server box, checked and
+/// written the one way it should be stored.
+///
+/// This is **not** the share address. Packs come down Geode's own port; the
+/// game connects to the server's `server-port`, and the two may differ in host
+/// as well as in port. Everything the share address's own rules refuse is
+/// refused here too, because [`Address::parse`] is what does the parsing:
+/// printable ASCII only, no userinfo, bracketed IPv6, DNS-valid host names, no
+/// port 0, and a length cap.
+///
+/// Two things are specific to a game address:
+///
+/// - An `https://` URL is refused. Minecraft connects to a host and a port,
+///   not over HTTP — and an https address is the likeliest wrong paste, since
+///   it may be exactly what the admin's share address looks like.
+/// - What comes back leaves Minecraft's own port off. [`Address::display`]
+///   always writes a port, but the game stores what it was given verbatim, so
+///   `play.example.com:25565` and `play.example.com` are two different rows in
+///   a player's list. Writing the bare host is what matches the one a player
+///   would have typed by hand.
+pub fn game_address(input: &str) -> Result<String> {
+    let parsed = Address::parse(input, GAME_PORT)
+        .map_err(|e| Error::msg(format!("that server address cannot be used: {e}")))?;
+
+    let (host, port) = match &parsed {
+        Address::Direct { host, port } => (host, *port),
+        Address::Https { .. } => {
+            return Err(Error::msg(
+                "Minecraft connects to a host and a port, not to an https:// address — \
+                 give the address players type into Add Server, like play.example.com",
+            ))
+        }
+    };
+    if let Some(ip) = parsed.unreachable_ip() {
+        return Err(Error::msg(format!(
+            "{ip} is not an address players can connect to — use the server's public address, or a domain pointing at it"
+        )));
+    }
+
+    let bracketed = host.contains(':');
+    Ok(match (bracketed, port) {
+        (true, GAME_PORT) => format!("[{host}]"),
+        (true, port) => format!("[{host}]:{port}"),
+        (false, GAME_PORT) => host.clone(),
+        (false, port) => format!("{host}:{port}"),
+    })
 }
 
 impl Link {
@@ -1027,6 +1098,83 @@ mod tests {
         assert!(Link::parse(&pack).is_err(), "a pack link is not a join link");
         for junk in ["geode://packs?drive=a", "geode://", "https://pack.example.com"] {
             assert!(Opened::parse(junk).is_err(), "{junk:?} should be refused");
+        }
+    }
+
+    /// An address that could only ever send a player to their own machine, or
+    /// to nothing. The share setting and the game address refuse the same set
+    /// because they ask the same function — which is the point of it.
+    ///
+    /// Drop the multicast arm and `224.0.0.1` goes through both.
+    #[test]
+    fn a_game_address_nobody_can_connect_to_is_refused() {
+        for text in ["0.0.0.0", "0.0.0.0:25565", "224.0.0.1", "255.255.255.255", "[::]"] {
+            let err = game_address(text).expect_err(text);
+            assert!(
+                err.to_string().contains("not an address players can connect to"),
+                "{text}: {err}"
+            );
+            // And the same address refused as a share address, through the
+            // same test.
+            assert!(
+                Address::parse(text, 25590).unwrap().unreachable_ip().is_some(),
+                "{text} passed as a share address"
+            );
+        }
+        // A host name is not judged on where it points today.
+        assert!(game_address("play.example.com").is_ok());
+        assert!(game_address("203.0.113.7").is_ok());
+        // A loopback address is a real answer for a server on the same
+        // machine, so it is not in the refused set.
+        assert!(game_address("127.0.0.1").is_ok());
+    }
+
+    /// Minecraft does not speak HTTP, and an https address is the likeliest
+    /// wrong paste here, because it is what an admin's share address may be.
+    #[test]
+    fn an_https_tunnel_is_not_a_game_address() {
+        let err = game_address("https://pack.example.com").expect_err("accepted a URL");
+        assert!(err.to_string().contains("host and a port"), "{err}");
+        assert!(err.to_string().contains("Add Server"), "{err}");
+    }
+
+    /// Stored the way a player would have typed it, which is what keeps a
+    /// claim from missing a row they already had.
+    ///
+    /// Return `Address::display()` here instead and every bare host gains
+    /// `:25565`, making it a different row from the one in their list.
+    #[test]
+    fn minecrafts_own_port_is_left_off_and_any_other_is_kept() {
+        assert_eq!(game_address("play.example.com").unwrap(), "play.example.com");
+        assert_eq!(game_address("play.example.com:25565").unwrap(), "play.example.com");
+        assert_eq!(game_address("play.example.com:25566").unwrap(), "play.example.com:25566");
+        // Normalised the way the parser normalises, so one server is written
+        // one way.
+        assert_eq!(game_address("PLAY.Example.COM").unwrap(), "play.example.com");
+        assert_eq!(game_address("203.0.113.7:25565").unwrap(), "203.0.113.7");
+        // IPv6 keeps its brackets, with and without a port: without them the
+        // game cannot tell the address from a port.
+        assert_eq!(game_address("[2001:db8::5]").unwrap(), "[2001:db8::5]");
+        assert_eq!(game_address("[2001:db8::5]:25566").unwrap(), "[2001:db8::5]:25566");
+        assert_eq!(game_address("[2001:DB8::5]:25565").unwrap(), "[2001:db8::5]");
+    }
+
+    /// Everything `Address::parse` refuses is still refused, because that is
+    /// what does the parsing.
+    #[test]
+    fn a_game_address_inherits_the_whole_address_rule_set() {
+        for text in [
+            "",
+            " ",
+            "play example.com",
+            "play.example.com:0",
+            "play.example.com:99999",
+            "2001:db8::5",
+            "1.2.3",
+            "play.example.com|other",
+            "user@play.example.com",
+        ] {
+            assert!(game_address(text).is_err(), "{text:?} was accepted");
         }
     }
 }

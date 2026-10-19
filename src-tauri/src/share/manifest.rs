@@ -84,6 +84,17 @@ pub struct Manifest {
     /// than this, which an older reader ignores in turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<String>,
+    /// In a server's pack, how the server should appear in its players'
+    /// multiplayer list — so a player who imports it can join from the game's
+    /// own screen rather than being handed a title screen and no address.
+    ///
+    /// Deliberately does **not** bump [`FORMAT`]: an older Geode that ignores
+    /// this adds no row, and the instance it builds is right in every other
+    /// respect. That is a miss, not a misread — see [`format_for`].
+    ///
+    /// An instance's pack never carries one. There is no server behind it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listing: Option<Listing>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -91,6 +102,69 @@ pub struct Manifest {
 pub enum Kind {
     Instance,
     Server,
+}
+
+/// How a server should appear in its players' multiplayer list.
+///
+/// Two things, both the admin's to choose: what players see it called, and the
+/// address they connect to *for the game*. That second one is not the address
+/// the pack came down — packs come down Geode's own port, the game connects to
+/// the server's `server-port`, and the two may differ in host as well as port.
+/// Confusing them writes a row that cannot connect, which is why the address
+/// here goes through [`crate::share::link::game_address`] and never through
+/// the share address.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Listing {
+    /// Shown in the player's list. Not held to an address's printable-ASCII
+    /// rule: a name legitimately holds emoji, `§` colour codes and non-Latin
+    /// scripts, which is why the list writer encodes Java's own UTF-8.
+    pub name: String,
+    /// `play.example.com`, or `play.example.com:25566`. Minecraft's own port
+    /// is left off so the string matches what a player would type by hand.
+    pub address: String,
+}
+
+/// The longest [`Listing::name`] stored, in characters.
+///
+/// Ours, not a claim about Minecraft's own Add Server field, whose exact limit
+/// is not something this build knows. It is here so a list stays readable, and
+/// so a name fits an NBT string's own length whatever script it is written in.
+pub const MAX_LISTING_NAME: usize = 64;
+
+impl Listing {
+    /// This listing, fit to write into somebody's multiplayer list — or why it
+    /// is not.
+    ///
+    /// One validator for both sides, so the admin's typing and a pack off the
+    /// network are held to the same rules. The admin is shown the reason; an
+    /// import takes a refusal as "no row", which is the graceful degrade an
+    /// older pack already gets.
+    pub fn checked(&self) -> crate::error::Result<Listing> {
+        use crate::error::Error;
+
+        let name = self.name.trim();
+        if name.is_empty() {
+            return Err(Error::msg("give the server a name for players' server lists"));
+        }
+        // Control characters garble a list rather than appearing in it, and
+        // a newline in an NBT string is a name that reads as two.
+        if name.chars().any(|c| c.is_control()) {
+            return Err(Error::msg(
+                "that name has control characters in it, which would garble a player's server list",
+            ));
+        }
+        let length = name.chars().count();
+        if length > MAX_LISTING_NAME {
+            return Err(Error::msg(format!(
+                "that name is {length} characters — keep it to {MAX_LISTING_NAME} so it fits a player's server list"
+            )));
+        }
+        Ok(Listing {
+            name: name.to_string(),
+            address: crate::share::link::game_address(&self.address)?,
+        })
+    }
 }
 
 /// The launcher-level settings a `.mrpack` has no field for.
@@ -216,6 +290,7 @@ mod tests {
                 disabled: false,
             }],
             revision: None,
+            listing: None,
         }
     }
 
@@ -232,7 +307,7 @@ mod tests {
     #[test]
     fn nothing_optional_is_written_when_it_is_absent() {
         let json = serde_json::to_string(&manifest()).unwrap();
-        for absent in ["group", "banner", "source", "width", "serverKind"] {
+        for absent in ["group", "banner", "source", "width", "serverKind", "listing"] {
             assert!(!json.contains(absent), "{absent} should not be written: {json}");
         }
         // And a file with nothing to say about it carries no flag either.
@@ -306,6 +381,100 @@ mod tests {
             ..plain
         };
         assert_eq!(format_for(&[indexed_off]), 2);
+    }
+
+    /// A listing is an *addition*: an older Geode that does not know the field
+    /// ignores it and adds no row, and the instance it builds is correct in
+    /// every other respect. Refusing such a pack would cost its recipient
+    /// every mod in it to save them a row in a list.
+    ///
+    /// Make `format_for` return 3 for a listing and this fails — which is the
+    /// mistake worth a test, since the field is new and bumping looks tidy.
+    #[test]
+    fn a_listing_does_not_claim_a_newer_format() {
+        let plain = FileNote {
+            path: "mods/sodium.jar".into(),
+            side: None,
+            source: None,
+            disabled: false,
+        };
+        // `format_for` reads the file notes, and a listing is not one of them.
+        assert_eq!(format_for(std::slice::from_ref(&plain)), 1);
+
+        let listed = Manifest {
+            geode_format: format_for(std::slice::from_ref(&plain)),
+            kind: Kind::Server,
+            listing: Some(Listing {
+                name: "Survival".into(),
+                address: "play.example.com".into(),
+            }),
+            files: vec![plain],
+            ..manifest()
+        };
+        assert_eq!(listed.geode_format, 1, "a listing claimed a newer format");
+        assert!(listed.readable());
+
+        // And a reader with no such field reads the rest of the pack, rather
+        // than refusing it — which is what "an older reader" actually does,
+        // since `Manifest` denies no unknown fields.
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct OlderManifest {
+            geode_format: u32,
+            kind: Kind,
+            profile: Profile,
+        }
+        let json = serde_json::to_string(&listed).unwrap();
+        assert!(json.contains("\"listing\""), "{json}");
+        let older: OlderManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!((older.geode_format, older.kind), (1, Kind::Server));
+        assert_eq!(older.profile.name, "Test");
+    }
+
+    /// The two things the admin chooses, round-tripped, and the rules that
+    /// keep a name out of a player's list when it would garble it.
+    #[test]
+    fn a_listing_round_trips_and_a_name_a_list_cannot_show_is_refused() {
+        let listing = Listing {
+            name: "  §aSurvival 🎮  ".into(),
+            address: "PLAY.example.com:25565".into(),
+        };
+        let checked = listing.checked().unwrap();
+        // Trimmed, and the address written the way a player would type it.
+        assert_eq!(checked.name, "§aSurvival 🎮");
+        assert_eq!(checked.address, "play.example.com");
+        let back: Listing = serde_json::from_str(&serde_json::to_string(&checked).unwrap()).unwrap();
+        assert_eq!(back, checked);
+
+        let bad = |name: &str| Listing {
+            name: name.into(),
+            address: "play.example.com".into(),
+        }
+        .checked()
+        .expect_err(&format!("{name:?} was accepted"))
+        .to_string();
+
+        assert!(bad("").contains("give the server a name"));
+        assert!(bad("   ").contains("give the server a name"));
+        assert!(bad("Survival\nNot really").contains("control characters"));
+        assert!(bad("Survival\u{7f}").contains("control characters"));
+        assert!(bad(&"x".repeat(MAX_LISTING_NAME + 1)).contains("characters"));
+        // Right up to the cap is fine, counted in characters rather than
+        // bytes so a non-Latin name is not refused for being itself.
+        assert!(Listing {
+            name: "あ".repeat(MAX_LISTING_NAME),
+            address: "play.example.com".into()
+        }
+        .checked()
+        .is_ok());
+
+        // And the address goes through the one address validator.
+        assert!(Listing {
+            name: "Survival".into(),
+            address: "https://pack.example.com".into()
+        }
+        .checked()
+        .is_err());
     }
 
     #[test]

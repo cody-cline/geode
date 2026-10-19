@@ -2,6 +2,7 @@ pub mod content;
 pub mod jar;
 pub mod logs;
 pub mod modpack;
+pub mod multiplayer;
 
 use serde::{Deserialize, Serialize};
 
@@ -89,6 +90,24 @@ pub struct Instance {
     /// recognised under a new one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub joined_server_id: Option<String>,
+    /// The game address this instance's row in `servers.dat` was last written
+    /// at, which is how the row is found again to rename or move it instead of
+    /// adding a second one beside it.
+    ///
+    /// Remembered here rather than marked inside the row, because Minecraft
+    /// reads a row into an object of known keys and writes only those back —
+    /// so a marker of Geode's own would be destroyed the first time the player
+    /// edited their list. See `instance::multiplayer`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub joined_listing_address: Option<String>,
+    /// Whether that row is one the player wrote, claimed rather than added.
+    ///
+    /// Theirs to name: it is never edited again, only found by its address and
+    /// claimed afresh. Without this, the address alone would make it look like
+    /// a row of Geode's on the next Play, and the name they chose would be
+    /// rewritten to the admin's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub joined_listing_claimed: bool,
 }
 
 /// Where an instance came from, and enough of the source's identity to keep
@@ -180,6 +199,8 @@ impl Instance {
             server_side_mods_off: false,
             joined_revision: None,
             joined_server_id: None,
+            joined_listing_address: None,
+            joined_listing_claimed: false,
         }
     }
 
@@ -313,6 +334,12 @@ pub async fn duplicate(paths: &Paths, id: &str, new_name: String) -> Result<Inst
     copy.server_side_mods_off = false;
     copy.joined_revision = None;
     copy.joined_server_id = None;
+    // The copy has its own `.minecraft`, and the row in it was copied along
+    // with the rest. Forgetting which address it was written at is what keeps
+    // a later change to the server from editing a row this copy no longer
+    // updates from — nothing does.
+    copy.joined_listing_address = None;
+    copy.joined_listing_claimed = false;
 
     copy_dir(&paths.game_dir(id), &paths.game_dir(&copy.id)).await?;
     // The copy keeps the original's `icon` and `banner` names, so the files

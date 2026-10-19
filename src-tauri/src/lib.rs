@@ -226,6 +226,7 @@ pub fn run() {
             commands::unshare_server,
             commands::set_server_share_config,
             commands::share_link_copied,
+            commands::set_server_listing,
             commands::rotate_server_share_code,
             commands::preview_join,
             commands::join_server,
