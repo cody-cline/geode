@@ -848,6 +848,10 @@ pub struct ExportReport {
     /// Files whose bytes travelled only because this format has nowhere to say
     /// a mod is turned off.
     pub embedded_turned_off: usize,
+    /// Files whose bytes travelled because the only platform that names them
+    /// is one whose author turned third-party downloads off. Counted apart
+    /// because no other format would have linked them either.
+    pub embedded_blocked: usize,
     /// Files that could not go into the pack at all, by the nearest readable
     /// form of their name.
     pub unnameable: Vec<String>,
@@ -1121,6 +1125,7 @@ pub async fn write_mrpack(
                     Copied::Unknown => report.embedded_unknown += 1,
                     Copied::Elsewhere => report.embedded_elsewhere += 1,
                     Copied::TurnedOff => report.embedded_turned_off += 1,
+                    Copied::Blocked => report.embedded_blocked += 1,
                 }
                 continue;
             }

@@ -2437,12 +2437,16 @@ mod tests {
     }
 
     /// What the report says travelled as bytes, by reason: nothing named it,
-    /// something did but this format cannot link to it, and it was turned off.
-    fn bundled(report: &ExportReport) -> (usize, usize, usize) {
+    /// something did but this format cannot link to it, it was turned off, and
+    /// its author turned third-party downloads off. Every reason there is, so
+    /// that a file counted under a new one cannot pass for a file that did not
+    /// travel at all.
+    fn bundled(report: &ExportReport) -> (usize, usize, usize, usize) {
         (
             report.embedded_unknown,
             report.embedded_elsewhere,
             report.embedded_turned_off,
+            report.embedded_blocked,
         )
     }
 
@@ -2476,7 +2480,7 @@ mod tests {
         assert!(index_of(&dest).files.is_empty(), "nothing can be indexed");
         // And the reason the sharer is given is the format's, not the mod's:
         // CurseForge has this jar, an `.mrpack` just cannot say so.
-        assert_eq!((report.referenced, bundled(&report)), (0, (0, 1, 0)));
+        assert_eq!((report.referenced, bundled(&report)), (0, (0, 1, 0, 0)));
     }
 
     /// The owner's request, in one test: a jar Geode knows as CurseForge
@@ -2515,7 +2519,7 @@ mod tests {
             "{:?}",
             manifest.files
         );
-        assert_eq!((report.referenced, bundled(&report)), (1, (0, 0, 0)));
+        assert_eq!((report.referenced, bundled(&report)), (1, (0, 0, 0, 0)));
     }
 
     /// A record is no longer the gate. A jar somebody dropped in by hand is
@@ -2573,7 +2577,7 @@ mod tests {
             "{:?}",
             entries(&dest)
         );
-        assert_eq!((report.referenced, bundled(&report)), (0, (1, 0, 0)));
+        assert_eq!((report.referenced, bundled(&report)), (0, (1, 0, 0, 0)));
     }
 
     /// Nothing asked, nothing concluded: an export with no lookup writes the
@@ -2598,6 +2602,7 @@ mod tests {
             Ask::Platforms {
                 client: &offline(),
                 want: &["modrinth"],
+                curseforge_key: None,
             },
             &paths,
             &inst,
@@ -2745,7 +2750,7 @@ mod tests {
             entries(&plain)
         );
         // And the sharer hears the real reason: Modrinth has this mod.
-        assert_eq!((report.referenced, bundled(&report)), (0, (0, 0, 1)));
+        assert_eq!((report.referenced, bundled(&report)), (0, (0, 0, 1, 0)));
     }
 
     /// The off state is a fact about the files, not about the records. A jar

@@ -55,6 +55,13 @@ pub struct PlatformRef {
     /// and for a platform whose packs name ids and resolve the URL at install
     /// time.
     pub url: Option<String>,
+    /// Whether the author lets anyone but the platform's own app fetch this
+    /// file. False only where a platform said so: CurseForge lets an author
+    /// turn third-party downloads off, and Modrinth has no such switch.
+    ///
+    /// A reference nobody can fetch is worse than the bytes, so [`travel`] is
+    /// where this is enforced and nothing else needs to remember it.
+    pub distributable: bool,
 }
 
 /// One file's bytes, and everything that can name them.
@@ -68,6 +75,10 @@ pub struct Identity {
     pub size: u64,
     pub sha1: String,
     pub sha512: String,
+    /// The only name CurseForge knows a file by. `None` whenever no CurseForge
+    /// lookup was going to be made, because taking it costs a second read of
+    /// the file.
+    pub murmur2: Option<u32>,
     /// Which side someone other than the jar said this belongs on — the
     /// record's answer, carried through so a pack's `env` pair does not move
     /// the day a hash lookup starts answering as well.
@@ -94,16 +105,50 @@ pub enum Ask<'a> {
     Platforms {
         client: &'a reqwest::Client,
         want: &'a [&'a str],
+        /// Passed straight through to `providers::curseforge`, exactly as
+        /// every other call site passes it. Nothing here inspects, keeps or
+        /// logs it, and it never appears in a report. `None` means the
+        /// CurseForge arm is skipped and the user is told so, rather than
+        /// guessed around.
+        ///
+        /// It sits on this variant rather than beside it so there is no key to
+        /// hand over when there is nobody to ask — the same reason
+        /// [`Ask::Nobody`] is a shape and not an empty list.
+        curseforge_key: Option<&'a str>,
     },
 }
 
 impl<'a> Ask<'a> {
-    /// What an export asks: Modrinth, because Modrinth is the one platform
-    /// whose answer a pack index can carry as a download.
-    pub fn exporting(client: &'a reqwest::Client) -> Self {
+    /// What an export asks: Modrinth always, and CurseForge only where the
+    /// pack being written has a channel that can carry a reference to it.
+    ///
+    /// Modrinth because its answer is what a pack index carries as a download.
+    /// CurseForge because the Geode half can name a file by its ids — but only
+    /// then, because a CurseForge answer is the one thing here that costs a
+    /// second read of every file in the instance ([`crate::net::digests`]),
+    /// and for a plain `.mrpack` it cannot change what the pack does with a
+    /// single file. The `carry` is the one the writer will use, which is what
+    /// makes asking worth the reading.
+    ///
+    /// What a plain `.mrpack` gives up by not asking: a jar Geode has no
+    /// record of and CurseForge happens to hold is reported as "nothing could
+    /// name it" rather than "a format with a Geode half would link it". The
+    /// pack is the same pack either way, and a jar Geode *did* install from
+    /// CurseForge still reports the sharper reason, because its record says so
+    /// without anybody being asked.
+    pub fn exporting(
+        client: &'a reqwest::Client,
+        curseforge_key: Option<&'a str>,
+        carry: Carry,
+    ) -> Self {
         Self::Platforms {
             client,
-            want: &["modrinth"],
+            want: if carry.notes {
+                &["modrinth", "curseforge"]
+            } else {
+                &["modrinth"]
+            },
+            curseforge_key,
         }
     }
 }
@@ -158,6 +203,7 @@ impl Catalogue {
                             "https://cdn.modrinth.com/data/mr-project/versions/mr-version/uploaded-{}",
                             urlencoding::encode(&i.file_name)
                         )),
+                        distributable: true,
                     },
                 )
             })
@@ -228,9 +274,10 @@ pub enum Travel<'a> {
 
 /// Why a file's bytes had to travel.
 ///
-/// Three different things to tell the sharer, and only one of them is "nobody
-/// has this mod". The other two are limits of the format they picked, which is
-/// something they can act on by picking another.
+/// Four different things to tell the sharer, and only one of them is "nobody
+/// has this mod". Two are limits of the format they picked, which is something
+/// they can act on by picking another, and the last is somebody else's
+/// decision that no format gets around.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Copied {
     /// Nothing could name these bytes.
@@ -241,6 +288,9 @@ pub enum Copied {
     /// Named, with a channel that could carry it, but this pack has nowhere to
     /// say the file is turned off.
     TurnedOff,
+    /// Named, but by a platform whose copy the author has made undownloadable
+    /// to anything but its own app.
+    Blocked,
 }
 
 /// What a pack will do with one file, and why.
@@ -266,6 +316,17 @@ pub fn travel(ident: &Identity, carry: Carry) -> Travel<'_> {
     // state alongside the source it names, so there is nothing more to ask.
     let named_elsewhere = ident.refs.iter().find(|r| r.provider != "modrinth");
     match (carry.notes, named_elsewhere) {
+        // The one place the distribution rule is enforced, so no writer can
+        // get it wrong. An author who turned third-party downloads off has
+        // left the recipient a reference nobody can resolve, and the bytes are
+        // better than that. Reported ahead of the format's own limits because
+        // it is the stronger answer: picking another format would not help.
+        //
+        // Not a refusal to carry the mod. Where the author published the same
+        // bytes on Modrinth themselves, the branch above has already linked it
+        // from there, which is the author's own release and not a way around
+        // them. What is left here is a file only the blocked copy names.
+        (_, Some(reference)) if !reference.distributable => Travel::Copied(Copied::Blocked),
         (true, Some(reference)) => Travel::Named(reference),
         // A platform holds this mod and the pack has nowhere to say so. Worth
         // telling apart from a jar nothing knows: the remedy is a format with
@@ -360,6 +421,30 @@ pub async fn identify(
         return Ok(catalogue);
     }
 
+    // Whether to take each file's murmur2, decided once for the whole run.
+    //
+    // It is all-or-nothing because the second read is the algorithm's and not
+    // ours: CurseForge seeds its state with the number of bytes it is about to
+    // hash, so that count has to be known before any mixing starts. Taking it
+    // only for the files Modrinth turned out not to have would need a
+    // murmur2-only pass after the Modrinth answer — cheaper in bytes read, at
+    // the price of a second entry point into the only place a file's bytes are
+    // read and a second hashing stage in a progress bar that has already
+    // finished one. The trade bought here is one code path and one stage.
+    //
+    // What stops that costing anything for nothing is the caller: asking about
+    // CurseForge at all is a choice about what the pack can say, which is what
+    // [`Ask::exporting`] decides and what keeps a plain `.mrpack` reading
+    // every file once.
+    let want_murmur2 = matches!(
+        ask,
+        Ask::Platforms {
+            want,
+            curseforge_key: Some(_),
+            ..
+        } if want.contains(&"curseforge")
+    );
+
     progress
         .stage("Identifying files", candidates.len() as u64)
         .await;
@@ -378,9 +463,8 @@ pub async fn identify(
             continue;
         }
 
-        // No murmur2: nothing here can use a CurseForge fingerprint yet, and
-        // asking for one reads every file in the instance a second time.
-        let Ok(digests) = crate::net::digests(&root.join(&candidate.disk_rel), false).await else {
+        let Ok(digests) = crate::net::digests(&root.join(&candidate.disk_rel), want_murmur2).await
+        else {
             // Bytes that cannot be read cannot be hashed, named or indexed.
             // The walk still carries the file if it is there to carry.
             continue;
@@ -403,6 +487,7 @@ pub async fn identify(
                 size: digests.size,
                 sha1: digests.sha1,
                 sha512: digests.sha512,
+                murmur2: digests.murmur2,
                 listed_side: record.and_then(|r| r.side),
                 refs: seeded
                     .map(|r| PlatformRef {
@@ -410,6 +495,10 @@ pub async fn identify(
                         project_id: r.project_id.clone(),
                         version_id: r.version_id.clone(),
                         url: None,
+                        // Geode installed this file from there once, so it was
+                        // downloadable then and nothing here has heard
+                        // otherwise. A lookup is what can say it changed.
+                        distributable: true,
                     })
                     .into_iter()
                     .collect(),
@@ -417,23 +506,34 @@ pub async fn identify(
         );
     }
 
-    let Ask::Platforms { client, want } = ask else {
+    let Ask::Platforms {
+        client,
+        want,
+        curseforge_key,
+    } = ask
+    else {
         return Ok(catalogue);
     };
     if want.contains(&"modrinth") {
         ask_modrinth(client, &mut catalogue).await;
     }
-    // stage: CurseForge fingerprints. Until that lands nothing here records
-    // whether CurseForge was asked, because it never is: a CurseForge
-    // reference can only come from a record. So the one honest thing to do
-    // with a file nothing named is say that the asking was incomplete, rather
-    // than let the writer report "no platform has this".
-    if catalogue.identities().any(|i| i.refs.is_empty()) {
-        catalogue.trouble.push(
-            "CurseForge was not asked which of these files it has, so a mod only CurseForge \
-             hosts travels as a copy"
-                .into(),
-        );
+    if want.contains(&"curseforge") {
+        match curseforge_key {
+            Some(key) => ask_curseforge(client, key, &mut catalogue).await,
+            // Nothing is guessed from no key, and nothing is quietly embedded
+            // either: a mod only CurseForge hosts is one the sharer can link by
+            // setting a key, and that is the only part of this they can act on.
+            None => {
+                let nameless = catalogue.identities().filter(|i| i.refs.is_empty()).count();
+                if nameless > 0 {
+                    catalogue.trouble.push(format!(
+                        "CurseForge was not asked about {nameless} files nothing else could name, \
+                         because no API key is set — add one in Settings and the ones it has will \
+                         be linked instead of bundled in"
+                    ));
+                }
+            }
+        }
     }
     Ok(catalogue)
 }
@@ -490,6 +590,10 @@ async fn ask_modrinth(client: &reqwest::Client, catalogue: &mut Catalogue) {
                     // the name on disk: a file renamed since it was installed
                     // has a constructed URL that 404s, and nothing checks it.
                     url: Some(file.url),
+                    // Modrinth has no third-party-download switch for an
+                    // author to turn off, so a match there is always one a
+                    // recipient can fetch.
+                    distributable: true,
                 },
             )
         })
@@ -511,6 +615,7 @@ fn apply_modrinth(
     answer: &HashMap<String, PlatformRef>,
     unanswered: &[String],
 ) {
+    let mut disowned = 0;
     for ident in catalogue.files.values_mut() {
         let hash = ident.sha512.to_lowercase();
         if unanswered.contains(&hash) {
@@ -518,10 +623,149 @@ fn apply_modrinth(
         }
         // Answered, so whatever the record claimed about Modrinth is no longer
         // the answer: either the lookup replaces it, or it is gone.
+        let had = ident.reference("modrinth").is_some();
         ident.refs.retain(|r| r.provider != "modrinth");
-        if let Some(reference) = answer.get(&hash) {
-            ident.refs.push(reference.clone());
+        match answer.get(&hash) {
+            Some(reference) => ident.refs.push(reference.clone()),
+            // Only once nothing is left naming the file: a stale Modrinth
+            // record on a jar CurseForge still names costs it an index entry,
+            // not its reference, and telling the sharer it travels as a copy
+            // would be the wrong sentence about the right file.
+            None if had && ident.refs.is_empty() => disowned += 1,
+            None => {}
         }
+    }
+    if disowned > 0 {
+        catalogue.trouble.push(stale_links("Modrinth", disowned));
+    }
+}
+
+/// What to tell the sharer about links a lookup disowned.
+///
+/// Embedding is the safe direction — a pack's hashes come from the local bytes
+/// while the link would come from the record, so an index entry built on a
+/// stale pair fails every reader's checksum and a CurseForge id pair quietly
+/// installs other bytes — but it is not a thing to do silently. Without this
+/// the sharer is told "nothing could name these mods" about the very files
+/// Geode had written a link down for, which is the opposite of what happened.
+fn stale_links(platform: &str, count: usize) -> String {
+    format!(
+        "{count} file(s) Geode had a {platform} link for are not ones {platform} says it holds \
+         any more, so they travel as copies"
+    )
+}
+
+/// Every file there is a fingerprint to ask about.
+///
+/// Not "every file Modrinth could not name": that is [`travel`]'s preference
+/// order, and it belongs to the two formats that have a Modrinth index rather
+/// than to the question. A CurseForge manifest has no slot for a Modrinth
+/// download, so the files it most needs an answer for are exactly the ones a
+/// `.geodepack` would have indexed instead. Which files are worth asking about
+/// is the caller's choice, made once in [`Ask::exporting`] by not asking at
+/// all, and the fingerprints are already in hand by the time this runs.
+fn fingerprints_to_ask(catalogue: &Catalogue) -> Vec<(ContentKind, String, u32)> {
+    catalogue
+        .files
+        .values()
+        .filter_map(|i| {
+            i.murmur2
+                .map(|fingerprint| (i.kind, i.file_name.clone(), fingerprint))
+        })
+        .collect()
+}
+
+/// Ask CurseForge which of these files it has, by the murmur2 it knows them by.
+async fn ask_curseforge(client: &reqwest::Client, api_key: &str, catalogue: &mut Catalogue) {
+    use crate::providers::curseforge::match_fingerprints;
+
+    let asking = fingerprints_to_ask(catalogue);
+    if asking.is_empty() {
+        return;
+    }
+
+    let fingerprints: Vec<u32> = asking.iter().map(|(_, _, f)| *f).collect();
+    let answer = match match_fingerprints(client, &fingerprints, api_key).await {
+        Ok(answer) => answer,
+        // Reported rather than read as "CurseForge has none of these". A key
+        // that has been revoked, a rate limit or no connection at all would
+        // otherwise disown every stored CurseForge link at once and turn a
+        // geodepack's references into a zip full of jars.
+        //
+        // The error is CurseForge's own sentence, and `providers::curseforge`
+        // never puts the key in one.
+        Err(e) => {
+            catalogue.trouble.push(format!(
+                "CurseForge could not be asked which of these files it has ({e}), \
+                 so only content with a stored link travels as a reference"
+            ));
+            return;
+        }
+    };
+
+    let answer: HashMap<u32, PlatformRef> = answer
+        .into_iter()
+        .map(|(fingerprint, version)| (fingerprint, curseforge_ref(version)))
+        .collect();
+    apply_curseforge(catalogue, &asking, &answer);
+}
+
+/// What CurseForge said about a file, as a reference.
+///
+/// Its own function so the distribution rule can be read — and tested —
+/// without a request in the way.
+fn curseforge_ref(version: crate::providers::Version) -> PlatformRef {
+    PlatformRef {
+        provider: "curseforge".into(),
+        project_id: version.project_id,
+        version_id: version.id,
+        // Always `None`: a CurseForge pack names ids and nothing else, and the
+        // recipient resolves the URL with their own key at install time, which
+        // is what makes an author's decision today the one that counts rather
+        // than the one that held when somebody else exported.
+        url: None,
+        // `blocked_reason` is set for exactly one thing: a file whose author
+        // turned third-party downloads off, which CurseForge reports as a null
+        // download URL.
+        distributable: version.blocked_reason.is_none(),
+    }
+}
+
+/// What an answer does to the catalogue, by the fingerprint asked about.
+///
+/// Kept apart from the request for the same reason [`apply_modrinth`] is: the
+/// rules can then be read against a hand-written answer, and the one place
+/// that decides a record is stale is not also the place that does HTTP.
+///
+/// `asking` is every file a question was asked about. A file not in it keeps
+/// whatever its record claimed, because nothing was asked and so nothing was
+/// learned. A file in it that no match came back for has had its record
+/// disowned: CurseForge holds no file with those bytes, and a CurseForge pack
+/// carries ids with no hash beside them, so a stale pair does not fail a
+/// checksum on the way in — it quietly installs different bytes.
+fn apply_curseforge(
+    catalogue: &mut Catalogue,
+    asking: &[(ContentKind, String, u32)],
+    answer: &HashMap<u32, PlatformRef>,
+) {
+    let mut disowned = 0;
+    for (kind, file_name, fingerprint) in asking {
+        let Some(ident) = catalogue.files.get_mut(&(*kind, file_name.clone())) else {
+            continue;
+        };
+        let had = ident.reference("curseforge").is_some();
+        ident.refs.retain(|r| r.provider != "curseforge");
+        match answer.get(fingerprint) {
+            Some(reference) => ident.refs.push(reference.clone()),
+            // As in [`apply_modrinth`]: only once nothing names the file. A
+            // jar Modrinth matched travels as an index entry whatever becomes
+            // of a CurseForge link Geode once wrote down for it.
+            None if had && ident.refs.is_empty() => disowned += 1,
+            None => {}
+        }
+    }
+    if disowned > 0 {
+        catalogue.trouble.push(stale_links("CurseForge", disowned));
     }
 }
 
@@ -584,6 +828,16 @@ mod tests {
         (scratch, catalogue)
     }
 
+    /// A client whose every request fails, for proving what happens when a
+    /// platform cannot be reached — and for proving a request was never
+    /// attempted, since one that was would be reported.
+    fn offline() -> reqwest::Client {
+        reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:9").unwrap())
+            .build()
+            .unwrap()
+    }
+
     fn answer(hash: &str) -> HashMap<String, PlatformRef> {
         [(
             hash.to_string(),
@@ -592,6 +846,7 @@ mod tests {
                 project_id: "answered-project".into(),
                 version_id: "answered-version".into(),
                 url: Some("https://cdn.modrinth.com/data/answered-project/versions/answered-version/real-name.jar".into()),
+                distributable: true,
             },
         )]
         .into_iter()
@@ -658,10 +913,7 @@ mod tests {
     async fn a_lookup_that_could_not_be_made_is_reported() {
         let (scratch, _) = catalogue_of("trouble", &[("modrinth", "sodium.jar")]).await;
         let root = scratch.paths.root.join("game");
-        let client = reqwest::Client::builder()
-            .proxy(reqwest::Proxy::all("http://127.0.0.1:9").unwrap())
-            .build()
-            .unwrap();
+        let client = offline();
         let catalogue = identify(
             &root,
             vec![Candidate {
@@ -674,6 +926,7 @@ mod tests {
             Ask::Platforms {
                 client: &client,
                 want: &["modrinth"],
+                curseforge_key: None,
             },
             &Progress::silent("t"),
         )
@@ -691,25 +944,34 @@ mod tests {
         );
     }
 
-    /// Nothing asks CurseForge yet, so a file nothing else named is not a file
-    /// nobody has. The sharer is told that much, rather than being left to read
-    /// "no platform has this" off a writer that only ever asked one.
+    /// No key means no request — and no pretending the answer was "nobody has
+    /// this". A mod only CurseForge hosts is one the sharer can link by
+    /// setting a key, which is the one part of this they can act on, so they
+    /// are told instead of quietly handed a fatter pack.
+    ///
+    /// The client here reaches a port nothing listens on, so a request that
+    /// was attempted would fail and be reported in words of its own.
     #[tokio::test]
-    async fn a_file_nothing_could_name_says_curseforge_was_never_asked() {
-        let (scratch, _) = catalogue_of("notasked", &[("modrinth", "sodium.jar")]).await;
+    async fn no_key_means_no_request_and_an_honest_report() {
+        let (scratch, _) = catalogue_of("nokey", &[("modrinth", "sodium.jar")]).await;
         let root = scratch.paths.root.join("game");
-        let client = reqwest::Client::builder()
-            .proxy(reqwest::Proxy::all("http://127.0.0.1:9").unwrap())
-            .build()
-            .unwrap();
         let candidate = Candidate {
             kind: ContentKind::Mod,
             disk_rel: PathBuf::from("mods/sodium.jar"),
             file_name: "sodium.jar".into(),
             disabled: false,
         };
-        let mentions_curseforge =
-            |c: &Catalogue| c.trouble.iter().any(|line| line.contains("CurseForge"));
+        let client = offline();
+        let keyless = Ask::Platforms {
+            client: &client,
+            want: &["curseforge"],
+            curseforge_key: None,
+        };
+        let about_the_key = |c: &Catalogue| {
+            c.trouble
+                .iter()
+                .any(|line| line.contains("CurseForge") && line.contains("no API key"))
+        };
 
         // With a record there is nothing to say: something does name this file,
         // whatever CurseForge would have answered.
@@ -717,31 +979,36 @@ mod tests {
             &root,
             vec![candidate.clone()],
             &[&a_record("modrinth", "sodium.jar")],
-            Ask::Platforms {
-                client: &client,
-                want: &["modrinth"],
-            },
+            keyless,
             &Progress::silent("t"),
         )
         .await
         .unwrap();
-        assert!(!mentions_curseforge(&named), "{:?}", named.trouble);
+        assert!(!about_the_key(&named), "{:?}", named.trouble);
 
-        // With none, the one platform that might still have had it was never
-        // asked, and the sharer is the one who can act on that.
+        // With none, the one platform that might still have had it was not
+        // asked, and the sharer is the one who can change that.
         let nameless = identify(
             &root,
             vec![candidate],
             &[],
             Ask::Platforms {
                 client: &client,
-                want: &["modrinth"],
+                want: &["curseforge"],
+                curseforge_key: None,
             },
             &Progress::silent("t"),
         )
         .await
         .unwrap();
-        assert!(mentions_curseforge(&nameless), "{:?}", nameless.trouble);
+        assert!(about_the_key(&nameless), "{:?}", nameless.trouble);
+        // Nothing was asked, so nothing was hashed for it either: the second
+        // read of every file is what the key pays for.
+        assert!(nameless
+            .get(ContentKind::Mod, "sodium.jar")
+            .unwrap()
+            .murmur2
+            .is_none());
     }
 
     /// The same for a lookup that was answered for some files and refused for
@@ -897,6 +1164,369 @@ mod tests {
         assert!(matches!(
             travel(ident, Carry::SERVER_PACK),
             Travel::Copied(Copied::TurnedOff)
+        ));
+    }
+
+    /// What CurseForge would have answered, without asking it.
+    fn a_curseforge_file(file_id: &str, blocked: bool) -> crate::providers::Version {
+        crate::providers::Version {
+            provider: crate::providers::Provider::CurseForge,
+            id: file_id.to_string(),
+            project_id: "cf-project".into(),
+            name: "Create".into(),
+            version_number: "Create 0.5.1".into(),
+            game_versions: vec!["1.20.1".into()],
+            loaders: vec!["forge".into()],
+            release_type: "release".into(),
+            published: None,
+            downloads: 0,
+            files: Vec::new(),
+            dependencies: Vec::new(),
+            blocked_reason: blocked.then(|| "the author has disabled it".to_string()),
+        }
+    }
+
+    /// The conversion the whole stage is for: a jar Geode wrote nothing down
+    /// about, and which Modrinth does not have, becomes a pair of CurseForge
+    /// ids the recipient resolves with their own key.
+    #[tokio::test]
+    async fn a_fingerprint_match_names_a_jar_no_record_ever_did() {
+        let (_scratch, mut catalogue) = catalogue_of("cfhit", &[("", "create.jar")]).await;
+        let asking = vec![(ContentKind::Mod, "create.jar".to_string(), 4242)];
+        let answer = [(4242, curseforge_ref(a_curseforge_file("cf-file", false)))]
+            .into_iter()
+            .collect();
+        apply_curseforge(&mut catalogue, &asking, &answer);
+
+        let ident = catalogue.get(ContentKind::Mod, "create.jar").unwrap();
+        let reference = ident.reference("curseforge").expect("what CurseForge said");
+        assert_eq!(reference.project_id, "cf-project");
+        assert_eq!(reference.version_id, "cf-file");
+        // Never a URL: a CurseForge pack names ids, and the recipient's own key
+        // turns them into a download at install time.
+        assert!(reference.url.is_none());
+
+        // The Geode half can name it; a plain `.mrpack` cannot, and says which
+        // of the two reasons that is.
+        assert!(matches!(travel(ident, Carry::GEODEPACK), Travel::Named(_)));
+        assert!(matches!(
+            travel(ident, Carry::MRPACK),
+            Travel::Copied(Copied::Elsewhere)
+        ));
+    }
+
+    /// The owner's distribution rule, in the one place it is enforced.
+    ///
+    /// A file whose author turned third-party downloads off is still a match —
+    /// that is how the sharer gets told why — but no writer can be handed it as
+    /// a reference, because the recipient would be left with ids nobody can
+    /// resolve. Where the author published the same bytes on Modrinth
+    /// themselves, the Modrinth branch has already linked it from there, which
+    /// is their own release and not a way around them.
+    #[tokio::test]
+    async fn an_author_blocked_file_is_never_offered_as_a_reference() {
+        let (_scratch, mut catalogue) = catalogue_of("cfblocked", &[("", "locked.jar")]).await;
+        let asking = vec![(ContentKind::Mod, "locked.jar".to_string(), 7)];
+        let answer = [(7, curseforge_ref(a_curseforge_file("cf-locked", true)))]
+            .into_iter()
+            .collect();
+        apply_curseforge(&mut catalogue, &asking, &answer);
+
+        let ident = catalogue.get(ContentKind::Mod, "locked.jar").unwrap();
+        let reference = ident.reference("curseforge").expect("still a match");
+        assert!(
+            !reference.distributable,
+            "a blocked match must be recorded as one, so the sharer can be told why"
+        );
+        // Every format, including the one that could have carried the ids.
+        for carry in [Carry::GEODEPACK, Carry::MRPACK, Carry::SERVER_PACK] {
+            assert!(
+                matches!(travel(ident, carry), Travel::Copied(Copied::Blocked)),
+                "{carry:?} offered a blocked file as a reference"
+            );
+        }
+    }
+
+    /// A lookup that answered nothing about a file the record named proves that
+    /// record stale, the same way a Modrinth miss does — and for a sharper
+    /// reason here, since a CurseForge pack carries ids with no hash beside
+    /// them, so stale ids do not fail a checksum on the way in. They quietly
+    /// install different bytes.
+    ///
+    /// A file nothing was asked about keeps what was stored, because nothing
+    /// was learned.
+    #[tokio::test]
+    async fn a_fingerprint_miss_proves_a_stored_record_stale() {
+        let (_scratch, mut catalogue) = catalogue_of(
+            "cfmiss",
+            &[("curseforge", "asked.jar"), ("curseforge", "unasked.jar")],
+        )
+        .await;
+        let asking = vec![(ContentKind::Mod, "asked.jar".to_string(), 1)];
+        apply_curseforge(&mut catalogue, &asking, &HashMap::new());
+
+        let asked = catalogue.get(ContentKind::Mod, "asked.jar").unwrap();
+        assert!(asked.reference("curseforge").is_none());
+        assert!(matches!(
+            travel(asked, Carry::GEODEPACK),
+            Travel::Copied(Copied::Unknown)
+        ));
+        assert!(
+            catalogue
+                .get(ContentKind::Mod, "unasked.jar")
+                .unwrap()
+                .reference("curseforge")
+                .is_some(),
+            "a file nobody asked about had its record disowned"
+        );
+    }
+
+    /// A lookup nobody could make is reported, never read as "CurseForge has
+    /// none of these". Indistinguishable, a revoked key or no connection would
+    /// disown every stored CurseForge link at once.
+    ///
+    /// Also what the murmur2 is for: it is taken in the hashing pass only when
+    /// a key means there is somebody to send it to.
+    #[tokio::test]
+    async fn a_curseforge_lookup_that_could_not_be_made_is_reported() {
+        let (scratch, _) = catalogue_of("cftrouble", &[("curseforge", "create.jar")]).await;
+        let root = scratch.paths.root.join("game");
+        let client = offline();
+        let catalogue = identify(
+            &root,
+            vec![Candidate {
+                kind: ContentKind::Mod,
+                disk_rel: PathBuf::from("mods/create.jar"),
+                file_name: "create.jar".into(),
+                disabled: false,
+            }],
+            &[&a_record("curseforge", "create.jar")],
+            Ask::Platforms {
+                client: &client,
+                want: &["curseforge"],
+                // Shaped like a key and belonging to nobody. It never leaves
+                // the process: the client cannot connect.
+                curseforge_key: Some("$2a$10$not-a-real-key"),
+            },
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(catalogue.trouble.len(), 1, "{:?}", catalogue.trouble);
+        assert!(
+            catalogue.trouble[0].contains("CurseForge"),
+            "{:?}",
+            catalogue.trouble
+        );
+        let ident = catalogue.get(ContentKind::Mod, "create.jar").unwrap();
+        assert!(
+            ident.reference("curseforge").is_some(),
+            "a lookup that never happened must not disown the record it never read"
+        );
+        assert!(
+            ident.murmur2.is_some(),
+            "a key means the fingerprint is worth the second read"
+        );
+    }
+
+    /// A file Modrinth has named is still asked about on CurseForge, because
+    /// one format's preference order is not the question.
+    ///
+    /// [`travel`] reads a Modrinth reference first and never looks past it, so
+    /// for the two formats with a Modrinth index the second answer changes
+    /// nothing. A CurseForge manifest has no slot for a Modrinth download, so
+    /// those are precisely the files it needs named — and skipping them here
+    /// would send a handful of fingerprints and ship the rest of the instance
+    /// as jars.
+    #[tokio::test]
+    async fn a_file_modrinth_named_is_still_asked_about_on_curseforge() {
+        let (scratch, _) = catalogue_of("cfboth", &[("", "sodium.jar")]).await;
+        let root = scratch.paths.root.join("game");
+        tokio::fs::write(root.join("mods/create.jar"), b"create")
+            .await
+            .unwrap();
+        let client = offline();
+        // A key, so the fingerprints are taken; the client cannot reach
+        // anything, so the lookup itself is the one that fails.
+        let mut catalogue = identify(
+            &root,
+            ["sodium.jar", "create.jar"]
+                .into_iter()
+                .map(|name| Candidate {
+                    kind: ContentKind::Mod,
+                    disk_rel: PathBuf::from("mods").join(name),
+                    file_name: name.into(),
+                    disabled: false,
+                })
+                .collect(),
+            &[],
+            Ask::Platforms {
+                client: &client,
+                want: &["curseforge"],
+                curseforge_key: Some("$2a$10$not-a-real-key"),
+            },
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+
+        let hash = catalogue
+            .get(ContentKind::Mod, "sodium.jar")
+            .unwrap()
+            .sha512
+            .clone();
+        apply_modrinth(&mut catalogue, &answer(&hash), &[]);
+        assert!(catalogue
+            .get(ContentKind::Mod, "sodium.jar")
+            .unwrap()
+            .reference("modrinth")
+            .is_some());
+
+        let asked: Vec<String> = fingerprints_to_ask(&catalogue)
+            .into_iter()
+            .map(|(_, name, _)| name)
+            .collect();
+        assert_eq!(
+            asked.len(),
+            2,
+            "the file Modrinth named was left out of the question: {asked:?}"
+        );
+    }
+
+    /// A `.mrpack` export reads every file once, because a CurseForge answer
+    /// cannot change what that pack does with a single file.
+    ///
+    /// The fingerprint is the only thing in the hashing pass that costs a
+    /// second read of every file in the instance, so asking for one is a
+    /// choice about what the pack can say — and it is the pack's writer, not
+    /// the matcher, that knows. The same run with a Geode half does ask, which
+    /// is also what keeps the no-key and lookup-failed sentences true: they
+    /// offer the sharer a link, and they are only ever shown for a pack that
+    /// could carry one.
+    #[tokio::test]
+    async fn an_mrpack_export_asks_only_the_platform_it_can_link() {
+        let (scratch, _) = catalogue_of("carry", &[("", "create.jar")]).await;
+        let root = scratch.paths.root.join("game");
+        let client = offline();
+        let candidate = Candidate {
+            kind: ContentKind::Mod,
+            disk_rel: PathBuf::from("mods/create.jar"),
+            file_name: "create.jar".into(),
+            disabled: false,
+        };
+        let key = Some("$2a$10$not-a-real-key");
+
+        let plain = identify(
+            &root,
+            vec![candidate.clone()],
+            &[],
+            Ask::exporting(&client, key, Carry::MRPACK),
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            plain
+                .get(ContentKind::Mod, "create.jar")
+                .unwrap()
+                .murmur2
+                .is_none(),
+            "an .mrpack export read every file twice for an answer it cannot use"
+        );
+        // The offline client reports anything it was asked to do, so silence
+        // here is proof no request was attempted — and that no sentence
+        // offering a CurseForge link reached a pack that cannot carry one.
+        assert!(
+            !plain.trouble.iter().any(|line| line.contains("CurseForge")),
+            "{:?}",
+            plain.trouble
+        );
+
+        let with_notes = identify(
+            &root,
+            vec![candidate],
+            &[],
+            Ask::exporting(&client, key, Carry::GEODEPACK),
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            with_notes
+                .get(ContentKind::Mod, "create.jar")
+                .unwrap()
+                .murmur2
+                .is_some(),
+            "a pack that can name a CurseForge file has to ask about one"
+        );
+        assert!(
+            with_notes
+                .trouble
+                .iter()
+                .any(|line| line.contains("CurseForge")),
+            "{:?}",
+            with_notes.trouble
+        );
+    }
+
+    /// A link a lookup disowned is said out loud, not left to look like a mod
+    /// nobody has.
+    ///
+    /// Embedding is right — the pack's hashes come from the local bytes while
+    /// the link came from the record — but the sharer otherwise reads "nothing
+    /// could name these" about the very files Geode had written a link down
+    /// for, with nothing anywhere to say what happened. A file nothing was
+    /// stored about is not news, so it is not counted.
+    #[tokio::test]
+    async fn a_link_a_lookup_disowned_is_reported_not_silent() {
+        let (_scratch, mut modrinth) = catalogue_of(
+            "disowned-mr",
+            &[("modrinth", "stale.jar"), ("", "homemade.jar")],
+        )
+        .await;
+        apply_modrinth(&mut modrinth, &HashMap::new(), &[]);
+        assert_eq!(modrinth.trouble.len(), 1, "{:?}", modrinth.trouble);
+        assert!(
+            modrinth.trouble[0].contains("1 file(s) Geode had a Modrinth link for"),
+            "{:?}",
+            modrinth.trouble
+        );
+
+        let (_scratch, mut curseforge) = catalogue_of(
+            "disowned-cf",
+            &[
+                ("curseforge", "stale.jar"),
+                ("", "homemade.jar"),
+                ("curseforge", "moved.jar"),
+            ],
+        )
+        .await;
+        // The third jar's bytes turn out to be on Modrinth, so losing the
+        // CurseForge link Geode wrote down for it costs it nothing: it travels
+        // as an index entry. Saying it travels as a copy would be a true count
+        // of a false thing.
+        let hash = curseforge
+            .get(ContentKind::Mod, "moved.jar")
+            .unwrap()
+            .sha512
+            .clone();
+        apply_modrinth(&mut curseforge, &answer(&hash), &[]);
+        let asking = vec![
+            (ContentKind::Mod, "stale.jar".to_string(), 1),
+            (ContentKind::Mod, "homemade.jar".to_string(), 2),
+            (ContentKind::Mod, "moved.jar".to_string(), 3),
+        ];
+        apply_curseforge(&mut curseforge, &asking, &HashMap::new());
+        assert_eq!(curseforge.trouble.len(), 1, "{:?}", curseforge.trouble);
+        assert!(
+            curseforge.trouble[0].contains("1 file(s) Geode had a CurseForge link for"),
+            "{:?}",
+            curseforge.trouble
+        );
+        assert!(matches!(
+            curseforge.travel(ContentKind::Mod, "moved.jar", Carry::MRPACK),
+            Some(Travel::Linked(_))
         ));
     }
 }

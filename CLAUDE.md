@@ -44,12 +44,15 @@ alone, which is strict (`noUnusedLocals`, `verbatimModuleSyntax`); there is no
 ESLint or Prettier config. `npm run dev` on its own serves a UI with no backend
 to talk to, which is why the palette page at `?palette` exists.
 
-Integration tests live in `src-tauri/tests/`. Two of the files run offline in a
+Integration tests live in `src-tauri/tests/`. Three of the files run offline in a
 normal `cargo test` — `backup_roundtrip.rs` (five tests that write and restore a
-real zip) and `header_wire_format.rs` (one that proves a bcrypt CurseForge key
-reaches the socket unmangled). The eight `live_*` files hold 42 tests, every one
-`#[ignore]`d because they hit real upstream APIs, and they exist because the
-parts most likely to break are the ones nobody here controls:
+real zip), `header_wire_format.rs` (one that proves a bcrypt CurseForge key
+reaches the socket unmangled) and `curseforge_fingerprints.rs` (five that pin
+what a fingerprint lookup puts on the wire). All three serve themselves from a
+`TcpListener` on localhost or a scratch directory; none reaches a real API. The
+eight `live_*` files hold 42 tests, every one `#[ignore]`d because they hit real
+upstream APIs, and they exist because the parts most likely to break are the
+ones nobody here controls:
 
 ```bash
 cargo test --test live_metadata -- --ignored --nocapture

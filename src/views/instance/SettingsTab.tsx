@@ -27,13 +27,16 @@ function numberOrNull(value: string): number | null {
  * Modrinth what it holds — and a count is the cheapest honest answer.
  *
  * One sentence per reason, because a single count cannot say which of them
- * applied: "no platform has this mod" is something nobody can fix, while "this
+ * applied: "nothing Geode asked has this mod" is something nobody can fix, "this
  * format cannot link to CurseForge" and "this format cannot say a mod is off"
- * are answered by exporting a .geodepack instead.
+ * are answered by exporting a .geodepack instead, and "the author turned
+ * third-party downloads off" is somebody else's decision that no format gets
+ * around.
  */
 function exportSummary(format: "geodepack" | "mrpack", report: ExportReport): string {
-  const { referenced, embeddedUnknown, embeddedElsewhere, embeddedTurnedOff } = report;
-  const bundled = embeddedUnknown + embeddedElsewhere + embeddedTurnedOff;
+  const { referenced, embeddedUnknown, embeddedElsewhere, embeddedTurnedOff, embeddedBlocked } =
+    report;
+  const bundled = embeddedUnknown + embeddedElsewhere + embeddedTurnedOff + embeddedBlocked;
   const lines: string[] = [];
   if (referenced === 0 && bundled === 0) {
     lines.push("There were no mods, packs or datapacks to carry.");
@@ -42,7 +45,13 @@ function exportSummary(format: "geodepack" | "mrpack", report: ExportReport): st
   } else {
     lines.push(`${referenced} linked for the recipient to download.`);
     if (embeddedUnknown > 0) {
-      lines.push(`${embeddedUnknown} bundled in because no platform has them.`);
+      // Not "no platform has them": an export asks the platforms whose answer
+      // the format it is writing could use, so a .mrpack export asks Modrinth
+      // alone — a fingerprint costs a second read of every file in the
+      // instance, and a .mrpack cannot carry a CurseForge reference whatever
+      // the answer. Claiming more than was asked is the kind of wrong a user
+      // can catch.
+      lines.push(`${embeddedUnknown} bundled in because nothing Geode asked has them.`);
     }
     if (embeddedElsewhere > 0) {
       lines.push(
@@ -52,6 +61,11 @@ function exportSummary(format: "geodepack" | "mrpack", report: ExportReport): st
     if (embeddedTurnedOff > 0) {
       lines.push(
         `${embeddedTurnedOff} bundled in because a .${format} cannot record that a mod is turned off.`,
+      );
+    }
+    if (embeddedBlocked > 0) {
+      lines.push(
+        `${embeddedBlocked} bundled in because their author has turned off third-party downloads, so a link would be one nobody could follow.`,
       );
     }
   }

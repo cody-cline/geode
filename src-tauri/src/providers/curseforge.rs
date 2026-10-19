@@ -564,10 +564,23 @@ struct CfFile {
     hashes: Vec<CfHash>,
     #[serde(default)]
     dependencies: Vec<CfDependency>,
+    /// The murmur2 CurseForge knows this file's bytes by. Only a fingerprint
+    /// lookup sends it back, and it is how a match is tied to the local jar
+    /// that asked about it.
+    #[serde(default)]
+    file_fingerprint: Option<u64>,
+    /// Whether CurseForge will serve this file at all. A file that has been
+    /// withdrawn is not a name for anyone's bytes.
+    #[serde(default = "available_unless_said_otherwise")]
+    is_available: bool,
 }
 
 fn default_release_type() -> u32 {
     1
+}
+
+fn available_unless_said_otherwise() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -601,6 +614,14 @@ fn to_version(f: CfFile) -> Version {
         None
     };
 
+    // A blocked file carries no `VersionFile` at all, which also throws away
+    // the sha1 CurseForge published for it in `hashes`. That hash is the one
+    // input the owner's substitution rule names — look the blocked file up on
+    // Modrinth by the sha1 CurseForge itself gave, and install the author's own
+    // Modrinth release rather than refusing — so whichever stage builds that
+    // (the CurseForge pack import, a `.geodepack` reference and an ordinary
+    // install all reach it) has to keep the hash here. An empty `url` is not
+    // the way: `install::content` would read it as somewhere to fetch from.
     let files = match f.download_url {
         Some(url) => vec![VersionFile {
             url,
@@ -687,6 +708,107 @@ pub async fn file(
     )
     .await?;
     Ok(to_version(resp.data))
+}
+
+/// What CurseForge is asked in one request. The endpoint documents no cap and
+/// Prism sends every fingerprint it has in one go, so this is the same
+/// conservative chunk `projects_by_ids` uses rather than a published limit.
+const FINGERPRINTS_PER_REQUEST: usize = 200;
+
+/// Only `exactMatches` is read. A fingerprint that matched nothing comes back
+/// in `unmatchedFingerprints`, which is the same fact as its absence here and
+/// so is not modelled: a miss is a miss, not an error and not a 404.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FingerprintMatches {
+    #[serde(default)]
+    exact_matches: Vec<FingerprintMatch>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FingerprintMatch {
+    file: CfFile,
+}
+
+/// Ask CurseForge which of these files it holds, by the murmur2 it knows them
+/// by ([`crate::net::murmur2`]).
+///
+/// This is the one direction that needs a fingerprint. The other is free: a
+/// CurseForge file object carries its own sha1, so a CurseForge jar can be
+/// looked up on Modrinth with an ordinary hash.
+pub async fn match_fingerprints(
+    client: &reqwest::Client,
+    fingerprints: &[u32],
+    api_key: &str,
+) -> Result<std::collections::HashMap<u32, Version>> {
+    match_fingerprints_at(client, API, fingerprints, api_key).await
+}
+
+/// The same, against a given base URL.
+///
+/// Injectable for the same reason [`check_key_at`] is: the wire form below is
+/// the one claim in this file with no primary source behind it, so a test
+/// serves the request itself rather than trusting it by eye, and no test ever
+/// reaches the real API.
+pub async fn match_fingerprints_at(
+    client: &reqwest::Client,
+    base: &str,
+    fingerprints: &[u32],
+    api_key: &str,
+) -> Result<std::collections::HashMap<u32, Version>> {
+    let mut out = std::collections::HashMap::new();
+    if fingerprints.is_empty() {
+        return Ok(out);
+    }
+
+    // Game-scoped rather than the bare `/fingerprints`: the fingerprint is 32
+    // bits over whitespace-stripped bytes, and a collision with a file from
+    // another CurseForge game would produce a confident wrong match rather
+    // than a miss. If the scoped path ever answers 404, dropping the id is the
+    // whole fix — same body, same correlation.
+    let url = format!("{base}/fingerprints/{MINECRAFT_GAME_ID}");
+
+    for chunk in fingerprints.chunks(FINGERPRINTS_PER_REQUEST) {
+        // Decimal strings, not JSON numbers. CurseForge's published schema
+        // types this `integer[]`, but the same schema types `downloadUrl` as
+        // non-nullable when it is null for every author-blocked file, and
+        // Prism sends strings against the live API. Copying the proven form is
+        // the only way to be right without a key to test with: if a real key
+        // answers HTTP 400, this line and the test that pins it are where to
+        // look.
+        let decimals: Vec<String> = chunk.iter().map(|f| f.to_string()).collect();
+        let body = serde_json::json!({ "fingerprints": decimals });
+        // A refused chunk fails the whole lookup rather than coming back as a
+        // short answer. A caller cannot tell a short answer from "CurseForge
+        // does not have these", and reading it the second way would disown
+        // every stored CurseForge link in the chunk at once.
+        let resp: Envelope<FingerprintMatches> = post(client, &url, &body, api_key).await?;
+
+        for matched in resp.data.exact_matches {
+            // Correlated by the fingerprint the answer itself carries, never
+            // by position: the response is neither ordered by the request nor
+            // keyed to it, and correlating by index would attach one mod's ids
+            // to another's jar — a pack that installs the wrong mods and looks
+            // perfectly fine.
+            let Some(fingerprint) = matched.file.file_fingerprint else {
+                continue;
+            };
+            let Ok(fingerprint) = u32::try_from(fingerprint) else {
+                // Wider than the value anything here asked about, so it names
+                // no candidate.
+                continue;
+            };
+            // A withdrawn file is not a name for these bytes. Distinct from
+            // one whose author turned third-party downloads off, which is a
+            // real match that simply cannot be fetched — `to_version` records
+            // that as `blocked_reason` and the caller decides.
+            if !matched.file.is_available {
+                continue;
+            }
+            out.insert(fingerprint, to_version(matched.file));
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -789,6 +911,8 @@ mod tests {
                 algo: 1,
             }],
             dependencies: vec![],
+            file_fingerprint: None,
+            is_available: true,
         };
         let v = to_version(file);
         assert_eq!(v.game_versions, vec!["1.21.1"]);
@@ -812,6 +936,8 @@ mod tests {
             game_versions: vec!["1.21.1".into()],
             hashes: vec![],
             dependencies: vec![],
+            file_fingerprint: None,
+            is_available: true,
         };
         let v = to_version(file);
         assert!(v.blocked_reason.is_some());

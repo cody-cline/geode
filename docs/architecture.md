@@ -85,9 +85,14 @@ itself. New code should take an `EventSink`.
   can run: libraries, assets, natives. `install/content.rs` is the shared engine
   for installing mods, plugins and packs — used by instances *and* servers, and
   the place that refuses to replace a server-owned mod. `install/identity.rs` is
-  the only place local bytes become a platform reference: it hashes each file
-  once, asks each platform what that file is, and `travel` decides from the
-  answer whether a file goes in a pack as a reference or as bytes.
+  the only place local bytes become a platform reference: it hashes each file in
+  one pass, asks each platform what that file is, and `travel` decides from the
+  answer whether a file goes in a pack as a reference or as bytes — including
+  refusing a reference to a file whose author turned third-party downloads off,
+  which is the one place that rule lives. CurseForge's murmur2 is the exception
+  to the one pass: it seeds itself with the number of bytes it is about to hash,
+  so it is a second read of the same file and is taken only when a key means
+  there is somebody to send it to.
 - **`java.rs`** finds a usable JVM and downloads a matching Temurin JRE when
   nothing on the system fits (1.16 and below need 8, 1.17 needs 16, 1.18–1.20.4
   need 17, 1.20.5+ need 21).

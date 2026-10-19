@@ -802,6 +802,8 @@ export interface ExportReport {
   embeddedElsewhere: number;
   /** Files whose bytes travelled only because this format cannot say a mod is turned off. */
   embeddedTurnedOff: number;
+  /** Files whose bytes travelled because the only platform naming them has third-party downloads turned off by the author. */
+  embeddedBlocked: number;
   /** Files that could not go into the pack at all, by the nearest readable form of their name. */
   unnameable: string[];
   /** What could not be asked, already in words for the user. */

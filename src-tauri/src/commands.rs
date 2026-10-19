@@ -3166,12 +3166,17 @@ pub async fn export_geodepack(
     let inst = instance::load(&state.paths, &id).await?;
     let progress = Progress::new(crate::desktop::sink(app), format!("export:{id}"));
     let dest = PathBuf::from(dest);
+    let cf_key = state.cf_key().await;
 
     // Failed explicitly rather than returned through `?`: the dock drops a job
     // only when it hears one is done, so a bar left unfinished stays there for
     // the rest of the session.
     let result = share::pack::export(
-        crate::install::identity::Ask::exporting(&state.http),
+        crate::install::identity::Ask::exporting(
+            &state.http,
+            cf_key.as_deref(),
+            crate::install::identity::Carry::GEODEPACK,
+        ),
         &state.paths,
         &inst,
         dest,
@@ -3196,9 +3201,14 @@ pub async fn export_modpack(
     let inst = instance::load(&state.paths, &id).await?;
     let progress = Progress::new(crate::desktop::sink(app), format!("export:{id}"));
     let dest = PathBuf::from(dest);
+    let cf_key = state.cf_key().await;
 
     let result = instance::modpack::export_mrpack(
-        crate::install::identity::Ask::exporting(&state.http),
+        crate::install::identity::Ask::exporting(
+            &state.http,
+            cf_key.as_deref(),
+            crate::install::identity::Carry::MRPACK,
+        ),
         &state.paths,
         &inst,
         dest,
