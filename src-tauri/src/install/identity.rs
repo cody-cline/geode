@@ -305,7 +305,7 @@ impl Catalogue {
                 ))
             })
             .collect();
-        apply_curseforge(self, &asking, &answer);
+        apply_curseforge(self, &asking, &answer, &std::collections::HashSet::new());
     }
 }
 
@@ -958,11 +958,25 @@ async fn ask_curseforge(client: &reqwest::Client, api_key: &str, catalogue: &mut
         }
     };
 
+    // A fingerprint CurseForge did not account for is not a miss, and must not
+    // be allowed to disown the link Geode already had for that file: the real
+    // API answers 200 with nothing matched and nothing listed as unmatched
+    // often enough to matter, and reading that as "CurseForge has none of
+    // these" turned a pack's references into a zip full of jars.
+    if !answer.unanswered.is_empty() {
+        catalogue.trouble.push(format!(
+            "CurseForge did not answer about {} file(s), so anything it already \
+             had a link for keeps it rather than travelling as a copy",
+            answer.unanswered.len()
+        ));
+    }
+    let silent: std::collections::HashSet<u32> = answer.unanswered.iter().copied().collect();
     let answer: HashMap<u32, PlatformRef> = answer
+        .found
         .into_iter()
         .map(|(fingerprint, version)| (fingerprint, curseforge_ref(version)))
         .collect();
-    apply_curseforge(catalogue, &asking, &answer);
+    apply_curseforge(catalogue, &asking, &answer, &silent);
 }
 
 /// What CurseForge said about a file, as a reference.
@@ -1003,9 +1017,17 @@ fn apply_curseforge(
     catalogue: &mut Catalogue,
     asking: &[(ContentKind, String, u32)],
     answer: &HashMap<u32, PlatformRef>,
+    silent: &std::collections::HashSet<u32>,
 ) {
     let mut disowned = 0;
     for (kind, file_name, fingerprint) in asking {
+        // Asked about and not accounted for: nothing is known, so nothing
+        // changes. Stripping the stored reference below and then finding no
+        // answer to put back would throw away a link that is probably still
+        // good, on the strength of a question that was never answered.
+        if silent.contains(fingerprint) {
+            continue;
+        }
         let Some(ident) = catalogue.files.get_mut(&(*kind, file_name.clone())) else {
             continue;
         };
@@ -1537,7 +1559,7 @@ mod tests {
         let answer = [(4242, curseforge_ref(a_curseforge_file("cf-file", false)))]
             .into_iter()
             .collect();
-        apply_curseforge(&mut catalogue, &asking, &answer);
+        apply_curseforge(&mut catalogue, &asking, &answer, &std::collections::HashSet::new());
 
         let ident = catalogue.get(ContentKind::Mod, "create.jar").unwrap();
         let reference = ident.reference("curseforge").expect("what CurseForge said");
@@ -1569,7 +1591,7 @@ mod tests {
         let answer = [(7, curseforge_ref(a_curseforge_file("cf-locked", true)))]
             .into_iter()
             .collect();
-        apply_curseforge(&mut catalogue, &asking, &answer);
+        apply_curseforge(&mut catalogue, &asking, &answer, &std::collections::HashSet::new());
 
         let ident = catalogue.get(ContentKind::Mod, "locked.jar").unwrap();
         let reference = ident.reference("curseforge").expect("still a match");
@@ -1607,7 +1629,7 @@ mod tests {
         let answer = [(9, curseforge_ref(a_curseforge_file("cf-both", true)))]
             .into_iter()
             .collect();
-        apply_curseforge(&mut catalogue, &asking, &answer);
+        apply_curseforge(&mut catalogue, &asking, &answer, &std::collections::HashSet::new());
 
         let ident = catalogue.get(ContentKind::Mod, "both.jar").unwrap();
         assert!(!ident.reference("curseforge").unwrap().distributable);
@@ -1673,7 +1695,7 @@ mod tests {
         )
         .await;
         let asking = vec![(ContentKind::Mod, "asked.jar".to_string(), 1)];
-        apply_curseforge(&mut catalogue, &asking, &HashMap::new());
+        apply_curseforge(&mut catalogue, &asking, &HashMap::new(), &std::collections::HashSet::new());
 
         let asked = catalogue.get(ContentKind::Mod, "asked.jar").unwrap();
         assert!(asked.reference("curseforge").is_none());
@@ -1688,6 +1710,46 @@ mod tests {
                 .reference("curseforge")
                 .is_some(),
             "a file nobody asked about had its record disowned"
+        );
+    }
+
+    /// The narrower version of the same mistake, and the one that actually
+    /// happens: the lookup was made, CurseForge answered, and the answer
+    /// simply did not account for this file. Measured against the real API on
+    /// 2026-10-21, roughly one call in four answers that way for a file it
+    /// names correctly the rest of the time. Treated as a miss, it strips the
+    /// link Geode already had and the mod travels as a copy of somebody's jar.
+    #[tokio::test]
+    async fn a_file_curseforge_did_not_answer_about_keeps_the_link_it_had() {
+        let (_scratch, mut catalogue) =
+            catalogue_of("cfsilent", &[("curseforge", "asked.jar")]).await;
+        let asking = vec![(ContentKind::Mod, "asked.jar".to_string(), 7)];
+
+        // Nothing found, and the fingerprint named as one CurseForge never
+        // accounted for.
+        let silent: std::collections::HashSet<u32> = [7].into_iter().collect();
+        apply_curseforge(&mut catalogue, &asking, &HashMap::new(), &silent);
+
+        let asked = catalogue.get(ContentKind::Mod, "asked.jar").unwrap();
+        assert!(
+            asked.reference("curseforge").is_some(),
+            "a silence disowned a stored link"
+        );
+        // A CurseForge reference carries no URL, so what it travels by depends
+        // on the format; what matters is that it is still a name for the file
+        // rather than the `Copied(Unknown)` a real miss produces.
+        assert!(
+            !matches!(
+                travel(asked, Carry::GEODEPACK),
+                Travel::Copied(Copied::Unknown)
+            ),
+            "the mod was going to travel as bytes nobody could name, because of a \
+             question nobody answered"
+        );
+        assert!(
+            catalogue.trouble.iter().all(|t| !t.contains("no longer")),
+            "a silence was reported as a stale link: {:?}",
+            catalogue.trouble
         );
     }
 
@@ -1981,7 +2043,7 @@ mod tests {
             (ContentKind::Mod, "homemade.jar".to_string(), 2),
             (ContentKind::Mod, "moved.jar".to_string(), 3),
         ];
-        apply_curseforge(&mut curseforge, &asking, &HashMap::new());
+        apply_curseforge(&mut curseforge, &asking, &HashMap::new(), &std::collections::HashSet::new());
         assert_eq!(curseforge.trouble.len(), 1, "{:?}", curseforge.trouble);
         assert!(
             curseforge.trouble[0].contains("1 file(s) Geode had a CurseForge link for"),

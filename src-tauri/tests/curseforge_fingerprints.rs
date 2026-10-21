@@ -116,7 +116,7 @@ async fn a_fingerprint_request_sends_decimal_strings_to_the_game_scoped_path() {
     )
     .await
     .expect("the stub answers 200");
-    assert!(found.is_empty());
+    assert!(found.found.is_empty());
 
     let seen = listener.join().expect("listener thread");
 
@@ -169,9 +169,9 @@ async fn matches_are_correlated_by_fingerprint_not_by_position() {
     .expect("the stub answers 200");
     listener.join().expect("listener thread");
 
-    assert_eq!(found.len(), 3);
+    assert_eq!(found.found.len(), 3);
     for (fingerprint, project, file) in [(100, "10", "11"), (200, "20", "21"), (300, "30", "31")] {
-        let version = found
+        let version = found.found
             .get(&fingerprint)
             .unwrap_or_else(|| panic!("no match for {fingerprint}"));
         assert_eq!(version.project_id, project, "fingerprint {fingerprint}");
@@ -197,7 +197,7 @@ async fn an_unavailable_file_is_not_a_match() {
             .expect("the stub answers 200");
     listener.join().expect("listener thread");
 
-    assert!(found.is_empty(), "a withdrawn file was offered as a match");
+    assert!(found.found.is_empty(), "a withdrawn file was offered as a match");
 }
 
 /// `downloadUrl: null` is CurseForge's way of saying the author has turned
@@ -225,7 +225,7 @@ async fn an_author_blocked_file_is_matched_but_carries_its_reason() {
             .expect("the stub answers 200");
     listener.join().expect("listener thread");
 
-    let version = found.get(&100).expect("still a match");
+    let version = found.found.get(&100).expect("still a match");
     assert!(
         version.blocked_reason.is_some(),
         "a file with no download URL has to say why"
@@ -252,7 +252,69 @@ async fn an_unmatched_fingerprint_is_a_miss_not_an_error() {
             .expect("a miss is not a failure");
     listener.join().expect("listener thread");
 
-    assert!(found.is_empty());
+    assert!(found.found.is_empty());
+    assert!(
+        found.unanswered.is_empty(),
+        "CurseForge said it does not have this file, which is an answer"
+    );
+}
+
+/// The failure this pair of halves exists for, measured against the real API
+/// on 2026-10-21: roughly one call in four came back HTTP 200 with nothing
+/// matched, nothing listed as unmatched, for a file whose fingerprint the same
+/// endpoint named correctly on the other three. An absence CurseForge has not
+/// accounted for is a question it did not answer, and reading it as "we do not
+/// have this" disowns a link that was never wrong.
+#[tokio::test]
+async fn a_fingerprint_curseforge_did_not_account_for_is_unanswered() {
+    let (base, listener) = serve(
+        r#"{"data":{"isCacheBuilt":true,"exactMatches":[],"exactFingerprints":[],
+           "unmatchedFingerprints":[],"installedFingerprints":[],"partialMatches":[],
+           "partialMatchFingerprints":{}}}"#,
+    );
+    let client = geode_lib::net::client();
+
+    let found =
+        geode_lib::providers::curseforge::match_fingerprints_at(&client, &base, &[100], FAKE_KEY)
+            .await
+            .expect("an answer that accounts for nothing is still an answer");
+    listener.join().expect("listener thread");
+
+    assert!(found.found.is_empty());
+    assert_eq!(
+        found.unanswered,
+        vec![100],
+        "an absence nobody accounted for was read as a miss"
+    );
+}
+
+/// CurseForge's own word for "the index was not ready". It accounts for
+/// nothing, so nothing in the chunk has been answered - including fingerprints
+/// it happened to list as unmatched in the same breath.
+#[tokio::test]
+async fn an_index_that_was_not_built_answers_nothing() {
+    let (base, listener) = serve(
+        r#"{"data":{"isCacheBuilt":false,"exactMatches":[],"exactFingerprints":[],
+           "unmatchedFingerprints":[100,200]}}"#,
+    );
+    let client = geode_lib::net::client();
+
+    let found = geode_lib::providers::curseforge::match_fingerprints_at(
+        &client,
+        &base,
+        &[100, 200],
+        FAKE_KEY,
+    )
+    .await
+    .expect("an unbuilt index is not a failure");
+    listener.join().expect("listener thread");
+
+    assert!(found.found.is_empty());
+    assert_eq!(
+        found.unanswered,
+        vec![100, 200],
+        "an unbuilt index was taken at its word about what it does not have"
+    );
 }
 
 // ---------------------------------------------------------------------------

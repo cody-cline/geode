@@ -800,8 +800,44 @@ const FINGERPRINTS_PER_REQUEST: usize = 200;
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FingerprintMatches {
+    /// `Option` because the real API sends JSON `null` for these lists, not an
+    /// empty array and not an absent field, and `serde(default)` covers only
+    /// the absent case — a null would otherwise fail the whole lookup.
     #[serde(default)]
-    exact_matches: Vec<FingerprintMatch>,
+    exact_matches: Option<Vec<FingerprintMatch>>,
+    /// The fingerprints CurseForge looked for and does not have. This is the
+    /// only thing that makes an absence an answer: a fingerprint listed here
+    /// is one CurseForge has accounted for, and anything neither matched nor
+    /// listed is a question it did not answer. Null for the reason above, and
+    /// a null here is precisely the case that matters: nothing matched and
+    /// nothing accounted for.
+    #[serde(default)]
+    unmatched_fingerprints: Option<Vec<u64>>,
+    /// Whether the fingerprint index was ready to be asked. Measured against
+    /// the real API: it answers HTTP 200 with no matches and nothing listed as
+    /// unmatched for a file it demonstrably knows, roughly one call in four
+    /// under load.
+    #[serde(default = "built_unless_said_otherwise")]
+    is_cache_built: bool,
+}
+
+fn built_unless_said_otherwise() -> bool {
+    true
+}
+
+/// What a fingerprint lookup came back with.
+///
+/// The same shape, and the same reason, as [`crate::providers::modrinth::Answered`]:
+/// a file CurseForge said it does not have and a file CurseForge did not
+/// answer about are different facts, and only the first is a miss. Reading the
+/// second as a miss throws away a stored link that was never wrong.
+#[derive(Debug, Default)]
+pub struct Fingerprinted {
+    /// What CurseForge named, by the fingerprint that was asked about.
+    pub found: std::collections::HashMap<u32, Version>,
+    /// Asked about, and neither named nor listed as absent. Nothing is known
+    /// about these.
+    pub unanswered: Vec<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -819,7 +855,7 @@ pub async fn match_fingerprints(
     client: &reqwest::Client,
     fingerprints: &[u32],
     api_key: &str,
-) -> Result<std::collections::HashMap<u32, Version>> {
+) -> Result<Fingerprinted> {
     match_fingerprints_at(client, API, fingerprints, api_key).await
 }
 
@@ -834,8 +870,8 @@ pub async fn match_fingerprints_at(
     base: &str,
     fingerprints: &[u32],
     api_key: &str,
-) -> Result<std::collections::HashMap<u32, Version>> {
-    let mut out = std::collections::HashMap::new();
+) -> Result<Fingerprinted> {
+    let mut out = Fingerprinted::default();
     if fingerprints.is_empty() {
         return Ok(out);
     }
@@ -862,8 +898,10 @@ pub async fn match_fingerprints_at(
         // does not have these", and reading it the second way would disown
         // every stored CurseForge link in the chunk at once.
         let resp: Envelope<FingerprintMatches> = post(client, &url, &body, api_key).await?;
+        let built = resp.data.is_cache_built;
+        let unmatched = resp.data.unmatched_fingerprints.unwrap_or_default();
 
-        for matched in resp.data.exact_matches {
+        for matched in resp.data.exact_matches.unwrap_or_default() {
             // Correlated by the fingerprint the answer itself carries, never
             // by position: the response is neither ordered by the request nor
             // keyed to it, and correlating by index would attach one mod's ids
@@ -884,7 +922,26 @@ pub async fn match_fingerprints_at(
             if !matched.file.is_available {
                 continue;
             }
-            out.insert(fingerprint, to_version(matched.file));
+            out.found.insert(fingerprint, to_version(matched.file));
+        }
+
+        // Whatever this chunk asked about and CurseForge neither named nor
+        // listed as absent. A cache that was not built accounts for nothing at
+        // all, so the whole chunk is unanswered — which is the case measured
+        // against the real API, where an unbuilt index answers 200 with two
+        // empty lists for a file it knows perfectly well.
+        let accounted: std::collections::HashSet<u32> = unmatched
+            .iter()
+            .filter_map(|f| u32::try_from(*f).ok())
+            .collect();
+        for fingerprint in chunk {
+            if out.found.contains_key(fingerprint) {
+                continue;
+            }
+            if built && accounted.contains(fingerprint) {
+                continue;
+            }
+            out.unanswered.push(*fingerprint);
         }
     }
     Ok(out)

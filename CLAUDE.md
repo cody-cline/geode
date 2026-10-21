@@ -52,12 +52,16 @@ real zip), `header_wire_format.rs` (one that proves a bcrypt CurseForge key
 reaches the socket unmangled) and `curseforge_fingerprints.rs` (five that pin
 what a fingerprint lookup puts on the wire). All three serve themselves from a
 `TcpListener` on localhost or a scratch directory; none reaches a real API. The
-eight `live_*` files hold 43 tests, every one `#[ignore]`d because they hit real
+nine `live_*` files hold 48 tests, every one `#[ignore]`d because they hit real
 upstream APIs, and they exist because the parts most likely to break are the
 ones nobody here controls:
 
 ```bash
 cargo test --test live_metadata -- --ignored --nocapture
+# live_curseforge needs the key the build reads. Source it in a way the shell
+# cannot eat: the key is bcrypt, so `$` inside it must not be expanded.
+export GEODE_CURSEFORGE_KEY="$(sed -n 's/^GEODE_CURSEFORGE_KEY=//p' .env)"
+cargo test --test live_curseforge -- --ignored
 GEODE_HOME=/tmp/geode-e2e GEODE_TEST_VERSION=1.21.1 GEODE_TEST_LOADER=fabric \
   cargo test --test live_launch -- --ignored --nocapture   # downloads a lot; wraps itself in xvfb-run
 ```
