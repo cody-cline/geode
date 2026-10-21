@@ -524,3 +524,51 @@ async fn the_probe_reads_a_real_servers_commands_without_disturbing_it() {
 
     let _ = tokio::fs::remove_dir_all(&paths.root).await;
 }
+
+/// A name becomes a UUID only by asking Mojang, and the files these go into are
+/// keyed by UUID.
+///
+/// Offline there is nothing honest to test: a fixture would prove that the
+/// parser parses the fixture. What can break is the endpoint — Mojang has moved
+/// these lookups before — and what must never happen is a name being written
+/// into `whitelist.json` or `ops.json` under a UUID that was guessed.
+#[tokio::test]
+#[ignore = "hits the network"]
+async fn mojang_resolves_a_name_to_the_uuid_the_files_are_keyed_by() {
+    use geode_lib::server::players;
+
+    let client = net::client();
+
+    // Notch's UUID is the one fixed point in Minecraft: account one, and the
+    // value every offline implementation is checked against.
+    let notch = players::resolve_online(&client, "Notch")
+        .await
+        .expect("Mojang should know Notch");
+    assert_eq!(notch.uuid, "069a79f4-44e9-4726-a5be-fca90e38aaf5");
+    assert_eq!(
+        notch.name, "Notch",
+        "the canonical spelling is what goes in the file, not what was typed"
+    );
+
+    // Case is Mojang's to decide: whatever an admin types, the file records the
+    // name as that account actually spells it.
+    let lower = players::resolve_online(&client, "notch")
+        .await
+        .expect("a lookup is not case-sensitive");
+    assert_eq!(lower.name, "Notch");
+    assert_eq!(lower.uuid, notch.uuid);
+
+    // A name nobody owns has to be reported, not worked around: writing a
+    // derived UUID for it would whitelist somebody who does not exist and
+    // never whitelist the person meant.
+    let missing = players::resolve_online(&client, "GeodeNoSuchName9")
+        .await
+        .expect_err("that account does not exist");
+    let text = missing.to_string();
+    assert!(
+        text.contains("GeodeNoSuchName9") && text.contains("no Minecraft account"),
+        "the refusal should name who could not be found: {text}"
+    );
+
+    println!("Notch -> {}", notch.uuid);
+}

@@ -18,6 +18,7 @@ pub mod install;
 pub mod installer;
 pub mod logs;
 pub mod meta;
+pub mod players;
 pub mod probe;
 pub mod properties;
 pub mod run;

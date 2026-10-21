@@ -400,6 +400,82 @@ export interface ServerExit {
   ranSeconds: number;
 }
 
+/** One of the four lists Minecraft keeps beside a world. */
+export type PlayerListId = "whitelist" | "ops" | "bans" | "ip-bans";
+
+/** One entry on one of those lists. */
+export interface PlayerListEntry {
+  /**
+   * The name **as the server last recorded it**. A Minecraft name can change
+   * hands, so this is not necessarily what that account answers to today —
+   * which is why the UUID is shown beside it.
+   */
+  name: string;
+  /** What the file is actually keyed by. Empty only for an IP ban. */
+  uuid: string;
+  ip: string | null;
+  /** An operator's permission level, 1 to 4. */
+  level: number | null;
+  reason: string | null;
+  created: string | null;
+}
+
+/**
+ * What this server's own command tree says it can be asked to do.
+ *
+ * Read off the Brigadier tree the probe wrote, never off the server kind: a
+ * proxy has no whitelist, and a mod or plugin can add or replace commands.
+ * `known` false means no tree has been read, and then nothing is offered.
+ */
+export interface PlayerConsole {
+  known: boolean;
+  whoIsOnline: boolean;
+  whitelistAdd: boolean;
+  whitelistRemove: boolean;
+  whitelistToggle: boolean;
+  op: boolean;
+  deop: boolean;
+  ban: boolean;
+  pardon: boolean;
+  banIp: boolean;
+  pardonIp: boolean;
+  kick: boolean;
+}
+
+export interface PlayerLists {
+  whitelist: PlayerListEntry[];
+  ops: PlayerListEntry[];
+  bans: PlayerListEntry[];
+  ipBans: PlayerListEntry[];
+  /** `white-list` in server.properties. */
+  whitelistOn: boolean;
+  /**
+   * Whether players are authenticated with Mojang, which decides how a name
+   * becomes a UUID: Mojang's answer, or the one Minecraft derives itself.
+   */
+  onlineMode: boolean;
+  running: boolean;
+  console: PlayerConsole;
+}
+
+/**
+ * Which way a change went. A running server owns these files, so a change goes
+ * through its console; a stopped one does not, so the file is edited directly.
+ */
+export interface PlayerChange {
+  via: "console" | "file";
+  /** What the server said, as it said it. Empty when the change went to a file. */
+  said: string[];
+  lists: PlayerLists;
+}
+
+/** Who is on the server now, as its own `/list` reported. */
+export interface OnlinePlayers {
+  /** `null` when the reply could not be read — then `said` is all there is. */
+  players: string[] | null;
+  said: string[];
+}
+
 // ---------------------------------------------------------------------------
 // Plans
 // ---------------------------------------------------------------------------

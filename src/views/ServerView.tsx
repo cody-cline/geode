@@ -33,6 +33,7 @@ import Browse from "./Browse";
 import GraphTab from "./instance/GraphTab";
 import ServerContentTab from "./server/ContentTab";
 import type { ServerFolder } from "./server/ContentTab";
+import PlayersTab from "./server/PlayersTab";
 import Properties from "./server/Properties";
 import ShareTab from "./server/ShareTab";
 import { api } from "../lib/api";
@@ -59,6 +60,9 @@ import styles from "./ServerView.module.css";
 const TABS = [
   { id: "console", label: "Console" },
   { id: "logs", label: "Logs" },
+  // Who may play. Its own tab rather than a corner of Properties: the whitelist
+  // was one boolean in that table with no way to manage who was on it.
+  { id: "players", label: "Players" },
   { id: "content", label: "Content" },
   // The same dependency field an instance draws. A server's mods folder is a
   // mods folder, and it keeps the same provenance records.
@@ -536,6 +540,9 @@ export default function ServerView({ id }: { id: string }) {
           // no world and no Minecraft version of its own, so no pack to share.
           (tab) =>
             (tab.id !== "graph" || server.takesMods || server.takesPlugins) &&
+            // A proxy hosts no world, so it has no whitelist, operators or
+            // bans of its own — the servers behind it do.
+            (tab.id !== "players" || server.hasWorld) &&
             (tab.id !== "share" || server.hasWorld),
         ).map((tab) => (
           <button
@@ -621,6 +628,8 @@ export default function ServerView({ id }: { id: string }) {
         </div>
       ) : active === "logs" ? (
         <LogFilesPanel source={logSource} />
+      ) : active === "players" ? (
+        <PlayersTab server={server} />
       ) : active === "content" ? (
         <ServerContentTab server={server} onBrowse={setAdding} />
       ) : active === "graph" ? (

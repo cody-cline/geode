@@ -2643,6 +2643,111 @@ pub async fn write_server_properties(
 }
 
 // ---------------------------------------------------------------------------
+// Servers: who may play
+// ---------------------------------------------------------------------------
+
+fn players(state: &AppState) -> crate::server::players::Manager<'_> {
+    crate::server::players::Manager {
+        paths: &state.paths,
+        servers: &state.servers,
+        http: &state.http,
+    }
+}
+
+fn parse_player_list(s: &str) -> Result<crate::server::players::PlayerList> {
+    crate::server::players::PlayerList::parse(s)
+        .ok_or_else(|| Error::msg(format!("unknown player list '{s}'")))
+}
+
+/// The whitelist, the operators and both ban lists, read from the files
+/// Minecraft itself writes, plus what this server's console can be asked.
+///
+/// Read from the files whether or not the server is running: it keeps them
+/// current as it changes them. Only writing them depends on who is holding
+/// them — see `server::players`.
+#[tauri::command]
+pub async fn server_player_lists(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<crate::server::players::PlayerLists> {
+    players(&state).lists(&id).await
+}
+
+/// Who is on the server right now, asked of the server itself.
+#[tauri::command]
+pub async fn server_online_players(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<crate::server::players::Online> {
+    players(&state).online(&id).await
+}
+
+/// Put somebody on one of those lists.
+///
+/// `level` is an operator's permission level and is only accepted while the
+/// server is stopped, because `/op` has no level argument.
+#[tauri::command]
+pub async fn add_to_server_list(
+    state: State<'_, AppState>,
+    id: String,
+    list: String,
+    target: String,
+    reason: Option<String>,
+    level: Option<u8>,
+) -> Result<crate::server::players::Change> {
+    players(&state)
+        .add(
+            &id,
+            parse_player_list(&list)?,
+            &target,
+            reason.as_deref(),
+            level,
+        )
+        .await
+}
+
+/// Take somebody off one of those lists.
+///
+/// `uuid` is the key the row carries, and while the server is stopped it is
+/// what the row is found by — these files are keyed by UUID, and a name can
+/// name more than one row.
+#[tauri::command]
+pub async fn remove_from_server_list(
+    state: State<'_, AppState>,
+    id: String,
+    list: String,
+    target: String,
+    uuid: Option<String>,
+) -> Result<crate::server::players::Change> {
+    players(&state)
+        .remove(&id, parse_player_list(&list)?, &target, uuid.as_deref())
+        .await
+}
+
+/// Put a player off the server now. Nothing is written: a kick lasts until they
+/// reconnect.
+#[tauri::command]
+pub async fn kick_server_player(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+    reason: Option<String>,
+) -> Result<crate::server::players::Change> {
+    players(&state).kick(&id, &name, reason.as_deref()).await
+}
+
+/// Turn the whitelist on or off — the `white-list` setting, next to the list it
+/// governs rather than buried in the properties table.
+#[tauri::command]
+pub async fn set_server_whitelist(
+    state: State<'_, AppState>,
+    id: String,
+    on: bool,
+) -> Result<crate::server::players::Change> {
+    players(&state).set_whitelist(&id, on).await
+}
+
+// ---------------------------------------------------------------------------
 // Accounts
 // ---------------------------------------------------------------------------
 

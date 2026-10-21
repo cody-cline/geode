@@ -176,6 +176,7 @@ belongs to.
 | `install.rs`, `installer.rs` | Fetching and running what a kind needs. `LaunchKind::ArgFile` exists because from 1.17 a Forge/NeoForge server has no jar at all — its installer leaves an argument file. |
 | `run.rs` | Running a server and its console. The difference from launching the game: stdin stays open, and that pipe *is* the console — how `stop` is sent, and why stopping can be graceful. Holds `ServerRegistry`. |
 | `properties.rs` | `server.properties`, described in terms of what each setting means rather than its key. |
+| `players.rs` | The whitelist, the operators and both ban lists — Minecraft's own `whitelist.json`, `ops.json`, `banned-players.json` and `banned-ips.json`. A running server owns those files, so a change goes through its console and the reply is reported as the server gave it; a stopped server's files are Geode's to write, which is also the only way to set an operator's level. What may be asked of the console comes off `probe.rs`'s tree, never off the server kind. |
 | `backup.rs` | A zip of the run directory, kept beside the server, never swept into the next backup. Logs and crash reports are left out. |
 | `schedule.rs` | Backups and commands on a timer. One ticker for every server, because "a thousand idle tasks would be a thousand ways to leak one". |
 | `git.rs` | Finding Git, and getting it where it is missing — only Spigot needs it, since BuildTools compiles from source. |
@@ -279,8 +280,9 @@ React 19 + TypeScript + Vite, zustand for state, CSS modules for styling.
   `SettingsTab`). A server's are not, mostly: `ServerView` renders console,
   automation and settings inline, which is why it is large, and only `ContentTab`
   and `Properties` live in `views/server/` — plus `ShareTab`, the admin's
-  sharing screen. `Browse` doubles as an embedded picker for an instance, a plan
-  or a server, via optional props. Sharing also brings `components/JoinModal`
+  sharing screen, and `PlayersTab`, which shows who is online and manages the
+  whitelist, the operators and both ban lists. `Browse` doubles as an embedded
+  picker for an instance, a plan or a server, via optional props. Sharing also brings `components/JoinModal`
   (the player's side of a `geode://join` link) and `components/StatusNote`.
 - **Store**: one zustand store in `lib/store.ts` — no context, no persist
   middleware, no per-view store. It holds routing and history, config,

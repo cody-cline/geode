@@ -34,6 +34,7 @@ import type {
   LinkReport,
   ListedClientOnly,
   LogFile,
+  OnlinePlayers,
   PackArrival,
   PackFormat,
   PackImport,
@@ -43,6 +44,9 @@ import type {
   Plan,
   PlanMod,
   PlanResolution,
+  PlayerChange,
+  PlayerListId,
+  PlayerLists,
   Project,
   ProjectKind,
   ProjectVersion,
@@ -459,6 +463,61 @@ export const api = {
   /** Only the settings passed are changed; the rest of the file is left alone. */
   writeServerProperties: (id: string, properties: ServerProperty[]) =>
     invoke<void>("write_server_properties", { id, properties }),
+
+  /**
+   * The whitelist, the operators and both ban lists, read from the files
+   * Minecraft itself writes, plus what this server's console can be asked.
+   */
+  serverPlayerLists: (id: string) =>
+    invoke<PlayerLists>("server_player_lists", { id }),
+  /** Who is on the server now, asked of the server itself. */
+  serverOnlinePlayers: (id: string) =>
+    invoke<OnlinePlayers>("server_online_players", { id }),
+  /**
+   * Put somebody on one of those lists. `level` is an operator's permission
+   * level and is only accepted while the server is stopped, because `/op` has
+   * no level argument.
+   */
+  addToServerList: (
+    id: string,
+    list: PlayerListId,
+    target: string,
+    reason?: string,
+    level?: number,
+  ) =>
+    invoke<PlayerChange>("add_to_server_list", {
+      id,
+      list,
+      target,
+      reason: reason ?? null,
+      level: level ?? null,
+    }),
+  /**
+   * Take somebody off one of those lists. `uuid` is the key the row carries,
+   * and while the server is stopped it is what the row is found by: the file is
+   * keyed by UUID, and one name can name more than one row.
+   */
+  removeFromServerList: (
+    id: string,
+    list: PlayerListId,
+    target: string,
+    uuid?: string,
+  ) =>
+    invoke<PlayerChange>("remove_from_server_list", {
+      id,
+      list,
+      target,
+      uuid: uuid ?? null,
+    }),
+  /** Puts them off now; nothing is written, so they can come straight back. */
+  kickServerPlayer: (id: string, name: string, reason?: string) =>
+    invoke<PlayerChange>("kick_server_player", {
+      id,
+      name,
+      reason: reason ?? null,
+    }),
+  setServerWhitelist: (id: string, on: boolean) =>
+    invoke<PlayerChange>("set_server_whitelist", { id, on }),
 
   // Accounts
   listAccounts: () => invoke<Account[]>("list_accounts"),

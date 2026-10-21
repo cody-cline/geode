@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use crate::events::{self, EventSink};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::error::{Error, Result};
 use crate::paths::Paths;
@@ -26,6 +26,27 @@ use super::{Server, ServerKind};
 /// Generous on purpose: saving a large world takes a while, and killing it
 /// halfway is how a world gets corrupted.
 const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// How long a console command gets to say anything at all before Geode calls
+/// it silence. Generous enough for a server mid-chunk-save, short enough that a
+/// screen waiting on it does not look hung.
+const REPLY_WINDOW: std::time::Duration = std::time::Duration::from_millis(3000);
+
+/// Once it has started answering, how long to keep listening for more.
+///
+/// `banlist` answers over several lines, so stopping at the first would read
+/// half a reply as the whole one.
+const REPLY_SETTLE: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// How many lines of one reply are worth keeping.
+///
+/// The window catches whatever the server logged while it answered, which on a
+/// busy server is not only the answer. A ceiling keeps that from arriving as a
+/// wall of text; what it costs is the tail of a very long `banlist`.
+const REPLY_LINES: usize = 24;
+
+/// How many console lines a listener may fall behind before it loses some.
+const CONSOLE_BACKLOG: usize = 256;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -61,6 +82,11 @@ pub struct RunningServer {
     pub started_at: std::time::Instant,
     commands: mpsc::UnboundedSender<String>,
     kill: tokio::sync::watch::Sender<bool>,
+    /// Every console line this server has produced, for whoever is waiting on
+    /// an answer to something they just sent. The console pane gets its copy
+    /// through the event sink; this is the same text, taken a second time by
+    /// code that has to read it rather than show it.
+    console: broadcast::Sender<String>,
 }
 
 impl RunningServer {
@@ -121,6 +147,53 @@ impl ServerRegistry {
             .unwrap_or(false)
     }
 
+    /// Send one console command and collect what the server says back.
+    ///
+    /// `None` means nothing is running, which is a different answer from
+    /// `Some(vec![])` — that one means the command went down the pipe and the
+    /// server said nothing at all. Both matter: a screen that reports a ban as
+    /// done when the server never acknowledged it has lied to somebody about
+    /// who can get in.
+    ///
+    /// The listener is subscribed before the command is written, so a reply
+    /// that arrives in the same instant is still caught. What comes back is
+    /// everything the console produced during the wait — on a busy server that
+    /// can include lines of its own, which is why callers show the reply rather
+    /// than claiming to have understood it.
+    pub async fn ask(&self, id: &str, command: &str) -> Option<Vec<String>> {
+        let mut lines = {
+            // The lock is a synchronous one and must not be held across an
+            // await, so subscribing and sending both happen inside this block.
+            let map = self.inner.lock().ok()?;
+            let running = map.get(id)?;
+            let rx = running.console.subscribe();
+            if !running.send(command) {
+                return None;
+            }
+            rx
+        };
+
+        let mut said = Vec::new();
+        let silence_ends = tokio::time::Instant::now() + REPLY_WINDOW;
+        while said.len() < REPLY_LINES {
+            let wait = if said.is_empty() {
+                silence_ends.saturating_duration_since(tokio::time::Instant::now())
+            } else {
+                REPLY_SETTLE
+            };
+            match tokio::time::timeout(wait, lines.recv()).await {
+                Ok(Ok(line)) => said.push(line),
+                // Behind by more than the backlog. Whatever was missed is
+                // gone, so keep listening rather than reporting silence.
+                Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+                // The server's pipes closed: it has exited mid-command.
+                Ok(Err(broadcast::error::RecvError::Closed)) => break,
+                Err(_) => break,
+            }
+        }
+        Some(said)
+    }
+
     /// Ask a server to stop the way an operator would, and kill it only if it
     /// will not. Returns false when nothing is running.
     pub fn stop(&self, id: &str, kind: ServerKind) -> bool {
@@ -142,6 +215,53 @@ impl ServerRegistry {
             .ok()
             .and_then(|m| m.get(id).map(|s| s.force_kill()))
             .is_some()
+    }
+
+    /// A registry holding one server whose console a test drives instead of a
+    /// JVM: what Geode writes to stdin arrives on the returned receiver, and
+    /// what the test pushes into the sender is what the server "said".
+    ///
+    /// Here rather than in a test module because the console direction is the
+    /// half of `server::players` that cannot be tested against files, and
+    /// `RunningServer`'s channels are this module's own.
+    #[cfg(test)]
+    pub(crate) fn fake_running(
+        id: &str,
+    ) -> (
+        Self,
+        mpsc::UnboundedReceiver<String>,
+        broadcast::Sender<String>,
+    ) {
+        let registry = Self::default();
+        let (typed, console) = registry.fake_start(id);
+        (registry, typed, console)
+    }
+
+    /// The same, into a registry a test already holds: a server that starts
+    /// part-way through something, the way a scheduled task or a click on Start
+    /// does while a stopped server's files are being edited.
+    #[cfg(test)]
+    pub(crate) fn fake_start(
+        &self,
+        id: &str,
+    ) -> (
+        mpsc::UnboundedReceiver<String>,
+        broadcast::Sender<String>,
+    ) {
+        let (commands, typed) = mpsc::unbounded_channel();
+        let (kill, _killed) = tokio::sync::watch::channel(false);
+        let (console, _) = broadcast::channel(CONSOLE_BACKLOG);
+        self.insert(
+            id.to_string(),
+            RunningServer {
+                pid: 0,
+                started_at: std::time::Instant::now(),
+                commands,
+                kill,
+                console: console.clone(),
+            },
+        );
+        (typed, console)
     }
 
     pub fn stop_all(&self) {
@@ -274,6 +394,8 @@ pub async fn start(
         });
     }
 
+    let (console_tx, _) = broadcast::channel(CONSOLE_BACKLOG);
+
     for (pipe, stream) in [
         (child.stdout.take().map(Pipe::Out), "out"),
         (child.stderr.take().map(Pipe::Err), "err"),
@@ -282,10 +404,11 @@ pub async fn start(
         let sink = sink.clone();
         let id = server.id.clone();
         let stream = stream.to_string();
+        let console = console_tx.clone();
         tokio::spawn(async move {
             match pipe {
-                Pipe::Out(out) => emit_lines(sink, id, stream, BufReader::new(out)).await,
-                Pipe::Err(err) => emit_lines(sink, id, stream, BufReader::new(err)).await,
+                Pipe::Out(out) => emit_lines(sink, console, id, stream, BufReader::new(out)).await,
+                Pipe::Err(err) => emit_lines(sink, console, id, stream, BufReader::new(err)).await,
             }
         });
     }
@@ -297,6 +420,7 @@ pub async fn start(
             started_at,
             commands: command_tx,
             kill: kill_tx,
+            console: console_tx,
         },
     );
 
@@ -339,12 +463,20 @@ enum Pipe {
     Err(tokio::process::ChildStderr),
 }
 
-async fn emit_lines<R>(sink: EventSink, id: String, stream: String, reader: BufReader<R>)
-where
+async fn emit_lines<R>(
+    sink: EventSink,
+    console: broadcast::Sender<String>,
+    id: String,
+    stream: String,
+    reader: BufReader<R>,
+) where
     R: tokio::io::AsyncRead + Unpin,
 {
     let mut lines = reader.lines();
     while let Ok(Some(line)) = lines.next_line().await {
+        // No receivers is the ordinary case — nobody is waiting on a reply —
+        // and an error here means exactly that, not a failure.
+        let _ = console.send(line.clone());
         events::emit(
             &Some(sink.clone()),
             "geode://server-log",
@@ -455,6 +587,71 @@ mod tests {
         let flag_at = args.iter().position(|a| a == "-XX:+UseG1GC").unwrap();
         assert!(flag_at < jar_at);
         assert!(args.contains(&"-Dfoo=bar".to_string()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_console_command_is_typed_in_and_the_answer_comes_back() {
+        let (registry, mut typed, console) = ServerRegistry::fake_running("survival");
+
+        let answering = tokio::spawn(async move {
+            let line = typed.recv().await.expect("the command should be written");
+            // Exactly what typing it into the console would send.
+            assert_eq!(line, "whitelist list\n");
+            let _ = console.send("[12:00:00] [Server thread/INFO]: There are 2 whitelisted players: alice, bob".into());
+        });
+
+        let said = registry.ask("survival", "whitelist list").await;
+        answering.await.unwrap();
+
+        let said = said.expect("something is running");
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("alice, bob"), "{said:?}");
+    }
+
+    /// The distinction the whole screen rests on: a server that said nothing is
+    /// not a server that did the thing.
+    #[tokio::test(start_paused = true)]
+    async fn a_server_that_answers_nothing_reports_silence_rather_than_success() {
+        let (registry, mut typed, _console) = ServerRegistry::fake_running("survival");
+
+        let said = registry.ask("survival", "whitelist add ghost").await;
+
+        assert_eq!(
+            said,
+            Some(Vec::new()),
+            "a server that says nothing must come back as nothing said"
+        );
+        assert_eq!(
+            typed.recv().await.as_deref(),
+            Some("whitelist add ghost\n"),
+            "the command should still have been sent"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn asking_a_server_that_is_not_running_is_its_own_answer() {
+        let (registry, _typed, _console) = ServerRegistry::fake_running("survival");
+        assert_eq!(registry.ask("creative", "list").await, None);
+    }
+
+    /// A reply arriving line by line is collected whole, not cut off at the
+    /// first one — `banlist` answers with a count and then a line per ban.
+    #[tokio::test(start_paused = true)]
+    async fn a_reply_that_arrives_over_several_lines_is_collected_whole() {
+        let (registry, mut typed, console) = ServerRegistry::fake_running("survival");
+
+        let answering = tokio::spawn(async move {
+            typed.recv().await.expect("the command should be written");
+            for line in ["There are 2 bans:", "alice was banned by Server", "bob was banned by Server"] {
+                let _ = console.send(line.to_string());
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        });
+
+        let said = registry.ask("survival", "banlist players").await.unwrap();
+        answering.await.unwrap();
+
+        assert_eq!(said.len(), 3, "{said:?}");
     }
 
     #[test]

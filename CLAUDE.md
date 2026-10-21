@@ -15,7 +15,7 @@ Knowing which of these a change belongs to is most of navigating this codebase.
 | Thing | Rust | What it is |
 |---|---|---|
 | **Instances** | `instance/`, `install/`, `launch/`, `meta/`, `auth/`, `java.rs` | A playable client: a Minecraft version, a loader, mods, worlds. Installed, then launched as a JVM. |
-| **Servers** | `server/` (14 files) | A server Geode installs, runs, and talks to over stdin. 14 kinds (`ServerKind`), backups, scheduled tasks, `server.properties`, a command probe. |
+| **Servers** | `server/` (15 files) | A server Geode installs, runs, and talks to over stdin. 14 kinds (`ServerKind`), backups, scheduled tasks, `server.properties`, the whitelist, ops and bans, a command probe. |
 | **Plans** | `plan/` | A *versionless* list of mods. You collect mods first; the resolver works out afterwards which loader and Minecraft version can run all of them. |
 | **Shares** | `share/` (13 files), `drive/`, `deeplink.rs` | Three shapes: a `.geodepack` file you hand over, a server serving its pack to its own players over TLS (`geode://join`), and a pack put in the sharer's own Google Drive (`geode://pack`). Carries provider content **by reference**, not by copying bytes. |
 
@@ -52,7 +52,7 @@ real zip), `header_wire_format.rs` (one that proves a bcrypt CurseForge key
 reaches the socket unmangled) and `curseforge_fingerprints.rs` (24 that pin
 what a fingerprint lookup puts on the wire). All three serve themselves from a
 `TcpListener` on localhost or a scratch directory; none reaches a real API. The
-nine `live_*` files hold 48 tests, every one `#[ignore]`d because they hit real
+nine `live_*` files hold 49 tests, every one `#[ignore]`d because they hit real
 upstream APIs, and they exist because the parts most likely to break are the
 ones nobody here controls:
 
@@ -79,7 +79,7 @@ reads Sinytra Connector's real files for exactly this reason. The same trap in
 reverse: a server kind's mod loader is a fact about that software, not a guess
 (Banner is Fabric-based, not NeoForge — `ServerKind::mod_loader`).
 
-**`commands.rs` stays thin: validate, delegate, return.** 130 of the 131
+**`commands.rs` stays thin: validate, delegate, return.** 136 of the 137
 `#[tauri::command]` functions live there (the odd one out is
 `deeplink::take_pending_join`), and logic belongs in the module that owns it so
 the headless path can reach it too. A new command must be added in **two**
@@ -119,6 +119,23 @@ exists — add one rather than making it three.
 is no codegen. Change a `#[derive(Serialize)]` struct or an enum's
 `rename_all`, and you must change the TypeScript by hand or the frontend
 silently reads `undefined`.
+
+**Minecraft's own player files are the server's while it runs.**
+`whitelist.json`, `ops.json`, `banned-players.json` and `banned-ips.json` are
+held in memory by a running server and written out whenever it changes one, so
+an edit made behind its back is lost at its next save. `server/players.rs`
+therefore goes one of two ways and says on screen which: through the console
+while the server runs, straight to the file while it is stopped. Three things
+fall out of that and are load-bearing. A console command that produces no reply
+is reported as silence, never as success — a screen that shows a ban as done
+when the server never acknowledged it has lied to somebody about who can get in.
+What may be asked of a console is read off the Brigadier tree in `probe.rs`,
+never off the server kind: a proxy has no whitelist, a plugin can replace
+`/ban`, and a server with no tree yet is offered nothing rather than assumed to
+be vanilla. And these files are keyed by UUID, so nothing is written under a
+name that has not been resolved — from Mojang for an online-mode server, from
+`auth::offline_uuid` for one with authentication off, reported rather than
+guessed when neither can answer.
 
 **Unit tests stay offline.** Anything needing the network is an `#[ignore]`d
 test in `src-tauri/tests/`.
@@ -173,9 +190,10 @@ libraries/  assets/  natives/<id>/  java/  cache/icons/  logs/
 tools/                  geode-probe.jar, and a portable git for BuildTools
 ```
 
-A server's `run/` holds the world, `server.properties` and `eula.txt`; its
-`media/` and `backups/` sit *beside* it so a backup is the server's own data
-and never sweeps up bookkeeping or a previous backup. `run/client-mods/` is
+A server's `run/` holds the world, `server.properties`, `eula.txt` and
+Minecraft's own `whitelist.json`, `ops.json`, `banned-players.json` and
+`banned-ips.json`; its `media/` and `backups/` sit *beside* it so a backup is
+the server's own data and never sweeps up bookkeeping or a previous backup. `run/client-mods/` is
 deliberately a folder no loader reads: a client mod there cannot slow the server
 down or crash it on boot, and is still part of the pack players get. `share.json`
 is its own file for a reason worth knowing — see `server/share.rs`.
