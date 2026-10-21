@@ -20,6 +20,15 @@
 //! because an AppImage or a dev build has no installer to do it and the file
 //! it points at can move.
 //!
+//! Windows and macOS claim it once each, and only from a bundle — which is
+//! what `tauri.windows.conf.json` and `tauri.macos.conf.json` are for. The
+//! NSIS installer writes `Software\Classes\geode` into the hive it installed
+//! into; the `.app`'s `Info.plist` carries a `CFBundleURLTypes` entry the
+//! bundler builds from the `plugins.deep-link.desktop` block in
+//! tauri.conf.json. Neither comes free: the MSI writes no such key, and macOS
+//! cannot register a scheme at runtime at all, so a Geode that was never
+//! bundled is a Geode no link on either platform can reach.
+//!
 //! A link is hostile until [`Opened::parse`] accepts it: any web page can
 //! navigate to `geode://`, and any local process can start Geode with an
 //! argument or call the running copy. Only the normalised form ever reaches
@@ -48,7 +57,8 @@ pub fn start(app: &tauri::App) {
     // A failure is a warning, never a reason not to start. It fails wherever
     // `update-desktop-database` is missing, and a packaged Geode is still the
     // handler through its desktop entry. Windows installers register the
-    // scheme themselves; only a debug build there has nothing that did.
+    // scheme themselves; only a debug build there has nothing that did. macOS
+    // is absent because it cannot register a scheme at runtime at all.
     #[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
     if let Err(e) = app.deep_link().register_all() {
         eprintln!("geode: could not register geode:// links: {e}");
@@ -216,5 +226,50 @@ mod tests {
             .expect("the desktop template exists");
         let exec: Vec<_> = template.lines().filter(|l| l.starts_with("Exec=")).collect();
         assert_eq!(exec, vec!["Exec={{exec}} %u"]);
+    }
+
+    /// Every platform builds the one bundle that claims the scheme for it.
+    ///
+    /// Which bundle that is differs, and getting it wrong ships a Geode no
+    /// link reaches rather than one that fails to build:
+    ///
+    /// - **Linux** — the `deb`, `rpm` and AppImage desktop entries, above.
+    /// - **Windows** — `nsis` only. The NSIS installer writes
+    ///   `Software\Classes\geode`; the MSI has no equivalent step, so adding
+    ///   `msi` here would ship an installer that registers nothing.
+    /// - **macOS** — `app`, because `CFBundleURLTypes` lives in its
+    ///   `Info.plist` and runtime registration is impossible there, and `dmg`
+    ///   to have something to hand over.
+    #[test]
+    fn every_platform_builds_the_bundle_that_claims_the_scheme() {
+        use tauri::utils::config::{BundleTarget, BundleType};
+
+        /// `bundle.targets` from one config file, read through the bundler's
+        /// own types so a target name it would not recognise fails here.
+        fn targets(file: &str, text: &str) -> BundleTarget {
+            let config: serde_json::Value =
+                serde_json::from_str(text).unwrap_or_else(|e| panic!("{file} is not JSON: {e}"));
+            serde_json::from_value(config["bundle"]["targets"].clone())
+                .unwrap_or_else(|e| panic!("{file} bundle.targets: {e}"))
+        }
+
+        assert_eq!(
+            targets("tauri.conf.json", include_str!("../tauri.conf.json")),
+            BundleTarget::List(vec![BundleType::AppImage, BundleType::Deb, BundleType::Rpm])
+        );
+        assert_eq!(
+            targets(
+                "tauri.windows.conf.json",
+                include_str!("../tauri.windows.conf.json")
+            ),
+            BundleTarget::List(vec![BundleType::Nsis])
+        );
+        assert_eq!(
+            targets(
+                "tauri.macos.conf.json",
+                include_str!("../tauri.macos.conf.json")
+            ),
+            BundleTarget::List(vec![BundleType::App, BundleType::Dmg])
+        );
     }
 }
