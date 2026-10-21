@@ -2072,6 +2072,28 @@ mod tests {
 
     /// The first retry the status reports that `done` accepts, or a panic
     /// after five seconds.
+    /// Wait for the admin to have been told something, rather than for the
+    /// state that precedes it.
+    ///
+    /// The retry sets its status flag and then emits, so a machine under load
+    /// can satisfy [`listens_within`] with the notice still in flight — which
+    /// made the count below a race rather than an assertion.
+    async fn told_at_least(notices: impl Fn() -> Vec<serde_json::Value>, many: usize) -> Vec<serde_json::Value> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let told = notices();
+            if told.len() >= many {
+                return told;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "only {} of {many} notices arrived: {told:?}",
+                told.len()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     async fn wait_for_retry(
         service: &ShareService,
         paths: &Paths,
@@ -2314,7 +2336,7 @@ mod tests {
 
         drop(squatter);
         assert!(listens_within(&service, &admin, &config, Duration::from_secs(5)).await);
-        let told = notices();
+        let told = told_at_least(notices, 2).await;
         assert_eq!(told.len(), 2, "{told:?}");
         assert_eq!(told[1]["listening"], serde_json::json!(true));
         assert_eq!(told[1]["error"], serde_json::Value::Null);
