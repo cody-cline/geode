@@ -52,7 +52,7 @@ real zip), `header_wire_format.rs` (one that proves a bcrypt CurseForge key
 reaches the socket unmangled) and `curseforge_fingerprints.rs` (five that pin
 what a fingerprint lookup puts on the wire). All three serve themselves from a
 `TcpListener` on localhost or a scratch directory; none reaches a real API. The
-eight `live_*` files hold 42 tests, every one `#[ignore]`d because they hit real
+eight `live_*` files hold 43 tests, every one `#[ignore]`d because they hit real
 upstream APIs, and they exist because the parts most likely to break are the
 ones nobody here controls:
 
@@ -75,7 +75,7 @@ reads Sinytra Connector's real files for exactly this reason. The same trap in
 reverse: a server kind's mod loader is a fact about that software, not a guess
 (Banner is Fabric-based, not NeoForge — `ServerKind::mod_loader`).
 
-**`commands.rs` stays thin: validate, delegate, return.** 125 of the 126
+**`commands.rs` stays thin: validate, delegate, return.** 127 of the 128
 `#[tauri::command]` functions live there (the odd one out is
 `deeplink::take_pending_join`), and logic belongs in the module that owns it so
 the headless path can reach it too. A new command must be added in **two**

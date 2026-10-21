@@ -298,3 +298,90 @@ async fn curseforge_is_reported_off_without_a_key() {
         results.warnings
     );
 }
+
+/// The lookup the whole "a mod travels as a reference" design rests on, and
+/// the one an author-blocked CurseForge file is substituted through: Modrinth
+/// naming a file by the hash somebody else published about it.
+///
+/// Nothing here is hardcoded. A popular mod is searched for, its own newest
+/// file's sha1 is read off Modrinth's answer, and that hash is then asked
+/// about as a stranger's hash would be — which is exactly the shape
+/// `install::blocked` uses with a sha1 CurseForge published.
+#[tokio::test]
+#[ignore = "hits the network"]
+async fn modrinth_names_a_file_by_the_hash_somebody_else_published() {
+    let client = net::client();
+
+    let query = SearchQuery {
+        query: "sodium".into(),
+        kind: ProjectKind::Mod,
+        game_version: None,
+        loader: None,
+        categories: vec![],
+        sort: SortBy::Downloads,
+        offset: 0,
+        limit: 1,
+        providers: Some(vec![Provider::Modrinth]),
+    };
+    let hit = providers::search(&client, &query, None)
+        .await
+        .unwrap()
+        .hits
+        .into_iter()
+        .next()
+        .expect("Modrinth returned nothing for a search anybody can make");
+
+    let versions = providers::versions(&client, Provider::Modrinth, &hit.id, None, None, None)
+        .await
+        .unwrap();
+    let file = versions
+        .iter()
+        .find_map(|v| v.primary_file())
+        .expect("a published version with a file");
+    let sha1 = file
+        .sha1
+        .clone()
+        .expect("Modrinth publishes a sha1 for every file it serves");
+
+    let answered = providers::modrinth::files_by_hashes(
+        &client,
+        std::slice::from_ref(&sha1),
+        providers::modrinth::HashAlgorithm::Sha1,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        answered.unanswered.is_empty(),
+        "the lookup could not be made: {:?}",
+        answered.unanswered
+    );
+    let (version, matched) = answered
+        .found
+        .get(&sha1.to_lowercase())
+        .expect("the hash Modrinth itself published for this file");
+
+    // The file that comes back is the one the hash named, not the version's
+    // primary one — the distinction a substitution depends on, because a
+    // version can list a sources jar first.
+    assert_eq!(matched.sha1.as_deref(), Some(sha1.as_str()));
+    assert_eq!(version.provider, Provider::Modrinth);
+    assert!(!version.project_id.is_empty(), "no project to record");
+    assert!(
+        matched.url.starts_with("https://"),
+        "a file to install has to come from somewhere: {}",
+        matched.url
+    );
+
+    // And a hash nobody published is a miss rather than an error or a hit.
+    let nobodys = "0".repeat(40);
+    let answered = providers::modrinth::files_by_hashes(
+        &client,
+        std::slice::from_ref(&nobodys),
+        providers::modrinth::HashAlgorithm::Sha1,
+    )
+    .await
+    .unwrap();
+    assert!(answered.found.is_empty(), "a hash nobody published matched");
+    assert!(answered.unanswered.is_empty(), "a miss is not a refusal");
+}

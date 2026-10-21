@@ -10,7 +10,7 @@ the authority — when this document and a module disagree, the module is right.
 
 ```
 React in the OS webview          src/
-    │  invoke("command_name", args)          126 #[tauri::command] fns
+    │  invoke("command_name", args)          128 #[tauri::command] fns
     │  listen("topic", handler)              events pushed the other way
     ▼
 Rust core                        src-tauri/src/
