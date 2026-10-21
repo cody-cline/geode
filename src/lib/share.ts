@@ -7,6 +7,7 @@ import type {
   DriveStatus,
   ExistingInstance,
   ExportReport,
+  Forbidden,
   Instance,
   JoinInput,
   JoinOutcome,
@@ -189,6 +190,69 @@ export function gameAddressHint(share: ServerShareView): string {
     return `${packSentence} Geode has filled in this server's own server-port for the game address — check it is the one you forwarded, then save it.`;
   }
   return `${packSentence} Geode cannot work out the game address from that, so type the one players put into Minecraft's Add Server.`;
+}
+
+/**
+ * What the Share tab says about the mods this server does not allow.
+ *
+ * Two halves, and the second one is not optional. The first says what the list
+ * does: a player's copy is turned *off*, never deleted, and it goes off again
+ * on every update, which is the one place sharing enforces rather than sends.
+ *
+ * The second says what it is not. Geode reads and writes no loader-side
+ * mod-list handshake and has no anti-cheat, so a patched Geode, a second
+ * launcher, or a jar dropped in after an update all ignore this entirely. An
+ * admin who believes this stops a cheater and is wrong is worse off than one
+ * who was told plainly — so it is told plainly, on the screen where the rule is
+ * written rather than in a doc nobody opens.
+ */
+export function forbiddenRuleHint(): string {
+  return "A player's copy is turned off, never deleted, and it goes off again every time this server's pack updates. It is a rule, not a wall: Geode has no anti-cheat and no mod-list check with the game, so a patched Geode, another launcher, or a jar added after an update ignores it. Stopping somebody who means it is your server software's job — a mod-list plugin or a whitelist. Tell your players this is a rule.";
+}
+
+/**
+ * What a joined instance's own Settings say about the same list, to the player.
+ *
+ * Shown whether or not their server has any rules, because the point is the
+ * promise: nothing of theirs is deleted, and anything turned off is still in
+ * the folder. The reason they are told plainly that turning it back on will not
+ * last is that they will otherwise learn it by trying, on a Play that takes a
+ * minute to go wrong.
+ */
+export function forbiddenPlayerHint(): string {
+  return "A server can turn off mods of your own it does not allow. Geode turns them off and tells you the server's reason — it never deletes them, and the file stays in your mods folder. Turning one back on does not last while you play here: it goes off again the next time the server's pack updates.";
+}
+
+/**
+ * One row in the admin's list, as the identity they gave it rather than as the
+ * fields behind it.
+ *
+ * Says which kind of name it is, because the two behave differently and an
+ * admin debugging "why is this not working" needs to see which they typed: a
+ * mod id matches a jar whoever has it, a project id matches only a copy Geode
+ * installed and so has a record of.
+ */
+export function forbiddenLabel(entry: Forbidden): string {
+  const site = entry.provider === "curseforge" ? "CurseForge" : "Modrinth";
+  const project = entry.projectId ? `${site} project ${entry.projectId}` : "";
+  const mod = entry.modId ? `mod id ${entry.modId}` : "";
+  return [mod, project].filter(Boolean).join(", ");
+}
+
+/**
+ * The rule the admin typed, as the backend is given it.
+ *
+ * The site belongs to the project id, not to the rule: a rule naming only a mod
+ * id is not a project on any site, and a site with no project id beside it is
+ * the one pair `Forbidden::checked` refuses. The select has no empty option,
+ * because a project id with no site is refused too and offering that pair would
+ * only lead somewhere refused — so the site comes off here instead, when there
+ * is no project id for it to belong to. Without this the mod id field, the only
+ * way to name a jar somebody dropped in by hand, could never be used on its
+ * own.
+ */
+export function forbiddenAsTyped(rule: Forbidden): Forbidden {
+  return { ...rule, provider: rule.projectId.trim() ? rule.provider : "" };
 }
 
 /** A finished import's problems, headed the way the join dialog shows them. */

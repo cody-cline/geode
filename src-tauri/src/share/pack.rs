@@ -17,7 +17,7 @@ use crate::net::Progress;
 use crate::paths::Paths;
 
 use super::manifest::{
-    format_for, FileNote, Kind, Listing, Manifest, Profile, SourceRef, EXTENSION, FORMAT,
+    format_for, FileNote, Forbidden, Kind, Listing, Manifest, Profile, SourceRef, EXTENSION, FORMAT,
 };
 
 /// Build the Geode half of a pack for an instance.
@@ -60,6 +60,9 @@ pub async fn manifest_for(paths: &Paths, instance: &Instance, catalogue: &Catalo
         // Nor a listing: there is no server behind a personal pack to put in
         // anybody's multiplayer list.
         listing: None,
+        // Nor a rule about what the recipient may run. A pack is handed over;
+        // nobody stays behind it to have one.
+        forbidden: Vec::new(),
     }
 }
 
@@ -563,13 +566,32 @@ pub struct UpdateReport {
     /// [`import`] returns them.
     pub missing: Vec<String>,
     /// The player's own mods that are off because the server sends the same
-    /// project, by name.
+    /// mod, by name.
     pub turned_off: Vec<String>,
+    /// The player's own mods that are off because the server does not allow
+    /// them, each with the admin's reason. Said again on every update: a ban
+    /// is a standing rule, not a change that happened once.
+    pub banned: Vec<Banned>,
     /// The revision the pack itself carried, when it carried one: what the
     /// instance now holds, to keep instead of the revision of a description
     /// read before the pack was built. A pack from an admin's Geode older
     /// than this has none, and the caller keeps the description's.
     pub revision: Option<String>,
+}
+
+/// One mod of the player's own that is off because the server does not allow
+/// it.
+///
+/// Ordered by name, so the sentence the player reads does not shuffle between
+/// updates.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Banned {
+    /// What to call it to them: their record's name, else the file's.
+    pub name: String,
+    /// The admin's own words for why. Never empty — a rule with no reason is a
+    /// bug report waiting to happen, which is why `Forbidden::checked` refuses
+    /// one.
+    pub reason: String,
 }
 
 /// The revision a pack says it holds, when it says one.
@@ -606,15 +628,24 @@ pub fn pack_revision(manifest: &Manifest) -> Option<String> {
 ///    not: the server decides what it has. One the player had turned off waits
 ///    instead, when the update failed before the new version of that project
 ///    landed to hold the choice in its place.
-/// 8. A mod of the player's own that is the same Modrinth or CurseForge project
-///    as one the server now has on, under another name, is turned off — two
-///    copies of one mod is a game that does not start — but not deleted, and it
-///    stays the player's. Its name is reported, on this update and on any that
-///    follows while it is off.
-/// 9. Only once all of that finished does the instance take the pack's
-///    Minecraft version, loader and loader version. A failed update is saved by
-///    the caller as far as it got, and runs again next time; until then the
-///    game it starts is the one it had.
+/// 8. A mod of the player's own that is the same mod as one the server now has
+///    on, under another file name, is turned off — two copies of one mod is a
+///    game that does not start — but not deleted, and it stays the player's.
+///    The same Modrinth or CurseForge project by their record, or the same id
+///    declared by both jars when a jar they dropped in by hand has no record
+///    to go by. Its name is reported, on this update and on any that follows
+///    while it is off.
+/// 9. A mod of the player's own the server does not allow is turned off, with
+///    the admin's reason, and not deleted: the file keeps its bytes and its
+///    record stays theirs. Named by identity — a provider and project one of
+///    their records holds, or an id one of their jars declares — never by a
+///    path the pack wrote. This one re-applies on every update, because it is
+///    a standing rule and not a change that happened once, and it is
+///    client-side only: nothing here is enforcement.
+/// 10. Only once all of that finished does the instance take the pack's
+///     Minecraft version, loader and loader version. A failed update is saved
+///     by the caller as far as it got, and runs again next time; until then
+///     the game it starts is the one it had.
 ///
 /// Everything else in the instance is left alone: the player's own records and
 /// untracked files, worlds, options, resource packs, shaders, memory, Java, and
@@ -713,6 +744,7 @@ pub async fn update(
     settle_server_files(paths, instance, &arrived, &player_off).await?;
     remove_departed(paths, instance, &arrived, &player_off).await?;
     let turned_off = turn_off_the_players_duplicates(paths, instance, &arrived).await?;
+    let banned = enforce_the_servers_bans(paths, instance, &arrived, &manifest.forbidden).await?;
 
     // Named after the settling, for the reason `import` gives: a mod the
     // server sent as bytes has no record until it has been claimed. Through
@@ -731,6 +763,7 @@ pub async fn update(
     Ok(UpdateReport {
         missing,
         turned_off,
+        banned,
         revision: pack_revision(&manifest),
     })
 }
@@ -843,41 +876,326 @@ async fn remove_departed(
 /// server's that is off, or that never landed, leaves the player's own the one
 /// they have. What is reported is what ended up off, so an update that runs
 /// again after a failure says the same thing again.
+///
+/// Recognised two ways, because a record is not always there to recognise it
+/// by. A mod the player installed through Geode carries the provider and
+/// project it came from, and that is matched against what the pack says each
+/// file it brings is. A jar dropped into the folder by hand carries nothing at
+/// all — so the ids the two jars *declare* are compared instead, which is what
+/// the loader itself goes by and the only thing left that says they are one
+/// mod. Without that second way, a hand-dropped copy of a mod the server now
+/// ships left both copies on, and the game that then would not start read to
+/// the player as the update having broken their instance.
 async fn turn_off_the_players_duplicates(
     paths: &Paths,
     instance: &Instance,
     arrived: &HashMap<(instance::content::ContentKind, String), Arrival>,
 ) -> Result<Vec<String>> {
-    use instance::content::{content_dir, either_name_in, is_regular_file, set_enabled_in, Origin};
+    use instance::content::{
+        content_dir, either_name_in, is_regular_file, set_enabled_in, ContentKind, Origin,
+    };
 
-    let mut turned_off = Vec::new();
+    // Each of the player's own files to turn off, by kind and the name its
+    // record is keyed by, with what to call it to them. One file matched both
+    // ways is one mod, and is said once.
+    let mut duplicates: HashMap<(ContentKind, String), String> = HashMap::new();
+    // Read once, and only when a jar the pack brings could match one: reading
+    // every jar in a folder is what `jar::MetaCache` exists to avoid doing
+    // twice, and a player with nothing of their own has nothing to compare.
+    let theirs = if arrived.keys().any(|(kind, _)| *kind == ContentKind::Mod) {
+        the_players_own_jars(paths, instance, arrived).await
+    } else {
+        Vec::new()
+    };
+
     for ((kind, name), arrival) in arrived {
-        let Some((provider, project_id)) = &arrival.project else {
-            continue;
-        };
         let dir = content_dir(paths, &instance.id, *kind);
         if !is_regular_file(&dir.join(name)).await {
             continue;
         }
-        for record in &instance.content {
-            let own_copy = record.origin == Origin::User
-                && record.kind == *kind
-                && &record.provider == provider
-                && &record.project_id == project_id
-                && &record.file_name != name;
-            if !own_copy {
+        if let Some((provider, project_id)) = &arrival.project {
+            for record in &instance.content {
+                let own_copy = record.origin == Origin::User
+                    && record.kind == *kind
+                    && &record.provider == provider
+                    && &record.project_id == project_id
+                    && &record.file_name != name;
+                if own_copy {
+                    duplicates.insert((*kind, record.file_name.clone()), record.name.clone());
+                }
+            }
+        }
+        // Only mods: an id is a thing a mod jar declares, and two copies of one
+        // mod is the failure this is about.
+        if *kind != ContentKind::Mod || theirs.is_empty() {
+            continue;
+        }
+        let ours = declared_ids(&dir.join(name)).await;
+        for jar in &theirs {
+            if &jar.file == name {
                 continue;
             }
-            let Some((_, enabled)) = either_name_in(&dir, &record.file_name).await else {
-                continue;
-            };
-            if enabled {
-                set_enabled_in(&dir, &record.file_name, false).await?;
+            let same_mod = jar
+                .ids
+                .iter()
+                .any(|id| ours.iter().any(|ours| ours.eq_ignore_ascii_case(id)));
+            if same_mod {
+                duplicates.insert((*kind, jar.file.clone()), jar.name.clone());
             }
-            turned_off.push(record.name.clone());
         }
     }
+
+    let mut turned_off = Vec::new();
+    for ((kind, file), name) in duplicates {
+        let dir = content_dir(paths, &instance.id, kind);
+        let Some((_, enabled)) = either_name_in(&dir, &file).await else {
+            continue;
+        };
+        if enabled {
+            set_enabled_in(&dir, &file, false).await?;
+        }
+        turned_off.push(name);
+    }
+    // Sorted because what they are read out of is a map: the player reads this
+    // sentence again on every update, and it should not shuffle.
+    turned_off.sort();
     Ok(turned_off)
+}
+
+/// Turn off the player's own mods the server does not allow, and say which and
+/// why.
+///
+/// A standing rule rather than a change, and the one asymmetry with everything
+/// else an update does: it runs again on every update, so a mod turned back on
+/// is off again after the next one. Not after the next Play — a Play on a
+/// server whose revision has not moved downloads no pack and so reaches none of
+/// this. What is reported is what is off, with the admin's own reason, so the
+/// player reads the same sentence every time rather than wondering what
+/// happened to their mod.
+///
+/// Never a delete. The file keeps its bytes under the `.disabled` name and its
+/// record stays the player's, so deleting it is still their decision and
+/// nothing of theirs is ever lost to a rule. The existing refusal in
+/// `content::remove_in` is untouched, because it is about the *server's* files
+/// and this touches none of them.
+///
+/// What the pack may name is an identity, never a path: a provider and project
+/// one of the player's own records names — by its id or by the slug that same
+/// record holds — or an id one of their own jars declares. All of them are read
+/// from this instance and these files — the same discipline [`content_file`]
+/// applies to everything else a pack claims — so an entry holding a path, a
+/// `..`, or a file name resolves to nothing at all and a stranger's pack cannot
+/// use the list to reach a file it was never allowed to name.
+///
+/// The list itself is checked here rather than trusted, by the same
+/// [`Forbidden::checked`] the admin's own typing goes through: this one arrived
+/// over the network, and the reason is read straight into the notice the player
+/// sees.
+///
+/// The server's own files are not touched. The rule is about what the player
+/// brings; a server that ships a mod it forbids is contradicting itself, and
+/// turning its own mod off would only leave the next update to put it back.
+///
+/// Nothing is written to the instance, which is what keeps the rule to the
+/// joined instance and to the time it is joined: a duplicate of a joined
+/// instance is not a join, never updates, and so inherits no rule.
+async fn enforce_the_servers_bans(
+    paths: &Paths,
+    instance: &Instance,
+    arrived: &HashMap<(instance::content::ContentKind, String), Arrival>,
+    forbidden: &[Forbidden],
+) -> Result<Vec<Banned>> {
+    use instance::content::{content_dir, either_name_in, set_enabled_in, ContentKind, Origin};
+
+    // Held to the same rules as what the admin types, because this list came
+    // off the network: a pack nobody's Geode built can carry a reason of any
+    // length, over any number of lines, and that reason is interpolated into
+    // the launch notice. An entry that does not pass is dropped rather than
+    // failing the update — refusing the pack whole would cost the player every
+    // mod in it, which is the answer `reconcile_listing` gives for a listing it
+    // will not write either.
+    let forbidden: Vec<Forbidden> = forbidden
+        .iter()
+        .filter_map(|rule| rule.checked().ok())
+        .collect();
+    if forbidden.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Each file to turn off, by kind and the name its record is keyed by, with
+    // what to call it and the reason to show. A mod matched both ways is one
+    // mod, and is said once.
+    let mut banned: HashMap<(ContentKind, String), (String, String)> = HashMap::new();
+
+    // By what the player's own record says the file is. A record with no
+    // provider names no project, and matches nothing.
+    for record in &instance.content {
+        if record.origin != Origin::User
+            || record.provider.is_empty()
+            || record.project_id.is_empty()
+        {
+            continue;
+        }
+        // By the project's id, or by the slug the same record holds. The slug
+        // is the only id on the project's own page and in its URL, so it is
+        // what an admin copies, and a rule that matched nothing would say so
+        // nowhere: there is no channel back from the players to tell them.
+        let rule = forbidden.iter().find(|rule| {
+            !rule.provider.is_empty()
+                && rule.provider == record.provider
+                && (rule.project_id == record.project_id
+                    || record
+                        .slug
+                        .as_deref()
+                        .is_some_and(|slug| slug.eq_ignore_ascii_case(&rule.project_id)))
+        });
+        if let Some(rule) = rule {
+            banned.insert(
+                (record.kind, record.file_name.clone()),
+                (record.name.clone(), rule.reason.clone()),
+            );
+        }
+    }
+
+    // By the ids the player's own jars declare, which is what is left for a jar
+    // they dropped in by hand — and what names the mod rather than the build of
+    // it somebody happens to have.
+    if forbidden.iter().any(|rule| !rule.mod_id.is_empty()) {
+        for jar in the_players_own_jars(paths, instance, arrived).await {
+            let rule = forbidden.iter().find(|rule| {
+                !rule.mod_id.is_empty()
+                    && jar
+                        .ids
+                        .iter()
+                        .any(|id| id.eq_ignore_ascii_case(&rule.mod_id))
+            });
+            if let Some(rule) = rule {
+                banned.insert(
+                    (ContentKind::Mod, jar.file.clone()),
+                    (jar.name.clone(), rule.reason.clone()),
+                );
+            }
+        }
+    }
+
+    let mut off = Vec::new();
+    for ((kind, file), (name, reason)) in banned {
+        let dir = content_dir(paths, &instance.id, kind);
+        // Their file under whichever of its two names it is on disk. Gone
+        // since, there is nothing to turn off and nothing to tell them.
+        let Some((_, enabled)) = either_name_in(&dir, &file).await else {
+            continue;
+        };
+        if enabled {
+            set_enabled_in(&dir, &file, false).await?;
+        }
+        off.push(Banned { name, reason });
+    }
+    // Sorted because what they are read out of is a map, and the player reads
+    // this on every update.
+    off.sort();
+    Ok(off)
+}
+
+/// One of the player's own mod jars, and what its jar says it is.
+struct PlayersJar {
+    /// The enabled file name, which is the one a record is keyed by.
+    file: String,
+    /// What to call it to them: their record's name, else the file's.
+    name: String,
+    /// The ids the jar declares for itself.
+    ids: Vec<String>,
+}
+
+/// The player's own mod jars in a joined instance, each with the ids its jar
+/// declares.
+///
+/// Read off the folder rather than off the records, because the files with no
+/// record are exactly the ones this is for. What is left out is the server's:
+/// anything the pack brought, and anything a record of the server's names. A
+/// mod of the server's is the server's to decide on, and was never the player's
+/// to turn off.
+///
+/// A jar that declares nothing we can read is left out too — there is nothing
+/// to recognise it by, and guessing from a file name is how a pack gets to name
+/// a file it was not allowed to.
+///
+/// A mod on disk under both of its names is one mod, and the **enabled** copy
+/// is the one read, because that is the copy a rule acts on.
+async fn the_players_own_jars(
+    paths: &Paths,
+    instance: &Instance,
+    arrived: &HashMap<(instance::content::ContentKind, String), Arrival>,
+) -> Vec<PlayersJar> {
+    use instance::content::{
+        content_dir, either_name_in, is_content_file, strip_disabled, ContentKind, Origin,
+    };
+
+    let dir = content_dir(paths, &instance.id, ContentKind::Mod);
+    let mut out: Vec<PlayersJar> = Vec::new();
+    let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
+        return out;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        if !is_content_file(&file_name, ContentKind::Mod) {
+            continue;
+        }
+        let (base, _) = strip_disabled(&file_name);
+        if arrived.contains_key(&(ContentKind::Mod, base.to_string())) {
+            continue;
+        }
+        let record = instance
+            .content
+            .iter()
+            .find(|r| r.kind == ContentKind::Mod && r.file_name == base);
+        if record.is_some_and(|r| r.origin != Origin::User) {
+            continue;
+        }
+        // On and off at once is two files and one mod, read once — and read
+        // from the copy a rule acts on, which is the enabled one, never from
+        // whichever name `read_dir` happened to yield first. The two can be
+        // different builds declaring different ids, so deciding from one and
+        // turning off the other decides nothing about either, and the answer
+        // would change with the order a folder happens to be in.
+        if out.iter().any(|jar| jar.file == base) {
+            continue;
+        }
+        let Some((on_disk, _)) = either_name_in(&dir, base).await else {
+            continue;
+        };
+        let ids = declared_ids(&dir.join(on_disk)).await;
+        if ids.is_empty() {
+            continue;
+        }
+        out.push(PlayersJar {
+            file: base.to_string(),
+            name: record
+                .map(|r| r.name.clone())
+                .unwrap_or_else(|| base.to_string()),
+            ids,
+        });
+    }
+    out
+}
+
+/// The ids a jar declares for itself, or none when it declares nothing this
+/// build can read.
+///
+/// Its own id and its aliases, never what it bundles: a mod carrying a copy of
+/// a library is not that library, and reading the two as one would turn off a
+/// mod the loader was happily using because the server ships something that
+/// packs it.
+///
+/// Blocking inside, like every other read of a jar.
+async fn declared_ids(path: &Path) -> Vec<String> {
+    let owned = path.to_path_buf();
+    tokio::task::spawn_blocking(move || instance::jar::read(&owned))
+        .await
+        .ok()
+        .flatten()
+        .map(|meta| meta.primary)
+        .unwrap_or_default()
 }
 
 /// Move the player's copy of a file a pack brings to the name the pack writes
@@ -1947,7 +2265,8 @@ pub async fn server_pack_info(
     let (loader, loader_version) = client_loader(server)?;
     let mods = server_mods(&paths.server_run(&server.id), &server.content).await?;
     let include_config = sends_config(paths, &server.id).await?;
-    let revision = server_revision(paths, server, &mods, include_config).await?;
+    let forbidden = forbidden_for(paths, &server.id).await?;
+    let revision = server_revision(paths, server, &mods, include_config, &forbidden).await?;
     Ok(super::host::PackInfo {
         name: server.name.clone(),
         mc_version: server.mc_version.clone(),
@@ -1997,6 +2316,24 @@ pub(crate) async fn listing_for(paths: &Paths, id: &str) -> Result<Option<Listin
         .and_then(|listing| listing.checked().ok()))
 }
 
+/// The mods this server does not allow its players to run, if the admin has
+/// named any.
+///
+/// Read fresh from the share file for the same reason as `sends_config`, and
+/// checked again on the way out rather than trusted: an entry a hand-edited
+/// file holds that names anything but a mod is dropped here rather than sent to
+/// everybody. A server that is not shared forbids nothing, because it sends no
+/// pack to carry a rule in.
+pub(crate) async fn forbidden_for(paths: &Paths, id: &str) -> Result<Vec<Forbidden>> {
+    Ok(crate::server::share::load(paths, id)
+        .await?
+        .map(|share| share.forbidden)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|entry| entry.checked().ok())
+        .collect())
+}
+
 /// The SHA-1 of a file, or nothing when it is no longer there to read.
 ///
 /// A running server rewrites files under it while it runs — a mod saving its
@@ -2026,6 +2363,10 @@ async fn sha1_if_there(path: &Path) -> Result<Option<String>> {
 /// config is sent, every regular file under `config/` is its path and SHA-1,
 /// found the way the pack's own walk finds them, through no link.
 ///
+/// A mod the server does not allow is a line too, with the admin's reason: it
+/// reaches the player's game as surely as a jar does, and changing the reason
+/// changes what they are shown.
+///
 /// Left out on purpose: the server's name, notes and artwork, which an update
 /// does not apply to a player's instance; its worlds, logs and properties,
 /// which never travel; and every modification time, so a restart that writes
@@ -2038,6 +2379,7 @@ async fn server_revision(
     server: &crate::server::Server,
     mods: &ServerMods<'_>,
     include_config: bool,
+    forbidden: &[Forbidden],
 ) -> Result<String> {
     use instance::jar::Side;
     use sha2::{Digest, Sha256};
@@ -2078,6 +2420,13 @@ async fn server_revision(
             },
         };
         lines.push(format!("mod {} {side} {identity}", shown(rel)));
+    }
+
+    for rule in forbidden {
+        lines.push(format!(
+            "forbid {}:{}:{} {}",
+            rule.provider, rule.project_id, rule.mod_id, rule.reason
+        ));
     }
 
     if include_config {
@@ -2158,11 +2507,12 @@ pub async fn export_server(
     let run = paths.server_run(&server.id);
     let mods = server_mods(&run, &server.content).await?;
     let include_config = sends_config(paths, &server.id).await?;
+    let forbidden = forbidden_for(paths, &server.id).await?;
     // Worked out from the very files this pack is about to be written from,
     // and before it is written: a file that changes while the pack is built
     // makes the revision it carries the older of the two, which the next check
     // finds changed. The other way round would be a change nobody ever sees.
-    let revision = server_revision(paths, server, &mods, include_config).await?;
+    let revision = server_revision(paths, server, &mods, include_config, &forbidden).await?;
 
     // Records only, and so no client and no network. This runs inside the share
     // host's download handler under `MAX_BUILDS`, and `server_revision` is
@@ -2202,6 +2552,7 @@ pub async fn export_server(
         // server to ask afterwards — still gets the row. A pack served over
         // the wire is kept in step by the description instead.
         listing: listing_for(paths, &server.id).await?,
+        forbidden,
     };
     let extras = extras_from(
         &media,
@@ -2287,6 +2638,7 @@ mod tests {
             files: Vec::new(),
             revision: None,
             listing: None,
+            forbidden: Vec::new(),
         }
     }
 
@@ -3283,6 +3635,7 @@ mod tests {
             files: Vec::new(),
             revision: None,
             listing: None,
+            forbidden: Vec::new(),
         };
         let dest = paths.root.join("cancel.geodepack");
         write_pack(&dest, &index, &manifest, &[("overrides/mods/private.jar", b"private")]);
@@ -3786,6 +4139,7 @@ mod tests {
                 include_config,
                 listing: None,
                 shared: true,
+                forbidden: Vec::new(),
             },
         )
         .await
@@ -5073,6 +5427,7 @@ mod tests {
             include_config,
             listing: None,
             shared: true,
+            forbidden: Vec::new(),
         };
 
         let mut last = revision_of(&paths, &server).await;
@@ -5144,6 +5499,50 @@ mod tests {
             revision_of(&paths, &server).await,
             "changing a config file that is sent",
         );
+
+        // A mod the server does not allow reaches a player's game as surely as
+        // a jar does: without this in the revision, adding a rule reaches
+        // nobody until something else on the server happens to change.
+        crate::server::share::save(
+            &paths,
+            &server.id,
+            &ServerShare {
+                forbidden: vec![Forbidden {
+                    mod_id: "xaerominimap".into(),
+                    reason: "no x-ray on this server".into(),
+                    ..Default::default()
+                }],
+                ..share(true)
+            },
+        )
+        .await
+        .unwrap();
+        moved(revision_of(&paths, &server).await, "forbidding a mod");
+
+        // And so does the reason, which is the sentence they read.
+        crate::server::share::save(
+            &paths,
+            &server.id,
+            &ServerShare {
+                forbidden: vec![Forbidden {
+                    mod_id: "xaerominimap".into(),
+                    reason: "ask an admin if you want a minimap".into(),
+                    ..Default::default()
+                }],
+                ..share(true)
+            },
+        )
+        .await
+        .unwrap();
+        moved(
+            revision_of(&paths, &server).await,
+            "rewording why a mod is not allowed",
+        );
+
+        crate::server::share::save(&paths, &server.id, &share(true))
+            .await
+            .unwrap();
+        moved(revision_of(&paths, &server).await, "allowing a mod again");
 
         // What players do not get, or get nothing new from.
         let unmoved = revision_of(&paths, &server).await;
@@ -5237,7 +5636,7 @@ mod tests {
         let paths = scratch.paths.clone();
         let run = paths.server_run(&server.id);
         let present = server_mods(&run, &server.content).await.unwrap();
-        let steady = server_revision(&paths, &server, &present, false)
+        let steady = server_revision(&paths, &server, &present, false, &[])
             .await
             .unwrap();
 
@@ -5262,7 +5661,7 @@ mod tests {
             sides: present.sides.clone(),
         };
         assert_eq!(
-            server_revision(&paths, &server, &gone, false)
+            server_revision(&paths, &server, &gone, false, &[])
                 .await
                 .unwrap(),
             steady,
@@ -5908,6 +6307,613 @@ mod tests {
         assert_eq!(again.turned_off, vec!["My P".to_string()]);
     }
 
+    /// The copy with no record at all: a jar dropped into the folder by hand,
+    /// under a name of its own, of a mod the server now ships. Nothing says the
+    /// two are one mod except the id each jar declares — and without reading
+    /// that, both copies stayed on and the game would not start, which reads to
+    /// the player as the update having broken their instance.
+    #[tokio::test]
+    async fn a_hand_dropped_copy_of_a_mod_the_server_now_ships_is_turned_off() {
+        let (scratch, server) = small_server(
+            "own-jar",
+            &[("mods/homemade.jar", b"homemade".to_vec())],
+            false,
+        )
+        .await;
+        let paths = scratch.paths.clone();
+        let mut player = join_now(&paths, &server, "update-own-jar", &[]).await;
+        let mods = paths.game_dir(&player.id).join("mods");
+
+        let theirs = fabric_jar("minimap", "client");
+        tokio::fs::write(mods.join("minimap-1.2.jar"), &theirs)
+            .await
+            .unwrap();
+
+        // The server starts shipping the same mod, under its own file name and
+        // with no provenance either — the pack carries it as bytes.
+        tokio::fs::write(
+            paths.server_run(&server.id).join("mods/minimap.jar"),
+            fabric_jar("minimap", "client"),
+        )
+        .await
+        .unwrap();
+        let pack = pack_now(&paths, &server, "b").await;
+
+        let report = update_offline(&paths, &mut player, &pack).await.unwrap();
+
+        // Named by its file, since no record of theirs gives it another name.
+        assert_eq!(report.turned_off, vec!["minimap-1.2.jar".to_string()]);
+        assert!(
+            !mods.join("minimap-1.2.jar").exists(),
+            "two copies of one mod stayed on"
+        );
+        assert_eq!(
+            std::fs::read(mods.join("minimap-1.2.jar.disabled")).unwrap(),
+            theirs,
+            "their own file was not kept, bytes and all"
+        );
+        // Untracked before and untracked after: nothing of the server's claims
+        // it, so it is still theirs to delete.
+        assert!(
+            record_of(&player, "minimap-1.2.jar").is_none(),
+            "{:?}",
+            player.content
+        );
+        assert!(mods.join("minimap.jar").is_file());
+
+        // Said again by the next update, because it is still off.
+        let again = update_offline(&paths, &mut player, &pack).await.unwrap();
+        assert_eq!(again.turned_off, vec!["minimap-1.2.jar".to_string()]);
+    }
+
+    /// And only the same mod. A jar of theirs that declares a different id is
+    /// not a second copy of anything, so it is left on and nothing is said —
+    /// matching on anything looser would turn off mods at random.
+    #[tokio::test]
+    async fn a_hand_dropped_jar_declaring_another_mod_is_left_alone() {
+        let (scratch, server) = small_server(
+            "own-jar-other",
+            &[("mods/homemade.jar", b"homemade".to_vec())],
+            false,
+        )
+        .await;
+        let paths = scratch.paths.clone();
+        let mut player = join_now(&paths, &server, "update-own-jar-other", &[]).await;
+        let mods = paths.game_dir(&player.id).join("mods");
+
+        tokio::fs::write(mods.join("minimap-1.2.jar"), fabric_jar("minimap", "client"))
+            .await
+            .unwrap();
+
+        tokio::fs::write(
+            paths.server_run(&server.id).join("mods/shaders.jar"),
+            fabric_jar("shaders", "client"),
+        )
+        .await
+        .unwrap();
+        let pack = pack_now(&paths, &server, "b").await;
+
+        let report = update_offline(&paths, &mut player, &pack).await.unwrap();
+
+        assert!(report.turned_off.is_empty(), "{report:?}");
+        assert!(
+            mods.join("minimap-1.2.jar").is_file(),
+            "a mod of their own that the server does not ship was turned off"
+        );
+        assert!(!mods.join("minimap-1.2.jar.disabled").exists());
+    }
+
+    /// Give a shared server a list of mods it does not allow.
+    async fn forbid(paths: &Paths, server: &Server, rules: &[Forbidden]) {
+        let share = crate::server::share::load(paths, &server.id)
+            .await
+            .unwrap()
+            .unwrap();
+        crate::server::share::save(
+            paths,
+            &server.id,
+            &ServerShare {
+                forbidden: rules.to_vec(),
+                ..share
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    fn by_project(project_id: &str, reason: &str) -> Forbidden {
+        Forbidden {
+            provider: "modrinth".into(),
+            project_id: project_id.into(),
+            reason: reason.into(),
+            ..Default::default()
+        }
+    }
+
+    fn by_mod_id(mod_id: &str, reason: &str) -> Forbidden {
+        Forbidden {
+            mod_id: mod_id.into(),
+            reason: reason.into(),
+            ..Default::default()
+        }
+    }
+
+    /// A joined instance holding one mod of the player's own, by record, that
+    /// the server does not allow — and that server's pack, with the rule in it.
+    async fn one_mod_the_server_forbids(tag: &str) -> (Scratch, Instance, PathBuf) {
+        let (scratch, server) = small_server(
+            tag,
+            &[("mods/homemade.jar", b"homemade".to_vec())],
+            false,
+        )
+        .await;
+        let paths = scratch.paths.clone();
+        let mut player = join_now(&paths, &server, &format!("{tag}-player"), &[]).await;
+        let mods = paths.game_dir(&player.id).join("mods");
+
+        tokio::fs::write(mods.join("minimap.jar"), b"their minimap")
+            .await
+            .unwrap();
+        player.content.push(ContentRecord {
+            project_id: "XRAY".into(),
+            name: "X-ray Minimap".into(),
+            ..record("modrinth", "minimap.jar", ContentKind::Mod)
+        });
+
+        forbid(
+            &paths,
+            &server,
+            &[by_project("XRAY", "no x-ray on this server")],
+        )
+        .await;
+        let pack = pack_now(&paths, &server, &format!("{tag}-pack")).await;
+        (scratch, player, pack)
+    }
+
+    /// The mod a player installed themselves that the server does not allow:
+    /// turned off with the admin's reason, by their own record or by what their
+    /// own jar declares, and *kept* — bytes, file and record. Disabling is the
+    /// whole of what this does; a player's own files are theirs.
+    #[tokio::test]
+    async fn a_mod_the_server_does_not_allow_is_turned_off_with_its_reason_and_kept() {
+        let (scratch, server) = small_server(
+            "ban",
+            &[("mods/homemade.jar", b"homemade".to_vec())],
+            false,
+        )
+        .await;
+        let paths = scratch.paths.clone();
+        let mut player = join_now(&paths, &server, "update-ban", &[]).await;
+        let mods = paths.game_dir(&player.id).join("mods");
+
+        // Installed through Geode, so a record names the project it came from.
+        tokio::fs::write(mods.join("minimap.jar"), b"their minimap")
+            .await
+            .unwrap();
+        player.content.push(ContentRecord {
+            project_id: "XRAY".into(),
+            name: "X-ray Minimap".into(),
+            ..record("modrinth", "minimap.jar", ContentKind::Mod)
+        });
+        // Dropped into the folder by hand, so the id its jar declares is the
+        // only thing that says what it is.
+        let dropped = fabric_jar("freecam", "client");
+        tokio::fs::write(mods.join("freecam-2.0.jar"), &dropped)
+            .await
+            .unwrap();
+        // And one the rule says nothing about.
+        tokio::fs::write(mods.join("sodium.jar"), fabric_jar("sodium", "client"))
+            .await
+            .unwrap();
+
+        forbid(
+            &paths,
+            &server,
+            &[
+                by_project("XRAY", "no x-ray on this server"),
+                by_mod_id("freecam", "no flying about on survival"),
+            ],
+        )
+        .await;
+        let pack = pack_now(&paths, &server, "b").await;
+
+        let report = update_offline(&paths, &mut player, &pack).await.unwrap();
+
+        assert_eq!(
+            report.banned,
+            vec![
+                Banned {
+                    name: "X-ray Minimap".into(),
+                    reason: "no x-ray on this server".into(),
+                },
+                Banned {
+                    // No record names it, so it is named by its file.
+                    name: "freecam-2.0.jar".into(),
+                    reason: "no flying about on survival".into(),
+                },
+            ]
+        );
+
+        assert!(!mods.join("minimap.jar").exists());
+        assert_eq!(
+            std::fs::read(mods.join("minimap.jar.disabled")).unwrap(),
+            b"their minimap",
+            "their file was not kept, bytes and all"
+        );
+        // Still theirs: nothing of the server's claims it, so deleting it is
+        // still their decision.
+        assert_eq!(
+            record_of(&player, "minimap.jar").map(|r| r.origin),
+            Some(Origin::User)
+        );
+        assert!(!mods.join("freecam-2.0.jar").exists());
+        assert_eq!(
+            std::fs::read(mods.join("freecam-2.0.jar.disabled")).unwrap(),
+            dropped
+        );
+        assert!(record_of(&player, "freecam-2.0.jar").is_none());
+
+        // And nothing the rule did not name.
+        assert!(mods.join("sodium.jar").is_file());
+        assert!(mods.join("homemade.jar").is_file());
+    }
+
+    /// A ban is a standing rule, not a change that happened once — the one
+    /// asymmetry with everything else an update applies. A player who turns the
+    /// mod back on has it turned off again by the server's next update, and the
+    /// honest consequence is that playing with it means playing somewhere else.
+    /// What the test calls `update` is what a Play runs only when the server's
+    /// revision has moved, which is why the claim is about updates and not
+    /// about Plays.
+    #[tokio::test]
+    async fn a_mod_turned_back_on_is_turned_off_again_on_the_next_update() {
+        let (scratch, mut player, pack) = one_mod_the_server_forbids("ban-again").await;
+        let paths = scratch.paths.clone();
+        let mods = paths.game_dir(&player.id).join("mods");
+
+        let first = update_offline(&paths, &mut player, &pack).await.unwrap();
+        assert_eq!(first.banned.len(), 1, "{first:?}");
+        assert!(mods.join("minimap.jar.disabled").is_file());
+
+        crate::instance::content::set_enabled_in(&mods, "minimap.jar.disabled", true)
+            .await
+            .unwrap();
+        assert!(mods.join("minimap.jar").is_file());
+
+        let again = update_offline(&paths, &mut player, &pack).await.unwrap();
+
+        assert_eq!(again.banned, first.banned, "the rule stopped applying");
+        assert!(
+            !mods.join("minimap.jar").exists() && mods.join("minimap.jar.disabled").is_file(),
+            "a mod turned back on stayed on"
+        );
+
+        // And an update that changed nothing says it too: what is reported is
+        // what is off, not what this run happened to switch — the same rule
+        // the duplicates report follows, and the reason a player who reads it
+        // once is not left wondering whether it still applies.
+        let steady = update_offline(&paths, &mut player, &pack).await.unwrap();
+        assert_eq!(steady.banned, first.banned);
+    }
+
+    /// Nothing about a ban may ever reach a delete. The file keeps its bytes,
+    /// and because the record stays the player's, the one delete that *is*
+    /// theirs still works — while the refusal that guards the server's own
+    /// mods is exactly as it was.
+    #[tokio::test]
+    async fn a_ban_never_deletes_and_the_refusal_on_the_servers_mods_is_untouched() {
+        let (scratch, mut player, pack) = one_mod_the_server_forbids("ban-keeps").await;
+        let paths = scratch.paths.clone();
+        let mods = paths.game_dir(&player.id).join("mods");
+
+        let before = sorted(
+            std::fs::read_dir(&mods)
+                .unwrap()
+                .map(|e| {
+                    let name = e.unwrap().file_name().to_string_lossy().to_string();
+                    crate::instance::content::strip_disabled(&name).0.to_string()
+                })
+                .collect(),
+        );
+
+        update_offline(&paths, &mut player, &pack).await.unwrap();
+
+        let after = sorted(
+            std::fs::read_dir(&mods)
+                .unwrap()
+                .map(|e| {
+                    let name = e.unwrap().file_name().to_string_lossy().to_string();
+                    crate::instance::content::strip_disabled(&name).0.to_string()
+                })
+                .collect(),
+        );
+        assert_eq!(before, after, "a ban took a file away");
+
+        // Theirs to delete, because the ban left the record theirs.
+        crate::instance::content::remove_in(
+            &mods,
+            &mut player.content,
+            ContentKind::Mod,
+            "minimap.jar.disabled",
+        )
+        .await
+        .unwrap();
+        assert!(!mods.join("minimap.jar.disabled").exists());
+
+        // And the server's own is still not theirs to delete.
+        let refused = crate::instance::content::remove_in(
+            &mods,
+            &mut player.content,
+            ContentKind::Mod,
+            "homemade.jar",
+        )
+        .await
+        .expect_err("a server mod was deleted")
+        .to_string();
+        assert!(refused.contains("came from the server's pack"), "{refused}");
+        assert!(mods.join("homemade.jar").is_file());
+    }
+
+    /// The rule that makes a ban list safe to accept from a stranger: it names
+    /// mods, and resolution runs against the player's own records and the ids
+    /// their own jars declare. An entry holding a path, a `..`, or a file name
+    /// matches nothing at all — twice over, since `forbidden_for` will not even
+    /// send one.
+    #[tokio::test]
+    async fn a_forbidden_entry_naming_a_path_resolves_to_nothing() {
+        let (scratch, server) = small_server(
+            "ban-path",
+            &[("mods/homemade.jar", b"homemade".to_vec())],
+            false,
+        )
+        .await;
+        let paths = scratch.paths.clone();
+        let mut player = join_now(&paths, &server, "update-ban-path", &[]).await;
+        let game = paths.game_dir(&player.id);
+        let mods = game.join("mods");
+
+        tokio::fs::write(mods.join("minimap.jar"), fabric_jar("minimap", "client"))
+            .await
+            .unwrap();
+        tokio::fs::write(game.join("options.txt"), b"fov:90\n")
+            .await
+            .unwrap();
+
+        // What a hand-written pack could hold. Every one of these names a file
+        // rather than a mod, which is the whole point of refusing it.
+        let hostile: Vec<Forbidden> = [
+            "minimap.jar",
+            "minimap.jar.disabled",
+            "mods/minimap.jar",
+            "../../instances/update-ban-path/mods/minimap.jar",
+            "..",
+            "*",
+            "options.txt",
+        ]
+        .iter()
+        .map(|named| by_mod_id(named, "a path, not a mod"))
+        .chain([Forbidden {
+            provider: "modrinth".into(),
+            project_id: "../../options.txt".into(),
+            reason: "a path, not a mod".into(),
+            ..Default::default()
+        }])
+        .collect();
+
+        let off = enforce_the_servers_bans(&paths, &player, &HashMap::new(), &hostile)
+            .await
+            .unwrap();
+        assert!(off.is_empty(), "{off:?}");
+        assert!(mods.join("minimap.jar").is_file());
+        assert!(!mods.join("minimap.jar.disabled").exists());
+        assert!(game.join("options.txt").is_file());
+
+        // And no server of this build sends one: the share file is checked on
+        // the way out, so what a pack carries is only ever identities.
+        forbid(&paths, &server, &hostile).await;
+        assert!(forbidden_for(&paths, &server.id).await.unwrap().is_empty());
+        let pack = pack_now(&paths, &server, "b").await;
+        let manifest = read_manifest(&pack).unwrap().unwrap();
+        assert!(manifest.forbidden.is_empty(), "{:?}", manifest.forbidden);
+
+        let report = update_offline(&paths, &mut player, &pack).await.unwrap();
+        assert!(report.banned.is_empty(), "{report:?}");
+        assert!(mods.join("minimap.jar").is_file());
+    }
+
+    /// A list that arrives is held to the rules the admin's own typing is held
+    /// to. A `geodepack` is only size-capped, so a hand-written one can carry a
+    /// reason of any length over any number of lines — and the reason is read
+    /// straight into the notice the player reads, where a second line is a
+    /// second sentence somebody will take for Geode's own. An entry that would
+    /// not pass where it was typed is dropped, and the rest of the pack still
+    /// arrives.
+    #[tokio::test]
+    async fn a_rule_that_arrives_off_the_network_is_checked_like_the_admins_own() {
+        let (scratch, server) = small_server(
+            "ban-wire",
+            &[("mods/homemade.jar", b"homemade".to_vec())],
+            false,
+        )
+        .await;
+        let paths = scratch.paths.clone();
+        let mut player = join_now(&paths, &server, "update-ban-wire", &[]).await;
+        let mods = paths.game_dir(&player.id).join("mods");
+
+        tokio::fs::write(mods.join("minimap.jar"), fabric_jar("minimap", "client"))
+            .await
+            .unwrap();
+        tokio::fs::write(mods.join("sodium.jar"), fabric_jar("sodium", "client"))
+            .await
+            .unwrap();
+
+        let pack = pack_now(&paths, &server, "b").await;
+        rewrite_pack(
+            &pack,
+            |manifest| {
+                manifest.forbidden = vec![
+                    // Longer than the notice can hold.
+                    Forbidden {
+                        reason: "x".repeat(crate::share::manifest::MAX_FORBIDDEN_REASON + 1),
+                        ..by_mod_id("minimap", "")
+                    },
+                    // And a second line written to read as Geode's own.
+                    by_mod_id(
+                        "sodium",
+                        "no x-ray\n\nGeode: your Microsoft session expired, sign in again",
+                    ),
+                ];
+            },
+            &[],
+        );
+
+        let report = update_offline(&paths, &mut player, &pack).await.unwrap();
+
+        assert!(report.banned.is_empty(), "{report:?}");
+        assert!(mods.join("minimap.jar").is_file());
+        assert!(mods.join("sodium.jar").is_file());
+
+        // What is dropped is the entry, not the list: the same pack with a rule
+        // an admin could have typed turns the mod off as it always did.
+        let sound = pack_now(&paths, &server, "c").await;
+        rewrite_pack(
+            &sound,
+            |manifest| manifest.forbidden = vec![by_mod_id("minimap", "no x-ray on this server")],
+            &[],
+        );
+
+        let report = update_offline(&paths, &mut player, &sound).await.unwrap();
+
+        assert_eq!(
+            report.banned,
+            vec![Banned {
+                name: "minimap.jar".into(),
+                reason: "no x-ray on this server".into(),
+            }]
+        );
+        assert!(mods.join("minimap.jar.disabled").is_file());
+        assert!(mods.join("sodium.jar").is_file());
+    }
+
+    /// A mod on disk under both of its names is two builds and one mod, and the
+    /// enabled copy is the one a rule is read against — never whichever name
+    /// the folder happens to be listed in. Deciding from one build's bytes and
+    /// turning off the other decides nothing about either, and would make the
+    /// same instance match or not match between two runs.
+    #[tokio::test]
+    async fn a_mod_under_both_its_names_is_judged_by_the_copy_the_rule_acts_on() {
+        let (scratch, server) = small_server(
+            "ban-two-names",
+            &[("mods/homemade.jar", b"homemade".to_vec())],
+            false,
+        )
+        .await;
+        let paths = scratch.paths.clone();
+        let mut player = join_now(&paths, &server, "update-ban-two-names", &[]).await;
+        let mods = paths.game_dir(&player.id).join("mods");
+
+        // The build they play with declares `coolmod`; an older one sitting
+        // beside it, switched off, declares `xray`.
+        let playing = fabric_jar("coolmod", "client");
+        let older = fabric_jar("xray", "client");
+        tokio::fs::write(mods.join("mod.jar"), &playing).await.unwrap();
+        tokio::fs::write(mods.join("mod.jar.disabled"), &older)
+            .await
+            .unwrap();
+        // And a mod they really are running that the rule names.
+        tokio::fs::write(mods.join("peek.jar"), fabric_jar("xray", "client"))
+            .await
+            .unwrap();
+
+        forbid(
+            &paths,
+            &server,
+            &[by_mod_id("xray", "no x-ray on this server")],
+        )
+        .await;
+        let pack = pack_now(&paths, &server, "b").await;
+
+        let report = update_offline(&paths, &mut player, &pack).await.unwrap();
+
+        // Only the one whose enabled copy is the banned mod, and nothing is
+        // claimed about a mod they are not running.
+        assert_eq!(
+            report.banned,
+            vec![Banned {
+                name: "peek.jar".into(),
+                reason: "no x-ray on this server".into(),
+            }]
+        );
+        assert!(mods.join("peek.jar.disabled").is_file());
+        assert_eq!(std::fs::read(mods.join("mod.jar")).unwrap(), playing);
+        assert_eq!(
+            std::fs::read(mods.join("mod.jar.disabled")).unwrap(),
+            older,
+            "the copy that decided was not the copy the rule would have acted on"
+        );
+    }
+
+    /// The id an admin can read is the slug: it is what the project's own page
+    /// and URL show, and the API id (`AANobbMI`) is not shown at all. A record
+    /// keeps the slug beside the id, so a rule written with either matches the
+    /// same mod — and a rule that matched nothing would say so nowhere, since
+    /// nothing comes back from a player to the admin who wrote it.
+    #[tokio::test]
+    async fn a_rule_naming_a_projects_slug_matches_the_record_that_holds_it() {
+        let (scratch, server) = small_server(
+            "ban-slug",
+            &[("mods/homemade.jar", b"homemade".to_vec())],
+            false,
+        )
+        .await;
+        let paths = scratch.paths.clone();
+        let mut player = join_now(&paths, &server, "update-ban-slug", &[]).await;
+        let mods = paths.game_dir(&player.id).join("mods");
+
+        tokio::fs::write(mods.join("minimap.jar"), b"their minimap")
+            .await
+            .unwrap();
+        player.content.push(ContentRecord {
+            project_id: "AANobbMI".into(),
+            slug: Some("xaeros-minimap".into()),
+            name: "Xaero's Minimap".into(),
+            ..record("modrinth", "minimap.jar", ContentKind::Mod)
+        });
+        // Another project of theirs, to show the slug reaches the record that
+        // holds it and no other.
+        tokio::fs::write(mods.join("sodium.jar"), b"their sodium")
+            .await
+            .unwrap();
+        player.content.push(ContentRecord {
+            project_id: "AANobbMJ".into(),
+            slug: Some("sodium".into()),
+            name: "Sodium".into(),
+            ..record("modrinth", "sodium.jar", ContentKind::Mod)
+        });
+
+        // Pasted out of the URL bar, where a slug is lower case but a paste is
+        // whatever the admin had.
+        forbid(
+            &paths,
+            &server,
+            &[by_project("Xaeros-Minimap", "no x-ray on this server")],
+        )
+        .await;
+        let pack = pack_now(&paths, &server, "b").await;
+
+        let report = update_offline(&paths, &mut player, &pack).await.unwrap();
+
+        assert_eq!(
+            report.banned,
+            vec![Banned {
+                name: "Xaero's Minimap".into(),
+                reason: "no x-ray on this server".into(),
+            }]
+        );
+        assert!(mods.join("minimap.jar.disabled").is_file());
+        assert!(mods.join("sodium.jar").is_file());
+    }
+
     /// A player's own copy is only turned off for a copy of the server's that
     /// is actually on. A server-side mod they keep off leaves their own copy
     /// the one they play with, and nothing is reported.
@@ -6519,6 +7525,7 @@ mod tests {
             files: Vec::new(),
             revision: None,
             listing: None,
+            forbidden: Vec::new(),
         };
         let archive = dir.join("theirs.geodepack");
         write_pack(&archive, &index, &manifest, &[]);
@@ -6582,6 +7589,7 @@ mod tests {
             files: Vec::new(),
             revision: None,
             listing: None,
+            forbidden: Vec::new(),
         };
 
         let plain = dir.join("plain.geodepack");

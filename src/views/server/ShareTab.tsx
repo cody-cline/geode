@@ -15,6 +15,9 @@ import StatusNote from "../../components/StatusNote";
 import { api, errorMessage } from "../../lib/api";
 import {
   addressChangedLine,
+  forbiddenAsTyped,
+  forbiddenLabel,
+  forbiddenRuleHint,
   gameAddressHint,
   linkPendingReason,
   listenLine,
@@ -25,7 +28,15 @@ import {
   stoppedLine,
 } from "../../lib/share";
 import { useStore } from "../../lib/store";
-import type { Server, ServerShareView } from "../../lib/types";
+import type { Forbidden, Server, ServerShareView } from "../../lib/types";
+
+/**
+ * The new-rule fields before the admin has typed anything. The site is where
+ * the select starts rather than part of the rule — `forbiddenAsTyped` drops it
+ * when there is no project id for it to belong to, which is what lets a rule
+ * name a mod id on its own.
+ */
+const NO_RULE: Forbidden = { provider: "modrinth", projectId: "", modId: "", reason: "" };
 
 // The server page's own sheet for the shell every tab shares — sections,
 // headings, the toggle with a sentence under it — so this tab cannot drift from
@@ -102,8 +113,10 @@ export default function ShareTab({ server }: { server: Server }) {
   const [shareError, setShareError] = useState<string | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [busy, setBusy] = useState<
-    "share" | "config" | "listing" | "rotate" | "stop" | null
+    "share" | "config" | "listing" | "forbidden" | "rotate" | "stop" | null
   >(null);
+  /** The rule the admin is typing, before it is added to the list. */
+  const [rule, setRule] = useState<Forbidden>(NO_RULE);
   const [confirming, setConfirming] = useState<"rotate" | "stop" | null>(null);
   /**
    * The two listing fields while the admin is editing them. `null` means they
@@ -184,6 +197,24 @@ export default function ShareTab({ server }: { server: Server }) {
       // server that was already stale is stale again the moment it is shared.
       void refreshServers();
     }
+  }
+
+  /**
+   * Save the whole list, which is what the backend takes: the list here is the
+   * list, so an entry taken out of it is taken out there with nothing to
+   * reconcile.
+   */
+  async function saveForbidden(next: Forbidden[]): Promise<boolean> {
+    const view = await run("forbidden", "Could not change which mods are allowed", () =>
+      api.setServerForbidden(server.id, next),
+    );
+    if (view) setShare(view);
+    return Boolean(view);
+  }
+
+  async function addRule() {
+    if (!share) return;
+    if (await saveForbidden([...share.forbidden, forbiddenAsTyped(rule)])) setRule(NO_RULE);
   }
 
   async function setIncludeConfig(include: boolean) {
@@ -587,6 +618,108 @@ export default function ShareTab({ server }: { server: Server }) {
                 </span>
               </span>
             </label>
+
+            {/* A rule, and the tab says so where it is written: Geode turns a
+                mod off in its own launcher and nothing more. An admin who
+                reads this as a wall is worse off than one who was told. */}
+            <div>
+              <span className="label">Mods players may not use</span>
+              {share.forbidden.length > 0 && (
+                <ul className={styles.rules}>
+                  {share.forbidden.map((entry, at) => (
+                    <li className={styles.rule} key={`${entry.provider}/${entry.projectId}/${entry.modId}`}>
+                      <span className={styles.ruleWhat}>
+                        <strong>{forbiddenLabel(entry)}</strong>
+                        <span className={viewStyles.settingWhy}>{entry.reason}</span>
+                      </span>
+                      <button
+                        className="btn btn-sm"
+                        aria-label={`Allow ${forbiddenLabel(entry)} again`}
+                        disabled={busy !== null}
+                        onClick={() =>
+                          void saveForbidden(share.forbidden.filter((_, i) => i !== at))
+                        }
+                      >
+                        Allow again
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div className={styles.pair}>
+                <div>
+                  <label className="label" htmlFor="forbid-mod-id">
+                    Mod id
+                  </label>
+                  <input
+                    id="forbid-mod-id"
+                    className={clsx("input", styles.mono)}
+                    value={rule.modId}
+                    placeholder="xaerominimap"
+                    spellCheck={false}
+                    autoComplete="off"
+                    disabled={busy !== null}
+                    onChange={(e) => setRule({ ...rule, modId: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label className="label" htmlFor="forbid-project-id">
+                    Or its project id
+                  </label>
+                  <div className={styles.copyRow}>
+                    <select
+                      className="input"
+                      aria-label="Which site that project id is from"
+                      value={rule.provider}
+                      disabled={busy !== null}
+                      onChange={(e) => setRule({ ...rule, provider: e.target.value })}
+                    >
+                      <option value="modrinth">Modrinth</option>
+                      <option value="curseforge">CurseForge</option>
+                    </select>
+                    <input
+                      id="forbid-project-id"
+                      className={clsx("input", styles.mono)}
+                      value={rule.projectId}
+                      placeholder="AANobbMI"
+                      spellCheck={false}
+                      autoComplete="off"
+                      disabled={busy !== null}
+                      onChange={(e) => setRule({ ...rule, projectId: e.target.value })}
+                    />
+                  </div>
+                </div>
+              </div>
+              <div className={styles.actions}>
+                <input
+                  className={clsx("input", styles.grow)}
+                  aria-label="Why this mod is not allowed"
+                  value={rule.reason}
+                  placeholder="Why — players are shown this"
+                  maxLength={200}
+                  disabled={busy !== null}
+                  onChange={(e) => setRule({ ...rule, reason: e.target.value })}
+                  onKeyDown={(e) => e.key === "Enter" && void addRule()}
+                />
+                <button
+                  className="btn"
+                  onClick={() => void addRule()}
+                  disabled={
+                    busy !== null ||
+                    !rule.reason.trim() ||
+                    (!rule.modId.trim() && !rule.projectId.trim())
+                  }
+                >
+                  {busy === "forbidden" && <Loader2 size={14} className="spin" />}
+                  Do not allow
+                </button>
+              </div>
+              <p className="hint">
+                A mod id is what the jar calls itself, which matches whoever has
+                it; a project id matches only a copy Geode installed.{" "}
+                {forbiddenRuleHint()}
+              </p>
+            </div>
 
             <div className={styles.actions}>
               {newPasswordButton}

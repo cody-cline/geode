@@ -696,6 +696,28 @@ export interface ListingSuggestion {
   address: string | null;
 }
 
+/**
+ * A mod a server does not allow its players to run.
+ *
+ * Named by identity, never by file name, and that is what keeps it safe: a
+ * provider and project the player can look up, or the id a jar declares for
+ * itself. Resolution runs against the player's own records and their own jars,
+ * so an entry holding a path matches nothing.
+ *
+ * Either identity will do and both may be given; the empty string means "not
+ * said". A reason is always required — it is shown to whoever has the mod.
+ */
+export interface Forbidden {
+  /** `modrinth` or `curseforge`, going with `projectId`. Empty when only a mod id was given. */
+  provider: string;
+  /** The project's id on that site. Empty with an empty provider. */
+  projectId: string;
+  /** The id a jar declares for itself — `xaerominimap`, not a file name. */
+  modId: string;
+  /** Why, in the admin's own words, shown to the player whose mod is turned off. */
+  reason: string;
+}
+
 export interface ServerShareView {
   /** The server's password, `GEODE-XXXXX-XXXXX`, for reading out or typing. */
   code: string;
@@ -715,6 +737,8 @@ export interface ServerShareView {
   suggested: ListingSuggestion;
   /** The address packs come down, shown beside the game address so the two are not confused. */
   packAddress: string | null;
+  /** Mods this server does not allow its players to run. Empty unless the admin has said. */
+  forbidden: Forbidden[];
 }
 
 /** What a server says it is sharing, shown before a player imports. */

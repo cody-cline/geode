@@ -1054,6 +1054,7 @@ mod tests {
             include_config: false,
             listing: None,
             shared: true,
+            forbidden: Vec::new(),
         };
         let run = paths.server_run(&server.id);
         let files: Vec<(&str, Vec<u8>)> = vec![
@@ -1604,6 +1605,7 @@ mod tests {
             include_config: false,
             listing: None,
             shared: true,
+            forbidden: Vec::new(),
         };
         server_share::save(&admin, &other.id, &other_share)
             .await

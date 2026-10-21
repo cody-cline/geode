@@ -95,6 +95,154 @@ pub struct Manifest {
     /// An instance's pack never carries one. There is no server behind it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listing: Option<Listing>,
+    /// In a server's pack, the mods it does not allow its players to run.
+    ///
+    /// A standing rule, not a change: it is applied on every update, so a
+    /// player who turns one back on has it turned off again by the next update
+    /// — not by their next Play, which downloads no pack while the server's
+    /// revision has not moved. What it may name is an identity, never a file —
+    /// see [`Forbidden`].
+    ///
+    /// Deliberately does **not** bump [`FORMAT`], for the same reason
+    /// [`Manifest::listing`] does not: an older Geode ignores the field and
+    /// turns nothing off, and the instance it builds is right in every other
+    /// respect. Refusing the pack whole would cost the recipient every mod in
+    /// it, which is a worse answer than a rule that goes unenforced on an old
+    /// build — and the rule is not enforceable anyway, which is the one thing
+    /// an admin has to be told about it.
+    ///
+    /// An instance's pack never carries any. Nobody is behind it to have a
+    /// rule.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forbidden: Vec<Forbidden>,
+}
+
+/// A mod a server does not allow its players to run.
+///
+/// Named by **identity**, never by file name, and that is the whole of what
+/// keeps this safe. A list of file names would let any pack name any jar in a
+/// player's folder; a provider and project, or the id a jar declares, names a
+/// thing the player can look up — and one they do not have is simply
+/// unreachable. Resolution runs against the player's own records and the ids
+/// read from their own jars, so an entry holding a path, a `..` or a file name
+/// matches nothing at all.
+///
+/// Either identity will do and both may be given. A player who installed the
+/// mod through Geode is recognised by their record's provider and project; one
+/// who dropped the jar in by hand has no record, and the id the jar declares is
+/// what is left.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Forbidden {
+    /// `modrinth` or `curseforge`, going with [`Forbidden::project_id`]. Empty
+    /// when the admin named only a mod id.
+    #[serde(default)]
+    pub provider: String,
+    /// The project's id on that provider. Empty with an empty provider.
+    #[serde(default)]
+    pub project_id: String,
+    /// The id a jar declares for itself — `xaerominimap`, not `Xaeros Minimap
+    /// 24.2.0.jar`. What recognises a jar nobody has a record of. Empty when
+    /// the admin named only a project.
+    #[serde(default)]
+    pub mod_id: String,
+    /// Why, in the admin's own words, shown to the player whose mod is turned
+    /// off. Required: a rule with no reason is a bug report waiting to happen.
+    pub reason: String,
+}
+
+/// The longest [`Forbidden::reason`] stored, in characters. A sentence, since
+/// it is read inside a launch notice.
+pub const MAX_FORBIDDEN_REASON: usize = 200;
+
+/// The longest id or project id stored, in characters. Modrinth's are eight,
+/// CurseForge's are numeric, and a Fabric mod id is a short slug.
+const MAX_FORBIDDEN_ID: usize = 64;
+
+impl Forbidden {
+    /// This entry, fit to put in a pack — or why it is not.
+    ///
+    /// One validator for both sides, like [`Listing::checked`]: what the admin
+    /// types and what arrives off the network are held to the same rules. An
+    /// id is an identifier and nothing else — letters, digits, `-` and `_` —
+    /// which is what refuses a path, a `..`, a file name and a wildcard in one
+    /// rule, so no entry can even describe a file.
+    pub fn checked(&self) -> crate::error::Result<Forbidden> {
+        use crate::error::Error;
+
+        let identifier = |what: &str, value: &str| -> crate::error::Result<String> {
+            let value = value.trim();
+            if value.chars().count() > MAX_FORBIDDEN_ID {
+                return Err(Error::msg(format!(
+                    "that {what} is longer than {MAX_FORBIDDEN_ID} characters, so it is not one"
+                )));
+            }
+            if !value
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                return Err(Error::msg(format!(
+                    "a {what} is letters, digits, '-' and '_' — '{value}' is not one. This list names mods, never files"
+                )));
+            }
+            Ok(value.to_string())
+        };
+
+        let provider = self.provider.trim().to_ascii_lowercase();
+        let project_id = identifier("project id", &self.project_id)?;
+        let mod_id = identifier("mod id", &self.mod_id)?;
+
+        match (provider.as_str(), project_id.is_empty()) {
+            ("", false) => {
+                return Err(Error::msg(
+                    "say which site that project id is from, Modrinth or CurseForge",
+                ))
+            }
+            ("modrinth" | "curseforge", _) | ("", true) => {}
+            (other, _) => {
+                return Err(Error::msg(format!(
+                    "'{other}' is not a site Geode knows — use Modrinth or CurseForge"
+                )))
+            }
+        }
+        if !provider.is_empty() && project_id.is_empty() {
+            return Err(Error::msg(
+                "give the project's id on that site, or name the mod by its mod id instead",
+            ));
+        }
+        if project_id.is_empty() && mod_id.is_empty() {
+            return Err(Error::msg(
+                "name the mod to turn off: its mod id, or its project id on Modrinth or CurseForge",
+            ));
+        }
+
+        let reason = self.reason.trim();
+        if reason.is_empty() {
+            return Err(Error::msg(
+                "say why this mod is not allowed — whoever has it is shown your reason",
+            ));
+        }
+        // A newline in a reason reads as two sentences in a launch notice, and
+        // a control character garbles it.
+        if reason.chars().any(|c| c.is_control()) {
+            return Err(Error::msg(
+                "keep the reason to one line — a player reads it in a single notice",
+            ));
+        }
+        let length = reason.chars().count();
+        if length > MAX_FORBIDDEN_REASON {
+            return Err(Error::msg(format!(
+                "that reason is {length} characters — keep it to {MAX_FORBIDDEN_REASON} so it fits the notice the player reads"
+            )));
+        }
+
+        Ok(Forbidden {
+            provider,
+            project_id,
+            mod_id,
+            reason: reason.to_string(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -291,6 +439,7 @@ mod tests {
             }],
             revision: None,
             listing: None,
+            forbidden: Vec::new(),
         }
     }
 
@@ -307,7 +456,15 @@ mod tests {
     #[test]
     fn nothing_optional_is_written_when_it_is_absent() {
         let json = serde_json::to_string(&manifest()).unwrap();
-        for absent in ["group", "banner", "source", "width", "serverKind", "listing"] {
+        for absent in [
+            "group",
+            "banner",
+            "source",
+            "width",
+            "serverKind",
+            "listing",
+            "forbidden",
+        ] {
             assert!(!json.contains(absent), "{absent} should not be written: {json}");
         }
         // And a file with nothing to say about it carries no flag either.
@@ -475,6 +632,173 @@ mod tests {
         }
         .checked()
         .is_err());
+    }
+
+    /// A ban list names mods, never files — that is what keeps a pack from
+    /// using it to reach a jar it was never allowed to name. One rule does it:
+    /// an id is letters, digits, `-` and `_`, so a path, a `..`, a file name
+    /// and a wildcard are all refused where the admin types them.
+    #[test]
+    fn a_forbidden_entry_names_a_mod_and_can_never_describe_a_file() {
+        let banned = |entry: Forbidden| entry.checked();
+        let by_mod_id = Forbidden {
+            mod_id: "  XaeroMinimap  ".into(),
+            reason: "  no x-ray on this server  ".into(),
+            ..Default::default()
+        };
+        let checked = banned(by_mod_id).unwrap();
+        assert_eq!(checked.mod_id, "XaeroMinimap");
+        assert_eq!(checked.reason, "no x-ray on this server");
+        assert!(checked.provider.is_empty() && checked.project_id.is_empty());
+        let back: Forbidden =
+            serde_json::from_str(&serde_json::to_string(&checked).unwrap()).unwrap();
+        assert_eq!(back, checked);
+
+        // By project, with the site written however the admin typed it.
+        let by_project = banned(Forbidden {
+            provider: "Modrinth".into(),
+            project_id: "AANobbMI".into(),
+            reason: "not on this server".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(by_project.provider, "modrinth");
+
+        let refused = |entry: Forbidden| banned(entry).expect_err("accepted").to_string();
+        let as_id = |value: &str| Forbidden {
+            mod_id: value.into(),
+            reason: "no".into(),
+            ..Default::default()
+        };
+        for path in [
+            "../../instances/x/mods/sodium.jar",
+            "sodium.jar",
+            "mods/sodium.jar",
+            "..",
+            "*",
+            "sodium jar",
+            "/etc/passwd",
+            "C:\\mods\\x.jar",
+        ] {
+            assert!(
+                refused(as_id(path)).contains("never files"),
+                "{path:?} was read as a mod id"
+            );
+        }
+        // And in the project field too, which is the other half of the pair.
+        assert!(refused(Forbidden {
+            provider: "modrinth".into(),
+            project_id: "../x.jar".into(),
+            reason: "no".into(),
+            ..Default::default()
+        })
+        .contains("never files"));
+
+        // Half a pair names nothing anybody can look up.
+        assert!(refused(Forbidden {
+            project_id: "AANobbMI".into(),
+            reason: "no".into(),
+            ..Default::default()
+        })
+        .contains("Modrinth or CurseForge"));
+        assert!(refused(Forbidden {
+            provider: "modrinth".into(),
+            reason: "no".into(),
+            ..Default::default()
+        })
+        .contains("mod id instead"));
+        assert!(refused(Forbidden {
+            provider: "mymodsite".into(),
+            project_id: "1".into(),
+            reason: "no".into(),
+            ..Default::default()
+        })
+        .contains("not a site Geode knows"));
+        assert!(refused(Forbidden {
+            reason: "no".into(),
+            ..Default::default()
+        })
+        .contains("name the mod to turn off"));
+
+        // A rule with no reason is a bug report waiting to happen, and one the
+        // notice cannot show is no better.
+        assert!(refused(as_id_with_reason("x", "   ")).contains("say why"));
+        assert!(refused(as_id_with_reason("x", "no\nx-ray")).contains("one line"));
+        assert!(refused(as_id_with_reason(
+            "x",
+            &"y".repeat(MAX_FORBIDDEN_REASON + 1)
+        ))
+        .contains("characters"));
+        assert!(banned(as_id_with_reason("x", &"y".repeat(MAX_FORBIDDEN_REASON))).is_ok());
+    }
+
+    fn as_id_with_reason(mod_id: &str, reason: &str) -> Forbidden {
+        Forbidden {
+            mod_id: mod_id.into(),
+            reason: reason.into(),
+            ..Default::default()
+        }
+    }
+
+    /// The pair a mod id goes with is *no* site, because a mod id is not on
+    /// one — and this is the rule the Share tab sends for the route its own
+    /// hint recommends, so it is the one combination worth pinning rather than
+    /// reaching through `..Default::default()`. The tab's site select always
+    /// holds a site; `forbiddenAsTyped` is what drops it when there is no
+    /// project id for it to belong to, and what is refused below is what used
+    /// to be sent instead.
+    #[test]
+    fn a_mod_id_is_named_with_no_site_beside_it() {
+        let as_the_tab_sends = Forbidden {
+            provider: String::new(),
+            project_id: String::new(),
+            mod_id: "xaerominimap".into(),
+            reason: "no x-ray on this server".into(),
+        };
+        assert_eq!(as_the_tab_sends.checked().unwrap(), as_the_tab_sends);
+
+        let refused = Forbidden {
+            provider: "modrinth".into(),
+            ..as_the_tab_sends
+        }
+        .checked()
+        .expect_err("a site with no project id beside it was accepted")
+        .to_string();
+        // The error tells them to name the mod by its mod id — which, with the
+        // site still on the rule, is what they had already done.
+        assert!(refused.contains("mod id instead"), "{refused}");
+    }
+
+    /// A ban list is an *addition*, like a listing: an older Geode ignores the
+    /// field, turns nothing off, and builds a correct instance otherwise.
+    /// Refusing the pack would cost its recipient every mod in it to enforce a
+    /// rule that was never enforceable to begin with.
+    #[test]
+    fn a_ban_list_does_not_claim_a_newer_format() {
+        let plain = FileNote {
+            path: "mods/sodium.jar".into(),
+            side: None,
+            source: None,
+            disabled: false,
+        };
+        let banned = Manifest {
+            geode_format: format_for(std::slice::from_ref(&plain)),
+            kind: Kind::Server,
+            forbidden: vec![Forbidden {
+                mod_id: "xaerominimap".into(),
+                reason: "no x-ray".into(),
+                ..Default::default()
+            }],
+            files: vec![plain],
+            ..manifest()
+        };
+        assert_eq!(banned.geode_format, 1, "a ban list claimed a newer format");
+        assert!(banned.readable());
+
+        let json = serde_json::to_string(&banned).unwrap();
+        assert!(json.contains("\"forbidden\""), "{json}");
+        let back: Manifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.forbidden, banned.forbidden);
     }
 
     #[test]

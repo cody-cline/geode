@@ -13,6 +13,10 @@ import {
   arrivalLine,
   driveLine,
   existingLine,
+  forbiddenAsTyped,
+  forbiddenLabel,
+  forbiddenPlayerHint,
+  forbiddenRuleHint,
   gameAddressHint,
   joinInput,
   joinStep,
@@ -775,6 +779,73 @@ test("a stopped share promises only what sharing again brings back", () => {
   // A config folder that was being sent goes again, and the admin is told
   // before sharing again rather than after.
   assert.match(stoppedLine(true).detail, /also sends the config folder/);
+});
+
+test("the admin is told plainly that a mod rule is a rule and not a wall", () => {
+  const hint = forbiddenRuleHint();
+  // What it does: off, never deleted, and again on every update.
+  assert.match(hint, /turned off, never deleted/);
+  assert.match(hint, /every time this server's pack updates/);
+  // What it is not. This is the half an admin would be hurt by not reading, so
+  // it must name the three ways round it and whose job real enforcement is.
+  assert.match(hint, /no anti-cheat/);
+  assert.match(hint, /patched Geode, another launcher, or a jar added after an update/);
+  assert.match(hint, /your server software's job/);
+  // And no word that would read as a guarantee.
+  assert.doesNotMatch(hint, /\b(prevents|blocks|stops players|cannot run|enforced)\b/);
+});
+
+test("the player is told their mod is off and still theirs, and that turning it back on does not last", () => {
+  const hint = forbiddenPlayerHint();
+  assert.match(hint, /never deletes them/);
+  assert.match(hint, /stays in your mods folder/);
+  assert.match(hint, /the server's reason/);
+  // The one thing they would otherwise learn by trying it.
+  assert.match(hint, /does not last/);
+});
+
+test("a rule naming only a mod id carries no site, which is the only pair the backend takes", () => {
+  // What the fields hold when the admin typed the mod id the tab's own
+  // placeholder suggests and left the project id blank. The site select is
+  // never empty, so the site has to come off here — `Forbidden::checked`
+  // refuses a site with no project id beside it, which would make the mod id
+  // field, the only way to name a jar somebody dropped in by hand, unusable.
+  assert.deepEqual(
+    forbiddenAsTyped({
+      provider: "modrinth",
+      projectId: "",
+      modId: "xaerominimap",
+      reason: "no x-ray on this server",
+    }),
+    { provider: "", projectId: "", modId: "xaerominimap", reason: "no x-ray on this server" },
+  );
+  // A project id keeps the site it was typed under: it means nothing without
+  // one, and that pair is refused too.
+  assert.deepEqual(
+    forbiddenAsTyped({ provider: "curseforge", projectId: "238222", modId: "", reason: "no jei" }),
+    { provider: "curseforge", projectId: "238222", modId: "", reason: "no jei" },
+  );
+  // And whitespace is not a project id for a site to belong to.
+  assert.equal(
+    forbiddenAsTyped({ provider: "modrinth", projectId: "   ", modId: "jei", reason: "no" })
+      .provider,
+    "",
+  );
+});
+
+test("a rule says which kind of name it was given, because the two match differently", () => {
+  assert.equal(
+    forbiddenLabel({ provider: "", projectId: "", modId: "xaerominimap", reason: "no" }),
+    "mod id xaerominimap",
+  );
+  assert.equal(
+    forbiddenLabel({ provider: "modrinth", projectId: "AANobbMI", modId: "", reason: "no" }),
+    "Modrinth project AANobbMI",
+  );
+  assert.equal(
+    forbiddenLabel({ provider: "curseforge", projectId: "238222", modId: "jei", reason: "no" }),
+    "mod id jei, CurseForge project 238222",
+  );
 });
 
 test("a password replaced while sharing is stopped is not sent before sharing again", () => {

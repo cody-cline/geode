@@ -43,6 +43,22 @@ pub struct ServerShare {
     /// server minutes ago cannot undo an address the admin corrected since.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listing: Option<crate::share::manifest::Listing>,
+    /// Mods this server does not allow its players to run, with the admin's
+    /// reason for each. Empty unless they have said.
+    ///
+    /// Here rather than in `server.json` for the reason the password is: a
+    /// long job that loaded the server minutes ago must not put back a rule
+    /// the admin has since changed. It rides the pack, so adding one reaches
+    /// every player on their next Play — and a mod turned back on after that
+    /// goes off again on the next update, because it is a standing rule and
+    /// not a one-time change. The next *update*, not the next Play: a Play
+    /// finding the revision where it left it downloads no pack.
+    ///
+    /// Client-side only, and the admin is told so where they set it: a patched
+    /// Geode, another launcher, or a jar dropped in after an update all ignore
+    /// it. Real enforcement is the server software's job.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forbidden: Vec<crate::share::manifest::Forbidden>,
     /// Whether players can download the pack now. Stop sharing turns this off
     /// and keeps the password, so it is the same when the server is shared
     /// again. Not written: which of the two files the share is in says it, so a
@@ -227,6 +243,7 @@ pub async fn start(paths: &Paths, id: &str) -> Result<ServerShare> {
                 code: crate::share::code::Code::generate(),
                 include_config: false,
                 listing: None,
+                forbidden: Vec::new(),
                 shared: true,
             };
             save(paths, id, &share).await?;
@@ -397,6 +414,7 @@ mod tests {
             include_config: true,
             listing: None,
             shared: true,
+            forbidden: Vec::new(),
         };
         save(&paths, "survival", &share).await.unwrap();
         assert_eq!(load(&paths, "survival").await.unwrap(), Some(share.clone()));
@@ -538,6 +556,7 @@ mod tests {
             include_config: true,
             listing: None,
             shared: true,
+            forbidden: Vec::new(),
         };
         save(&paths, &server.id, &leaked).await.unwrap();
 
@@ -548,6 +567,7 @@ mod tests {
             include_config: false,
             listing: None,
             shared: true,
+            forbidden: Vec::new(),
         };
         save(&paths, &server.id, &replaced).await.unwrap();
 
@@ -660,6 +680,7 @@ mod tests {
             include_config: false,
             listing: None,
             shared: true,
+            forbidden: Vec::new(),
         };
         save(&paths, "nowhere", &share).await.unwrap_err();
         start(&paths, "nowhere").await.unwrap_err();
@@ -682,12 +703,14 @@ mod tests {
             include_config: false,
             listing: None,
             shared: true,
+            forbidden: Vec::new(),
         };
         let a = ServerShare {
             code: Code::generate(),
             include_config: true,
             listing: None,
             shared: true,
+            forbidden: Vec::new(),
         };
         save(&paths, "b-shared", &b).await.unwrap();
         save(&paths, "a-shared", &a).await.unwrap();

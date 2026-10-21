@@ -16,6 +16,7 @@ import type {
   ExportReport,
   GameVersion,
   GitStatus,
+  Forbidden,
   ImportScan,
   InstallReport,
   Instance,
@@ -528,6 +529,9 @@ export const api = {
   /** How this server appears in players' multiplayer lists. An empty name means the server's own. */
   setServerListing: (id: string, name: string, address: string) =>
     invoke<ServerShareView>("set_server_listing", { id, name, address }),
+  /** The mods this server does not allow: the whole list, replacing what was there. Client-side only — a rule, not a wall. */
+  setServerForbidden: (id: string, forbidden: Forbidden[]) =>
+    invoke<ServerShareView>("set_server_forbidden", { id, forbidden }),
   rotateServerShareCode: (id: string) =>
     invoke<ServerShareView>("rotate_server_share_code", { id }),
 

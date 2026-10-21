@@ -5,6 +5,7 @@ import { Copy, Loader2, PackageOpen, Trash2 } from "lucide-react";
 import ImageField from "../../components/ImageField";
 import Modal from "../../components/Modal";
 import { api } from "../../lib/api";
+import { forbiddenPlayerHint } from "../../lib/share";
 import { useStore } from "../../lib/store";
 import { LOADERS } from "../../lib/types";
 import type { ExportReport, Instance, InstanceOverrides } from "../../lib/types";
@@ -645,6 +646,11 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
                 </span>
               </span>
             </label>
+            {/* The promise, whether or not this server has any rules: nothing
+                of theirs is deleted, and a mod turned back on does not stay
+                on — which they would otherwise learn from a Play that takes a
+                minute to go wrong. */}
+            <p className="hint">{forbiddenPlayerHint()}</p>
           </section>
         )}
 

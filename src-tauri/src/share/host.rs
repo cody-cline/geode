@@ -1308,6 +1308,7 @@ pub(super) mod tests {
                 include_config: false,
                 listing: None,
                 shared: true,
+                forbidden: Vec::new(),
             },
         )
         .await
@@ -1588,6 +1589,7 @@ pub(super) mod tests {
             include_config: false,
             listing: None,
             shared: true,
+            forbidden: Vec::new(),
         }
     }
 
@@ -2704,6 +2706,7 @@ pub(super) mod tests {
             include_config: false,
             listing: None,
             shared: true,
+            forbidden: Vec::new(),
         };
         crate::server::share::save(&scratch.paths, &server.id, &replaced)
             .await

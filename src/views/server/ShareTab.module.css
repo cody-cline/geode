@@ -77,3 +77,36 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* The rules already written, above the fields that add another. One line each,
+   with the admin's own reason under it: the reason is what a player reads, so
+   it is shown here rather than hidden behind an edit. */
+.rules {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+}
+
+.rule {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+
+/* What the rule names, with the reason under it rather than running on from it
+   — the stacking `.settingToggle > span` gives every other place a
+   `settingWhy` is used, which this one is not inside. */
+.ruleWhat {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}

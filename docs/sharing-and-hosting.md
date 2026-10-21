@@ -797,14 +797,24 @@ order:
    that project landed to hold the choice in its place — deleted first, a
    failed update would forget the choice, and the next one would bring the mod
    back on. A jar added by hand that the server dropped goes either way.
-7. A mod of the player's own that is the same Modrinth or CurseForge project as
-   one the pack brings and the server has on, under another file name, is
-   turned off — two copies of one mod is a game that does not start — but not
-   deleted, and stays the player's. A copy of the server's that ends up off, or
-   that never landed, leaves theirs alone: turning it off as well would leave
-   them with neither. What is reported is what ended up off, so an update run
-   again after one that failed says the same thing again.
-8. Only when all of that finished does the instance take the pack's Minecraft
+7. A mod of the player's own that is the same mod as one the pack brings and
+   the server has on, under another file name, is turned off — two copies of
+   one mod is a game that does not start — but not deleted, and stays the
+   player's. Recognised two ways, because a record is not always there to
+   recognise it by: the same Modrinth or CurseForge project as their record
+   names, or, for a jar they dropped into the folder by hand and so have no
+   record of, the same **id both jars declare** — what the loader itself goes
+   by, read with `instance::jar::read` and never from a file name. Only their
+   own jars are read that way; anything the pack brought, and anything a record
+   of the server's names, is the server's. A jar that declares nothing readable
+   is left alone, since there is nothing to recognise it by. A copy of the
+   server's that ends up off, or that never landed, leaves theirs alone:
+   turning it off as well would leave them with neither. What is reported is
+   what ended up off, so an update run again after one that failed says the
+   same thing again.
+8. A mod of the player's own that the server does not allow is turned off,
+   with the admin's reason, and never deleted — see below.
+9. Only when all of that finished does the instance take the pack's Minecraft
    version, loader and loader version. A failed update leaves them, so the
    game it starts is the one it had.
 
@@ -820,6 +830,64 @@ their own standing one. What it changes is the server's part: its mods, the
 config files it sends, which overwrite the player's copies (config it stopped
 sending stays), and the Minecraft and loader versions. A file of the player's
 with the same name as a file the server now sends becomes the server's.
+
+**Mods a server does not allow — a rule, not a wall.** An admin can name mods
+their players may not run, with a reason for each, in the Share tab. The list
+rides in `Manifest::forbidden` and in the revision, so adding one reaches every
+player on their next Play; `share::pack::enforce_the_servers_bans` applies it.
+
+Three things about it are load-bearing, and the third is the most important.
+
+- **Disable, never delete.** The player's copy is renamed to `.disabled`, keeps
+  its bytes, and keeps its record as `Origin::User` — so deleting it is still
+  their decision, and `content::remove_in`'s refusal, which is about the
+  *server's* files, is untouched. Nothing in this path can reach a delete.
+- **Resolution runs against the player's own records and the ids read from
+  their own jars, never against a path the pack wrote.** A `Forbidden` names a
+  provider and project, or the id a jar declares for itself (`xaerominimap`),
+  and nothing else: `Forbidden::checked` holds an id to letters, digits, `-`
+  and `_`, which refuses a path, a `..`, a file name and a wildcard in one
+  rule, and `forbidden_for` checks the share file again on the way out so no
+  server of this build sends one. A list that *arrives* goes through the same
+  check before any of it is applied: a hand-written pack is only size-capped,
+  so without that a stranger's reason of any length, over any number of lines
+  would be read straight into the launch notice. Even if a hand-written pack
+  carried an entry that passes, the resolution compares strings against this
+  instance's own records — their project id, or the slug the same record
+  holds, which is the id the project's own URL shows — and its own jars'
+  declared ids, the same discipline `content_file` applies to everything else
+  a pack claims. So it matches nothing at all. Only the player's own files are
+  considered; the server's own mods are never touched.
+- **It is client-side only, and both sides of the UI say so.** Geode reads and
+  writes no loader-side mod-list handshake and has no anti-cheat. A patched
+  Geode, a second launcher, or a jar dropped into the folder after an update
+  all ignore this entirely. Real enforcement is the server software's job — a
+  mod-list plugin, a whitelist. What this gives an admin is a strong default
+  and a clear message to a cooperating player, which is worth having; described
+  as a guarantee it would be a lie, and the first person to x-ray a world would
+  find out. The Share tab says it where the rule is written
+  (`forbiddenRuleHint`), and the player's Settings → Server says what it means
+  for them (`forbiddenPlayerHint`).
+
+**Bans enforce; everything else an update does happens once.** A player who
+turns the mod back on has it turned off again by the server's next update,
+because a standing rule is not a one-time change — and the honest consequence,
+which the notice says, is that playing with that mod means playing somewhere
+else. The next *update*, not the next Play: `bring_up_to_date` returns before
+it downloads anything while `update_due` is false, so a server whose revision
+has not moved re-applies nothing, and a player who turns the mod back on keeps
+it for as long as the admin changes nothing else. That is the limit of the one
+thing in sharing that enforces, and it is why `forbiddenRuleHint` and
+`forbiddenPlayerHint` both say "every time this server's pack updates" rather
+than anything about a Play. It is the one asymmetry in the update, and it is
+deliberate. Nothing is written onto the instance, which is what keeps the rule
+to the joined instance and to the time it is joined: a duplicate of a joined
+instance is not a join, never updates, and inherits no rule.
+
+A weaker shape was designed and not built: ship the list, disable nothing, and
+tell the player "the server asks you not to use X" with a Turn off button. It
+needs no write path and makes no claim about enforcement. It is the same list
+with one step removed, if the social problem turns out to be all there is.
 
 A joined instance from before revisions has no `joined_revision`, so its first
 update always runs. On that run a server file that is off, with no

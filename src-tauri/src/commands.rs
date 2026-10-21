@@ -2887,6 +2887,9 @@ async fn bring_up_to_date(
     if !report.turned_off.is_empty() {
         notices.push(own_copies_off(&report.turned_off));
     }
+    if !report.banned.is_empty() {
+        notices.push(not_allowed_here(&report.banned));
+    }
     if !report.missing.is_empty() {
         notices.push(fetch_by_hand(&report.missing));
     }
@@ -3030,6 +3033,31 @@ fn own_copies_off(names: &[String]) -> String {
     format!(
         "Your own {} {verb} off: the server provides {it}.",
         names.join(", ")
+    )
+}
+
+/// What to say about a player's own mods the server does not allow.
+///
+/// Three things, and none of them optional. Which mod, because they have to
+/// know what went off; the admin's own reason, because a mod that vanished
+/// with no explanation is a bug report; and that the file is still theirs,
+/// because the fear is that Geode deleted it. The last sentence says the rule
+/// re-applies, which is the one way this differs from everything else an
+/// update does — turning it back on does not last, and somebody should learn
+/// that from a notice rather than from their next Play.
+fn not_allowed_here(banned: &[share::pack::Banned]) -> String {
+    let each: Vec<String> = banned
+        .iter()
+        .map(|mod_off| format!("{} ({})", mod_off.name, mod_off.reason))
+        .collect();
+    let (them, it) = if banned.len() == 1 {
+        ("it", "It is")
+    } else {
+        ("them", "They are")
+    };
+    format!(
+        "This server does not allow {}, so Geode turned {them} off. {it} still in your mods folder, and the server turns {them} off again on every update — if you want to play with {them}, you will have to play somewhere else.",
+        each.join(", ")
     )
 }
 
@@ -3505,6 +3533,9 @@ pub struct ServerShareView {
     /// The address packs come down, shown beside the game address so the two
     /// cannot be mistaken for each other. `None` while none is known.
     pub pack_address: Option<String>,
+    /// Mods this server does not allow its players to run, with the admin's
+    /// reason for each. Empty unless they have said.
+    pub forbidden: Vec<share::manifest::Forbidden>,
 }
 
 async fn share_view(
@@ -3541,7 +3572,52 @@ async fn share_view(
         listing: share.listing.clone(),
         suggested: crate::server::share::suggest(&state.paths, server, reachable.as_ref()).await,
         pack_address: reachable.map(|address| address.display()),
+        forbidden: share.forbidden.clone(),
     }
+}
+
+/// Set the mods this server does not allow its players to run.
+///
+/// The whole list at once, because the Share tab holds it and sends what it
+/// should be: an entry taken out there is taken out here, and there is nothing
+/// to reconcile. Each is held to the same rules a pack off the network is —
+/// [`share::manifest::Forbidden::checked`] — so a list that names a file
+/// rather than a mod is refused in front of the admin rather than ignored
+/// later.
+///
+/// Players hear about it on their next Play: the list rides the revision, so
+/// adding one sends everybody an update, and it is applied again on every
+/// update after that. It is a rule and not a wall — client-side only, which
+/// the tab says beside it.
+///
+/// The same mod named twice is one rule, and the second is dropped: two rows
+/// saying the same thing is the admin's typing rather than their intent, and
+/// one reason has to win anyway.
+#[tauri::command]
+pub async fn set_server_forbidden(
+    state: State<'_, AppState>,
+    id: String,
+    forbidden: Vec<share::manifest::Forbidden>,
+) -> Result<ServerShareView> {
+    let server = crate::server::load(&state.paths, &id).await?;
+    let mut share = crate::server::share::load(&state.paths, &id)
+        .await?
+        .ok_or_else(|| Error::msg("this server has not been shared yet — share it first"))?;
+
+    let mut rules: Vec<share::manifest::Forbidden> = Vec::new();
+    for entry in &forbidden {
+        let rule = entry.checked()?;
+        let already = rules.iter().any(|kept: &share::manifest::Forbidden| {
+            (&kept.provider, &kept.project_id, &kept.mod_id)
+                == (&rule.provider, &rule.project_id, &rule.mod_id)
+        });
+        if !already {
+            rules.push(rule);
+        }
+    }
+    share.forbidden = rules;
+    crate::server::share::save(&state.paths, &id, &share).await?;
+    Ok(share_view(&state, &server, &share).await)
 }
 
 /// Set how this server appears in its players' multiplayer list.
@@ -4149,7 +4225,13 @@ mod tests {
         )
         .await
         .unwrap();
-        let share = ServerShare { code: Code::generate(), include_config: false, listing: None, shared: true };
+        let share = ServerShare {
+            code: Code::generate(),
+            include_config: false,
+            listing: None,
+            forbidden: Vec::new(),
+            shared: true,
+        };
         crate::server::share::save(paths, &server.id, &share).await.unwrap();
         (server, share)
     }
@@ -4862,6 +4944,32 @@ mod tests {
             own_copies_off(&["Sodium".to_string(), "Lithium".to_string()]),
             "Your own Sodium, Lithium stay off: the server provides them."
         );
+    }
+
+    /// A mod the server does not allow went off while the player was looking
+    /// at a progress bar. The notice has to answer all three of the things
+    /// they will wonder: which mod, why, and whether Geode deleted it. And it
+    /// has to say the rule re-applies, because that is the one way this
+    /// differs from everything else an update does.
+    #[test]
+    fn the_notice_about_a_mod_the_server_does_not_allow_says_why_and_that_it_is_kept() {
+        let banned = |name: &str, reason: &str| share::pack::Banned {
+            name: name.to_string(),
+            reason: reason.to_string(),
+        };
+        let one = not_allowed_here(&[banned("X-ray Minimap", "no x-ray on this server")]);
+        assert_eq!(
+            one,
+            "This server does not allow X-ray Minimap (no x-ray on this server), so Geode turned it off. It is still in your mods folder, and the server turns it off again on every update — if you want to play with it, you will have to play somewhere else."
+        );
+
+        let two = not_allowed_here(&[
+            banned("X-ray Minimap", "no x-ray"),
+            banned("Freecam", "no flying about"),
+        ]);
+        assert!(two.contains("X-ray Minimap (no x-ray), Freecam (no flying about)"));
+        assert!(two.contains("turned them off"));
+        assert!(two.contains("They are still in your mods folder"));
     }
 
     /// A password replaced while a player was away stops Geode checking for
