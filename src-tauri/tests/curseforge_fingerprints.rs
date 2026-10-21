@@ -423,6 +423,10 @@ struct Held {
     /// in.
     class_id: u32,
     file_name: String,
+    /// The bytes served for this file, where the test needs real ones — a
+    /// world has to be a zip the import can open and unpack. `None` is the
+    /// shared `JAR` body every other file gets.
+    bytes: Option<Vec<u8>>,
     /// False for a file whose author turned third-party downloads off, which
     /// CurseForge answers for with a null `downloadUrl`.
     downloadable: bool,
@@ -440,6 +444,7 @@ impl Held {
             file_id,
             class_id: 6,
             file_name: format!("mod-{file_id}.jar"),
+            bytes: None,
             downloadable: true,
             on_modrinth: false,
         }
@@ -448,19 +453,37 @@ impl Held {
     /// The sha1 CurseForge publishes for this file in its `hashes` array, and
     /// the only thing the Modrinth lookup has to go on.
     ///
-    /// The real sha1 of the bytes this stub serves for every file, because
-    /// both platforms' answers are checked against the bytes that arrive: a
-    /// made-up hash would fail the download rather than the thing under test.
-    /// One body for every file means one hash for every file, which these
-    /// tests never need to tell apart — that a hit is tied to the hash that
-    /// asked for it is pinned where the hashes differ, in
-    /// `providers::modrinth` and `install::blocked`.
+    /// The real sha1 of the bytes this stub serves for the file, because both
+    /// platforms' answers are checked against the bytes that arrive: a made-up
+    /// hash would fail the download rather than the thing under test. The
+    /// shared `JAR` body means one hash for most files, which these tests
+    /// never need to tell apart — that a hit is tied to the hash that asked
+    /// for it is pinned where the hashes differ, in `providers::modrinth` and
+    /// `install::blocked`.
     fn sha1(&self) -> String {
-        "a7a941dea93a9fd0d1a0a8980df11d40b2cf576c".to_string()
+        match &self.bytes {
+            Some(bytes) => {
+                use sha1::Digest;
+                hex::encode(sha1::Sha1::digest(bytes))
+            }
+            None => "a7a941dea93a9fd0d1a0a8980df11d40b2cf576c".to_string(),
+        }
+    }
+
+    /// What the CDN hands over for this file.
+    fn body(&self) -> Vec<u8> {
+        self.bytes.clone().unwrap_or_else(|| b"JAR".to_vec())
     }
 
     fn named(mut self, file_name: &str) -> Self {
         self.file_name = file_name.to_string();
+        self
+    }
+
+    /// Served as these exact bytes, for a file whose content is the thing
+    /// under test rather than something to be moved about.
+    fn holding(mut self, bytes: Vec<u8>) -> Self {
+        self.bytes = Some(bytes);
         self
     }
 
@@ -500,11 +523,33 @@ fn curseforge_holding(held: Vec<Held>) -> Api {
             "/v1/mods/files" => (200, files_answer(&held, &asked.body, &origin)),
             "/v1/mods" => (200, projects_answer(&held, &asked.body)),
             "/v2/version_files" => (200, hashes_answer(&held, &asked.body, &origin)),
-            path if path.starts_with("/cdn/") => (200, b"JAR".to_vec()),
+            path if path.starts_with("/cdn/") => (200, cdn_body(&held, path)),
             path if path.starts_with("/mr/") => (200, b"JAR".to_vec()),
             _ => (404, b"{}".to_vec()),
         }
     })
+}
+
+/// What the stub's CDN serves at `/cdn/<file name>`: that file's own bytes
+/// where it has any of its own, and the shared `JAR` body otherwise.
+fn cdn_body(held: &[Held], path: &str) -> Vec<u8> {
+    let name = path.trim_start_matches("/cdn/");
+    held.iter()
+        .find(|h| h.file_name == name)
+        .map(|h| h.body())
+        .unwrap_or_else(|| b"JAR".to_vec())
+}
+
+/// A zip of these entries, in memory: the shape CurseForge publishes a world
+/// in, and the only kind of file whose content an import reads.
+fn zip_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (name, bytes) in entries {
+        let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        zip.start_file(*name, options).expect("entry");
+        zip.write_all(bytes).expect("write");
+    }
+    zip.finish().expect("finish").into_inner()
 }
 
 /// The ids a batch request asked about, read out of its own body so the answer
@@ -675,6 +720,37 @@ async fn import(
     .await
 }
 
+/// The same, and what the run told the user along the way: a fact that is
+/// neither progress nor a failure leaves through `geode://notice`, which a
+/// silent handle would drop. The progress the same handle records is not what
+/// any of this is about, so only the notices come back.
+async fn import_telling(
+    api: &Api,
+    paths: &Paths,
+    instance: &mut Instance,
+    archive: &Path,
+) -> (geode_lib::error::Result<Vec<String>>, Vec<serde_json::Value>) {
+    let told = Arc::new(geode_lib::events::Recorder::default());
+    let outcome = geode_lib::instance::modpack::import_into_at(
+        &geode_lib::net::client(),
+        &api.base,
+        &api.modrinth(),
+        paths,
+        instance,
+        archive,
+        Some(FAKE_KEY),
+        &Progress::new(told.clone(), "import"),
+    )
+    .await;
+    let notices = told
+        .events()
+        .into_iter()
+        .filter(|(topic, _)| topic == "geode://notice")
+        .map(|(_, payload)| payload)
+        .collect();
+    (outcome, notices)
+}
+
 /// A pack of three hundred mods used to be three hundred round trips, one per
 /// `{projectID, fileID}` pair. It is two now, and the chunk boundary is where
 /// the batch endpoint's is.
@@ -830,22 +906,25 @@ async fn a_resource_pack_from_a_curseforge_pack_lands_in_resourcepacks() {
 ///
 /// And arriving there is not the end of it. The game reads a world as a
 /// directory holding `level.dat`, which is what Geode's own writer produces,
-/// and CurseForge publishes one as a zip of that directory. Nothing here
-/// unpacks it and there is no worlds view to show it in, so the import that
-/// only moved the bytes would be reporting a success the player cannot see:
-/// an empty singleplayer list and no mention of a world anywhere. It is named
-/// in the report instead, with what it needs.
+/// and CurseForge publishes one as a zip of that directory. The import that
+/// only moved the bytes was reporting a success the player could not see — an
+/// empty singleplayer list and a file to find and unzip by hand — so the zip
+/// is unpacked into the folder the game reads, under the name its author gave
+/// it, and the player is told the folder is there.
 #[tokio::test]
-async fn a_world_is_not_filed_under_mods() {
+async fn a_bundled_world_arrives_as_a_folder_the_game_reads() {
     let api = curseforge_holding(vec![Held::a_mod(1000, 2000)
         .named("spawn.zip")
-        .classed(17)]);
+        .classed(17)
+        .holding(zip_of(&[
+            ("Spawn Town/level.dat", b"NBT"),
+            ("Spawn Town/region/r.0.0.mca", b"REGION"),
+        ]))]);
     let (paths, mut instance, game) = importing("world");
     let archive = pack_with(&paths.root, &manifest(&[(1000, 2000, true)]));
 
-    let problems = import(&api, &paths, &mut instance, &archive)
-        .await
-        .expect("the pack installs");
+    let (outcome, told) = import_telling(&api, &paths, &mut instance, &archive).await;
+    let problems = outcome.expect("the pack installs");
 
     assert!(
         !game.join("mods/spawn.zip").exists(),
@@ -859,9 +938,60 @@ async fn a_world_is_not_filed_under_mods() {
         "a world was recorded as a mod: {:?}",
         instance.content
     );
+
+    assert_eq!(
+        std::fs::read(game.join("saves/Spawn Town/level.dat")).expect("the world's level.dat"),
+        b"NBT",
+        "the world is not in the singleplayer list unless its level.dat is"
+    );
+    assert!(
+        game.join("saves/Spawn Town/region/r.0.0.mca").exists(),
+        "the world arrived without the rest of itself"
+    );
+    assert!(
+        !game.join("saves/spawn.zip").exists(),
+        "the zip was left in saves/ beside the world it became"
+    );
+    assert!(
+        problems.is_empty(),
+        "a world that arrived playable was reported as something the player must deal with: \
+         {problems:?}"
+    );
+
+    // A new save folder appearing in somebody's instance is worth a sentence,
+    // and the import's own report is for what it could not do.
+    assert_eq!(told.len(), 1, "{told:?}");
+    let body = told[0]["body"].as_str().expect("a body");
+    assert!(
+        body.contains("Spawn Town") && body.contains("saves"),
+        "the player has to be told which folder arrived and where: {body}"
+    );
+}
+
+/// The same class, on a zip that holds no `level.dat`. That is not a world,
+/// whatever CurseForge files it under, and a save folder invented out of a
+/// guess would show up in the singleplayer list with nothing in it that the
+/// game can open. So it stays exactly as it arrived and the report says so.
+#[tokio::test]
+async fn a_world_zip_with_no_world_in_it_is_left_as_it_arrived() {
+    let api = curseforge_holding(vec![Held::a_mod(1000, 2000)
+        .named("spawn.zip")
+        .classed(17)
+        .holding(zip_of(&[("pack.mcmeta", b"{}")]))]);
+    let (paths, mut instance, game) = importing("worldless");
+    let archive = pack_with(&paths.root, &manifest(&[(1000, 2000, true)]));
+
+    let problems = import(&api, &paths, &mut instance, &archive)
+        .await
+        .expect("the pack installs");
+
     assert!(
         game.join("saves/spawn.zip").exists(),
-        "the world did not arrive anywhere"
+        "the file did not arrive anywhere"
+    );
+    assert!(
+        !game.join("saves/spawn").exists(),
+        "a save folder was invented for a zip holding no world"
     );
 
     // A world in no content record and no content tab is in nothing at all
@@ -869,8 +999,7 @@ async fn a_world_is_not_filed_under_mods() {
     assert_eq!(
         problems.len(),
         1,
-        "a world that arrived as an archive the game cannot read was reported as nothing: \
-         {problems:?}"
+        "a file the import could do nothing with was reported as nothing: {problems:?}"
     );
     assert!(
         problems[0].contains("spawn.zip"),

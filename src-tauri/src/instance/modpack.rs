@@ -749,7 +749,7 @@ pub async fn import_into_at(
             // mods the index names, by project id, and never opens the
             // archive. Extracting it into a client instance would overwrite
             // the client's own config with a server's.
-            extract_overrides(
+            extract_trees(
                 &archive_owned,
                 &game_dir,
                 &["overrides", "client-overrides"],
@@ -815,7 +815,7 @@ pub async fn import_into_at(
             })?;
 
             progress.stage("Extracting overrides", 1).await;
-            extract_overrides(
+            extract_trees(
                 &archive_owned,
                 &game_dir,
                 &[manifest.overrides.as_str()],
@@ -879,6 +879,9 @@ pub async fn import_into_at(
 
             let mut downloads = Vec::new();
             let mut records = Vec::new();
+            // The worlds this pack bundles, as `(what CurseForge calls it, the
+            // zip it is arriving as)`, unpacked once their bytes have landed.
+            let mut worlds: Vec<(String, PathBuf)> = Vec::new();
 
             for entry in &manifest.files {
                 progress.check_cancelled()?;
@@ -997,17 +1000,12 @@ pub async fn import_into_at(
                 // Arriving is not the end of it for a world. Minecraft reads a
                 // world as a directory holding `level.dat` — which is what
                 // Geode's own writer produces — and CurseForge publishes one
-                // as a zip of that directory. Nothing here unpacks it, and
-                // there is no worlds view to show it in, so the file is named
-                // and the user told what it needs: the alternative is an
-                // import that calls itself a success and an empty world list
-                // with no explanation anywhere.
+                // as a zip of that directory. So the zip is unpacked once the
+                // downloads are in, below: a map pack whose world the player
+                // has to find and unzip by hand is an import that calls itself
+                // a success and leaves an empty singleplayer list.
                 if matches!(placement, CfPlacement::Saves) {
-                    left_out.push(format!(
-                        "{} (a world — it is in the instance's saves folder as \"{}\", and the \
-                         game only reads a world as a folder, so unzip it there)",
-                        version.name, on_disk
-                    ));
+                    worlds.push((version.name.clone(), game_dir.join(&rel)));
                 }
 
                 if let Some(kind) = record_kind {
@@ -1041,6 +1039,50 @@ pub async fn import_into_at(
                 .await;
             crate::net::fetch_all(client, downloads, progress, 8).await?;
 
+            // A map pack's world is the whole point of installing it, so it is
+            // unpacked into the folder the game reads rather than left as a
+            // zip. Only a world Geode could not make a folder out of is left
+            // for the player, named in the report with what it needs.
+            if !worlds.is_empty() {
+                progress
+                    .stage("Unpacking worlds", worlds.len() as u64)
+                    .await;
+            }
+            let saves = game_dir.join("saves");
+            for (name, zipped) in worlds {
+                progress.advance(1, &name).await;
+                let on_disk = zipped.file_name().unwrap_or_default().to_string_lossy();
+                let by_hand = |what: &str| {
+                    format!(
+                        "{name} (a world{what} — it is in the instance's saves folder as \
+                         \"{on_disk}\", and the game only reads a world as a folder, so unzip it \
+                         there)"
+                    )
+                };
+                match unpack_world(&zipped, &saves, progress).await {
+                    Ok(Some(folder)) => {
+                        // The zip has nothing left to say, and leaving it in
+                        // `saves/` beside the world it became is clutter the
+                        // game ignores and the player has to wonder about.
+                        let _ = tokio::fs::remove_file(&zipped).await;
+                        progress.notice(
+                            "A world came with this pack",
+                            format!(
+                                "\"{name}\" is unpacked into this instance's saves folder as \
+                                 \"{folder}\", so it is in the game's singleplayer list."
+                            ),
+                        );
+                    }
+                    // A zip with no `level.dat` in it is not a world, whatever
+                    // CurseForge files it under, and inventing a save folder
+                    // for it would be worse than saying so.
+                    Ok(None) => left_out.push(by_hand("")),
+                    // Cancel is the user's answer and not a thing to report.
+                    Err(Error::Cancelled) => return Err(Error::Cancelled),
+                    Err(e) => left_out.push(by_hand(&format!(" Geode could not unpack — {e}"))),
+                }
+            }
+
             instance.content.extend(records);
             instance.pack = Some(super::PackSource::local(
                 manifest.name,
@@ -1073,7 +1115,7 @@ pub async fn import_into_at(
                 .await?;
             } else {
                 progress.stage("Copying the instance", 1).await;
-                extract_overrides(
+                extract_trees(
                     &archive_owned,
                     &game_dir,
                     &[prism_instance.game_root().as_str()],
@@ -1126,21 +1168,24 @@ fn overrides_budget(archive_bytes: u64) -> u64 {
     archive_bytes.saturating_mul(RATIO).clamp(FLOOR, CEILING)
 }
 
-/// Copy the pack's override trees into the game directory. Later roots win, so
+/// Copy chosen trees out of an archive into a directory. Later roots win, so
 /// `client-overrides` correctly shadows `overrides`.
+///
+/// A root of `""` is the archive's own root, which is how a world zip whose
+/// `level.dat` sits at the top is unpacked: every entry in it is the tree.
 ///
 /// Stops at the next entry when the run is cancelled. If it does not finish —
 /// cancelled, or refused for unpacking past its budget — it unlinks the files
 /// it brought into being and only those, so a file the player already had
 /// keeps the pack's copy rather than being taken away from them.
-async fn extract_overrides(
+async fn extract_trees(
     archive: &Path,
-    game_dir: &Path,
+    dest_dir: &Path,
     roots: &[&str],
     progress: &Progress,
 ) -> Result<()> {
     let archive = archive.to_path_buf();
-    let game_dir = game_dir.to_path_buf();
+    let dest_dir = dest_dir.to_path_buf();
     let roots: Vec<String> = roots.iter().map(|s| s.to_string()).collect();
     let progress = progress.clone();
 
@@ -1163,10 +1208,13 @@ async fn extract_overrides(
                     continue;
                 }
                 let name = entry.name().to_string();
-                let Some(rel) = roots
-                    .iter()
-                    .find_map(|root| name.strip_prefix(&format!("{root}/")))
-                else {
+                let Some(rel) = roots.iter().find_map(|root| {
+                    if root.is_empty() {
+                        Some(name.as_str())
+                    } else {
+                        name.strip_prefix(&format!("{root}/"))
+                    }
+                }) else {
                     continue;
                 };
 
@@ -1174,7 +1222,7 @@ async fn extract_overrides(
                 if !crate::paths::is_safe_relative(rel_path) {
                     continue;
                 }
-                let dest = game_dir.join(rel_path);
+                let dest = dest_dir.join(rel_path);
                 if let Some(parent) = dest.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
@@ -1209,7 +1257,103 @@ async fn extract_overrides(
         outcome
     })
     .await
-    .map_err(|e| Error::msg(format!("extracting overrides panicked: {e}")))?
+    .map_err(|e| Error::msg(format!("unpacking an archive panicked: {e}")))?
+}
+
+/// Where the world is inside a zip of one, and what to call the folder it
+/// unpacks into: `(the entry prefix to unpack, the folder's name)`.
+///
+/// Both shapes a real world zip comes in. The common one wraps everything in a
+/// folder — `CoolMap/level.dat`, `CoolMap/region/...` — and that folder *is*
+/// the world, so the name its author gave it is the one to keep. The other has
+/// `level.dat` at the archive's root, where nothing inside says what the world
+/// is called and the file's own name is all there is to go on.
+///
+/// Read off `level.dat`, because that is the file the game requires and the
+/// only thing that makes a directory a world. The shallowest one wins, so a
+/// world that happens to carry another world deeper inside unpacks as itself.
+///
+/// `None` when there is no `level.dat` at all — that is not a world, and
+/// guessing would leave a junk folder in somebody's singleplayer list — and
+/// when the wrapping folder is not a name Geode will make a directory for.
+fn world_in(names: &[String], named_after_the_file: &str) -> Option<(String, String)> {
+    let depth = |prefix: &str| {
+        if prefix.is_empty() {
+            0
+        } else {
+            prefix.split('/').count()
+        }
+    };
+
+    let mut shallowest: Option<&str> = None;
+    for name in names {
+        let (prefix, file) = name.rsplit_once('/').unwrap_or(("", name.as_str()));
+        if file != "level.dat" {
+            continue;
+        }
+        // Ties broken by name so one archive always unpacks the same way.
+        let better = match shallowest {
+            Some(best) => (depth(prefix), prefix) < (depth(best), best),
+            None => true,
+        };
+        if better {
+            shallowest = Some(prefix);
+        }
+    }
+    let prefix = shallowest?;
+
+    let folder = match prefix.rsplit('/').next() {
+        Some(last) if !last.is_empty() => last,
+        _ => named_after_the_file,
+    };
+    // The name comes out of somebody else's archive, so it is held to more
+    // than the `is_safe_relative` its entries are: exactly one ordinary
+    // component. That refuses `..` and `/` as that rule does, and also `.` and
+    // `a/b`, each of which would unpack a world somewhere other than its own
+    // folder under `saves/`.
+    let mut parts = Path::new(folder).components();
+    let one_plain_name =
+        matches!(parts.next(), Some(std::path::Component::Normal(_))) && parts.next().is_none();
+    if !one_plain_name {
+        return None;
+    }
+
+    Some((prefix.to_string(), folder.to_string()))
+}
+
+/// Turn a world that arrived as a zip into the folder the game reads, and say
+/// what that folder ended up being called.
+///
+/// `Ok(None)` for an archive that holds no world: it is left exactly where it
+/// is, for the report to name.
+///
+/// Unpacked through [`extract_trees`], so a world is held to everything a
+/// pack's overrides are — entry names that climb out of the destination are
+/// skipped, the inflate budget stops a zip bomb, Cancel is heard between
+/// entries, and a run that does not finish takes back only what it wrote.
+async fn unpack_world(archive: &Path, saves: &Path, progress: &Progress) -> Result<Option<String>> {
+    let names = {
+        let archive = archive.to_path_buf();
+        tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
+            let mut zip = open_pack(&archive)?;
+            Ok((0..zip.len())
+                .filter_map(|i| zip.by_index(i).ok().map(|e| e.name().to_string()))
+                .collect())
+        })
+        .await
+        .map_err(|e| Error::msg(format!("reading a world panicked: {e}")))??
+    };
+
+    let named_after_the_file = archive
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let Some((prefix, folder)) = world_in(&names, &named_after_the_file) else {
+        return Ok(None);
+    };
+
+    extract_trees(archive, &saves.join(&folder), &[prefix.as_str()], progress).await?;
+    Ok(Some(folder))
 }
 
 /// Give every file a `.mrpack` installed a link back to its project.
@@ -2956,6 +3100,193 @@ mod tests {
             .unwrap();
         let written = std::fs::metadata(paths.game_dir(&inst.id).join("mods/large.jar")).unwrap();
         assert_eq!(written.len(), 17 * MIB as u64);
+    }
+
+    // -----------------------------------------------------------------------
+    // A bundled world, unpacked into the folder the game reads
+    // -----------------------------------------------------------------------
+
+    /// A `saves/` directory with a world zip sitting in it, the way one lands
+    /// from a CurseForge pack that bundles a map.
+    fn arrived_world(tag: &str, file: &str, entries: &[(&str, &[u8])]) -> (Scratch, PathBuf) {
+        let scratch = scratch_dir(tag);
+        let saves = scratch.paths.root.join("saves");
+        std::fs::create_dir_all(&saves).unwrap();
+        let deflated: Vec<(&str, &[u8], zip::CompressionMethod)> = entries
+            .iter()
+            .map(|(name, bytes)| (*name, *bytes, zip::CompressionMethod::Deflated))
+            .collect();
+        write_zip(&saves.join(file), &deflated);
+        (scratch, saves)
+    }
+
+    /// The common shape a map is published in: every entry under one folder,
+    /// which *is* the world, so the name its author gave it is the name it
+    /// keeps — not the name of whatever the download was called.
+    ///
+    /// A world that happens to carry another world deeper inside unpacks as
+    /// itself, which is the shallowest `level.dat` winning.
+    #[tokio::test]
+    async fn a_world_wrapped_in_a_folder_keeps_that_folders_name() {
+        let (_scratch, saves) = arrived_world(
+            "world-wrapped",
+            "download.zip",
+            &[
+                ("Sky Village/level.dat", b"NBT"),
+                ("Sky Village/region/r.0.0.mca", b"REGION"),
+                ("Sky Village/datapacks/inner/level.dat", b"DEEPER"),
+            ],
+        );
+
+        let folder = unpack_world(&saves.join("download.zip"), &saves, &Progress::silent("t"))
+            .await
+            .expect("a world zip unpacks");
+
+        assert_eq!(folder.as_deref(), Some("Sky Village"));
+        assert_eq!(
+            std::fs::read(saves.join("Sky Village/level.dat")).unwrap(),
+            b"NBT",
+            "the game reads a world by its level.dat, so that is what has to be there"
+        );
+        assert_eq!(
+            std::fs::read(saves.join("Sky Village/region/r.0.0.mca")).unwrap(),
+            b"REGION",
+            "the world arrived without the rest of itself"
+        );
+        assert!(
+            !saves.join("download").exists(),
+            "the download's own name was used for a world that had its own"
+        );
+        assert!(
+            !saves.join("Sky Village/Sky Village").exists(),
+            "the wrapping folder was unpacked inside itself"
+        );
+    }
+
+    /// The other shape: `level.dat` at the archive's root, where nothing
+    /// inside the zip says what the world is called and the file's own name is
+    /// all there is to go on.
+    #[tokio::test]
+    async fn a_world_zipped_at_its_root_is_named_after_the_file() {
+        let (_scratch, saves) = arrived_world(
+            "world-root",
+            "Spawn Town.zip",
+            &[
+                ("level.dat", b"NBT"),
+                ("region/r.0.0.mca", b"REGION"),
+                ("icon.png", b"PNG"),
+            ],
+        );
+
+        let folder = unpack_world(&saves.join("Spawn Town.zip"), &saves, &Progress::silent("t"))
+            .await
+            .expect("a world zip unpacks");
+
+        assert_eq!(folder.as_deref(), Some("Spawn Town"));
+        assert_eq!(
+            std::fs::read(saves.join("Spawn Town/level.dat")).unwrap(),
+            b"NBT"
+        );
+        assert_eq!(
+            std::fs::read(saves.join("Spawn Town/region/r.0.0.mca")).unwrap(),
+            b"REGION"
+        );
+        assert!(
+            !saves.join("level.dat").exists(),
+            "a world unpacked loose into saves/ is a world the game does not read"
+        );
+    }
+
+    /// A zip CurseForge files under its worlds class that holds no `level.dat`
+    /// is not a world. It is left exactly as it arrived, because a save folder
+    /// invented out of a guess shows up in the singleplayer list and nothing
+    /// in the game will open it.
+    #[tokio::test]
+    async fn a_zip_with_no_level_dat_is_not_a_world() {
+        let (_scratch, saves) = arrived_world(
+            "world-none",
+            "resources.zip",
+            &[("pack.mcmeta", b"{}"), ("assets/icon.png", b"PNG")],
+        );
+
+        let folder = unpack_world(&saves.join("resources.zip"), &saves, &Progress::silent("t"))
+            .await
+            .expect("a zip that is not a world is not a failure");
+
+        assert_eq!(folder, None);
+        let left: Vec<String> = std::fs::read_dir(&saves)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            left,
+            vec!["resources.zip".to_string()],
+            "something was unpacked out of a zip holding no world"
+        );
+    }
+
+    /// A world zip is somebody else's archive. An entry that climbs out of the
+    /// folder it is being unpacked into is skipped, and a wrapping folder that
+    /// names its way out of `saves/` is not a world shape at all.
+    #[tokio::test]
+    async fn a_world_that_climbs_out_of_its_folder_does_not_get_out() {
+        let (scratch, saves) = arrived_world(
+            "world-climb",
+            "map.zip",
+            &[("level.dat", b"NBT"), ("../../pwned.txt", b"OWNED")],
+        );
+        let root = scratch.paths.root.clone();
+
+        let folder = unpack_world(&saves.join("map.zip"), &saves, &Progress::silent("t"))
+            .await
+            .expect("the world itself still unpacks");
+        assert_eq!(folder.as_deref(), Some("map"));
+        assert!(saves.join("map/level.dat").exists());
+        for escaped in [root.join("pwned.txt"), saves.join("pwned.txt")] {
+            assert!(!escaped.exists(), "{} was written", escaped.display());
+        }
+
+        // And the same trick played with the wrapping folder, which would
+        // otherwise be unpacked as `saves/..`.
+        let (climbing, saves) = arrived_world("world-climb-root", "map.zip", &[("../level.dat", b"NBT")]);
+        let root = climbing.paths.root.clone();
+        let folder = unpack_world(&saves.join("map.zip"), &saves, &Progress::silent("t"))
+            .await
+            .expect("a zip Geode will not make a folder for is not a failure");
+        assert_eq!(folder, None, "a world said to live outside saves/ was unpacked anyway");
+        assert!(!root.join("level.dat").exists(), "it was written outside saves/");
+        assert!(!saves.join("level.dat").exists());
+    }
+
+    /// The budget a pack's overrides are held to, on a world for the same
+    /// reason: a zip that is small to download and vast unpacked would fill
+    /// the disk. The player keeps the zip, and the import names it.
+    #[tokio::test]
+    async fn a_world_that_inflates_past_its_budget_is_stopped() {
+        let (_scratch, saves) = arrived_world(
+            "world-bomb",
+            "bomb.zip",
+            &[
+                ("Bomb/level.dat", b"NBT"),
+                ("Bomb/region/r.0.0.mca", &vec![0u8; 17 * MIB]),
+            ],
+        );
+        let archive = saves.join("bomb.zip");
+        assert!(
+            std::fs::metadata(&archive).unwrap().len() < MIB as u64,
+            "not a bomb"
+        );
+
+        let err = unpack_world(&archive, &saves, &Progress::silent("t"))
+            .await
+            .expect_err("a world that unpacks past its budget must be refused");
+
+        assert!(err.to_string().contains("fill the disk"), "{err}");
+        assert!(
+            !saves.join("Bomb/level.dat").exists(),
+            "the refused run left part of a world behind"
+        );
+        assert!(archive.exists(), "the zip the player can still unpack was deleted");
     }
 
     /// A zip of `files` empty entries with `name_len`-byte names, written by
