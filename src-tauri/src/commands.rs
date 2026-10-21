@@ -4062,6 +4062,63 @@ mod tests {
 
     use super::*;
     use crate::instance::jar::tests::fabric_jar;
+
+    /// A command has to be written in two places — here, and the
+    /// `generate_handler!` list in `lib.rs` — and nothing made them agree, so a
+    /// command left out of the list compiled, shipped, and failed only when a
+    /// person pressed the button that called it. This reads both files at
+    /// compile time and makes that a test failure instead.
+    ///
+    /// `deeplink::take_pending_join` is the one command that lives elsewhere on
+    /// purpose, so the list is allowed to hold names this file does not have;
+    /// what is never allowed is a command here that nothing can reach.
+    #[test]
+    fn every_command_in_this_file_is_reachable_from_the_handler_list() {
+        let here = include_str!("commands.rs");
+        let shell = include_str!("lib.rs");
+
+        let listed: Vec<&str> = shell
+            .split("generate_handler![")
+            .nth(1)
+            .expect("lib.rs has no generate_handler! list")
+            .split(']')
+            .next()
+            .unwrap()
+            .split("commands::")
+            .skip(1)
+            // Up to the first character a Rust name cannot hold: what follows
+            // each entry is the rest of the list, not part of its name.
+            .map(|rest| {
+                let end = rest
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .unwrap_or(rest.len());
+                &rest[..end]
+            })
+            .collect();
+
+        // The name is whatever follows the attribute: `pub async fn`, `pub fn`
+        // or a bare `fn`, since all three shapes are commands.
+        // Spelled in two halves so this test does not find its own source.
+        let attribute = concat!("#[tauri::", "command]");
+        let mut unreachable = Vec::new();
+        for after in here.split(attribute).skip(1) {
+            let name = after
+                .split_whitespace()
+                .find(|word| !matches!(*word, "pub" | "async" | "fn"))
+                .and_then(|word| word.split('(').next())
+                .unwrap_or_default();
+            if !name.is_empty() && !listed.contains(&name) {
+                unreachable.push(name.to_string());
+            }
+        }
+
+        assert!(
+            unreachable.is_empty(),
+            "these commands are not in generate_handler! in lib.rs, so calling one \
+             fails at runtime: {unreachable:?}"
+        );
+    }
+
     use crate::paths::{Paths, Scratch};
     use crate::server::share::ServerShare;
     use crate::server::{Server, ServerKind};
