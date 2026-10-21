@@ -157,11 +157,43 @@ export interface ContentItem {
   /** Mod ids this file answers to. Stable where display names are not. */
   modIds: string[];
   /**
-   * Which side a mod or client mod belongs on: its folder, then what the jar
-   * declares, then the listing. A file from a server's pack carries the
-   * server's answer, or none.
+   * Which side a mod or client mod belongs on, and who said so. Absent for
+   * everything else, which has no sides.
    */
-  side?: "client" | "server" | "both";
+  sided?: Sided;
+  /**
+   * The admin is keeping this file on the server: no pack it writes carries
+   * it, by any route. Only ever true for a server's own mods.
+   */
+  keepOnServer?: boolean;
+}
+
+/**
+ * Where a mod belongs, and on whose word: the folder first, then the jar, then
+ * the listing. A file from a server's pack carries the server's own answer.
+ *
+ * `saidBy: "nobody"` is the honest answer for a mod every source is silent
+ * about — most of NeoForge, and all of CurseForge. The side is `both`, because
+ * that is what a loader does with it, and it must not be shown as though
+ * something had declared it. `admin` is the admin's own answer, which outranks
+ * everything but the folder.
+ */
+export interface Sided {
+  side: "client" | "server" | "both";
+  saidBy: "folder" | "admin" | "jar" | "listing" | "server" | "nobody";
+}
+
+/**
+ * One of a server's mods that only the platform's listing calls client-side.
+ *
+ * An offer, never something already done: a listing is an author's tick-box,
+ * and a mod moved out of a server on its word alone would simply be missing
+ * there. Starting the server moves the ones whose own jars declare it.
+ */
+export interface ListedClientOnly {
+  /** The file as it sits in the mods folder, `.disabled` and all. */
+  file: string;
+  name: string;
 }
 
 export interface ProviderRef {

@@ -2465,6 +2465,67 @@ pub async fn move_server_mod(
     server.save(&state.paths).await
 }
 
+/// Say which side one of a server's mods belongs on, or hand the question back.
+///
+/// `side` is `client`, `server`, `both`, or nothing at all to go back to what
+/// the jar and the listing work out between them. Allowed while the server
+/// runs: no file moves, and what changes is what its pack tells players.
+#[tauri::command]
+pub async fn set_server_mod_side(
+    state: State<'_, AppState>,
+    id: String,
+    file: String,
+    side: Option<String>,
+) -> Result<()> {
+    let side = match side.as_deref() {
+        None | Some("") => None,
+        Some("client") => Some(crate::instance::jar::Side::Client),
+        Some("server") => Some(crate::instance::jar::Side::Server),
+        Some("both") => Some(crate::instance::jar::Side::Both),
+        Some(other) => {
+            return Err(Error::msg(format!(
+                "'{other}' is not a side — say client, server or both"
+            )))
+        }
+    };
+    let mut server = crate::server::load(&state.paths, &id).await?;
+    crate::server::set_mod_side(&state.paths, &mut server, &file, side).await?;
+    server.save(&state.paths).await
+}
+
+/// The mods in a server's Mods folder that only the platform's listing calls
+/// client-side — the offer, which nothing acts on until the admin does.
+///
+/// Starting the server moves out the ones whose own jars declare themselves
+/// client-only. These are the ones it leaves, because a listing can be wrong
+/// and a mod taken out of a server on its word would simply be missing there.
+#[tauri::command]
+pub async fn list_server_client_only_mods(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<crate::server::ListedClientOnly>> {
+    let server = crate::server::load(&state.paths, &id).await?;
+    crate::server::listed_client_only(&state.paths, &server, &state.jars).await
+}
+
+/// Keep one of a server's mods off the packs it writes, or stop keeping it.
+///
+/// The server goes on loading the file; no pack carries it. Allowed while the
+/// server runs, and the next pack a player downloads is the one that changes.
+#[tauri::command]
+pub async fn set_server_mod_kept(
+    state: State<'_, AppState>,
+    id: String,
+    kind: String,
+    file: String,
+    keep: bool,
+) -> Result<()> {
+    let kind = parse_kind(&kind)?;
+    let mut server = crate::server::load(&state.paths, &id).await?;
+    crate::server::set_mod_kept(&state.paths, &mut server, kind, &file, keep).await?;
+    server.save(&state.paths).await
+}
+
 // ---------------------------------------------------------------------------
 // Servers: logs, backups and properties
 // ---------------------------------------------------------------------------

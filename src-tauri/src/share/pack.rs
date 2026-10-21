@@ -1603,6 +1603,8 @@ pub(crate) async fn settle_server_files(
                 origin: Origin::Server,
                 requires: None,
                 side: arrival.side,
+                chosen_side: None,
+                keep_on_server: false,
                 server_off: arrival.off,
             }),
         }
@@ -2064,6 +2066,8 @@ async fn resolve_references(
             origin: Default::default(),
             requires: None,
             side: None,
+            chosen_side: None,
+            keep_on_server: false,
             server_off: false,
         }));
     }
@@ -2288,7 +2292,7 @@ async fn server_mods<'a>(
 
     type Found = (ContentKind, String, Option<instance::jar::Side>);
     let run_dir = run.to_path_buf();
-    let found = tokio::task::spawn_blocking(move || -> Result<Vec<Found>> {
+    let mut found = tokio::task::spawn_blocking(move || -> Result<Vec<Found>> {
         let mut found = Vec::new();
         for kind in [ContentKind::Mod, ContentKind::ClientMod] {
             let dir = run_dir.join(kind.folder());
@@ -2321,6 +2325,21 @@ async fn server_mods<'a>(
             .iter()
             .find(|r| r.kind == kind && r.file_name == base)
     };
+
+    // Everything the admin is keeping here drops out before anything else is
+    // asked about it, so there is no route by which a pack can carry it: not
+    // the index, not a reference, not its bytes, not a note naming where it
+    // came from, not the revision, and not the count a player is shown. The
+    // walk below is the only thing that puts a file in `carried`, and
+    // `carried` is the only thing the writer is given.
+    //
+    // It also stops being a reason to leave its twin in `client-mods/` behind:
+    // the rule there is that one mod reaches a player once, and this one is no
+    // longer reaching them at all.
+    found.retain(|(kind, name, _)| {
+        !record_for(*kind, strip_disabled(name).0).is_some_and(|r| r.keep_on_server)
+    });
+
     let project = |r: &'a instance::content::ContentRecord| {
         (!r.provider.is_empty() && !r.project_id.is_empty())
             .then_some((r.provider.as_str(), r.project_id.as_str()))
@@ -2355,7 +2374,16 @@ async fn server_mods<'a>(
             continue;
         }
         let rel = PathBuf::from(kind.folder()).join(name);
-        let side = side_of(*kind, *declared, record.and_then(|r| r.side));
+        // The answer alone. A pack has one field for a side and no way to say
+        // nobody gave one, which a player's Geode reads back as the server
+        // having said nothing — see [`server_notes`].
+        let side = side_of(
+            *kind,
+            record.and_then(|r| r.chosen_side),
+            *declared,
+            record.and_then(|r| r.side),
+        )
+        .side;
         mods.sides.insert(rel.clone(), side);
         mods.carried.insert(rel);
         // A mod on disk both on and off is two files and one record, which is
@@ -3048,6 +3076,8 @@ mod tests {
             origin: Default::default(),
             requires: None,
             side: None,
+            chosen_side: None,
+            keep_on_server: false,
             server_off: false,
         }
     }
@@ -4629,6 +4659,162 @@ mod tests {
             manifest.files.iter().all(|n| !n.path.contains("p.jar")),
             "the manifest mentions the plugin: {:?}",
             manifest.files
+        );
+    }
+
+    /// A side the admin set by hand is the side the pack sends, in both of the
+    /// places a pack says one: the index's `env` pair and the manifest's note.
+    /// They are written by different code from different inputs, and a pack
+    /// whose index called a mod client-only while its note called it
+    /// server-side would install it in one place and hide it in the other.
+    #[tokio::test]
+    async fn a_side_the_admin_set_is_the_side_the_whole_pack_sends() {
+        use crate::instance::jar::Side;
+
+        let (scratch, mut server) = server_fixture("chosen-side", false).await;
+        let paths = scratch.paths.clone();
+
+        // Declares both sides and has no record at all until now.
+        server.content.push(ContentRecord {
+            chosen_side: Some(Side::Server),
+            ..record("", "homemade.jar", ContentKind::Mod)
+        });
+        // Listed as client only, which is wrong: the admin says it runs here.
+        for r in &mut server.content {
+            if r.file_name == "excluded-mr.jar" {
+                r.side = Some(Side::Client);
+                r.chosen_side = Some(Side::Both);
+            }
+        }
+
+        let dest = paths.root.join("chosen.geodepack");
+        export_server(&paths, &server, dest.clone(), &Progress::silent("t"))
+            .await
+            .unwrap();
+
+        let manifest = read_manifest(&dest).unwrap().expect("a Geode pack");
+        assert_eq!(
+            manifest.note("mods/homemade.jar").and_then(|n| n.side),
+            Some(Side::Server),
+            "the admin's answer beat the jar's own declaration: {:?}",
+            manifest.files
+        );
+        assert_eq!(
+            manifest.note("mods/excluded-mr.jar").and_then(|n| n.side),
+            None,
+            "a mod for both sides is noted with no side at all"
+        );
+
+        let env = index_of(&dest)
+            .files
+            .iter()
+            .find(|f| f.path == "mods/excluded-mr.jar")
+            .and_then(|f| f.env.clone())
+            .expect("the Modrinth mod is indexed");
+        assert_eq!(
+            (env.client.as_str(), env.server.as_str()),
+            ("required", "required"),
+            "the index agrees with the note rather than with the listing"
+        );
+    }
+
+    /// A mod the admin is keeping on this server reaches a pack by no route at
+    /// all. One of each kind is held back — the Modrinth mod the index would
+    /// name, the CurseForge mod the manifest would reference, and the jar added
+    /// by hand whose bytes would travel — and the pack must carry none of
+    /// them, mention none of them, and count none of them. This is a licence
+    /// and a privacy promise as much as a convenience, so it is checked one
+    /// carrier at a time rather than by the total.
+    #[tokio::test]
+    async fn a_mod_kept_on_this_server_reaches_the_pack_by_no_route() {
+        use instance::content::ContentKind;
+
+        let (scratch, mut server) = server_fixture("kept-here", false).await;
+        let paths = scratch.paths.clone();
+        let held = ["sodium-mr.jar", "create-cf.jar", "homemade.jar"];
+        for file in held {
+            // Through the admin's own command, so the jar added by hand gets
+            // the record the choice has to live on.
+            crate::server::set_mod_kept(&paths, &mut server, ContentKind::Mod, file, true)
+                .await
+                .unwrap();
+        }
+        // Saved and read again, which is what happens between the press and
+        // the next player's download: the host loads the server itself. For
+        // the jar added by hand that is the whole test, since its record holds
+        // nothing but this choice and a load drops records that say nothing.
+        server.save(&paths).await.unwrap();
+        let server = crate::server::load(&paths, &server.id).await.unwrap();
+
+        let dest = paths.root.join("kept.geodepack");
+        export_server(&paths, &server, dest.clone(), &Progress::silent("t"))
+            .await
+            .unwrap();
+
+        // Its bytes.
+        assert_eq!(
+            sorted(entries(&dest)),
+            vec![
+                "geode/manifest.json",
+                "geode/media/icon.png",
+                "modrinth.index.json",
+                "overrides/mods/private-tools.jar.disabled",
+                "overrides/mods/server-side.jar",
+            ],
+        );
+
+        let index = index_of(&dest);
+        let manifest = read_manifest(&dest).unwrap().expect("a Geode pack");
+        for file in held {
+            // The index.
+            assert!(
+                !index.files.iter().any(|f| f.path.contains(file)),
+                "{file} is indexed: {:?}",
+                index.files.iter().map(|f| &f.path).collect::<Vec<_>>()
+            );
+            // A reference, a side, a disabled flag — any note at all, since a
+            // note names where a file came from.
+            assert!(
+                !manifest.files.iter().any(|n| n.path.contains(file)),
+                "{file} is named in the manifest: {:?}",
+                manifest.files
+            );
+        }
+
+        // And the count a player is shown, which has to be the number of files
+        // the pack actually carries.
+        let info = server_pack_info(&paths, &server).await.unwrap();
+        assert_eq!(info.mods, 5);
+        assert_eq!(info.mods, mods_in(&dest));
+    }
+
+    /// Holding a jar back changes what every player receives, so the server's
+    /// description has to change with it. Without that, a player who already
+    /// has the pack would check for changes, find none, and keep the jar for
+    /// ever.
+    #[tokio::test]
+    async fn keeping_a_mod_here_changes_what_players_check_for() {
+        use instance::content::ContentKind;
+
+        let (scratch, mut server) = server_fixture("kept-revision", false).await;
+        let paths = scratch.paths.clone();
+        let before = server_pack_info(&paths, &server).await.unwrap().revision;
+
+        crate::server::set_mod_kept(&paths, &mut server, ContentKind::Mod, "sodium-mr.jar", true)
+            .await
+            .unwrap();
+        let after = server_pack_info(&paths, &server).await.unwrap();
+
+        assert_ne!(before, after.revision);
+        // And the pack built from that same state carries the new one, so the
+        // player who downloads it is not told again that it has changed.
+        let dest = paths.root.join("kept-revision.geodepack");
+        export_server(&paths, &server, dest.clone(), &Progress::silent("t"))
+            .await
+            .unwrap();
+        assert_eq!(
+            read_manifest(&dest).unwrap().unwrap().revision,
+            Some(after.revision)
         );
     }
 

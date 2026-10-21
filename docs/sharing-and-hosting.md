@@ -38,6 +38,8 @@ is more actionable than a silently incomplete instance would be.
 | Referencing rather than copying | `src-tauri/src/share/pack.rs` (`source_for`) | Done, tested |
 | Sidedness from the jar | `src-tauri/src/instance/jar.rs` (`Side`) | Done, verified against real jars |
 | Client, server and both on a server | `src-tauri/src/instance/content.rs` (`side_of`), `src-tauri/src/server/mod.rs` (`move_mod`), `src-tauri/src/share/pack.rs` (`server_mods`) | Done, tested (item 7) |
+| A side set by hand, and whose word each side is on | `src-tauri/src/instance/content.rs` (`side_of`, `Sided`), `src-tauri/src/server/mod.rs` (`set_mod_side`, `listed_client_only`) | Done, tested |
+| Keeping a mod on the server it is installed on | `src-tauri/src/server/mod.rs` (`set_mod_kept`), `src-tauri/src/share/pack.rs` (`server_mods`) | Done, tested per carrier |
 | Geode pack round trip | `src-tauri/src/share/pack.rs` (`export`, `apply_pack`) | Done, tested end to end |
 | Server vs user mods | `src-tauri/src/instance/content.rs` (`Origin`) | Done, tested — server mods can be disabled, not removed |
 | Sharing a server directly with players | `src-tauri/src/share/{host,service,portmap,identity,trust,link,join}.rs` | Done, tested end to end over real TLS |
@@ -339,11 +341,20 @@ connects straight to the admin's machine. Nothing sits in the middle.
   jars that declare themselves server-side. An index entry for a server-side
   jar says optional on a client, since it does nothing there, and required on
   a server, so other launchers still install nothing unexpected on one — the
-  same in a personal pack. There is no per-mod "don't share":
-  the only ways to keep a jar from players are not sharing the server, or
-  taking the jar out of `mods/`. Records the old choice left for jars added by
-  hand are dropped when the server loads, so those jars read as untracked
-  again, and a mod once held back goes to players from the next pack on.
+  same in a personal pack.
+  The one exception is a mod the admin is **keeping on this server**
+  (`keep_on_server`, set per mod in the Content tab): nothing of it travels by
+  any route. `server_mods` drops it before anything else is asked about it, so
+  it is not indexed, not referenced, not embedded, not named in a note, not
+  hashed into the revision and not in the count a player is shown — and it is
+  no longer a reason to leave its twin in `client-mods/` out either, since
+  nothing of it is reaching anybody. It is not an off switch: the server still
+  loads the file. The older, blanket "don't share" lock is still gone, and
+  this is deliberately narrower — per mod, named for what it does, with no
+  second meaning. Records that lock left behind for jars added by hand are
+  still dropped when the server loads, so those jars read as untracked again;
+  the only reason `left_by_dont_share` now asks anything else is that a record
+  holding one of today's choices and nothing more looks exactly like one.
 - The player's side imports through the same sequence as any `.geodepack`, and
   everything it brings is the server's (item 6). It installs only a server's
   pack, and only the one the player approved: a pack describing a different
@@ -1017,27 +1028,44 @@ profiler, a backup tool, an anti-cheat — are the reverse. So Geode sorts each
 of a server's mods into **client**, **server** or **both**, and the pack its
 players get says which.
 
-**Where a side comes from.** `content::side_of` answers from three things, in
-this order:
+**Where a side comes from.** `content::side_of` is the one place the sources
+are ordered, and it answers with both the side and who said it — a `Sided`,
+carrying a `SideSource`. In order:
 
 1. The folder. A mod in Client mods is a client mod, whatever it says, because
    putting it there was the admin's decision.
-2. What the jar declares — `environment` in `fabric.mod.json`, Forge's
+2. What the admin said, on the row itself, kept as `chosen_side`. It is the
+   only answer somebody gave on purpose, so nothing below may sharpen it —
+   and it is held apart from `side`, which is what a platform or a server
+   said, so an update or an identify cannot overwrite it.
+3. What the jar declares — `environment` in `fabric.mod.json`, Forge's
    `clientSideOnly` — when it declares client or server. A jar declaring both
    says nothing the next source cannot sharpen.
-3. Modrinth's listing, captured when the mod was installed and kept on its
+4. Modrinth's listing, captured when the mod was installed and kept on its
    record as `side`. `Project::listed_side` reads the two tick-boxes: server
    unsupported is client; client unsupported, or client optional with server
    required, is server; any other stated pair is both. CurseForge states
    nothing, so its projects have no listed side. (SpigotMC's projects are
    listed as server software by Geode itself, which only a plugin ever is.)
 
-Nothing said anywhere is both. That is the known limit: a CurseForge mod, or a
-NeoForge mod — NeoForge has no field for this — that its jar does not
-classify counts as both, and goes to players and stays in the server's `mods/`
-as it always did. Records written before this have no `side` and are not
-backfilled; they are classified from their jar alone until they are
-reinstalled, updated or identified.
+Nothing said anywhere is `SideSource::Nobody`, with a side of both. That is
+the known limit: a CurseForge mod, or a NeoForge mod — NeoForge has no field
+for this — that its jar does not classify goes to players and stays in the
+server's `mods/` as it always did, because that is what every loader does with
+a mod that does not say. What it is **not** is a mod declared for both sides,
+and the two are not shown alike: a row in Mods badges `both` when something
+said so and `side not declared` when nothing did, with the badge's tooltip
+naming whose word it is on. Showing both of them with no badge at all was the
+bug: a NeoForge or CurseForge mod read as one Geode understood.
+
+A joined instance's copy of a server's mod carries the server's own
+classification (`Sided::told_by_the_server`), or nobody's — never this
+machine's reading of the jar, which would disagree with the pack the player
+was sent.
+
+Records written before sides were kept have no `side` and are not backfilled;
+they are classified from their jar alone until they are reinstalled, updated
+or identified.
 
 **Client mods live in `run/client-mods/`.** No loader reads that folder, which
 is the whole point: a mod there cannot slow the server down or crash it on
@@ -1074,8 +1102,19 @@ belongs on one side only.
 Only the jar's own word moves a jar that is already installed. One that reads
 as a client mod only because of Modrinth's listing stays in `run/mods`, since a
 listing can be wrong and a mod moved on its word would simply be missing from
-the server; the badge says so, and the admin decides. Updates stay in the
-folder they are in.
+the server. Updates stay in the folder they are in.
+
+**What the listing alone says is offered, not done.** Above the Mods list, the
+Content tab names the jars the platform calls client-side while their own jars
+say nothing (`server::listed_client_only`,
+`commands::list_server_client_only_mods`) and says why, with two presses each:
+*Move to Client mods*, which is the ordinary move, or *Keep in Mods*. Nothing
+moves without a press. The candidates come out of `side_of`'s own answer —
+those whose side is client *on the listing's word* — so a jar that declares
+itself is not among them, and neither is one the admin has said anything
+about. That is what Keep in Mods records: the mod runs on this server, as
+`chosen_side`, which both retires the offer for it and is the honest content of
+the press. There is no separate dismissed flag to disagree with it.
 
 **Moving a mod.** Each row in Mods and Client mods has a move button
 (`server::move_mod`). The file keeps its name, `.disabled` included, and its
@@ -1085,8 +1124,38 @@ that name or as the same Modrinth or CurseForge project under another, is
 refused with nothing changed, and so is any move while the server runs: it
 read `mods/` when it started. Moving a mod whose own jar declares it client
 only into Mods lasts until the server next starts, which moves it back, since
-a server ignores client mods; the button says so. There is no way to mark a mod
-server or both by hand; those are always worked out.
+a server ignores client mods; the button says so.
+
+**Setting a side by hand.** Each row in Mods has a Side control
+(`server::set_mod_side`, `commands::set_server_mod_side`): *worked out*, which
+is the default and asks the jar and the listing, *server only*, or *both
+sides*. Nothing on disk moves — what changes is what the pack tells players and
+what the row says — so it is allowed while the server runs. Client is not
+offered, because a mod left in `mods/` is loaded by the server whatever it is
+marked; the way to say a mod is only for players is the move button beside it,
+and the badge's tooltip says so. A jar added by hand has no record to keep the
+answer on, so one is made that holds nothing else: it is the same shape the
+removed "don't share" lock left behind, which is why `left_by_dont_share` now
+asks whether the record still says something before dropping it. The answer is
+kept when the mod is updated, when its blocked CurseForge file is substituted
+from Modrinth, and when an identify fills in the provenance around it — a side
+a person chose is never overwritten by a machine's answer.
+
+**Keeping a mod on this server.** Each row in Mods and Client mods has a
+Keep-here button (`server::set_mod_kept`, `commands::set_server_mod_kept`), for
+an admin's own tooling and for a jar whose licence forbids passing it on. The
+server goes on loading it; its pack carries nothing of it, which `server_mods`
+enforces in one place for every carrier at once, and
+`a_mod_kept_on_this_server_reaches_the_pack_by_no_route` checks the index, the
+references, the bytes, the notes and the count one at a time. Holding a jar
+back moves the revision, so a player who already has it is told to drop it.
+Two things carry the choice rather than dropping it, because both replace a
+record wholesale: updating the mod (`install::content::install_into`, the
+substituted-from-Modrinth case included) and identifying it by hash
+(`link_untracked_in`). A long job's late save cannot undo it either —
+`save_if_present` takes `keep_on_server` back from disk, since nothing slow
+ever sets it and the only mistake worth guarding is the one that puts a private
+jar into somebody's download.
 
 **How a pack carries each side.** A player's game has one mods folder, so a
 client mod arrives as an ordinary mod in `mods/`, and nothing in a pack names
@@ -1127,9 +1196,4 @@ Nothing below is required for anything already committed.
    share page says your ISP uses carrier-grade NAT, set a public address for a
    tunnel instead.
 
-2. **Decide the NeoForge sidedness presentation.** NeoForge declares nothing —
-   not on the mod, not on the file — so Geode reports "not declared" rather than
-   guessing. If you would rather see a guess, it must be visibly labelled as
-   one, because a wrong answer means a server silently missing a mod.
-
-3. **Install Docker** if you want the container built and tested here.
+2. **Install Docker** if you want the container built and tested here.

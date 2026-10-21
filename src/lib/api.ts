@@ -32,6 +32,7 @@ import type {
   JoinPreview,
   KeyCheck,
   LinkReport,
+  ListedClientOnly,
   LogFile,
   PackArrival,
   PackFormat,
@@ -385,6 +386,32 @@ export const api = {
   /** Move a mod between a server's Mods and Client mods. Refused while it runs. */
   moveServerMod: (id: string, file: string, toClient: boolean) =>
     invoke<void>("move_server_mod", { id, file, toClient }),
+  /**
+   * Say which side one of a server's mods belongs on, overruling its jar and
+   * its listing, or pass `null` to hand the question back to them. Mods only:
+   * a client mod is one because of the folder it is in.
+   */
+  setServerModSide: (
+    id: string,
+    file: string,
+    side: "client" | "server" | "both" | null,
+  ) => invoke<void>("set_server_mod_side", { id, file, side }),
+  /**
+   * The mods in a server's Mods folder that only the platform's listing calls
+   * client-side. An offer: nothing has moved, and nothing moves until asked.
+   */
+  listServerClientOnlyMods: (id: string) =>
+    invoke<ListedClientOnly[]>("list_server_client_only_mods", { id }),
+  /**
+   * Keep one of a server's mods off the packs it writes, or stop keeping it.
+   * The server still loads it; players simply never receive it.
+   */
+  setServerModKept: (
+    id: string,
+    kind: ContentKind,
+    file: string,
+    keep: boolean,
+  ) => invoke<void>("set_server_mod_kept", { id, kind, file, keep }),
   /**
    * Install Cardboard, so a Fabric server can load Bukkit plugins. Refused,
    * with the reason, where it would do nothing.

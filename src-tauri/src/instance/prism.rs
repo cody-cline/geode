@@ -292,6 +292,8 @@ fn record_from_index(kind: ContentKind, slug: &str, text: &str) -> Option<Conten
         // by version, so nobody has looked at what *this* build needs.
         requires: None,
         side: side_from_index(root.get("side").and_then(|v| v.as_str())),
+        chosen_side: None,
+        keep_on_server: false,
         server_off: false,
     })
 }
@@ -684,7 +686,15 @@ pub(super) async fn write_instance(
             .ok()
             .flatten()
             .and_then(|meta| meta.side);
-        let side = super::content::side_of(ident.kind, jar_side, ident.listed_side);
+        // Prism's index has one field for the side and no way to say nobody
+        // answered, so only the answer travels.
+        let side = super::content::side_of(
+            ident.kind,
+            ident.chosen_side,
+            jar_side,
+            ident.listed_side,
+        )
+        .side;
 
         let entry = IndexEntry {
             name: record
@@ -1960,6 +1970,8 @@ project-id = 1649197
             origin: Default::default(),
             requires: None,
             side: None,
+            chosen_side: None,
+            keep_on_server: false,
             server_off: false,
         }
     }

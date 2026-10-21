@@ -202,3 +202,52 @@
   margin-right: auto;
   line-height: 1.6;
 }
+
+/* The side control on a server's Mods rows. Narrow enough to sit among the
+   row's buttons, and the same height as the small ones beside it. */
+.sideChoice {
+  width: auto;
+  height: 28px;
+  font-size: 12px;
+  padding: 0 26px 0 9px;
+  color: var(--text-dim);
+  flex: none;
+}
+
+/* The Keep-on-this-server button while it is on. Accent rather than a warning
+   colour: it is a choice the admin made, not something going wrong. */
+.keptHere {
+  color: var(--accent);
+}
+
+/* The offer above a server's Mods list: which jars look client-only, and the
+   two presses. Accent-tinted like the update banner, since it is the same kind
+   of thing — something waiting on the admin — but it holds rows. */
+.offer {
+  padding: 10px 22px 12px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  font-size: 13px;
+}
+
+.offerLead {
+  margin: 0 0 8px;
+  color: var(--accent);
+  line-height: 1.5;
+}
+
+.offerRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 0;
+}
+
+.offerName {
+  font-weight: 500;
+  color: var(--text);
+}
+
+.offerRow .fileName {
+  flex: 1;
+}

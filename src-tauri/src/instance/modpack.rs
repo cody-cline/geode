@@ -1086,6 +1086,8 @@ pub async fn import_into_at(
                         // Pack manifests carry no dependency graph; the jars do.
                         requires: None,
                         side: None,
+                        chosen_side: None,
+                        keep_on_server: false,
                         server_off: false,
                     });
                 }
@@ -1646,6 +1648,8 @@ async fn record_mrpack_provenance(
             origin: Default::default(),
             requires: None,
             side,
+            chosen_side: None,
+            keep_on_server: false,
             server_off: false,
         });
     }
@@ -2131,7 +2135,15 @@ pub async fn write_mrpack(
             .ok()
             .flatten()
             .and_then(|meta| meta.side);
-        let side = crate::instance::content::side_of(ident.kind, jar_side, ident.listed_side);
+        // Only where it belongs, not who said so: an index entry has one field
+        // for it, and a reader of the pack cannot be told that nobody knew.
+        let side = crate::instance::content::side_of(
+            ident.kind,
+            ident.chosen_side,
+            jar_side,
+            ident.listed_side,
+        )
+        .side;
 
         // A player's game has no `client-mods/`: there they are ordinary mods.
         let folder = if players_pack && ident.kind == ContentKind::ClientMod {

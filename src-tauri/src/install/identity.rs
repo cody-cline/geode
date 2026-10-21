@@ -91,6 +91,11 @@ pub struct Identity {
     /// record's answer, carried through so a pack's `env` pair does not move
     /// the day a hash lookup starts answering as well.
     pub listed_side: Option<Side>,
+    /// Which side a person said this belongs on, which outranks both of the
+    /// above. Carried for the same reason: a writer works out each file's side
+    /// from here, and leaving it behind would make a pack's index contradict
+    /// the side its own manifest notes.
+    pub chosen_side: Option<Side>,
     pub refs: Vec<PlatformRef>,
 }
 
@@ -705,6 +710,7 @@ pub async fn identify(
                 sha512: digests.sha512,
                 murmur2: digests.murmur2,
                 listed_side: record.and_then(|r| r.side),
+                chosen_side: record.and_then(|r| r.chosen_side),
                 refs: seeded
                     .map(|r| PlatformRef {
                         provider: r.provider.clone(),
@@ -1069,6 +1075,8 @@ mod tests {
             origin: Default::default(),
             requires: None,
             side: None,
+            chosen_side: None,
+            keep_on_server: false,
             server_off: false,
         }
     }

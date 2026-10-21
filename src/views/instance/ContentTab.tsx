@@ -363,7 +363,7 @@ export default function ContentTab({
                         server
                       </span>
                     )}
-                    {item.origin === "server" && item.side === "server" && (
+                    {item.origin === "server" && item.sided?.side === "server" && (
                       <span
                         className="badge"
                         title="Only the server needs this. Turn all of these on or off in Settings, under Server."

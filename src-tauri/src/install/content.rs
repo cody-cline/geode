@@ -146,6 +146,17 @@ pub async fn install_into(
         .map(|r| r.file_name.clone())
         .collect();
 
+    // What somebody chose by hand is about the mod, not about one build of it,
+    // and every record this install is about to drop is a build of this mod.
+    // Letting an update forget the side would quietly put a mod the admin had
+    // corrected back on the side its listing claims; letting it forget the
+    // hold would send a jar they are keeping here to every player.
+    let replacing = |r: &&ContentRecord| {
+        r.kind == kind && (r.file_name == file.filename || previous.contains(&r.file_name))
+    };
+    let chosen_side = records.iter().filter(replacing).find_map(|r| r.chosen_side);
+    let keep_on_server = records.iter().filter(replacing).any(|r| r.keep_on_server);
+
     crate::net::fetch_one(
         client,
         &Download::new(file.url.clone(), dir.join(&file.filename))
@@ -179,6 +190,8 @@ pub async fn install_into(
         origin: Default::default(),
         requires: Some(required_ids(version)),
         side,
+        chosen_side,
+        keep_on_server,
         server_off: false,
     });
 
@@ -620,6 +633,8 @@ mod tests {
             origin: crate::instance::content::Origin::Server,
             requires: None,
             side: None,
+            chosen_side: None,
+            keep_on_server: false,
             server_off: false,
         }
     }
@@ -976,6 +991,69 @@ mod tests {
         assert_eq!(records[0].side, Some(Side::Client));
     }
 
+    /// What a person said about a mod outlives its builds. An update deletes
+    /// the old jar and writes a fresh record under the new one's name, and one
+    /// that dropped these two would quietly send a jar the admin is keeping on
+    /// their server to every player, or put a mod back on the side its listing
+    /// claims after they had corrected it.
+    #[tokio::test]
+    async fn an_update_keeps_the_side_and_the_hold_a_person_set() {
+        use crate::instance::jar::Side;
+
+        let scratch = Scratch::new("install-keeps-choices");
+        let dir = scratch.paths.root.clone();
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("old.jar"), b"the build in place")
+            .await
+            .unwrap();
+        // The new build is already there with the right hash, so nothing is
+        // downloaded, and the client points at a port nothing listens on.
+        tokio::fs::write(dir.join("a.jar"), b"the new build")
+            .await
+            .unwrap();
+        let mut newer = version("2.0", "release", true);
+        newer.files[0].sha1 = Some(crate::net::sha1_file(&dir.join("a.jar")).await.unwrap());
+        let offline = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:9").unwrap())
+            .build()
+            .unwrap();
+
+        let mut records = vec![ContentRecord {
+            origin: Default::default(),
+            chosen_side: Some(Side::Server),
+            keep_on_server: true,
+            ..server_record("old.jar", "p")
+        }];
+        install_into(
+            &offline,
+            &dir,
+            &mut records,
+            &newer,
+            ContentKind::Mod,
+            "A Mod",
+            None,
+            None,
+            false,
+            Some(Side::Client),
+            blocked::Fallback::live(&Progress::silent("t")),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].file_name, "a.jar", "the new build's name");
+        assert_eq!(records[0].chosen_side, Some(Side::Server));
+        assert!(
+            records[0].keep_on_server,
+            "the update sent a jar the admin was keeping: {records:?}"
+        );
+        assert_eq!(
+            records[0].side,
+            Some(Side::Client),
+            "the listing's own answer is still refreshed from the install"
+        );
+    }
+
     /// A walk into Mods installs a library the server has only in Client mods,
     /// since the server never loads that folder. A walk into Client mods
     /// counts both folders, since players get the server's mods anyway.
@@ -1226,6 +1304,16 @@ pub async fn link_untracked_in(
         // Records key off the plain name, so toggling does not orphan them.
         let base = content::strip_disabled(&file_name).0.to_string();
 
+        // What a person set is not provenance, and a hash lookup has no answer
+        // to it. Dropping the side here would re-side, on the listing's word,
+        // the very mod whose listing the admin corrected; dropping the hold
+        // would put a jar they are keeping here into the next pack.
+        let held = records
+            .iter()
+            .find(|r| r.file_name == base && r.kind == kind);
+        let chosen_side = held.and_then(|r| r.chosen_side);
+        let keep_on_server = held.is_some_and(|r| r.keep_on_server);
+
         records.retain(|r| !(r.file_name == base && r.kind == kind));
         records.push(ContentRecord {
             file_name: base,
@@ -1244,6 +1332,8 @@ pub async fn link_untracked_in(
             // A hash lookup gives provenance, not a dependency list.
             requires: None,
             side: project.and_then(|p| p.listed_side()),
+            chosen_side,
+            keep_on_server,
             server_off: false,
         });
         identified += 1;
@@ -1407,6 +1497,8 @@ async fn name_from_catalogue(
                 // A hash lookup gives provenance, not a dependency list.
                 requires: None,
                 side: project.and_then(|p| p.listed_side()),
+                chosen_side: None,
+                keep_on_server: false,
                 server_off: false,
             }),
         }
@@ -1728,6 +1820,8 @@ mod naming_tests {
             origin: Origin::Server,
             requires: None,
             side: Some(Side::Server),
+            chosen_side: None,
+            keep_on_server: false,
             server_off: true,
         });
 
@@ -1773,6 +1867,8 @@ mod naming_tests {
             origin: Default::default(),
             requires: None,
             side: None,
+            chosen_side: None,
+            keep_on_server: false,
             server_off: false,
         });
 
@@ -1887,6 +1983,8 @@ mod naming_tests {
             origin: Default::default(),
             requires: None,
             side: Some(Side::Both),
+            chosen_side: None,
+            keep_on_server: false,
             server_off: false,
         }
     }

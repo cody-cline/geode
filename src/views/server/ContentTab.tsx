@@ -10,13 +10,20 @@ import {
   Package,
   RefreshCw,
   Search,
+  Server as ServerIcon,
   Trash2,
 } from "lucide-react";
 
 import { api } from "../../lib/api";
 import { fileSize, providerShort } from "../../lib/format";
 import { useStore } from "../../lib/store";
-import type { ContentItem, Server, UpdateCandidate } from "../../lib/types";
+import type {
+  ContentItem,
+  ListedClientOnly,
+  Server,
+  Sided,
+  UpdateCandidate,
+} from "../../lib/types";
 
 // The instance tab's stylesheet, deliberately. The two panes are the same
 // screen with different folders behind them, and a second copy of these rules
@@ -41,6 +48,52 @@ const PICKS: Record<ServerFolder, { label: string; extensions: string[] }> = {
 /** The same update: one project, in one folder. */
 const sameUpdate = (a: UpdateCandidate, b: UpdateCandidate) =>
   a.provider === b.provider && a.projectId === b.projectId && a.kind === b.kind;
+
+/** Whose word a side is on, said in a sentence an admin can act on. */
+const SAID_BY: Record<Sided["saidBy"], string> = {
+  admin: "You said so, and nothing here overrules it.",
+  jar: "Its own jar declares it.",
+  listing: "The platform lists it that way, which an author can get wrong.",
+  server: "The server it came from classified it.",
+  folder: "It sits in Client mods.",
+  nobody: "",
+};
+
+/**
+ * The side badge for a row in Mods: where the mod belongs, and on whose word.
+ *
+ * Every mod gets one, the ones nobody has sided included. Badges used to
+ * appear only for client and server, so a mod no source says anything about —
+ * most of NeoForge, and every CurseForge mod — looked exactly like one
+ * genuinely needed on both sides, and an admin could not tell which row they
+ * were reading.
+ */
+function sideBadge(sided: Sided): { label: string; title: string } {
+  const why = SAID_BY[sided.saidBy];
+  switch (sided.side) {
+    case "client":
+      return {
+        label: "client",
+        title: `Runs only in players' games. ${why} Players get it with the pack; move it to Client mods to keep it out of this server's mods folder.`,
+      };
+    case "server":
+      return {
+        label: "server",
+        title: `Only this server needs it. ${why} Players get it too, and can keep server-side mods turned off.`,
+      };
+    case "both":
+      return sided.saidBy === "nobody"
+        ? {
+            label: "side not declared",
+            title:
+              "Nothing says which side this belongs on — not its own jar, not the platform's listing. So this server loads it and players get it, which is what every loader does with a mod that does not say.",
+          }
+        : {
+            label: "both",
+            title: `Needed on this server and in players' games. ${why}`,
+          };
+  }
+}
 
 export default function ServerContentTab({
   server,
@@ -70,6 +123,7 @@ export default function ServerContentTab({
 
   const [folder, setFolder] = useState<ServerFolder>(folders[0]?.id ?? "mod");
   const [items, setItems] = useState<ContentItem[] | null>(null);
+  const [clientOnly, setClientOnly] = useState<ListedClientOnly[]>([]);
   const [filter, setFilter] = useState("");
   const [updates, setUpdates] = useState<UpdateCandidate[]>([]);
   const [checking, setChecking] = useState(false);
@@ -83,6 +137,16 @@ export default function ServerContentTab({
     } catch (e) {
       reportError("Could not read the server folder", e);
       setItems([]);
+    }
+    // The offer about mods only the listing calls client-side. In its own try,
+    // and silent if it fails: it is a suggestion, and it must not be able to
+    // stand in the way of the folder it is about.
+    try {
+      setClientOnly(
+        folder === "mod" ? await api.listServerClientOnlyMods(server.id) : [],
+      );
+    } catch {
+      setClientOnly([]);
     }
   }, [server.id, folder, reportError]);
 
@@ -132,18 +196,81 @@ export default function ServerContentTab({
   /**
    * Move a mod between Mods and Client mods, record and on/off state with it.
    * Only while the server is stopped: it read its mods folder when it started.
+   *
+   * Named by file rather than by row, because the offer above the list moves
+   * mods too and has no row to hand over.
    */
-  async function move(item: ContentItem) {
-    const toClient = folder === "mod";
+  async function move(
+    mod: { fileName: string; name: string },
+    toClient = folder === "mod",
+  ) {
     try {
-      await api.moveServerMod(server.id, item.fileName, toClient);
+      await api.moveServerMod(server.id, mod.fileName, toClient);
       await Promise.all([load(), refreshServers()]);
       toast({
         kind: "success",
-        title: `Moved ${item.name} to ${toClient ? "Client mods" : "Mods"}`,
+        title: `Moved ${mod.name} to ${toClient ? "Client mods" : "Mods"}`,
       });
     } catch (e) {
-      reportError(`Could not move ${item.name}`, e);
+      reportError(`Could not move ${mod.name}`, e);
+    }
+  }
+
+  /**
+   * Decline the offer for one jar. What that records is the one thing the
+   * press actually said — this mod runs on this server — which is also what
+   * stops it being offered again, since a person's answer outranks a listing.
+   */
+  async function keepInMods(mod: ListedClientOnly) {
+    try {
+      await api.setServerModSide(server.id, mod.file, "both");
+      await load();
+      toast({
+        kind: "success",
+        title: `${mod.name} stays in Mods`,
+        body: "Marked as needed on both sides, which the Side control can change.",
+      });
+    } catch (e) {
+      reportError(`Could not keep ${mod.name} in Mods`, e);
+    }
+  }
+
+  /**
+   * Say which side a mod belongs on, or hand the question back to the jar and
+   * the listing. Nothing on disk moves: what changes is what this server's
+   * pack tells players, and what this list says.
+   */
+  async function chooseSide(
+    item: ContentItem,
+    side: "client" | "server" | "both" | null,
+  ) {
+    try {
+      await api.setServerModSide(server.id, item.fileName, side);
+      await load();
+    } catch (e) {
+      reportError(`Could not set which side ${item.name} is on`, e);
+    }
+  }
+
+  /**
+   * Keep a mod on this server, or stop keeping it. The server goes on loading
+   * it either way; what changes is that its pack carries nothing of it.
+   */
+  async function keepHere(item: ContentItem, keep: boolean) {
+    try {
+      await api.setServerModKept(server.id, folder, item.fileName, keep);
+      await load();
+      toast({
+        kind: "success",
+        title: keep
+          ? `${item.name} stays on this server`
+          : `${item.name} goes to players again`,
+        body: keep
+          ? "Players get nothing of it: not the file, not a link to it, not its name."
+          : undefined,
+      });
+    } catch (e) {
+      reportError(`Could not change what players get of ${item.name}`, e);
     }
   }
 
@@ -373,6 +500,49 @@ export default function ServerContentTab({
         </div>
       )}
 
+      {/* An offer, not a move. Starting the server moves out the jars that
+          declare themselves client-only; these are known only from a listing,
+          which is an author's tick-box and is sometimes wrong, so a mod taken
+          out on its word alone would simply be missing from the server. */}
+      {folder === "mod" && clientOnly.length > 0 && (
+        <div className={styles.offer}>
+          <p className={styles.offerLead}>
+            {clientOnly.length === 1
+              ? "This mod looks like it is only for players: the platform lists it as client-side, while its own jar says nothing about it."
+              : `These ${clientOnly.length} mods look like they are only for players: the platform lists them as client-side, while their own jars say nothing about it.`}{" "}
+            A listing can be wrong, so nothing has moved. Client mods still go
+            to players with the pack; this server stops loading them.
+          </p>
+          {clientOnly.map((mod) => (
+            <div key={mod.file} className={styles.offerRow}>
+              <span className={styles.offerName}>{mod.name}</span>
+              <span className={styles.fileName}>{mod.file}</span>
+              <button
+                className="btn btn-sm"
+                onClick={() =>
+                  void move({ fileName: mod.file, name: mod.name }, true)
+                }
+                disabled={server.running}
+                title={
+                  server.running
+                    ? "Stop the server to move mods between folders"
+                    : "Move to Client mods — players still get it, this server stops loading it"
+                }
+              >
+                Move to Client mods
+              </button>
+              <button
+                className="btn btn-sm btn-ghost"
+                onClick={() => void keepInMods(mod)}
+                title="Leave it where it is. Recorded as needed on both sides, so you are not asked about it again."
+              >
+                Keep in Mods
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       {updates.length > 0 && (
         <div className={styles.updateBanner}>
           <ArrowUpCircle size={15} />
@@ -423,6 +593,13 @@ export default function ServerContentTab({
         ) : (
           shown.map((item) => {
             const update = updateFor(item);
+            // Only in Mods: every row in Client mods is a client mod by virtue
+            // of the folder it is in, and a badge on each would say nothing.
+            const side =
+              folder === "mod" && item.sided ? sideBadge(item.sided) : null;
+            // Blank unless the admin answered: the control offers their own
+            // answer, not a reading of whatever the jar happens to say.
+            const chosen = item.sided?.saidBy === "admin" ? item.sided.side : "";
             return (
               <div
                 key={item.fileName}
@@ -466,20 +643,17 @@ export default function ServerContentTab({
                         {providerShort(item.provider)}
                       </span>
                     )}
-                    {folder === "mod" && item.side === "client" && (
-                      <span
-                        className="badge"
-                        title="Runs only in players' games. Players get it with the pack; move it to Client mods to keep it out of this server's mods folder."
-                      >
-                        client
+                    {side && (
+                      <span className="badge" title={side.title}>
+                        {side.label}
                       </span>
                     )}
-                    {folder === "mod" && item.side === "server" && (
+                    {item.keepOnServer && (
                       <span
                         className="badge"
-                        title="Only this server needs it. Players get it too, and can keep server-side mods turned off."
+                        title="Kept on this server. No pack carries this file: not its bytes, not a link to it, not even its name."
                       >
-                        server
+                        kept here
                       </span>
                     )}
                   </div>
@@ -503,6 +677,58 @@ export default function ServerContentTab({
                       <ArrowUpCircle size={13} />
                     )}
                     Update
+                  </button>
+                )}
+
+                {folder === "mod" && (
+                  <select
+                    className={clsx("select", styles.sideChoice)}
+                    value={chosen}
+                    onChange={(e) =>
+                      void chooseSide(
+                        item,
+                        (e.target.value || null) as
+                          | "client"
+                          | "server"
+                          | "both"
+                          | null,
+                      )
+                    }
+                    aria-label={`Which side ${item.name} belongs on`}
+                    title="Which side this mod belongs on. Worked out from its jar and its listing until you say otherwise, and your answer is what the pack tells players. A mod only players need belongs in Client mods — the move button does that."
+                  >
+                    <option value="">Side: worked out</option>
+                    {/* Not offered, because leaving a client-only mod in Mods
+                        has the server load it anyway; shown when something
+                        else recorded it, so this never misreports the mod. */}
+                    {chosen === "client" && (
+                      <option value="client">Side: client only</option>
+                    )}
+                    <option value="server">Side: server only</option>
+                    <option value="both">Side: both sides</option>
+                  </select>
+                )}
+
+                {(folder === "mod" || folder === "clientmod") && (
+                  <button
+                    className={clsx(
+                      "btn btn-ghost btn-icon btn-sm",
+                      item.keepOnServer && styles.keptHere,
+                    )}
+                    onClick={() => void keepHere(item, !item.keepOnServer)}
+                    title={
+                      item.keepOnServer
+                        ? "Kept on this server. Press to let players have it again."
+                        : "Keep on this server: players get nothing of this file. For your own tooling, and for a jar whose licence forbids passing it on."
+                    }
+                    aria-label={
+                      item.keepOnServer
+                        ? `Let players have ${item.name}`
+                        : `Keep ${item.name} on this server`
+                    }
+                    aria-pressed={item.keepOnServer ?? false}
+                  >
+                    <ServerIcon size={14} />
                   </button>
                 )}
 

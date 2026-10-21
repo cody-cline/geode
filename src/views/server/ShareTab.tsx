@@ -345,7 +345,9 @@ export default function ShareTab({ server }: { server: Server }) {
       nothing is uploaded anywhere. Mods on Modrinth or CurseForge travel as
       references; every other jar in the mods folder, including jars you added
       by hand, is sent as a copy. Client mods go to players too, but this server
-      never loads them.
+      never loads them. The one exception is a mod you keep on this server,
+      which you say per mod in the Content tab: players get nothing of it, not
+      the file and not its name.
     </p>
   );
 

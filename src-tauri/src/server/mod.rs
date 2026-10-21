@@ -428,6 +428,21 @@ impl Server {
     /// gives way to the moved one rather than staying beside it, where an
     /// update would put the mod back in the folder it was moved out of.
     ///
+    /// What the admin has since said about a mod — which side it belongs on,
+    /// and whether to **keep it on this server** — comes from disk whatever
+    /// this copy says. Nothing slow sets either: each is one press, read and
+    /// written in a moment, so disk is always the newer answer, and a long job
+    /// that loaded before the press must not undo it. Putting a
+    /// licence-restricted or private jar back in the pack cannot be undone at
+    /// all, and telling players a mod is client-only after the admin said
+    /// otherwise is the harm they pressed to stop.
+    ///
+    /// An answer is about the mod, not about the build it was given on, so a
+    /// record is matched by project where there is one as well as by file name.
+    /// An update finishing late recorded its new jar under a new name and
+    /// dropped the old record, and the answer has to reach the new one or it
+    /// goes with the old.
+    ///
     /// Only records are kept, and only across the wait: a change landing
     /// between this read and its write is still lost, and any other field saved
     /// meanwhile is overwritten by this copy. The password is safe from that
@@ -438,6 +453,14 @@ impl Server {
         let fresh = load(paths, &self.id).await?;
         let same_file =
             |r: &ContentRecord, d: &ContentRecord| r.kind == d.kind && r.file_name == d.file_name;
+        // The same mod under another file name: the build an update replaced,
+        // which is the record an answer given during the wait was written on.
+        let same_project = |r: &ContentRecord, d: &ContentRecord| {
+            r.kind == d.kind
+                && !d.project_id.is_empty()
+                && r.provider == d.provider
+                && r.project_id == d.project_id
+        };
         let has = |records: &[ContentRecord], kind: ContentKind, name: &str| {
             records
                 .iter()
@@ -456,14 +479,25 @@ impl Server {
                 && has(&fresh.content, other, &r.file_name);
             !moved
         });
-        for current in fresh.content {
+        for current in &fresh.content {
             if !self
                 .content
                 .iter()
                 .chain(&self.content_as_loaded)
-                .any(|r| same_file(r, &current))
+                .any(|r| same_file(r, current))
             {
-                self.content.push(current);
+                self.content.push(current.clone());
+            }
+        }
+        for record in &mut self.content {
+            let said = fresh
+                .content
+                .iter()
+                .find(|d| same_file(record, d))
+                .or_else(|| fresh.content.iter().find(|d| same_project(record, d)));
+            if let Some(said) = said {
+                record.chosen_side = said.chosen_side;
+                record.keep_on_server = said.keep_on_server;
             }
         }
         self.save(paths).await?;
@@ -530,14 +564,21 @@ pub async fn load(paths: &Paths, id: &str) -> Result<Server> {
 /// A record that says nothing but that a mod was once kept from players.
 ///
 /// Only the removed "don't share" choice ever wrote this shape: no provider,
-/// the admin's own, not a dependency and no requirements looked up. Its choice
-/// no longer means anything, and left in place it would stop a jar added by
-/// hand from reading as untracked, so it could not be identified.
+/// the admin's own, not a dependency, no requirements looked up — and now,
+/// nothing a person has since said about the mod either. Its choice no longer
+/// means anything, and left in place it would stop a jar added by hand from
+/// reading as untracked, so it could not be identified.
+///
+/// A record holding a choice the admin has made since — a side, or keeping the
+/// file on this server — is **not** this, though it looks the same from the
+/// front: see [`a_choice_about`].
 fn left_by_dont_share(r: &crate::instance::content::ContentRecord) -> bool {
     r.provider.is_empty()
         && r.origin == crate::instance::content::Origin::User
         && !r.dependency
         && r.requires.is_none()
+        && r.chosen_side.is_none()
+        && !r.keep_on_server
 }
 
 pub async fn list(paths: &Paths) -> Result<Vec<Server>> {
@@ -832,6 +873,216 @@ pub async fn move_mod(
     Ok(())
 }
 
+/// Say which side one of this server's mods belongs on, or go back to being
+/// told.
+///
+/// Overrules the jar and the platform's listing both, because it is the one
+/// answer somebody gave on purpose — see [`crate::instance::content::side_of`]
+/// for the order. Nothing on disk moves: what changes is what the pack tells
+/// players about this mod, and what the Content tab says about it.
+///
+/// Only `mods/`. A mod in Client mods is a client mod because of the folder it
+/// is in, which is the admin's own decision already and one no loader can
+/// contradict; the way to say a client mod belongs on the server is to move it.
+///
+/// A jar added by hand has no record to keep the answer on, so one is made
+/// holding nothing else. It is not the shape the removed "don't share" lock
+/// left behind — [`left_by_dont_share`] drops those and keeps this, because
+/// this one still says something.
+pub async fn set_mod_side(
+    paths: &Paths,
+    server: &mut Server,
+    file: &str,
+    side: Option<crate::instance::jar::Side>,
+) -> Result<()> {
+    use crate::instance::content::ContentKind;
+
+    let base = a_mod_to_choose_about(paths, server, ContentKind::Mod, file).await?;
+    if let Some(record) = server
+        .content
+        .iter_mut()
+        .find(|r| r.kind == ContentKind::Mod && r.file_name == base)
+    {
+        record.chosen_side = side;
+        return Ok(());
+    }
+    // Nothing said, and nothing to say it on: there is no choice to write.
+    let Some(side) = side else {
+        return Ok(());
+    };
+    server.content.push(crate::instance::content::ContentRecord {
+        chosen_side: Some(side),
+        ..a_choice_about(base, ContentKind::Mod)
+    });
+    Ok(())
+}
+
+/// Keep one of this server's mods off every pack it writes, or stop keeping it.
+///
+/// The file stays where it is and the server goes on loading it; what changes
+/// is that no pack carries it — not its bytes, not a reference to it, not an
+/// index entry, not a note naming where it came from, and not the revision
+/// players check for changes. For the admin's own tooling, and for a jar whose
+/// licence forbids passing it on.
+///
+/// Mods and client mods both, since a client mod is only in a server at all to
+/// be sent on, and a licence that forbids that applies to it just the same.
+///
+/// A jar added by hand has no record to keep the answer on, so one is made
+/// holding nothing else — see [`set_mod_side`], which does the same.
+pub async fn set_mod_kept(
+    paths: &Paths,
+    server: &mut Server,
+    kind: crate::instance::content::ContentKind,
+    file: &str,
+    keep: bool,
+) -> Result<()> {
+    use crate::instance::content::ContentKind;
+
+    if !matches!(kind, ContentKind::Mod | ContentKind::ClientMod) {
+        return Err(Error::msg(
+            "only a mod can be kept on this server — a pack carries nothing else",
+        ));
+    }
+    let base = a_mod_to_choose_about(paths, server, kind, file).await?;
+    if let Some(record) = server
+        .content
+        .iter_mut()
+        .find(|r| r.kind == kind && r.file_name == base)
+    {
+        record.keep_on_server = keep;
+        return Ok(());
+    }
+    if !keep {
+        return Ok(());
+    }
+    server.content.push(crate::instance::content::ContentRecord {
+        keep_on_server: true,
+        ..a_choice_about(base, kind)
+    });
+    Ok(())
+}
+
+/// Check that a file names a mod this server has, and give back the name its
+/// record is keyed by.
+///
+/// Shared by the two things an admin can say about a file rather than about the
+/// project it came from. Both have to work for a jar added by hand, and both
+/// have to refuse a name that is not one of this server's files: a choice
+/// recorded for a file that is not there is a record no file answers to, and
+/// now one that a load keeps.
+async fn a_mod_to_choose_about(
+    paths: &Paths,
+    server: &Server,
+    kind: crate::instance::content::ContentKind,
+    file: &str,
+) -> Result<String> {
+    use crate::instance::content::{disabled_name, is_content_file, strip_disabled};
+
+    let rel = std::path::Path::new(file);
+    if !crate::paths::is_safe_relative(rel)
+        || rel.components().count() != 1
+        || !is_content_file(file, kind)
+    {
+        return Err(Error::msg("invalid filename"));
+    }
+    // Keyed on the enabled name, as every record is, while the file itself may
+    // be on disk under either.
+    let base = strip_disabled(file).0.to_string();
+    let dir = content_dir(paths, &server.id, kind).await;
+    for name in [base.clone(), disabled_name(&base)] {
+        if tokio::fs::symlink_metadata(dir.join(name)).await.is_ok() {
+            return Ok(base);
+        }
+    }
+    Err(Error::msg(format!(
+        "{base} is not in this server's {} folder",
+        kind.folder()
+    )))
+}
+
+/// A record holding nothing but a choice somebody made about one file.
+///
+/// No provenance at all, which is the truth about a jar added by hand: it is
+/// still untracked, it is still offered for identification, and identifying it
+/// later fills these in around the choice rather than replacing it.
+fn a_choice_about(
+    file_name: String,
+    kind: crate::instance::content::ContentKind,
+) -> crate::instance::content::ContentRecord {
+    crate::instance::content::ContentRecord {
+        file_name,
+        kind,
+        provider: String::new(),
+        project_id: String::new(),
+        version_id: String::new(),
+        name: String::new(),
+        version_number: String::new(),
+        slug: None,
+        icon_url: None,
+        dependency: false,
+        origin: Default::default(),
+        requires: None,
+        side: None,
+        chosen_side: None,
+        keep_on_server: false,
+        server_off: false,
+    }
+}
+
+/// One of this server's mods that only the platform's listing calls
+/// client-side.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListedClientOnly {
+    /// The file as it sits in `mods/`, `.disabled` and all — what [`move_mod`]
+    /// and [`set_mod_side`] take.
+    pub file: String,
+    /// What to call it to a person.
+    pub name: String,
+}
+
+/// The mods in `mods/` that look like they are only for players, on nothing
+/// but the platform's word.
+///
+/// What an admin is offered, never what is done for them: a listing is an
+/// author's tick-box, and a mod moved out of a server on its word alone would
+/// simply be missing there. Starting the server moves the ones whose *own jars*
+/// declare it ([`move_client_only_mods`]) and deliberately leaves these.
+///
+/// A mod is here only while the listing is the whole of the evidence, which
+/// [`crate::instance::content::side_of`] already works out: its answer names
+/// the listing as the source exactly when neither the admin nor the jar
+/// answered. So a jar that declares itself, and one the admin has since said
+/// anything about — including by declining this very offer — is not offered,
+/// and is not offered again on the next start.
+pub async fn listed_client_only(
+    paths: &Paths,
+    server: &Server,
+    jars: &crate::instance::jar::MetaCache,
+) -> Result<Vec<ListedClientOnly>> {
+    use crate::instance::content::{ContentKind, SideSource};
+    use crate::instance::jar::Side;
+
+    if !server.takes_mods() {
+        return Ok(Vec::new());
+    }
+    let dir = content_dir(paths, &server.id, ContentKind::Mod).await;
+    let items =
+        crate::instance::content::list_in(&dir, &server.content, ContentKind::Mod, jars).await?;
+    Ok(items
+        .into_iter()
+        .filter(|item| {
+            item.sided
+                .is_some_and(|s| s.side == Side::Client && s.said_by == SideSource::Listing)
+        })
+        .map(|item| ListedClientOnly {
+            file: item.file_name,
+            name: item.name,
+        })
+        .collect())
+}
+
 /// Move every mod in Mods whose own jar says it only runs in a player's game
 /// into Client mods, and name the files moved.
 ///
@@ -1011,6 +1262,8 @@ mod tests {
             origin: Default::default(),
             requires: None,
             side: None,
+            chosen_side: None,
+            keep_on_server: false,
             server_off: false,
         }
     }
@@ -1205,6 +1458,326 @@ mod tests {
             .map(|r| r.file_name.as_str())
             .collect();
         assert_eq!(files, vec!["from-server.jar", "library.jar", "sodium.jar"]);
+    }
+
+    /// A side the admin set on a jar they added by hand has nowhere to live but
+    /// a record of its own, and that record looks from the front exactly like
+    /// the ones "don't share" left behind. It is not one: it says something,
+    /// and it survives a load — while the jar still reads as untracked, so it
+    /// can still be identified.
+    #[tokio::test]
+    async fn a_side_set_by_hand_on_an_untracked_jar_survives_a_load() {
+        use crate::instance::content::{ContentKind, SideSource};
+        use crate::instance::jar::Side;
+
+        let scratch = scratch("side-by-hand");
+        let paths = scratch.paths.clone();
+        let mut server = Server::new("Survival".into(), ServerKind::Fabric, "1.21.1".into());
+        let dir = content_dir(&paths, &server.id, ContentKind::Mod).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("anticheat.jar"), fabric_jar("anticheat", "*"))
+            .await
+            .unwrap();
+
+        set_mod_side(&paths, &mut server, "anticheat.jar", Some(Side::Server))
+            .await
+            .unwrap();
+        server.save(&paths).await.unwrap();
+
+        let loaded = load(&paths, &server.id).await.unwrap();
+        assert_eq!(
+            loaded
+                .content
+                .iter()
+                .map(|r| (r.file_name.as_str(), r.chosen_side))
+                .collect::<Vec<_>>(),
+            vec![("anticheat.jar", Some(Side::Server))],
+        );
+
+        let items = crate::instance::content::list_in(
+            &dir,
+            &loaded.content,
+            ContentKind::Mod,
+            &crate::instance::jar::MetaCache::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            items[0].sided,
+            Some(crate::instance::content::Sided {
+                side: Side::Server,
+                said_by: SideSource::Admin
+            }),
+            "the jar declares both sides; the admin said otherwise"
+        );
+        assert!(
+            items[0].from_disk,
+            "a choice is not provenance — the jar is still untracked"
+        );
+    }
+
+    /// Handing the question back leaves no record behind for a jar that had
+    /// none, and a choice is only ever recorded for a mod this server has.
+    #[tokio::test]
+    async fn a_side_can_be_handed_back_and_is_refused_for_a_mod_that_is_not_there() {
+        use crate::instance::content::ContentKind;
+        use crate::instance::jar::Side;
+
+        let scratch = scratch("side-cleared");
+        let paths = scratch.paths.clone();
+        let mut server = Server::new("Survival".into(), ServerKind::Fabric, "1.21.1".into());
+        let dir = content_dir(&paths, &server.id, ContentKind::Mod).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("spark.jar.disabled"), b"off but installed")
+            .await
+            .unwrap();
+
+        // Named as it sits on disk, turned off, and recorded under the enabled
+        // name every record is keyed by.
+        set_mod_side(&paths, &mut server, "spark.jar.disabled", Some(Side::Both))
+            .await
+            .unwrap();
+        assert_eq!(server.content.len(), 1);
+        assert_eq!(server.content[0].file_name, "spark.jar");
+
+        set_mod_side(&paths, &mut server, "spark.jar", None)
+            .await
+            .unwrap();
+        assert_eq!(server.content[0].chosen_side, None);
+
+        let error = set_mod_side(&paths, &mut server, "ghost.jar", Some(Side::Server))
+            .await
+            .expect_err("a mod that is not installed has no side to set");
+        assert!(
+            error.to_string().contains("is not in this server's mods"),
+            "{error}"
+        );
+        assert_eq!(server.content.len(), 1, "nothing was recorded for it");
+
+        set_mod_side(&paths, &mut server, "../escape.jar", Some(Side::Server))
+            .await
+            .expect_err("a path is not a file name");
+        set_mod_side(&paths, &mut server, "notes.txt", Some(Side::Server))
+            .await
+            .expect_err("only a jar is a mod");
+        assert!(server.content.iter().all(|r| r.kind == ContentKind::Mod));
+    }
+
+    /// What the offer holds, and what it leaves out. Only a mod the platform
+    /// calls client-side while its own jar says nothing: one whose jar
+    /// declares it is moved by starting the server instead, one listed for
+    /// both sides is not a candidate at all, and one nothing has sided is not
+    /// guessed at. Nothing moves from asking, and a jar the admin keeps where
+    /// it is drops out of the offer rather than coming back on every start.
+    #[tokio::test]
+    async fn only_a_mod_the_listing_alone_calls_client_only_is_offered() {
+        use crate::instance::content::ContentKind;
+        use crate::instance::jar::{MetaCache, Side};
+
+        let scratch = scratch("offer-client-only");
+        let paths = scratch.paths.clone();
+        let mut server = Server::new("Survival".into(), ServerKind::Fabric, "1.21.1".into());
+        let dir = content_dir(&paths, &server.id, ContentKind::Mod).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        for (file, environment) in [
+            ("zoom.jar", "*"),
+            ("sodium.jar", "client"),
+            ("create.jar", "*"),
+            ("mystery.jar", "*"),
+        ] {
+            tokio::fs::write(
+                dir.join(file),
+                fabric_jar(file.trim_end_matches(".jar"), environment),
+            )
+            .await
+            .unwrap();
+        }
+        let listed = |file: &str, side: Option<Side>| crate::instance::content::ContentRecord {
+            side,
+            ..record(file, "modrinth", file)
+        };
+        server.content = vec![
+            listed("zoom.jar", Some(Side::Client)),
+            listed("sodium.jar", Some(Side::Client)),
+            listed("create.jar", Some(Side::Both)),
+        ];
+
+        let offered = |server: &Server| {
+            let paths = paths.clone();
+            let server = server.clone();
+            async move {
+                listed_client_only(&paths, &server, &MetaCache::new())
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|mod_| mod_.file)
+                    .collect::<Vec<_>>()
+            }
+        };
+        assert_eq!(offered(&server).await, vec!["zoom.jar".to_string()]);
+
+        // Asking moved nothing.
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            vec!["create.jar", "mystery.jar", "sodium.jar", "zoom.jar"]
+        );
+
+        // Declining is the admin answering, and the answer is what retires the
+        // offer: not a flag of its own, so nothing else can disagree with it.
+        set_mod_side(&paths, &mut server, "zoom.jar", Some(Side::Both))
+            .await
+            .unwrap();
+        assert!(offered(&server).await.is_empty());
+    }
+
+    /// A backup or a Java download loaded this server minutes before the admin
+    /// held a jar back. Its late save writes the copy it loaded, and putting
+    /// that jar back into the pack is the one mistake here that cannot be
+    /// undone: it goes to whoever downloads next.
+    #[tokio::test]
+    async fn a_late_save_does_not_undo_keeping_a_mod_here() {
+        use crate::instance::content::ContentKind;
+
+        let scratch = scratch("late-save-kept");
+        let paths = scratch.paths.clone();
+        let mut server = Server::new("Survival".into(), ServerKind::Fabric, "1.21.1".into());
+        server.content = vec![record("spark.jar", "modrinth", "SPARK")];
+        let dir = content_dir(&paths, &server.id, ContentKind::Mod).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("spark.jar"), b"the admin's own build")
+            .await
+            .unwrap();
+        server.save(&paths).await.unwrap();
+
+        // The long job's copy, loaded before the press.
+        let mut waiting = load(&paths, &server.id).await.unwrap();
+
+        let mut admin = load(&paths, &server.id).await.unwrap();
+        set_mod_kept(&paths, &mut admin, ContentKind::Mod, "spark.jar", true)
+            .await
+            .unwrap();
+        admin.save(&paths).await.unwrap();
+
+        waiting.last_started = Some(7);
+        waiting.save_if_present(&paths).await.unwrap();
+
+        let after = load(&paths, &server.id).await.unwrap();
+        assert!(
+            after.content.iter().all(|r| r.keep_on_server),
+            "the late save put a held-back jar back in the pack: {:?}",
+            after.content
+        );
+        assert_eq!(after.last_started, Some(7), "the job still saved its work");
+    }
+
+    /// The same window, with the long job that makes the press hardest to
+    /// keep: by the time an update has downloaded, the record the admin
+    /// pressed Keep on is gone and the mod is recorded under the new build's
+    /// name. An answer about a mod has to follow the mod, or the next player
+    /// download carries a jar the admin took out of the pack.
+    #[tokio::test]
+    async fn a_late_update_keeps_a_mod_held_back_under_its_new_name() {
+        use crate::instance::content::ContentKind;
+
+        let scratch = scratch("late-update-kept");
+        let paths = scratch.paths.clone();
+        let mut server = Server::new("Survival".into(), ServerKind::Fabric, "1.21.1".into());
+        server.content = vec![record("spark-1.jar", "modrinth", "SPARK")];
+        let dir = content_dir(&paths, &server.id, ContentKind::Mod).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("spark-1.jar"), b"the admin's own build")
+            .await
+            .unwrap();
+        server.save(&paths).await.unwrap();
+
+        // The update's copy, loaded before the press.
+        let mut updating = load(&paths, &server.id).await.unwrap();
+
+        let mut admin = load(&paths, &server.id).await.unwrap();
+        set_mod_kept(&paths, &mut admin, ContentKind::Mod, "spark-1.jar", true)
+            .await
+            .unwrap();
+        admin.save(&paths).await.unwrap();
+
+        // What the install leaves behind: the old record dropped, the new
+        // build recorded with the hold as this stale copy knew it.
+        updating.content.retain(|r| r.file_name != "spark-1.jar");
+        updating
+            .content
+            .push(record("spark-2.jar", "modrinth", "SPARK"));
+        updating.save_if_present(&paths).await.unwrap();
+
+        let after = load(&paths, &server.id).await.unwrap();
+        assert_eq!(
+            after
+                .content
+                .iter()
+                .map(|r| (r.file_name.as_str(), r.keep_on_server))
+                .collect::<Vec<_>>(),
+            vec![("spark-2.jar", true)],
+            "the update carried the hold off with the build it replaced"
+        );
+    }
+
+    /// An install with dependencies downloads for a minute while the admin
+    /// fixes a wrong side on another mod. Its late save must not hand that
+    /// question back to the listing that had it wrong, which would tell every
+    /// player the mod is client-only on that listing's word.
+    #[tokio::test]
+    async fn a_late_save_does_not_undo_a_side_the_admin_set() {
+        use crate::instance::content::ContentKind;
+        use crate::instance::jar::Side;
+
+        let scratch = scratch("late-save-side");
+        let paths = scratch.paths.clone();
+        let mut server = Server::new("Survival".into(), ServerKind::Fabric, "1.21.1".into());
+        server.content = vec![record("spark.jar", "modrinth", "SPARK")];
+        let dir = content_dir(&paths, &server.id, ContentKind::Mod).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("spark.jar"), b"a profiler, listed client-only")
+            .await
+            .unwrap();
+        server.save(&paths).await.unwrap();
+
+        // The install's copy, loaded before the admin answered.
+        let mut installing = load(&paths, &server.id).await.unwrap();
+
+        let mut admin = load(&paths, &server.id).await.unwrap();
+        set_mod_side(&paths, &mut admin, "spark.jar", Some(Side::Server))
+            .await
+            .unwrap();
+        admin.save(&paths).await.unwrap();
+
+        // The walk finished: a mod of its own recorded, and this copy saved.
+        installing
+            .content
+            .push(record("lithium.jar", "modrinth", "LITHIUM"));
+        installing.save_if_present(&paths).await.unwrap();
+
+        let after = load(&paths, &server.id).await.unwrap();
+        let side = |file: &str| {
+            after
+                .content
+                .iter()
+                .find(|r| r.file_name == file)
+                .map(|r| r.chosen_side)
+        };
+        assert_eq!(
+            side("spark.jar"),
+            Some(Some(Side::Server)),
+            "the late save handed the side back to the listing: {:?}",
+            after.content
+        );
+        assert_eq!(
+            side("lithium.jar"),
+            Some(None),
+            "the install still saved its own work"
+        );
     }
 
     /// Deleted while the job ran. Writing the copy back would bring the

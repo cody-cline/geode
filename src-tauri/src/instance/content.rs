@@ -126,6 +126,30 @@ pub struct ContentRecord {
     /// not filled in after the fact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub side: Option<super::jar::Side>,
+    /// Which side a person said this belongs on, overruling every other
+    /// source. `None` — which is almost every record — means nobody has said,
+    /// and the jar and the listing answer as before.
+    ///
+    /// Only an admin's own servers have these, set in the Content tab for a
+    /// mod whose worked-out side is wrong. It has to be kept apart from
+    /// [`ContentRecord::side`], which is what a platform or a server said: a
+    /// person's answer is the only one nothing else may sharpen, and merging
+    /// the two would let the next identify or update overwrite it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen_side: Option<super::jar::Side>,
+    /// This file stays on the server it is installed on: no pack it writes
+    /// carries it, by any route.
+    ///
+    /// For an admin's own tooling, and for a jar whose licence forbids passing
+    /// it on. The server still loads it — this is not an off switch — and it
+    /// is enforced where the pack decides what to send, in
+    /// [`crate::share::pack::server_mods`], so a kept file is never indexed,
+    /// referenced, embedded, named in a note or hashed into a revision.
+    ///
+    /// Only an admin's own servers have these. A player's instance has no
+    /// pack to write, and a file that arrived from a server is the server's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_on_server: bool,
     /// The server had this turned off when it last sent it.
     ///
     /// Only ever set on a joined instance's server files, where a file that is
@@ -136,28 +160,99 @@ pub struct ContentRecord {
     pub server_off: bool,
 }
 
-/// Where a mod belongs, from everything known about it.
+/// Who said which side a mod belongs on.
 ///
-/// The folder comes first, because it is the admin's own decision: a mod in
-/// Client mods is a client mod whatever it says. Then what the jar declares,
-/// because that is what the loader enforces. Then the listing, which is an
-/// author's tick-box and the only word there is for a jar that says nothing —
-/// most of NeoForge. Nothing said anywhere is both, never a guess at one side:
-/// a wrong guess leaves a server missing a mod, or a player without one.
+/// Kept beside the answer because the sources are not equally trustworthy, and
+/// because the weakest of them — nobody having said anything — has to be
+/// tellable from a mod that really does belong on both sides. Showing those two
+/// the same way is what made a NeoForge or CurseForge mod, which declares
+/// nothing anywhere, look like one Geode knew about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SideSource {
+    /// The folder it is in. No loader reads `client-mods/`, so a mod there is
+    /// a client mod however it is listed.
+    Folder,
+    /// The person running the server said so, in the Content tab.
+    Admin,
+    /// The jar's own metadata.
+    Jar,
+    /// The platform's listing, captured when the mod was installed.
+    Listing,
+    /// The server that sent this file, for a joined instance's copy of it.
+    Server,
+    /// Nobody. Treated as both sides, which is what a loader does with it, but
+    /// never shown as though something had said so.
+    Nobody,
+}
+
+/// Where a mod belongs, and on whose word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Sided {
+    pub side: super::jar::Side,
+    pub said_by: SideSource,
+}
+
+impl Sided {
+    /// What a joined instance's copy of a server's mod is: the server's own
+    /// classification, or nobody's word at all.
+    ///
+    /// The server's answer rather than this machine's, because the server is
+    /// where that mod is installed and sided; second-guessing it from the jar
+    /// here would disagree with the pack the player was sent.
+    fn told_by_the_server(side: Option<super::jar::Side>) -> Self {
+        match side {
+            Some(side) => Sided {
+                side,
+                said_by: SideSource::Server,
+            },
+            None => Sided {
+                side: super::jar::Side::Both,
+                said_by: SideSource::Nobody,
+            },
+        }
+    }
+}
+
+/// Where a mod belongs, from everything known about it, and who said so.
+///
+/// The one place the sources are ordered. They disagree, so the order is the
+/// whole answer:
+///
+/// 1. The folder, because it is the admin's own decision: a mod in Client mods
+///    is a client mod whatever it says, since no loader reads that folder.
+/// 2. What a person said, which is the only answer somebody gave on purpose,
+///    and so the only one nothing else may sharpen.
+/// 3. What the jar declares, because that is what the loader enforces.
+/// 4. The listing, which is an author's tick-box and the only word there is
+///    for a jar that says nothing — most of NeoForge, and all of CurseForge.
+///
+/// Nothing said anywhere is both sides, never a guess at one: a wrong guess
+/// leaves a server missing a mod, or a player without one. It comes back as
+/// [`SideSource::Nobody`] rather than as a declaration, because a caller
+/// showing it must not claim Geode knows something it does not.
 pub fn side_of(
     kind: ContentKind,
+    chosen: Option<super::jar::Side>,
     declared: Option<super::jar::Side>,
     listed: Option<super::jar::Side>,
-) -> super::jar::Side {
+) -> Sided {
     use super::jar::Side;
-    if kind == ContentKind::ClientMod {
-        return Side::Client;
-    }
-    match (declared, listed) {
-        (Some(side @ (Side::Client | Side::Server)), _) => side,
-        (_, Some(side @ (Side::Client | Side::Server))) => side,
-        _ => Side::Both,
-    }
+    use SideSource::{Admin, Folder, Jar, Listing, Nobody};
+
+    let (side, said_by) = match (kind, chosen, declared, listed) {
+        (ContentKind::ClientMod, ..) => (Side::Client, Folder),
+        (_, Some(side), _, _) => (side, Admin),
+        // A jar declaring both sides says nothing the listing cannot sharpen,
+        // so a one-sided listing is read before it and a both-sided one after.
+        (_, _, Some(side @ (Side::Client | Side::Server)), _) => (side, Jar),
+        (_, _, _, Some(side @ (Side::Client | Side::Server))) => (side, Listing),
+        (_, _, Some(Side::Both), _) => (Side::Both, Jar),
+        (_, _, _, Some(Side::Both)) => (Side::Both, Listing),
+        _ => (Side::Both, Nobody),
+    };
+    Sided { side, said_by }
 }
 
 /// One row in the instance's content list.
@@ -207,12 +302,17 @@ pub struct ContentItem {
     /// to match on when a specific mod needs recognising.
     #[serde(default)]
     pub mod_ids: Vec<String>,
-    /// Which side a mod belongs on, for mods and client mods only.
+    /// Which side a mod belongs on and who said so, for mods and client mods
+    /// only — `None` for everything else, which has no sides.
     ///
     /// Worked out with [`side_of`], except for a file that arrived with a
-    /// server's pack: that one carries the server's own answer, or none.
+    /// server's pack: that one carries the server's own answer, or nobody's.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub side: Option<super::jar::Side>,
+    pub sided: Option<Sided>,
+    /// The admin is keeping this file on the server: its pack never carries
+    /// it. Always false on an instance, which writes nobody a pack.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_on_server: bool,
 }
 
 pub(crate) const DISABLED_SUFFIX: &str = ".disabled";
@@ -313,6 +413,14 @@ pub async fn list_in(
             // A record that knows only whose a file is — a server's override
             // jar — has no name or version of its own to offer, so it reads
             // like any untracked file, and keeps the one thing it does know.
+            //
+            // The admin's own, holding only a choice they made about the file,
+            // reads as untracked *including* [`ContentItem::from_disk`]: it
+            // says nothing about where the file came from, so identifying it
+            // is still the right offer. A server's file is the exception that
+            // branch exists for — identifying one would rewrite the record
+            // that marks it the server's and leave the player able to delete
+            // it.
             Some(r) if r.provider.is_empty() => ContentItem {
                 file_name: file_name.clone(),
                 kind,
@@ -327,7 +435,7 @@ pub async fn list_in(
                 enabled,
                 size,
                 dependency: false,
-                from_disk: false,
+                from_disk: r.origin != Origin::Server,
                 origin: r.origin,
                 ..Default::default()
             },
@@ -367,17 +475,19 @@ pub async fn list_in(
             },
         };
         item.mod_ids = meta.as_ref().map(|m| m.primary.clone()).unwrap_or_default();
+        item.keep_on_server = record.is_some_and(|r| r.keep_on_server);
         if matches!(kind, ContentKind::Mod | ContentKind::ClientMod) {
             // A server's file is the server's to classify, and a joined
             // instance takes its word rather than second-guessing it here.
-            item.side = match record {
-                Some(r) if r.origin == Origin::Server => r.side,
-                _ => Some(side_of(
+            item.sided = Some(match record {
+                Some(r) if r.origin == Origin::Server => Sided::told_by_the_server(r.side),
+                _ => side_of(
                     kind,
+                    record.and_then(|r| r.chosen_side),
                     meta.as_ref().and_then(|m| m.side),
                     record.and_then(|r| r.side),
-                )),
-            };
+                ),
+            });
         }
         items.push(item);
         metas.push(meta);
@@ -749,6 +859,8 @@ mod tests {
             origin: Default::default(),
             requires: None,
             side: None,
+            chosen_side: None,
+            keep_on_server: false,
             server_off: false,
         };
         let json = serde_json::to_string(&record).unwrap();
@@ -803,6 +915,8 @@ mod tests {
             origin: Default::default(),
             requires: Some(requires.iter().map(|s| s.to_string()).collect()),
             side: None,
+            chosen_side: None,
+            keep_on_server: false,
             server_off: false,
         }
     }
@@ -957,6 +1071,8 @@ mod tests {
             origin: Default::default(),
             requires: Some(vec!["BBB".into()]),
             side: None,
+            chosen_side: None,
+            keep_on_server: false,
             server_off: false,
         }];
         link(&mut items, &[None, None], &records);
@@ -1038,35 +1154,95 @@ mod tests {
         assert_eq!(vault.required_by, vec!["essentials.jar"]);
     }
 
-    /// The folder outranks the jar, and the jar outranks the listing. A
-    /// declaration of both sides says nothing a listing cannot sharpen, and
-    /// silence everywhere is both rather than a guess.
+    /// The folder outranks a person, a person outranks the jar, and the jar
+    /// outranks the listing. A declaration of both sides says nothing a
+    /// listing cannot sharpen, and silence everywhere is both rather than a
+    /// guess. Each answer names who gave it, so the weakest of them is not
+    /// read as a declaration.
     #[test]
-    fn side_of_prefers_the_folder_then_the_jar_then_the_listing() {
+    fn side_of_prefers_the_folder_then_a_person_then_the_jar_then_the_listing() {
         use crate::instance::jar::Side;
         use ContentKind::{ClientMod, Mod};
+        use SideSource::{Admin, Folder, Jar, Listing, Nobody};
 
         let table = [
             (
                 ClientMod,
                 Some(Side::Server),
                 Some(Side::Server),
+                Some(Side::Server),
                 Side::Client,
+                Folder,
             ),
-            (Mod, Some(Side::Client), Some(Side::Server), Side::Client),
-            (Mod, Some(Side::Server), Some(Side::Client), Side::Server),
-            (Mod, Some(Side::Both), Some(Side::Client), Side::Client),
-            (Mod, None, Some(Side::Server), Side::Server),
-            (Mod, Some(Side::Both), None, Side::Both),
-            (Mod, None, None, Side::Both),
+            (
+                Mod,
+                Some(Side::Server),
+                Some(Side::Client),
+                Some(Side::Client),
+                Side::Server,
+                Admin,
+            ),
+            (
+                Mod,
+                Some(Side::Both),
+                Some(Side::Client),
+                None,
+                Side::Both,
+                Admin,
+            ),
+            (
+                Mod,
+                None,
+                Some(Side::Client),
+                Some(Side::Server),
+                Side::Client,
+                Jar,
+            ),
+            (
+                Mod,
+                None,
+                Some(Side::Server),
+                Some(Side::Client),
+                Side::Server,
+                Jar,
+            ),
+            (
+                Mod,
+                None,
+                Some(Side::Both),
+                Some(Side::Client),
+                Side::Client,
+                Listing,
+            ),
+            (Mod, None, None, Some(Side::Server), Side::Server, Listing),
+            (Mod, None, Some(Side::Both), None, Side::Both, Jar),
+            (Mod, None, None, Some(Side::Both), Side::Both, Listing),
+            (Mod, None, None, None, Side::Both, Nobody),
         ];
-        for (kind, declared, listed, want) in table {
+        for (kind, chosen, declared, listed, side, said_by) in table {
             assert_eq!(
-                side_of(kind, declared, listed),
-                want,
-                "{kind:?} {declared:?} {listed:?}"
+                side_of(kind, chosen, declared, listed),
+                Sided { side, said_by },
+                "{kind:?} chosen={chosen:?} declared={declared:?} listed={listed:?}"
             );
         }
+    }
+
+    /// The two answers that used to look identical. A mod every source is
+    /// silent about is treated as both sides — that is what a loader does with
+    /// it — but nothing said so, and a row that showed the same thing for both
+    /// told the admin Geode knew where a mod belonged when it did not.
+    #[test]
+    fn a_mod_nobody_has_sided_is_not_a_mod_declared_for_both_sides() {
+        use crate::instance::jar::Side;
+
+        let nobody = side_of(ContentKind::Mod, None, None, None);
+        let declared = side_of(ContentKind::Mod, None, Some(Side::Both), None);
+
+        assert_eq!(nobody.side, declared.side, "both are loaded on both sides");
+        assert_eq!(nobody.said_by, SideSource::Nobody);
+        assert_eq!(declared.said_by, SideSource::Jar);
+        assert_ne!(nobody, declared);
     }
 
     /// Client mods are read like mods — the jar opened, the record found — and
@@ -1099,7 +1275,13 @@ mod tests {
         assert_eq!(items[0].kind, ContentKind::ClientMod);
         assert_eq!(items[0].project_id.as_deref(), Some("IN-CLIENT-MODS"));
         assert_eq!(items[0].mod_ids, vec!["minimap"], "the jar was not read");
-        assert_eq!(items[0].side, Some(crate::instance::jar::Side::Client));
+        assert_eq!(
+            items[0].sided,
+            Some(Sided {
+                side: crate::instance::jar::Side::Client,
+                said_by: SideSource::Folder
+            })
+        );
     }
 
     /// Each mod row says where it belongs. A file that came from a server
@@ -1142,16 +1324,37 @@ mod tests {
         )
         .await
         .unwrap();
-        let side = |file: &str| {
+        let sided = |file: &str| {
             items
                 .iter()
                 .find(|i| i.file_name == file)
                 .unwrap_or_else(|| panic!("{file} is not listed: {items:?}"))
-                .side
+                .sided
+                .expect("a mod is sided")
         };
-        assert_eq!(side("tick-profiler.jar"), Some(Side::Server));
-        assert_eq!(side("zoom.jar"), Some(Side::Client));
-        assert_eq!(side("from-server.jar"), None);
+        assert_eq!(
+            sided("tick-profiler.jar"),
+            Sided {
+                side: Side::Server,
+                said_by: SideSource::Jar
+            }
+        );
+        assert_eq!(
+            sided("zoom.jar"),
+            Sided {
+                side: Side::Client,
+                said_by: SideSource::Listing
+            },
+            "the jar declares both sides, so the listing sharpens it"
+        );
+        assert_eq!(
+            sided("from-server.jar"),
+            Sided {
+                side: Side::Both,
+                said_by: SideSource::Nobody
+            },
+            "the server said nothing, and its jar is not asked instead"
+        );
     }
 
     /// The switch reaches only the server's own server-side mods. Turning them
@@ -1315,6 +1518,8 @@ mod tests {
             origin: Default::default(),
             requires: Some(vec!["BBB".into()]),
             side: None,
+            chosen_side: None,
+            keep_on_server: false,
             server_off: false,
         }];
         link(&mut items, &[None, None], &records);
