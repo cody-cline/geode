@@ -206,6 +206,8 @@ mod tests {
         let _loop = ticker(sink, paths, ServerRegistry::default());
     }
     use super::*;
+    // Only the pipe test below uses it, and that one is Unix-only.
+    #[cfg(unix)]
     use crate::paths::Scratch;
 
     fn every(minutes: u32, last_run: Option<i64>) -> Schedule {

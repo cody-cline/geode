@@ -49,7 +49,7 @@ to talk to, which is why the palette page at `?palette` exists.
 Integration tests live in `src-tauri/tests/`. Three of the files run offline in a
 normal `cargo test` — `backup_roundtrip.rs` (five tests that write and restore a
 real zip), `header_wire_format.rs` (one that proves a bcrypt CurseForge key
-reaches the socket unmangled) and `curseforge_fingerprints.rs` (five that pin
+reaches the socket unmangled) and `curseforge_fingerprints.rs` (24 that pin
 what a fingerprint lookup puts on the wire). All three serve themselves from a
 `TcpListener` on localhost or a scratch directory; none reaches a real API. The
 nine `live_*` files hold 48 tests, every one `#[ignore]`d because they hit real
@@ -208,6 +208,26 @@ rather than implying otherwise. `main.rs` works around WebKitGTK's DMABUF
 renderer aborting on NVIDIA under Wayland by setting
 `WEBKIT_DISABLE_DMABUF_RENDERER=1` for itself.
 
+All three are now **built** by `.github/workflows/build.yml`, and that is a
+different claim. On a `v*` tag it bundles the Linux three, a Windows `nsis`
+installer and a universal macOS dmg, and on every push it runs the whole check
+suite on all three runners. A green Windows job means the code compiled, the
+offline tests passed and an installer came out; it does not mean anyone has
+launched Geode on Windows, clicked a `geode://` link there, or seen the
+`Info.plist` the macOS bundler wrote. Keep the two apart in anything you write
+— "built by CI" is not "tested on Windows". What each platform does and does
+not prove, and which secrets signing needs, is
+[docs/releasing.md](docs/releasing.md).
+
+Each platform claims `geode://` from a different thing, and only from a
+bundle: the desktop entry on Linux, `Software\Classes\geode` written by the
+NSIS installer on Windows, `CFBundleURLTypes` in the `.app`'s `Info.plist` on
+macOS. That is why `tauri.windows.conf.json` and `tauri.macos.conf.json` exist
+beside `tauri.conf.json` — the bundler drops targets that do not belong to the
+platform it runs on, so without them a build there produces nothing to
+register. The MSI writes no such registry key, and macOS cannot register a
+scheme at runtime at all, so neither is a free substitute.
+
 ## The deeper docs
 
 - [docs/architecture.md](docs/architecture.md) — module map, IPC, event flow.
@@ -216,4 +236,7 @@ renderer aborting on NVIDIA under Wayland by setting
 - [docs/sharing-and-hosting.md](docs/sharing-and-hosting.md) — the
   `.geodepack` format, what is done, and what remains. Also the record of
   options already evaluated and rejected; read it before reopening one.
+- [docs/releasing.md](docs/releasing.md) — what CI builds on each platform,
+  what a green run does and does not prove, and the signing secrets the owner
+  has to create.
 - [agent/README.md](agent/README.md) — the command probe.

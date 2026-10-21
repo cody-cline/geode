@@ -221,19 +221,15 @@ async fn package_manager_command() -> Option<String> {
 }
 
 /// Whether a program can be found on PATH, by asking the system to find it.
+///
+/// Linux-only, like both its callers — [`package_manager_command`] and
+/// [`elevated`]. Windows unpacks MinGit and macOS asks for the command line
+/// tools, so neither goes looking for a package manager or `pkexec` first,
+/// and compiled there this is dead code: a warning, which is a failure.
+#[cfg(target_os = "linux")]
 async fn which(program: &str) -> Option<PathBuf> {
-    let finder = if cfg!(target_os = "windows") {
-        "where"
-    } else {
-        "command"
-    };
-    let args: &[&str] = if cfg!(target_os = "windows") {
-        &[]
-    } else {
-        &["-v"]
-    };
-    let out = tokio::process::Command::new(finder)
-        .args(args)
+    let out = tokio::process::Command::new("command")
+        .arg("-v")
         .arg(program)
         .stdin(std::process::Stdio::null())
         .output()

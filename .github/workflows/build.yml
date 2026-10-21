@@ -1,0 +1,240 @@
+# Checks Geode on the three platforms it targets, and on a tag builds the
+# installers for all three.
+#
+# Linux is the only platform Geode has ever been run on. This file is what
+# makes the other two exist; it is not what makes them tested. A green Windows
+# or macOS job means the code compiled, the offline tests passed and an
+# installer came out the other end. Nobody has launched either one.
+#
+# Runner images are pinned rather than `-latest`, because what a bundle is
+# built against decides which machines can install it: ubuntu-22.04 is the
+# oldest glibc GitHub still offers, windows-2022 a VC runtime most machines
+# already have, macos-15 an Xcode whose floor is known rather than the newest
+# one. GitHub retires these images; when one goes, bumping it moves the floor
+# Geode supports, so bump it deliberately.
+#
+# No API key is needed, or wanted. The CurseForge key and the Microsoft client
+# id are per-developer and per-application, read through `option_env!`, and a
+# build without them simply asks the user for their own. Nothing here supplies
+# one, and nothing here should.
+
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # A tag build is a release. Never cancel one.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # A runner compiles once and is thrown away.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing is the interesting case; let the others finish
+      # and say whether it is that platform or the change.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2022, macos-15]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+            libxdo-dev libssl-dev build-essential curl wget file patchelf
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install the Rust toolchain
+        shell: bash
+        run: |
+          rustup update --no-self-update stable
+          rustup default stable
+          rustup component add clippy
+
+      # Worth caching: the registry, which is the same download on every run.
+      # The target directory goes in too, keyed by lockfile, because a cold
+      # Tauri build is several hundred crates on a runner that has none.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            src-tauri/target
+          key: check-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: check-${{ runner.os }}-
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+      - run: cargo test --lib
+        working-directory: src-tauri
+      # The three integration tests that need no network: one writes and
+      # restores a real zip, two serve themselves over a localhost socket.
+      # Paths and sockets are where a platform differs first, so these are
+      # worth more on the two platforms nobody has run than they are here.
+      - run: cargo test --test backup_roundtrip --test header_wire_format --test curseforge_fingerprints
+        working-directory: src-tauri
+      # A warning is a failure, the same rule the project holds itself to
+      # locally. A new stable can add a lint and fail a run that nothing
+      # changed in; that is the cost of the rule, not a reason to drop it.
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: src-tauri
+
+  bundle:
+    name: bundle (${{ matrix.name }})
+    # Nothing is published that the checks have not passed on its own
+    # platform.
+    needs: check
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ${{ matrix.os }}
+    permissions:
+      # To create the draft release and attach the installers to it.
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-22.04
+            args: ""
+          - name: windows
+            os: windows-2022
+            args: ""
+          # One universal dmg rather than one per architecture: a player
+          # should not have to know which kind of Mac they have. It costs a
+          # second compile of every crate, and macOS minutes are billed at ten
+          # times the rate, so this is roughly what two single-arch jobs would
+          # have cost anyway.
+          - name: macos
+            os: macos-15
+            args: "--target universal-apple-darwin"
+            rust_targets: aarch64-apple-darwin x86_64-apple-darwin
+    env:
+      # Here only so the import step below can ask whether the owner has added
+      # a certificate. Unset, it is the empty string and that step is skipped.
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+            libxdo-dev libssl-dev build-essential curl wget file patchelf
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install the Rust toolchain
+        shell: bash
+        run: |
+          rustup update --no-self-update stable
+          rustup default stable
+
+      - name: Add the Rust targets this bundle is built for
+        if: matrix.rust_targets != ''
+        shell: bash
+        run: rustup target add ${{ matrix.rust_targets }}
+
+      # Only the registry here, not the target directory: a release is built
+      # once per tag, in release mode, and caching that is mostly cache
+      # eviction for the check jobs that run far more often.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: bundle-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: bundle-${{ runner.os }}-
+
+      # Installed here rather than left to the action, so the build uses the
+      # CLI this repo pins instead of a global one.
+      - run: npm ci
+
+      - name: Import the Apple signing certificate
+        # Skipped entirely until the owner adds the secret. Without it the app
+        # is signed ad-hoc below, which is enough for an Apple Silicon Mac to
+        # run it at all and not enough to pass Gatekeeper without the player
+        # allowing it by hand.
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
+        env:
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          NOTARY_ID: ${{ secrets.APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          NOTARY_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          keychain_password="$(openssl rand -base64 24)"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$keychain_password" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$keychain_password" build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
+          security import "$RUNNER_TEMP/certificate.p12" -k build.keychain \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$keychain_password" build.keychain
+          rm "$RUNNER_TEMP/certificate.p12"
+          # Notarisation is all three or nothing, and it is handed on here
+          # rather than in the build step's own env because the Tauri CLI asks
+          # only whether these variables are *set*: an absent one is a skip,
+          # an empty one is a credential, and `xcrun notarytool --apple-id ""`
+          # fails the build. GitHub sets a missing secret to the empty string,
+          # so they are forwarded only once all three have something in them.
+          if [ -n "$NOTARY_ID" ] && [ -n "$NOTARY_PASSWORD" ] && [ -n "$NOTARY_TEAM_ID" ]; then
+            {
+              echo "APPLE_ID=$NOTARY_ID"
+              echo "APPLE_PASSWORD=$NOTARY_PASSWORD"
+              echo "APPLE_TEAM_ID=$NOTARY_TEAM_ID"
+            } >> "$GITHUB_ENV"
+          else
+            echo "No notarisation credentials; the dmg will be signed but not notarised."
+          fi
+
+      - name: Build the installers and attach them to a draft release
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Every signing secret is the owner's, and every one is optional.
+          # `-` is an ad-hoc signature, which costs nothing and is what stops
+          # an Apple Silicon Mac calling a downloaded app damaged. The real
+          # identity replaces it as soon as the secret exists. The
+          # notarisation variables are not here on purpose — see the step
+          # above, which sets them only when all three exist.
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Geode ${{ github.ref_name }}
+          # A draft, because the owner signs off on a release — and on
+          # whichever of these three bundles nobody has been able to launch.
+          releaseDraft: true
+          args: ${{ matrix.args }}

@@ -116,6 +116,14 @@ Linux is the only platform tested so far. The code paths for macOS and Windows
 are written and rule evaluation is exercised by unit tests, but neither has
 been run.
 
+CI now builds all three — a Windows installer and a universal macOS dmg
+alongside the Linux packages — and runs the whole check suite on all three.
+That is a weaker statement than it looks: it means the code compiles, the
+offline tests pass and an installer comes out, not that anybody has launched
+Geode on Windows or macOS. Nothing there has signed into Microsoft, started a
+JVM, or clicked a `geode://` link. See
+[docs/releasing.md](docs/releasing.md).
+
 ## Building
 
 Needs Rust, Node 20+, and the usual Tauri Linux dependencies
@@ -131,6 +139,12 @@ For a release build:
 ```bash
 npm run tauri build
 ```
+
+That produces the AppImage, deb and rpm. The Windows and macOS bundles come
+from `tauri.windows.conf.json` and `tauri.macos.conf.json`, which Tauri merges
+over `tauri.conf.json` on their own platforms, and are built by CI on a `v*`
+tag — see [docs/releasing.md](docs/releasing.md). No API key is needed to
+build any of them.
 
 Everything Geode owns lives in `~/.local/share/geode` (override with
 `GEODE_HOME`). Deleting that directory resets it completely.

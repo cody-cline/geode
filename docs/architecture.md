@@ -253,7 +253,13 @@ to the plain Drive link when Drive answers with its warning page.
 `deeplink.rs` gets the link into the app, which is fiddlier than it sounds: the
 OS may start a fresh Geode with the link as its only argument, or hand it to the
 running one through single-instance D-Bus, or — on macOS — deliver an Apple Event
-with no second process at all.
+with no second process at all. Whether the OS does any of that at all depends on
+the bundle: the desktop entry claims the scheme on Linux (written from
+`geode.desktop.hbs`, because the bundler's own template drops the `%u` that
+carries the link), the NSIS installer writes `Software\Classes\geode` on
+Windows, and the macOS `.app` carries `CFBundleURLTypes` in its `Info.plist`.
+Only Linux can also claim it at runtime, which is what an AppImage and a dev
+build lean on.
 
 This is all done and tested end to end over real TLS; what has *not* been tried
 is two different networks. The reasoning, the per-piece status, and the options

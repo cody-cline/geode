@@ -26,8 +26,8 @@
 //! into; the `.app`'s `Info.plist` carries a `CFBundleURLTypes` entry the
 //! bundler builds from the `plugins.deep-link.desktop` block in
 //! tauri.conf.json. Neither comes free: the MSI writes no such key, and macOS
-//! cannot register a scheme at runtime at all, so a Geode that was never
-//! bundled is a Geode no link on either platform can reach.
+//! cannot register a scheme at runtime at all, so a release build that was
+//! never bundled is one no link on either platform can reach.
 //!
 //! A link is hostile until [`Opened::parse`] accepts it: any web page can
 //! navigate to `geode://`, and any local process can start Geode with an
