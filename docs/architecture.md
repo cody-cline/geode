@@ -92,8 +92,16 @@ itself. New code should take an `EventSink`.
   the only place local bytes become a platform reference: it hashes each file in
   one pass, asks each platform what that file is, and `travel` decides from the
   answer whether a file goes in a pack as a reference or as bytes — including
-  refusing a reference to a file whose author turned third-party downloads off,
-  which is the one place that rule lives. CurseForge's murmur2 is the exception
+  refusing to *write* a reference to a file whose author turned third-party
+  downloads off, which is the one place that rule lives for a pack being
+  exported. `install/blocked.rs` is the other half, for a file being installed:
+  where the sha1 CurseForge published about its own file matches a file Modrinth
+  holds, the author published those bytes themselves, so their own Modrinth
+  release is what installs — recorded as Modrinth, announced to the user, and
+  reached from all three places a blocked file is met (a pack import, a
+  `.geodepack` reference, an ordinary install). No hash, no match, or a lookup
+  that could not be made keeps the refusal, and the last of those says so
+  rather than passing a bad minute off as the author's decision. CurseForge's murmur2 is the exception
   to the one pass: it seeds itself with the number of bytes it is about to hash,
   so it is a second read of the same file and is taken only when a key means
   there is somebody to send it to.
