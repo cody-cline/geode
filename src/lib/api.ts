@@ -6,6 +6,7 @@ import type {
   BuildReport,
   CommandNode,
   Config,
+  ConfigPolicy,
   ConnectorSupport,
   ContentItem,
   ContentKind,
@@ -545,8 +546,13 @@ export const api = {
     invoke<ServerShareView | null>("get_server_share", { id }),
   shareServer: (id: string) => invoke<ServerShareView>("share_server", { id }),
   unshareServer: (id: string) => invoke<void>("unshare_server", { id }),
-  setServerShareConfig: (id: string, includeConfig: boolean) =>
-    invoke<ServerShareView>("set_server_share_config", { id, includeConfig }),
+  /** `policy` is null for "leave the choice where it is", which is what the on/off switch sends. */
+  setServerShareConfig: (
+    id: string,
+    include: boolean,
+    policy: ConfigPolicy | null,
+  ) =>
+    invoke<ServerShareView>("set_server_share_config", { id, include, policy }),
   /** Call this when the admin takes the link, so Geode can tell them later if the address it points at has changed. */
   shareLinkCopied: (id: string) =>
     invoke<ServerShareView>("share_link_copied", { id }),

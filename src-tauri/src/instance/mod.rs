@@ -92,6 +92,31 @@ pub struct Instance {
     /// recognised under a new one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub joined_server_id: Option<String>,
+    /// How far this instance has caught up with the server's settings pushes:
+    /// the `at` of the last pack from it that landed completely.
+    ///
+    /// One integer, and the whole client side of keeping a player's own
+    /// changes. A synced file is written whole while this is below the push
+    /// its behaviour was chosen at, and is the player's from then on. `None`
+    /// is a joined instance from before any of this, which reads as 0 and so
+    /// is below every push — it gets each synced file whole exactly once,
+    /// which is right, because today's replacing means their copy already
+    /// holds the admin's values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings_at: Option<u32>,
+    /// Synced settings files the server sent that this instance could not
+    /// write, by path inside the game directory.
+    ///
+    /// `settings_at` alone says this instance has caught up with a push, which
+    /// a file that could not be written has not — and once it is both there
+    /// and caught up, nothing would ever send it again. So the paths that did
+    /// not land are kept beside the number, offered again on the next Play
+    /// whatever behaviour was chosen for them, and they are also what makes an
+    /// update due at all while one is outstanding (`commands::fetch_due`).
+    /// Replaced by each update rather than added to, so a path the server
+    /// stops sending drops out of it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settings_owed: Vec<String>,
     /// The game address this instance's row in `servers.dat` was last written
     /// at, which is how the row is found again to rename or move it instead of
     /// adding a second one beside it.
@@ -201,6 +226,8 @@ impl Instance {
             server_side_mods_off: false,
             joined_revision: None,
             joined_server_id: None,
+            settings_at: None,
+            settings_owed: Vec::new(),
             joined_listing_address: None,
             joined_listing_claimed: false,
         }

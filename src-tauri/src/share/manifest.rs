@@ -95,6 +95,24 @@ pub struct Manifest {
     /// An instance's pack never carries one. There is no server behind it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listing: Option<Listing>,
+    /// Which of the settings files this pack carries are the recipient's to
+    /// keep their own changes to, and which the sender replaces every time.
+    ///
+    /// A top-level field of its own rather than a note on each file:
+    /// [`FileNote`] is "keyed by the same path the index uses", and a settings
+    /// file is in no index — making that comment a lie would cost more than
+    /// the field does.
+    ///
+    /// Deliberately does **not** bump [`FORMAT`]. A reader that ignores this
+    /// writes every settings file whole on every update, which is exactly what
+    /// every reader did before the field existed: a miss, not a misread — see
+    /// [`format_for`]. The admin should hear once that a player on an older
+    /// Geode gets the whole file rather than only the settings that changed.
+    ///
+    /// `None` from a pack that syncs nothing, which is every pack but a
+    /// server's whose admin has chosen a behaviour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<Settings>,
     /// In a server's pack, the mods it does not allow its players to run.
     ///
     /// A standing rule, not a change: it is applied on every update, so a
@@ -115,6 +133,186 @@ pub struct Manifest {
     /// rule.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub forbidden: Vec<Forbidden>,
+}
+
+/// What a pack says about the settings files it carries: which paths the
+/// recipient may keep their own changes to, and how far the sender's pushes
+/// have got.
+///
+/// One type on both sides of the wire, because it is one fact. On the admin's
+/// machine it lives in `servers/<id>/share.json` and `at` is the newest push
+/// that server has made; inside a pack it is the copy that pack was built
+/// from, and `at` is the push that pack holds — which is what a player's
+/// `settings_at` becomes once the pack has landed.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Settings {
+    /// One entry per path somebody has chosen a behaviour for. A folder covers
+    /// everything under it, and the longest entry covering a file decides it —
+    /// see [`Settings::covering`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<SyncedPath>,
+    /// The push these behaviours were last changed at. Monotonic and never
+    /// reused: a number that went backwards would send a player a file they
+    /// have since made their own.
+    #[serde(default)]
+    pub at: u32,
+}
+
+/// One path whose behaviour has been chosen, relative to the game directory.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncedPath {
+    /// `config`, or one file inside it. A folder covers everything under it.
+    pub path: String,
+    pub policy: Policy,
+    /// The push this behaviour was chosen at. A player who has not caught up
+    /// with it gets the file whole once, whatever the policy says, so a switch
+    /// from one behaviour to another loses nothing the admin had already
+    /// changed.
+    #[serde(default)]
+    pub from: u32,
+}
+
+/// What happens to a player's own changes to a synced file.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Policy {
+    /// Sent when the player has no copy, and never touched again.
+    ShipOnce,
+    /// Sent whole the first time; afterwards only the settings the admin
+    /// pushes, spliced into whatever the player has made of the file.
+    Merge,
+    /// The sender's copy replaces the player's on every update. What sharing a
+    /// config folder has always done.
+    Enforce,
+}
+
+impl Policy {
+    /// The one spelling, used on the wire and in a server's revision alike, so
+    /// a behaviour cannot be named two ways.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Policy::ShipOnce => "ship-once",
+            Policy::Merge => "merge",
+            Policy::Enforce => "enforce",
+        }
+    }
+}
+
+impl Settings {
+    /// The entry covering a file at this path inside the instance: the file
+    /// itself, or the longest folder above it that somebody chose a behaviour
+    /// for. `None` when nobody did.
+    ///
+    /// One matcher, because two things ask this and must never disagree. An
+    /// import decides per file whether to write the pack's copy at all, and
+    /// `share::pack::server_revision` decides per file whether its bytes are
+    /// part of what players receive. A second matcher that drifted would hash
+    /// a file nobody is sent, or send one nobody is ever told about.
+    pub fn covering(&self, rel: &std::path::Path) -> Option<&SyncedPath> {
+        self.paths
+            .iter()
+            .filter(|named| named.allowed() && covers(std::path::Path::new(&named.path), rel))
+            .max_by_key(|named| std::path::Path::new(&named.path).components().count())
+    }
+
+    /// What happens to this file, for a pack that named no behaviour for it.
+    ///
+    /// [`Policy::Enforce`] is the answer, and it is the migration rule in one
+    /// place: a share that sends its config folder and has chosen nothing
+    /// behaves exactly as sharing a config folder always has, with every file
+    /// replaced on every update.
+    pub fn policy_for(&self, rel: &std::path::Path) -> Policy {
+        self.covering(rel).map_or(Policy::Enforce, |named| named.policy)
+    }
+
+    /// This list as a pack carries it: with `path` spelled out as the
+    /// behaviour already in force, when nothing in it covers that path.
+    ///
+    /// A pack states the behaviour of everything it sends, the choice nobody
+    /// made included, so the Geode reading it has one rule to follow for every
+    /// file rather than a rule and an exception. What gets spelled out is
+    /// [`Policy::Enforce`] from before counting began — exactly what sending a
+    /// folder of settings files has always done — so no player receives
+    /// anything different for its being said out loud, and the revision says
+    /// nothing about it, because nothing about it has changed.
+    ///
+    /// What it does buy, and the reason it is worth a field in every pack: the
+    /// recipient can tell a file its sender syncs from a file out of any other
+    /// pack. A settings file that cannot be written is then one line in a
+    /// report rather than a failed update and a launch the player cannot have.
+    pub fn spelling_out(&self, path: &str) -> Settings {
+        if self.covering(std::path::Path::new(path)).is_some() {
+            return self.clone();
+        }
+        let mut spelled = self.clone();
+        spelled.paths.push(SyncedPath {
+            path: path.to_string(),
+            policy: Policy::Enforce,
+            from: 0,
+        });
+        spelled
+    }
+
+    /// Choose what happens to a player's own changes to a path.
+    ///
+    /// Stamped with the next push, so a player who has not caught up gets the
+    /// file whole once and keeps their own changes from then on — nothing the
+    /// admin had already changed is lost at a switch. Choosing what is already
+    /// in force writes nothing, so turning a folder off and on again does not
+    /// send every player a pack over a choice that never moved.
+    pub fn choose(&mut self, path: &str, policy: Policy) {
+        if self.policy_for(std::path::Path::new(path)) == policy {
+            return;
+        }
+        self.at = self.at.saturating_add(1);
+        let from = self.at;
+        match self.paths.iter_mut().find(|named| named.path == path) {
+            Some(named) => {
+                named.policy = policy;
+                named.from = from;
+            }
+            None => self.paths.push(SyncedPath {
+                path: path.to_string(),
+                policy,
+                from,
+            }),
+        }
+    }
+}
+
+impl SyncedPath {
+    /// Whether this is a path a pack may name at all.
+    ///
+    /// Safe-relative, so no entry reaches outside the instance, and never
+    /// inside `mods/` or `client-mods/`. What a settings entry decides is
+    /// whether the pack's own copy of a file is written and whether failing to
+    /// write it stops the import — and neither is a decision a stranger's pack
+    /// gets to make about a jar. Geode names neither folder; a pack that does
+    /// was written by something else.
+    fn allowed(&self) -> bool {
+        let rel = std::path::Path::new(&self.path);
+        if self.path.trim().is_empty() || !crate::paths::is_safe_relative(rel) {
+            return false;
+        }
+        !matches!(
+            rel.components().next().and_then(|c| c.as_os_str().to_str()),
+            Some("mods") | Some("client-mods")
+        )
+    }
+}
+
+/// Whether `tree` is `rel` itself or a folder above it.
+///
+/// Compared component by component, never as text: `config` must not cover
+/// `configs/x.toml`, and a prefix match on the string would say it does.
+fn covers(tree: &std::path::Path, rel: &std::path::Path) -> bool {
+    if tree.as_os_str().is_empty() {
+        return false;
+    }
+    let mut under = rel.components();
+    tree.components().all(|part| under.next() == Some(part))
 }
 
 /// A mod a server does not allow its players to run.
@@ -418,6 +616,7 @@ impl Manifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn manifest() -> Manifest {
         Manifest {
@@ -439,6 +638,7 @@ mod tests {
             }],
             revision: None,
             listing: None,
+            settings: None,
             forbidden: Vec::new(),
         }
     }
@@ -463,6 +663,7 @@ mod tests {
             "width",
             "serverKind",
             "listing",
+            "settings",
             "forbidden",
         ] {
             assert!(!json.contains(absent), "{absent} should not be written: {json}");
@@ -808,5 +1009,166 @@ mod tests {
         assert!(!m.readable());
         m.geode_format = FORMAT;
         assert!(m.readable());
+    }
+
+    /// The wire is where this spelling has to hold: a server's revision names
+    /// a behaviour with the same string, a player's Geode reads it back by it,
+    /// and `src/lib/types.ts` mirrors it by hand with no codegen to catch a
+    /// rename. A pack from before any of this has no settings half at all and
+    /// still reads, which is the whole reason the format is not bumped.
+    #[test]
+    fn the_behaviours_are_named_one_way_on_the_wire_and_an_older_pack_still_reads() {
+        let settings = Settings {
+            paths: vec![
+                chosen("config", Policy::Merge, 4),
+                chosen("config/keys", Policy::ShipOnce, 2),
+                chosen("config/locked.toml", Policy::Enforce, 1),
+            ],
+            at: 4,
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        assert_eq!(
+            json,
+            r#"{"paths":[{"path":"config","policy":"merge","from":4},{"path":"config/keys","policy":"ship-once","from":2},{"path":"config/locked.toml","policy":"enforce","from":1}],"at":4}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<Settings>(&json).unwrap(),
+            settings,
+            "the wire form did not read back"
+        );
+        for named in &settings.paths {
+            assert!(
+                json.contains(&format!(r#""policy":"{}""#, named.policy.as_str())),
+                "the revision and the wire name {:?} differently: {json}",
+                named.policy
+            );
+        }
+
+        let older: Manifest =
+            serde_json::from_str(&serde_json::to_string(&manifest()).unwrap()).unwrap();
+        assert_eq!(older.settings, None);
+    }
+
+    fn chosen(path: &str, policy: Policy, from: u32) -> SyncedPath {
+        SyncedPath {
+            path: path.into(),
+            policy,
+            from,
+        }
+    }
+
+    /// The migration rule, and the one that keeps every share made before any
+    /// of this working exactly as it did: a share that has chosen nothing
+    /// replaces every file it sends, every time, which is what sending a
+    /// config folder has always done.
+    #[test]
+    fn a_file_nobody_chose_a_behaviour_for_is_replaced_every_time() {
+        let nothing = Settings::default();
+        assert_eq!(nothing.covering(Path::new("config/sodium.json")), None);
+        for file in ["config/sodium.json", "config", "options.txt", "mods/a.jar"] {
+            assert_eq!(
+                nothing.policy_for(Path::new(file)),
+                Policy::Enforce,
+                "{file}"
+            );
+        }
+    }
+
+    /// A folder covers what is under it, the longest choice wins, and `config`
+    /// is not `configs` — a prefix match on the text would say it was, and a
+    /// file in a folder nobody chose a behaviour for would quietly stop being
+    /// replaced.
+    #[test]
+    fn the_longest_folder_above_a_file_is_what_decides_it() {
+        let settings = Settings {
+            paths: vec![
+                chosen("config", Policy::Merge, 1),
+                chosen("config/locked.toml", Policy::Enforce, 2),
+                chosen("config/keys", Policy::ShipOnce, 3),
+            ],
+            at: 3,
+        };
+
+        let policy = |file: &str| settings.policy_for(Path::new(file));
+        assert_eq!(policy("config/sodium.json"), Policy::Merge);
+        assert_eq!(policy("config/deep/down/here.toml"), Policy::Merge);
+        assert_eq!(policy("config/locked.toml"), Policy::Enforce);
+        assert_eq!(policy("config/keys/binds.txt"), Policy::ShipOnce);
+        // Not under any of them, so nothing was chosen for it.
+        assert_eq!(policy("configs/sodium.json"), Policy::Enforce);
+        assert_eq!(policy("options.txt"), Policy::Enforce);
+        assert_eq!(settings.covering(Path::new("options.txt")), None);
+        // And the `from` travels with the choice, since that is what decides
+        // whether a player is still behind it.
+        assert_eq!(
+            settings.covering(Path::new("config/keys/binds.txt")).map(|p| p.from),
+            Some(3)
+        );
+    }
+
+    /// What a stranger's pack may name. An entry decides whether the pack's own
+    /// copy of a file is written and whether failing to write it stops the
+    /// import, and neither is a decision anybody else's pack gets to make
+    /// about a jar.
+    #[test]
+    fn a_pack_cannot_choose_a_behaviour_for_a_jar_or_for_anything_outside_the_instance() {
+        for path in [
+            "mods",
+            "mods/evil.jar",
+            "client-mods/evil.jar",
+            "../elsewhere",
+            "config/../../elsewhere",
+            "/etc",
+            "",
+            "   ",
+        ] {
+            let settings = Settings {
+                paths: vec![chosen(path, Policy::ShipOnce, 1)],
+                at: 1,
+            };
+            assert_eq!(
+                settings.covering(Path::new("mods/evil.jar")),
+                None,
+                "{path} decided something"
+            );
+            assert_eq!(
+                settings.policy_for(Path::new(path)),
+                Policy::Enforce,
+                "{path} decided something about itself"
+            );
+        }
+    }
+
+    /// A choice is dated so a player who has not caught up with it gets the
+    /// file whole once and keeps their own changes from then on. Choosing what
+    /// is already in force writes nothing, so turning a folder off and on
+    /// again costs no player a download.
+    #[test]
+    fn choosing_a_behaviour_dates_it_and_choosing_it_again_changes_nothing() {
+        let mut settings = Settings::default();
+
+        // Already in force, because it is what nobody choosing anything means.
+        settings.choose("config", Policy::Enforce);
+        assert_eq!(settings, Settings::default());
+
+        settings.choose("config", Policy::Merge);
+        assert_eq!(settings.at, 1);
+        assert_eq!(settings.paths, vec![chosen("config", Policy::Merge, 1)]);
+
+        settings.choose("config", Policy::Merge);
+        assert_eq!(settings.at, 1, "choosing the same thing twice dated it again");
+        assert_eq!(settings.paths.len(), 1, "{:?}", settings.paths);
+
+        // A switch is one entry with a newer date, never a second entry.
+        settings.choose("config", Policy::ShipOnce);
+        assert_eq!(settings.at, 2);
+        assert_eq!(settings.paths, vec![chosen("config", Policy::ShipOnce, 2)]);
+
+        // And back to what a share that had chosen nothing does, which is a
+        // choice like any other rather than a return to silence: a player
+        // below it has to be sent the file again.
+        settings.choose("config", Policy::Enforce);
+        assert_eq!(settings.at, 3);
+        assert_eq!(settings.paths, vec![chosen("config", Policy::Enforce, 3)]);
     }
 }

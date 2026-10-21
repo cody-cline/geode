@@ -715,9 +715,13 @@ async fn import(
         instance,
         archive,
         Some(FAKE_KEY),
+        // A pack the user chose themselves syncs nothing: every override file
+        // written whole, and a write that fails fails the import.
+        &geode_lib::instance::modpack::Overrides::replace(),
         &Progress::silent("import"),
     )
     .await
+    .map(|imported| imported.left_out)
 }
 
 /// The same, and what the run told the user along the way: a fact that is
@@ -739,9 +743,13 @@ async fn import_telling(
         instance,
         archive,
         Some(FAKE_KEY),
+        // A pack the user chose themselves syncs nothing: every override file
+        // written whole, and a write that fails fails the import.
+        &geode_lib::instance::modpack::Overrides::replace(),
         &Progress::new(told.clone(), "import"),
     )
-    .await;
+    .await
+    .map(|imported| imported.left_out);
     let notices = told
         .events()
         .into_iter()

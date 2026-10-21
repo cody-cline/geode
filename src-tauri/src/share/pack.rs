@@ -18,7 +18,8 @@ use crate::net::Progress;
 use crate::paths::Paths;
 
 use super::manifest::{
-    format_for, FileNote, Forbidden, Kind, Listing, Manifest, Profile, SourceRef, EXTENSION, FORMAT,
+    format_for, FileNote, Forbidden, Kind, Listing, Manifest, Policy, Profile, Settings, SourceRef,
+    EXTENSION, FORMAT,
 };
 
 /// Build the Geode half of a pack for an instance.
@@ -67,6 +68,10 @@ pub async fn manifest_for(
         // Nor a listing: there is no server behind a personal pack to put in
         // anybody's multiplayer list.
         listing: None,
+        // Nor anything synced: a person hands a pack over once, and what the
+        // recipient makes of its files afterwards is between them and their
+        // own instance.
+        settings: None,
         // Nor a rule about what the recipient may run. A pack is handed over;
         // nobody stays behind it to have one.
         forbidden: Vec::new(),
@@ -425,11 +430,15 @@ fn needs_curseforge_key(manifest: &Manifest) -> bool {
 /// no memory size leaves the importer's default alone rather than writing a
 /// zero over it.
 ///
-/// A server's pack never sets memory or Java arguments, whatever it carries.
-/// Geode never writes them into one — a server's are sized for its own heap —
-/// so a server pack that has them was written by something else, and Java
-/// arguments are a way to run code (`-javaagent:`) that no mod count in the
-/// join preview would show.
+/// A server's pack never sets a launcher setting — memory, Java arguments,
+/// the window size or fullscreen — whatever it carries. Geode never writes one
+/// into a server's pack, so a server pack that has them was written by
+/// something else. Java arguments are a way to run code (`-javaagent:`) that no
+/// mod count in the join preview would show; memory is sized for the server's
+/// own heap, and the window is the player's own screen, which no server knows
+/// anything about. None of the five is named in the join preview either, so a
+/// player accepting a pack is not accepting any of them. A person's pack is
+/// still trusted with all five.
 pub fn apply(manifest: &Manifest, instance: &mut Instance) {
     let p = &manifest.profile;
     if !p.name.trim().is_empty() {
@@ -448,20 +457,72 @@ pub fn apply(manifest: &Manifest, instance: &mut Instance) {
     if personal && p.java_args.is_some() {
         instance.overrides.java_args = p.java_args.clone();
     }
-    if p.width.is_some() {
+    if personal && p.width.is_some() {
         instance.overrides.width = p.width;
     }
-    if p.height.is_some() {
+    if personal && p.height.is_some() {
         instance.overrides.height = p.height;
     }
-    if p.fullscreen.is_some() {
+    if personal && p.fullscreen.is_some() {
         instance.overrides.fullscreen = p.fullscreen;
     }
     if manifest.source.is_some() {
         instance.pack = manifest.source.clone();
     }
+    // Not a launcher setting and not the player's to choose: it is how far
+    // this instance has caught up with the sender's settings pushes, and the
+    // files this pack just wrote whole are the ones it names. Without it they
+    // would be written whole again on the next update, over whatever the
+    // player had changed in the meantime.
+    if let Some(settings) = &manifest.settings {
+        instance.settings_at = Some(settings.at);
+    }
     // A Java path is never carried, so there is nothing to apply and nothing
     // that could point at a directory on somebody else's machine.
+}
+
+/// How a pack's settings files land in this instance: the one place a policy
+/// turns into an action.
+///
+/// A path the pack says nothing about is written whole and a write that fails
+/// fails the import, which is what importing a pack has always done.
+///
+/// [`Policy::Enforce`] is that behaviour too, and the only thing it does not
+/// share is the failure: a settings file the player has made read-only is a
+/// line in their report rather than a launch they cannot have.
+/// [`Policy::ShipOnce`] and [`Policy::Merge`] arrive whole while the player is
+/// behind the push the path's behaviour was chosen at — on a first join there
+/// is no file there at all, so they arrive then too — and are the player's
+/// from then on, which is the whole of keeping their own changes.
+///
+/// `owed` is the paths a run before this one could not write, which are
+/// offered again however their behaviour reads: the player never received the
+/// sender's copy of them, and "present and caught up" would otherwise be true
+/// of a file that never landed, so nothing would ever send it again.
+fn landings(
+    settings: Option<&Settings>,
+    applied: u32,
+    owed: &[String],
+) -> instance::modpack::Overrides {
+    use instance::modpack::Landing;
+
+    let settings = settings.cloned().unwrap_or_default();
+    let owed: Vec<PathBuf> = owed.iter().map(PathBuf::from).collect();
+    instance::modpack::Overrides::decided(move |rel, present| {
+        let Some(named) = settings.covering(rel) else {
+            return Landing::Replace;
+        };
+        match named.policy {
+            Policy::Enforce => Landing::Offer,
+            Policy::ShipOnce | Policy::Merge => {
+                if present && applied >= named.from && !owed.iter().any(|path| path == rel) {
+                    Landing::Keep
+                } else {
+                    Landing::Offer
+                }
+            }
+        }
+    })
 }
 
 /// Import a pack into a freshly created instance — both halves, in order.
@@ -516,6 +577,15 @@ pub async fn import(
     };
 
     let from_a_server = manifest.as_ref().is_some_and(|m| m.kind == Kind::Server);
+    // How the pack's own settings files land, worked out before anything is
+    // written. A fresh instance has caught up with nothing, so on a first
+    // join every one of them arrives whole — which is what a default config
+    // being shipped means.
+    let how = landings(
+        manifest.as_ref().and_then(|m| m.settings.as_ref()),
+        instance.settings_at.unwrap_or(0),
+        &instance.settings_owed,
+    );
 
     let outcome = async {
         if from_a_server {
@@ -534,16 +604,23 @@ pub async fn import(
         // Both halves name what the user has to fetch themselves, and both
         // lists are the same list: a CurseForge file nobody may download and a
         // reference the recipient's own key could not resolve are the same
-        // problem to whoever reads the report.
-        let mut missing = instance::modpack::import_into(
+        // problem to whoever reads the report. A settings file that could not
+        // be written joins them, for the same reason: it is one more line
+        // naming a file and what to do about it.
+        let imported = instance::modpack::import_into_at(
             &http,
+            crate::providers::curseforge::API,
+            crate::providers::modrinth::API,
             paths,
             instance,
             archive,
             curseforge_key,
+            &how,
             progress,
         )
         .await?;
+        let mut missing = imported.left_out;
+        missing.extend(imported.not_written.into_iter().map(|file| file.why));
         // A plain `.mrpack` has no Geode half.
         if let Some(manifest) = &manifest {
             missing.extend(
@@ -586,6 +663,22 @@ pub struct UpdateReport {
     /// The player's own mods that are off because the server sends the same
     /// mod, by name.
     pub turned_off: Vec<String>,
+    /// Settings files the server sent that could not be written, so the
+    /// player's own are still there, each line naming the file and why.
+    ///
+    /// Reported rather than fatal, and only for the paths the server syncs. A
+    /// read-only config used to fail the import, which failed the update,
+    /// which stopped the launch — on that Play and, because the revision was
+    /// never recorded, on every Play after it. A mod the player is short of
+    /// stops them joining; a settings file they kept their own copy of
+    /// usually does not.
+    ///
+    /// Each of these is also left owed on the instance, so a player who makes
+    /// the file writable and presses Play gets the server's copy, which is
+    /// what the notice tells them. Without that the file would be skipped for
+    /// good: the revision is recorded, so nothing would fetch a pack again,
+    /// and a synced file that is present and caught up is one nothing sends.
+    pub not_written: Vec<String>,
     /// The player's own mods that are off because the server does not allow
     /// them, each with the admin's reason. Said again on every update: a ban
     /// is a standing rule, not a change that happened once.
@@ -638,7 +731,12 @@ pub fn pack_revision(manifest: &Manifest) -> Option<String> {
 ///    [`take_the_packs_name`].
 /// 5. The mrpack half runs, and the references are resolved again. The rest of
 ///    the Geode half does not: the instance's name, group, notes, window
-///    settings, icon and banner stay the player's.
+///    settings, icon and banner stay the player's. Each settings file the pack
+///    carries lands here, as the behaviour its admin chose for it says, worked
+///    out before anything is written from what this instance has already
+///    caught up with — see [`landings`]. One that could not be written is
+///    noted and the player's own left in place, rather than failing the
+///    update.
 /// 6. On every exit, including an error or a cancel, what landed is settled as
 ///    the server's, with each file the player turned off kept off — under a new
 ///    file name too, when it is the same project.
@@ -661,14 +759,20 @@ pub fn pack_revision(manifest: &Manifest) -> Option<String> {
 ///    a standing rule and not a change that happened once, and it is
 ///    client-side only: nothing here is enforcement.
 /// 10. Only once all of that finished does the instance take the pack's
-///     Minecraft version, loader and loader version. A failed update is saved
-///     by the caller as far as it got, and runs again next time; until then
-///     the game it starts is the one it had.
+///     Minecraft version, loader and loader version, and the push its settings
+///     half was at — with the paths this run could not write left owed, since
+///     that number says the push landed and for those files it did not. A
+///     failed update is saved by the caller as far as it got, and runs again
+///     next time; until then the game it starts is the one it had.
 ///
 /// Everything else in the instance is left alone: the player's own records and
 /// untracked files, worlds, options, resource packs, shaders, memory, Java, and
-/// whether server-side mods are on. Config files the server sends overwrite the
-/// player's; config files it stopped sending stay.
+/// whether server-side mods are on. Config files the server sends land as the
+/// behaviour its admin chose for them says — replaced every time, or sent once
+/// and the player's from then on (`super::manifest::Settings`); config files it
+/// stopped sending stay, whichever it was. One that could not be written is
+/// reported and left owed, so the next run offers it again however its
+/// behaviour reads.
 pub async fn update(
     client: &reqwest::Client,
     paths: &Paths,
@@ -697,6 +801,15 @@ pub async fn update(
     };
 
     let player_off = players_own_off(paths, instance).await;
+    // How the pack's own settings files land, worked out before anything is
+    // written — and from what this instance has caught up with, which is why
+    // a file the player has already been sent once is not sent again.
+    let how = landings(
+        manifest.settings.as_ref(),
+        instance.settings_at.unwrap_or(0),
+        &instance.settings_owed,
+    );
+    let mut not_written: Vec<instance::modpack::NotWritten> = Vec::new();
 
     // What the pack's index says each file it names is, so only that very file
     // is moved to the name it will be written under.
@@ -729,16 +842,23 @@ pub async fn update(
         // provider's API rather than from the pack.
         let http = server_pack_client();
         // One list, for the reason `import` gives: what either half could not
-        // install is the same thing to the player reading it.
-        let mut missing = instance::modpack::import_into(
+        // install is the same thing to the player reading it. A settings file
+        // that could not be written is not on that list — it is already on
+        // disk, as the player's own copy, and says so in its own line.
+        let imported = instance::modpack::import_into_at(
             &http,
+            crate::providers::curseforge::API,
+            crate::providers::modrinth::API,
             paths,
             instance,
             archive,
             curseforge_key,
+            &how,
             progress,
         )
         .await?;
+        not_written = imported.not_written;
+        let mut missing = imported.left_out;
         missing.extend(
             resolve_references(
                 client,
@@ -778,9 +898,22 @@ pub async fn update(
     instance.mc_version = described.mc_version;
     instance.loader = described.loader;
     instance.loader_version = described.loader_version;
+    // Last, with the version and the loader, and for the same reason: a run
+    // that did not finish leaves this where it was, so the next Play decides
+    // every synced path again from the same place rather than from half of
+    // this one.
+    if let Some(settings) = &manifest.settings {
+        instance.settings_at = Some(settings.at);
+    }
+    // And the paths this run could not write, which that number cannot speak
+    // for: it says the push landed, and for these files it did not. Assigned
+    // rather than added to, so a path that went in this time — or one the
+    // server has stopped sending — drops out of it.
+    instance.settings_owed = not_written.iter().map(|file| file.path.clone()).collect();
     Ok(UpdateReport {
         missing,
         turned_off,
+        not_written: not_written.into_iter().map(|file| file.why).collect(),
         banned,
         revision: pack_revision(&manifest),
     })
@@ -985,11 +1118,15 @@ async fn turn_off_the_players_duplicates(
 ///
 /// A standing rule rather than a change, and the one asymmetry with everything
 /// else an update does: it runs again on every update, so a mod turned back on
-/// is off again after the next one. Not after the next Play — a Play on a
-/// server whose revision has not moved downloads no pack and so reaches none of
-/// this. What is reported is what is off, with the admin's own reason, so the
-/// player reads the same sentence every time rather than wondering what
-/// happened to their mod.
+/// is off again after the next one. Every update and no more than that — what
+/// reaches this is a pack, so a Play that fetches none reaches none of it. Two
+/// things make a Play fetch one, and `commands::fetch_due` is both: a revision
+/// the instance does not hold, and a settings file an earlier run could not
+/// write and still owes. So a player who owes one has the rule re-applied on
+/// their very next Play, with the revision exactly where it was. What is
+/// reported is what is off, with the admin's own reason, so the player reads
+/// the same sentence every time rather than wondering what happened to their
+/// mod.
 ///
 /// Never a delete. The file keeps its bytes under the `.disabled` name and its
 /// record stays the player's, so deleting it is still their decision and
@@ -2281,10 +2418,20 @@ pub async fn server_pack_info(
     server: &crate::server::Server,
 ) -> Result<super::host::PackInfo> {
     let (loader, loader_version) = client_loader(server)?;
-    let mods = server_mods(&paths.server_run(&server.id), &server.content).await?;
+    let run = paths.server_run(&server.id);
+    let mods = server_mods(&run, &server.content).await?;
     let include_config = sends_config(paths, &server.id).await?;
     let forbidden = forbidden_for(paths, &server.id).await?;
-    let revision = server_revision(paths, server, &mods, include_config, &forbidden).await?;
+    let settings = synced_settings(paths, &server.id).await?;
+    let revision =
+        server_revision(paths, server, &mods, include_config, &forbidden, &settings).await?;
+    // The same walk the revision hashes, so the number a player is shown is
+    // the number of files the pack carries — see [`config_files`].
+    let settings_files = if include_config {
+        config_files(&run).await?.len()
+    } else {
+        0
+    };
     Ok(super::host::PackInfo {
         name: server.name.clone(),
         mc_version: server.mc_version.clone(),
@@ -2297,6 +2444,14 @@ pub async fn server_pack_info(
             .filter(|side| **side == instance::jar::Side::Server)
             .count(),
         server_kind: server.kind.as_str().to_string(),
+        config_files: settings_files,
+        // The only thing a player asks about those files, answered here
+        // rather than by naming the behaviour: a bool cannot fail to read the
+        // way a policy name a newer Geode invented would, and a description
+        // that would not parse leaves a player unable to check for changes at
+        // all.
+        config_kept: include_config
+            && settings.policy_for(Path::new("config")) != Policy::Enforce,
         revision,
         server_id: server.id.clone(),
         // Read here as well as written into the pack, and on purpose: this is
@@ -2320,6 +2475,21 @@ async fn sends_config(paths: &Paths, id: &str) -> Result<bool> {
         .is_some_and(|share| share.shared && share.include_config))
 }
 
+/// What a server's pack says about the settings files it sends: which paths a
+/// player keeps their own changes to, and how far the admin's pushes have got.
+///
+/// From the share file, read now, for the same reason as [`sends_config`]. A
+/// server that is not shared syncs nothing: its pack reaches nobody, and an
+/// empty answer is the one that means "every file is replaced", which is what
+/// a share from before any of this has always done.
+async fn synced_settings(paths: &Paths, id: &str) -> Result<Settings> {
+    Ok(crate::server::share::load(paths, id)
+        .await?
+        .filter(|share| share.shared)
+        .map(|share| share.settings)
+        .unwrap_or_default())
+}
+
 /// How this server should appear in its players' multiplayer list, if the
 /// admin has said.
 ///
@@ -2332,6 +2502,46 @@ pub(crate) async fn listing_for(paths: &Paths, id: &str) -> Result<Option<Listin
         .await?
         .and_then(|share| share.listing)
         .and_then(|listing| listing.checked().ok()))
+}
+
+/// Every regular file a server's pack would send from `config/`, found the way
+/// the pack's own walk finds them: through no link, and nothing at all when
+/// `config/` is itself one.
+///
+/// One function because two things count on this set and must never disagree.
+/// [`server_revision`] hashes these files, so they are what a player's update
+/// is triggered by; [`server_pack_info`] counts them, so they are what the join
+/// preview promises is coming. A second walk that drifted would tell a player a
+/// number the pack does not carry.
+///
+/// The caller decides whether config is sent at all — [`sends_config`] — so
+/// this answers only "which files", never "whether".
+async fn config_files(run: &Path) -> Result<Vec<PathBuf>> {
+    let config = run.join("config");
+    tokio::task::spawn_blocking(move || {
+        let mut files = Vec::new();
+        // A `config/` that is itself a link is not sent, so it is nothing
+        // here either.
+        if !std::fs::symlink_metadata(&config).is_ok_and(|meta| meta.is_dir()) {
+            return files;
+        }
+        let mut stack = vec![config];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                match entry.file_type() {
+                    Ok(kind) if kind.is_dir() => stack.push(entry.path()),
+                    Ok(kind) if kind.is_file() => files.push(entry.path()),
+                    _ => {}
+                }
+            }
+        }
+        files
+    })
+    .await
+    .map_err(|e| Error::msg(format!("reading the server's config panicked: {e}")))
 }
 
 /// The mods this server does not allow its players to run, if the admin has
@@ -2381,6 +2591,16 @@ async fn sha1_if_there(path: &Path) -> Result<Option<String>> {
 /// config is sent, every regular file under `config/` is its path and SHA-1,
 /// found the way the pack's own walk finds them, through no link.
 ///
+/// The behaviour chosen for each path the server syncs is a line of its own,
+/// because a change to it changes what players get and nothing else here would
+/// say so: it lives in `share.json`, which nothing in this walk reads. A file
+/// the admin lets players keep their own copy of is named without its hash —
+/// its bytes are not what a player receives, so hashing them would send
+/// everybody a pack over an edit that reaches none of them, which is what a
+/// mod rewriting its own config on every boot would otherwise do. Named, and
+/// not left out, because a player who has no copy of it is still sent one, and
+/// this is the only thing that tells their Geode to come and look.
+///
 /// A mod the server does not allow is a line too, with the admin's reason: it
 /// reaches the player's game as surely as a jar does, and changing the reason
 /// changes what they are shown.
@@ -2398,6 +2618,7 @@ async fn server_revision(
     mods: &ServerMods<'_>,
     include_config: bool,
     forbidden: &[Forbidden],
+    settings: &Settings,
 ) -> Result<String> {
     use instance::jar::Side;
     use sha2::{Digest, Sha256};
@@ -2448,36 +2669,33 @@ async fn server_revision(
     }
 
     if include_config {
-        let config = run.join("config");
-        let files = tokio::task::spawn_blocking(move || {
-            let mut files = Vec::new();
-            // A `config/` that is itself a link is not sent, so it is nothing
-            // here either.
-            if !std::fs::symlink_metadata(&config).is_ok_and(|meta| meta.is_dir()) {
-                return files;
+        // Only a path whose files actually travel. A behaviour chosen for a
+        // folder this pack does not send changes nothing for anybody, and a
+        // revision that moved for it would send every player a pack over a
+        // choice none of them can see.
+        for named in &settings.paths {
+            lines.push(format!(
+                "settings {} {} {}",
+                named.path,
+                named.policy.as_str(),
+                named.from
+            ));
+        }
+        for full in config_files(&run).await? {
+            let rel = full.strip_prefix(&run).unwrap_or(&full);
+            if settings.policy_for(rel) != Policy::Enforce {
+                // Its bytes are not what a player receives, so they are not
+                // here — but *that it exists* is: a player with no copy of it
+                // is sent one, and nothing else in this walk would ever say it
+                // had appeared. A line with no hash in it is the difference
+                // between announcing a new settings file and sending everybody
+                // a pack every time a mod rewrites its own config.
+                lines.push(format!("config-file {} sent", shown(rel)));
+                continue;
             }
-            let mut stack = vec![config];
-            while let Some(dir) = stack.pop() {
-                let Ok(entries) = std::fs::read_dir(&dir) else {
-                    continue;
-                };
-                for entry in entries.flatten() {
-                    match entry.file_type() {
-                        Ok(kind) if kind.is_dir() => stack.push(entry.path()),
-                        Ok(kind) if kind.is_file() => files.push(entry.path()),
-                        _ => {}
-                    }
-                }
-            }
-            files
-        })
-        .await
-        .map_err(|e| Error::msg(format!("reading the server's config panicked: {e}")))?;
-        for full in files {
             let Some(hash) = sha1_if_there(&full).await? else {
                 continue;
             };
-            let rel = full.strip_prefix(&run).unwrap_or(&full);
             lines.push(format!("config-file {} sha1:{hash}", shown(rel)));
         }
     }
@@ -2526,11 +2744,13 @@ pub async fn export_server(
     let mods = server_mods(&run, &server.content).await?;
     let include_config = sends_config(paths, &server.id).await?;
     let forbidden = forbidden_for(paths, &server.id).await?;
+    let settings = synced_settings(paths, &server.id).await?;
     // Worked out from the very files this pack is about to be written from,
     // and before it is written: a file that changes while the pack is built
     // makes the revision it carries the older of the two, which the next check
     // finds changed. The other way round would be a change nobody ever sees.
-    let revision = server_revision(paths, server, &mods, include_config, &forbidden).await?;
+    let revision =
+        server_revision(paths, server, &mods, include_config, &forbidden, &settings).await?;
 
     // Records only, and so no client and no network. This runs inside the share
     // host's download handler under `MAX_BUILDS`, and `server_revision` is
@@ -2570,6 +2790,14 @@ pub async fn export_server(
         // server to ask afterwards — still gets the row. A pack served over
         // the wire is kept in step by the description instead.
         listing: listing_for(paths, &server.id).await?,
+        // Only when the folder those paths are in actually travels — and then
+        // always, with the choice nobody made spelled out, so the player's
+        // Geode has one rule for every file it is sent. See
+        // [`Settings::spelling_out`]; it is also what tells a settings file
+        // apart from every other file in the pack, which is what makes one
+        // that cannot be written a line in a report instead of a failed
+        // update.
+        settings: include_config.then(|| settings.spelling_out("config")),
         forbidden,
     };
     let extras = extras_from(
@@ -2656,6 +2884,7 @@ mod tests {
             files: Vec::new(),
             revision: None,
             listing: None,
+            settings: None,
             forbidden: Vec::new(),
         }
     }
@@ -2708,31 +2937,47 @@ mod tests {
         assert!(got.group.is_none());
     }
 
-    /// A server's JVM settings are not the player's, and Java arguments are a
-    /// way to run code the join preview never mentions. Geode never writes
-    /// them into a server pack, so one that has them is not to be believed.
+    /// A server's launcher settings are not the player's. Its heap is sized
+    /// for its own machine, its window is nothing it knows about, and Java
+    /// arguments are a way to run code the join preview never mentions — so
+    /// all five are refused, and not one of them is in the preview a player
+    /// agreed to. Geode never writes them into a server pack, so one that has
+    /// them is not to be believed.
     #[test]
-    fn a_server_pack_never_sets_memory_or_java_arguments() {
+    fn a_server_pack_never_sets_a_launcher_setting() {
         let mut server = manifest();
         server.kind = Kind::Server;
         server.profile.java_args = Some("-javaagent:mods/agent.jar".into());
         server.profile.memory_mb = Some(256);
+        server.profile.fullscreen = Some(true);
 
         let mut joined = instance();
+        joined.overrides.width = Some(1280);
+        joined.overrides.height = Some(720);
+        joined.overrides.fullscreen = Some(false);
         apply(&server, &mut joined);
         assert_eq!(joined.overrides.memory_mb, Some(2048), "kept the player's size");
         assert_eq!(joined.overrides.java_args, None);
+        assert_eq!(joined.overrides.width, Some(1280), "kept the player's window");
+        assert_eq!(joined.overrides.height, Some(720));
+        assert_eq!(joined.overrides.fullscreen, Some(false));
         // The rest of the profile still arrives.
         assert_eq!(joined.name, "Shared Pack");
-        assert_eq!(joined.overrides.width, Some(1600));
+        assert_eq!(joined.notes, "read me");
 
-        // A person's pack is still trusted with both.
+        // A person's pack is still trusted with all five.
         let mut personal = server.clone();
         personal.kind = Kind::Instance;
         let mut got = instance();
+        got.overrides.width = Some(1280);
+        got.overrides.height = Some(720);
+        got.overrides.fullscreen = Some(false);
         apply(&personal, &mut got);
         assert_eq!(got.overrides.memory_mb, Some(256));
         assert_eq!(got.overrides.java_args.as_deref(), Some("-javaagent:mods/agent.jar"));
+        assert_eq!(got.overrides.width, Some(1600));
+        assert_eq!(got.overrides.height, Some(900));
+        assert_eq!(got.overrides.fullscreen, Some(true));
     }
 
     /// A Java path is the author's machine, not the pack's. It is never
@@ -3609,14 +3854,18 @@ mod tests {
     }
 
     /// The same through the whole import, from a server pack Geode would never
-    /// write: one that sets a Java agent and a heap, and names a modpack. None
-    /// of it lands, while the same pack from a person still carries all three.
+    /// write: one that sets a Java agent, a heap and a window, and names a
+    /// modpack. None of it lands, while the same pack from a person still
+    /// carries every bit of it.
     #[tokio::test]
     async fn a_server_pack_cannot_set_the_jvm_or_claim_to_be_a_modpack() {
         let (scratch, mut inst) = fixture("jvm", &[("mods", "agent.jar")]).await;
         let paths = scratch.paths.clone();
         inst.overrides.java_args = Some("-javaagent:mods/agent.jar".into());
         inst.overrides.memory_mb = Some(256);
+        inst.overrides.width = Some(3840);
+        inst.overrides.height = Some(2160);
+        inst.overrides.fullscreen = Some(true);
         inst.pack = Some(crate::instance::PackSource::local(
             "Upstream Pack".into(),
             "4.2.0".into(),
@@ -3630,15 +3879,26 @@ mod tests {
         rewrite_pack(&hostile, |m| m.kind = Kind::Server, &[]);
 
         let mut joined = fresh("jvm-joined");
+        joined.overrides.width = Some(1280);
+        joined.overrides.height = Some(720);
+        joined.overrides.fullscreen = Some(false);
         import_offline(&paths, &mut joined, &hostile).await.unwrap();
         assert_eq!(joined.overrides.java_args, None);
         assert_eq!(joined.overrides.memory_mb, Some(2048));
+        // The window a server pack names is not applied either, and nothing in
+        // the join preview mentions one.
+        assert_eq!(joined.overrides.width, Some(1280));
+        assert_eq!(joined.overrides.height, Some(720));
+        assert_eq!(joined.overrides.fullscreen, Some(false));
         assert!(joined.pack.is_none(), "labelled as a modpack: {:?}", joined.pack);
 
         let mut shared = fresh("jvm-shared");
         import_offline(&paths, &mut shared, &personal).await.unwrap();
         assert_eq!(shared.overrides.java_args.as_deref(), Some("-javaagent:mods/agent.jar"));
         assert_eq!(shared.overrides.memory_mb, Some(256));
+        assert_eq!(shared.overrides.width, Some(3840));
+        assert_eq!(shared.overrides.height, Some(2160));
+        assert_eq!(shared.overrides.fullscreen, Some(true));
         assert_eq!(shared.pack.as_ref().map(|p| p.version.as_str()), Some("4.2.0"));
     }
 
@@ -3683,6 +3943,7 @@ mod tests {
             files: Vec::new(),
             revision: None,
             listing: None,
+            settings: None,
             forbidden: Vec::new(),
         };
         let dest = paths.root.join("cancel.geodepack");
@@ -4185,6 +4446,7 @@ mod tests {
             &ServerShare {
                 code: crate::share::code::Code::generate(),
                 include_config,
+                settings: Default::default(),
                 listing: None,
                 shared: true,
                 forbidden: Vec::new(),
@@ -4442,6 +4704,190 @@ mod tests {
         );
     }
 
+    /// Choose a behaviour for this server's config folder, the way the admin's
+    /// control does: on, and this behaviour for the whole folder.
+    async fn choose_config(paths: &Paths, id: &str, policy: Policy) {
+        let mut share = crate::server::share::load(paths, id)
+            .await
+            .unwrap()
+            .expect("a shared server");
+        share.include_config = true;
+        share.settings.choose("config", policy);
+        crate::server::share::save(paths, id, &share).await.unwrap();
+    }
+
+    /// A share made before any of this — config on, no behaviour chosen —
+    /// carries no settings half at all, and choosing the behaviour it already
+    /// has changes nothing either. So every existing share's pack is the pack
+    /// it was, its revision is the revision it was, and no player downloads
+    /// anything over a feature nobody asked for.
+    #[tokio::test]
+    async fn a_share_that_chose_nothing_sends_the_pack_it_always_sent() {
+        let (scratch, server) = server_fixture("migrate", true).await;
+        let paths = scratch.paths.clone();
+        let dest = paths.root.join("server.geodepack");
+        export_server(&paths, &server, dest.clone(), &Progress::silent("t")).await.unwrap();
+
+        let before = sorted(entries(&dest));
+        let revision = revision_of(&paths, &server).await;
+        // The pack spells out the choice nobody made, which is the one sending
+        // a config folder has always made: every file replaced, in force since
+        // before there was anything counting.
+        let spelled = crate::share::manifest::Settings {
+            paths: vec![crate::share::manifest::SyncedPath {
+                path: "config".into(),
+                policy: Policy::Enforce,
+                from: 0,
+            }],
+            at: 0,
+        };
+        assert_eq!(
+            read_manifest(&dest).unwrap().unwrap().settings,
+            Some(spelled.clone())
+        );
+
+        // "Always replace" is what sending a config folder has always done, so
+        // picking it is picking what is already in force.
+        choose_config(&paths, &server.id, Policy::Enforce).await;
+        export_server(&paths, &server, dest.clone(), &Progress::silent("t")).await.unwrap();
+        assert_eq!(sorted(entries(&dest)), before);
+        assert_eq!(
+            read_manifest(&dest).unwrap().unwrap().settings,
+            Some(spelled)
+        );
+        assert_eq!(
+            revision_of(&paths, &server).await,
+            revision,
+            "picking the behaviour already in force moved the revision"
+        );
+        // And the one thing a player is told about those files: whether they
+        // are theirs once they have them. They are not, under either of these.
+        assert!(!server_pack_info(&paths, &server).await.unwrap().config_kept);
+
+        // And the other two are real choices, so they do move it — a player
+        // who is never told cannot act on any of this.
+        choose_config(&paths, &server.id, Policy::ShipOnce).await;
+        let sent_once = revision_of(&paths, &server).await;
+        assert_ne!(sent_once, revision, "choosing Send once told nobody");
+        let info = server_pack_info(&paths, &server).await.unwrap();
+        assert!(
+            info.config_kept,
+            "a player is still told the server will replace what it sent once"
+        );
+        assert_eq!(info.config_files, 1, "{info:?}");
+        let manifest = {
+            export_server(&paths, &server, dest.clone(), &Progress::silent("t")).await.unwrap();
+            read_manifest(&dest).unwrap().unwrap()
+        };
+        let settings = manifest.settings.expect("a settings half");
+        assert_eq!(settings.paths.len(), 1, "{:?}", settings.paths);
+        assert_eq!(settings.paths[0].path, "config");
+        assert_eq!(settings.paths[0].policy, Policy::ShipOnce);
+        assert_eq!(settings.at, settings.paths[0].from);
+        // The pack still carries the files themselves: the behaviour decides
+        // what the player's Geode does with them, not whether they travel.
+        assert!(entries(&dest).contains(&"overrides/config/secret.toml".to_string()));
+        // And the two agree, as they must with a settings half as without one.
+        assert_eq!(
+            manifest.revision.as_deref(),
+            Some(sent_once.as_str()),
+            "the pack and the description disagree once a behaviour is chosen"
+        );
+
+        choose_config(&paths, &server.id, Policy::Merge).await;
+        assert_ne!(revision_of(&paths, &server).await, sent_once);
+        assert!(server_pack_info(&paths, &server).await.unwrap().config_kept);
+
+        // Not sending the folder at all says nothing about it either way.
+        let mut share = crate::server::share::load(&paths, &server.id)
+            .await
+            .unwrap()
+            .unwrap();
+        share.include_config = false;
+        crate::server::share::save(&paths, &server.id, &share).await.unwrap();
+        let info = server_pack_info(&paths, &server).await.unwrap();
+        assert_eq!((info.config_files, info.config_kept), (0, false), "{info:?}");
+    }
+
+    /// Changing a config file the server replaces still reaches every player,
+    /// because its bytes are what they receive. Changing one they were sent
+    /// once reaches nobody — so hashing it would send everybody a pack over an
+    /// edit none of them gets, which is what a mod rewriting its own config on
+    /// boot does on every restart.
+    #[tokio::test]
+    async fn the_revision_follows_a_config_file_the_server_replaces_and_not_one_it_sent_once() {
+        let (scratch, server) = server_fixture("rev-policy", true).await;
+        let paths = scratch.paths.clone();
+        let config = paths.server_run(&server.id).join("config/secret.toml");
+
+        choose_config(&paths, &server.id, Policy::Enforce).await;
+        let replaced = revision_of(&paths, &server).await;
+        tokio::fs::write(&config, b"token = \"rotated\"\n").await.unwrap();
+        assert_ne!(
+            revision_of(&paths, &server).await,
+            replaced,
+            "a file the server replaces changed and nobody was told"
+        );
+
+        for policy in [Policy::ShipOnce, Policy::Merge] {
+            choose_config(&paths, &server.id, policy).await;
+            let settled = revision_of(&paths, &server).await;
+            tokio::fs::write(&config, format!("token = \"{policy:?}\"\n"))
+                .await
+                .unwrap();
+            assert_eq!(
+                revision_of(&paths, &server).await,
+                settled,
+                "{policy:?} sent every player a pack over an edit none of them gets"
+            );
+        }
+
+        // Adding a mod still does, whatever is chosen for config: the two are
+        // different halves of what a player receives.
+        tokio::fs::write(
+            paths.server_run(&server.id).join("mods/added.jar"),
+            b"added",
+        )
+        .await
+        .unwrap();
+        assert_ne!(revision_of(&paths, &server).await, replaced);
+    }
+
+    /// A config file the player has no copy of is one the server sends whatever
+    /// behaviour is chosen for it — `landings` says so — so the revision has to
+    /// say the file exists, or nothing ever tells that player's Geode to come
+    /// and fetch it. Its bytes are still not part of the revision: an edit to a
+    /// file that is already the player's reaches nobody.
+    #[tokio::test]
+    async fn a_new_config_file_the_server_sends_once_moves_the_revision() {
+        let (scratch, server) = server_fixture("rev-added", true).await;
+        let paths = scratch.paths.clone();
+        choose_config(&paths, &server.id, Policy::ShipOnce).await;
+        let before = revision_of(&paths, &server).await;
+
+        let added = paths.server_run(&server.id).join("config/newmod-client.toml");
+        tokio::fs::write(&added, b"first = 1\n").await.unwrap();
+        let announced = revision_of(&paths, &server).await;
+        assert_ne!(
+            announced, before,
+            "a settings file no player has a copy of was never announced to them"
+        );
+
+        // And its bytes are still not in it, which is the whole reason the
+        // line carries no hash.
+        tokio::fs::write(&added, b"first = 2\n").await.unwrap();
+        assert_eq!(
+            revision_of(&paths, &server).await,
+            announced,
+            "an edit none of them receives sent every player a pack"
+        );
+
+        // Taking it away moves it back, because the walk is the pack's own: the
+        // files it names are the files it carries.
+        tokio::fs::remove_file(&added).await.unwrap();
+        assert_eq!(revision_of(&paths, &server).await, before);
+    }
+
     /// What arrives is the server's: every mod, including the one carried as
     /// bytes with no record, is claimed for the server on the player's side.
     #[tokio::test]
@@ -4608,6 +5054,10 @@ mod tests {
                 mods: 8,
                 server_mods: 2,
                 server_kind: "fabric".into(),
+                // This server does not send config, so no settings file is on
+                // its way even though `run/config` has one in it.
+                config_files: 0,
+                config_kept: false,
                 revision: info.revision.clone(),
                 server_id: "srv-info".into(),
                 // No listing set on this server, so none is described.
@@ -4623,6 +5073,60 @@ mod tests {
         let dest = paths.root.join("server.geodepack");
         export_server(&paths, &server, dest.clone(), &Progress::silent("t")).await.unwrap();
         assert_eq!(info.mods, mods_in(&dest));
+    }
+
+    /// Config was the one thing a player received — and kept receiving on every
+    /// update — that nothing in the preview ever mentioned. The count that says
+    /// so comes from the same walk the revision hashes, so neither can promise
+    /// a file the other does not see: a link under `config/` is in neither, and
+    /// a nested file is in both.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_settings_count_and_the_revision_see_the_same_config_files() {
+        use std::os::unix::fs::symlink;
+
+        let (scratch, server) = server_fixture("settings-count", true).await;
+        let paths = scratch.paths.clone();
+        let run = paths.server_run(&server.id);
+
+        tokio::fs::create_dir_all(run.join("config/nested")).await.unwrap();
+        tokio::fs::write(run.join("config/nested/deep.toml"), b"ok = true\n")
+            .await
+            .unwrap();
+        symlink(run.join("server.properties"), run.join("config/linked.toml")).unwrap();
+
+        // `config/secret.toml` and `config/nested/deep.toml`. Not the link.
+        let info = server_pack_info(&paths, &server).await.unwrap();
+        assert_eq!(info.config_files, 2, "a link under config/ was counted");
+
+        // What the link points at is not a file the pack sends, so changing it
+        // tells no player to update either.
+        tokio::fs::write(run.join("server.properties"), b"motd=changed\n")
+            .await
+            .unwrap();
+        let unmoved = server_pack_info(&paths, &server).await.unwrap();
+        assert_eq!(unmoved.config_files, 2);
+        assert_eq!(
+            unmoved.revision, info.revision,
+            "a link's target moved the revision"
+        );
+
+        // The nested file is in both halves of the same walk.
+        tokio::fs::write(run.join("config/nested/deep.toml"), b"ok = false\n")
+            .await
+            .unwrap();
+        let moved = server_pack_info(&paths, &server).await.unwrap();
+        assert_eq!(moved.config_files, 2);
+        assert_ne!(
+            moved.revision, info.revision,
+            "a nested config file left the revision alone"
+        );
+
+        // And an admin who has stopped sharing is sending nothing, so there is
+        // nothing to tell a player about.
+        crate::server::share::stop(&paths, &server.id).await.unwrap();
+        let stopped = server_pack_info(&paths, &server).await.unwrap();
+        assert_eq!(stopped.config_files, 0);
     }
 
     /// Every mod a pack brings, however it brings it: indexed, referenced, or
@@ -4751,6 +5255,16 @@ mod tests {
         let info = server_pack_info(&paths, &server).await.unwrap();
         assert_eq!(info.mods, 8);
         assert_eq!(info.mods, mods_in(&dest));
+        // The settings count comes off the same walk, so what a player is told
+        // is coming is what the pack holds — links and strays in neither.
+        assert_eq!(
+            info.config_files,
+            entries(&dest)
+                .iter()
+                .filter(|name| name.starts_with("overrides/config/"))
+                .count(),
+        );
+        assert_eq!(info.config_files, 2);
     }
 
     /// A link named like a record, beside a real turned-off copy of that mod:
@@ -5473,6 +5987,7 @@ mod tests {
         let share = |include_config| ServerShare {
             code: crate::share::code::Code::generate(),
             include_config,
+            settings: Default::default(),
             listing: None,
             shared: true,
             forbidden: Vec::new(),
@@ -5684,7 +6199,7 @@ mod tests {
         let paths = scratch.paths.clone();
         let run = paths.server_run(&server.id);
         let present = server_mods(&run, &server.content).await.unwrap();
-        let steady = server_revision(&paths, &server, &present, false, &[])
+        let steady = server_revision(&paths, &server, &present, false, &[], &Settings::default())
             .await
             .unwrap();
 
@@ -5709,7 +6224,7 @@ mod tests {
             sides: present.sides.clone(),
         };
         assert_eq!(
-            server_revision(&paths, &server, &gone, false, &[])
+            server_revision(&paths, &server, &gone, false, &[], &Settings::default())
                 .await
                 .unwrap(),
             steady,
@@ -6083,6 +6598,257 @@ mod tests {
         assert_eq!(files.len(), player.content.len(), "{:?}", player.content);
         assert!(player.pack.is_none(), "{:?}", player.pack);
         assert_eq!(player.loader_version, "0.17.0");
+    }
+
+    /// The whole of "ship a default config, let players tweak it, leave it
+    /// alone": the file arrives the first time, the player's own version of it
+    /// survives every update after, and a player who deletes it gets the
+    /// server's copy back.
+    #[tokio::test]
+    async fn a_config_file_the_server_sends_once_is_the_players_from_then_on() {
+        let (scratch, server) = small_server(
+            "sent-once",
+            &[
+                ("mods/a.jar", b"a".to_vec()),
+                ("config/sodium.json", b"{\"renderDistance\": 8}".to_vec()),
+            ],
+            true,
+        )
+        .await;
+        let paths = scratch.paths.clone();
+        choose_config(&paths, &server.id, Policy::ShipOnce).await;
+
+        let mut player = join_now(&paths, &server, "sent-once-player", &[]).await;
+        let mine = paths.game_dir(&player.id).join("config/sodium.json");
+        assert_eq!(
+            std::fs::read(&mine).unwrap(),
+            b"{\"renderDistance\": 8}",
+            "the default config did not arrive on the first join"
+        );
+        let caught_up = player.settings_at.expect("the join recorded where it got to");
+
+        // The player tunes it, and the admin changes their own copy.
+        tokio::fs::write(&mine, b"{\"renderDistance\": 24}").await.unwrap();
+        let run = paths.server_run(&server.id);
+        tokio::fs::write(run.join("config/sodium.json"), b"{\"renderDistance\": 12}")
+            .await
+            .unwrap();
+        tokio::fs::write(run.join("mods/b.jar"), b"b").await.unwrap();
+
+        let pack = pack_now(&paths, &server, "b").await;
+        update_offline(&paths, &mut player, &pack).await.unwrap();
+
+        assert_eq!(
+            std::fs::read(&mine).unwrap(),
+            b"{\"renderDistance\": 24}",
+            "the server replaced a file it had already sent once"
+        );
+        assert!(
+            paths.game_dir(&player.id).join("mods/b.jar").is_file(),
+            "the mod half of the same update did not run"
+        );
+        assert_eq!(player.settings_at, Some(caught_up));
+
+        // A player who deletes it has no copy, so there is nothing of theirs
+        // to keep and the server's current one arrives.
+        tokio::fs::remove_file(&mine).await.unwrap();
+        let pack = pack_now(&paths, &server, "c").await;
+        update_offline(&paths, &mut player, &pack).await.unwrap();
+        assert_eq!(
+            std::fs::read(&mine).unwrap(),
+            b"{\"renderDistance\": 12}",
+            "a player who deleted it did not get it back"
+        );
+    }
+
+    /// A player who joined before the admin chose anything has had every
+    /// config file replaced on every Play, so their copy already holds the
+    /// admin's values. They get it whole exactly once more — the update that
+    /// carries the choice — and keep their own changes from then on.
+    #[tokio::test]
+    async fn a_player_who_joined_before_the_choice_gets_the_file_whole_once_more() {
+        let (scratch, server) = small_server(
+            "catch-up",
+            &[
+                ("mods/a.jar", b"a".to_vec()),
+                ("config/c.toml", b"c = 1\n".to_vec()),
+            ],
+            true,
+        )
+        .await;
+        let paths = scratch.paths.clone();
+
+        // Joined while the share had chosen nothing, so the only thing to have
+        // caught up with is the behaviour that has been in force since before
+        // there was anything counting: zero, which is below every choice an
+        // admin will ever make.
+        let mut player = join_now(&paths, &server, "catch-up-player", &[]).await;
+        assert_eq!(player.settings_at, Some(0));
+        let mine = paths.game_dir(&player.id).join("config/c.toml");
+        tokio::fs::write(&mine, b"c = 99\n").await.unwrap();
+
+        let run = paths.server_run(&server.id);
+        tokio::fs::write(run.join("config/c.toml"), b"c = 2\n").await.unwrap();
+        choose_config(&paths, &server.id, Policy::ShipOnce).await;
+        let pack = pack_now(&paths, &server, "b").await;
+        update_offline(&paths, &mut player, &pack).await.unwrap();
+
+        assert_eq!(
+            std::fs::read(&mine).unwrap(),
+            b"c = 2\n",
+            "the update that carried the choice did not send the file whole"
+        );
+        let caught_up = player.settings_at.expect("the update recorded where it got to");
+
+        // And from then on it is theirs, with no further choice made.
+        tokio::fs::write(&mine, b"c = 99\n").await.unwrap();
+        tokio::fs::write(run.join("config/c.toml"), b"c = 3\n").await.unwrap();
+        tokio::fs::write(run.join("mods/b.jar"), b"b").await.unwrap();
+        let pack = pack_now(&paths, &server, "c").await;
+        update_offline(&paths, &mut player, &pack).await.unwrap();
+        assert_eq!(
+            std::fs::read(&mine).unwrap(),
+            b"c = 99\n",
+            "the file was sent whole twice"
+        );
+        assert_eq!(player.settings_at, Some(caught_up));
+    }
+
+    /// A read-only config file used to cost a player their game. `File::create`
+    /// on a 0444 file is EACCES, which failed the extraction, which failed the
+    /// import, which failed the update, which stopped the launch — and because
+    /// the revision was never recorded, it stopped the next launch too, for
+    /// ever. For a file the server syncs it is now one line in the report.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_config_the_player_made_read_only_does_not_stop_them_playing() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (scratch, server) = small_server(
+            "readonly",
+            &[
+                ("mods/a.jar", b"a".to_vec()),
+                ("config/c.toml", b"c = 1\n".to_vec()),
+            ],
+            true,
+        )
+        .await;
+        let paths = scratch.paths.clone();
+        // "Always replace" is what sending a config folder has always done, so
+        // this share has chosen nothing at all — which is deliberately the
+        // case under test. Every share made before any of this is in it, and
+        // every one of them has this bug today.
+        choose_config(&paths, &server.id, Policy::Enforce).await;
+        assert!(
+            crate::server::share::load(&paths, &server.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .settings
+                .paths
+                .is_empty(),
+            "the share recorded a choice, so this is not the migration case"
+        );
+        let mut player = join_now(&paths, &server, "readonly-player", &[]).await;
+
+        let mine = paths.game_dir(&player.id).join("config/c.toml");
+        std::fs::set_permissions(&mine, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let run = paths.server_run(&server.id);
+        tokio::fs::write(run.join("config/c.toml"), b"c = 2\n").await.unwrap();
+        tokio::fs::write(run.join("mods/b.jar"), b"b").await.unwrap();
+        let pack = pack_now(&paths, &server, "b").await;
+
+        let report = update_offline(&paths, &mut player, &pack).await.unwrap();
+        assert_eq!(report.not_written.len(), 1, "{report:?}");
+        assert!(
+            report.not_written[0].contains("config/c.toml"),
+            "the player is not told which file: {:?}",
+            report.not_written
+        );
+        // Not among the files to go and fetch: this one is on their disk
+        // already, as their own copy.
+        assert!(report.missing.is_empty(), "{report:?}");
+        // The rest of the update finished and the revision came back, so the
+        // instance holds what the pack held — bar the one file, which it owes.
+        assert!(report.revision.is_some(), "{report:?}");
+        assert_eq!(player.settings_owed, vec!["config/c.toml".to_string()]);
+        assert!(paths.game_dir(&player.id).join("mods/b.jar").is_file());
+        assert_eq!(std::fs::read(&mine).unwrap(), b"c = 1\n");
+
+        // Writable again, and the server's copy lands on the next update with
+        // nothing for the player to do but press Play.
+        std::fs::set_permissions(&mine, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let pack = pack_now(&paths, &server, "c").await;
+        let report = update_offline(&paths, &mut player, &pack).await.unwrap();
+        assert!(report.not_written.is_empty(), "{report:?}");
+        assert_eq!(std::fs::read(&mine).unwrap(), b"c = 2\n");
+        assert!(player.settings_owed.is_empty(), "{:?}", player.settings_owed);
+    }
+
+    /// A synced file the player's disk would not take is not a file they have.
+    /// `settings_at` says the push landed, which for that one file it did not —
+    /// and a file that is present and caught up is one `landings` never sends
+    /// again. So the paths that did not land are kept beside the number: the
+    /// player makes the file writable, presses Play as the notice tells them,
+    /// and receives it, while the files they tuned in the meantime are left
+    /// exactly as they left them.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_sent_once_config_that_could_not_be_written_is_sent_again() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (scratch, server) = small_server(
+            "owed",
+            &[
+                ("mods/a.jar", b"a".to_vec()),
+                ("config/pinned.toml", b"pinned = 1\n".to_vec()),
+                ("config/tuned.toml", b"tuned = 1\n".to_vec()),
+            ],
+            true,
+        )
+        .await;
+        let paths = scratch.paths.clone();
+
+        // Joined while the share had chosen nothing, so both files have been
+        // replaced on every Play up to now.
+        let mut player = join_now(&paths, &server, "owed-player", &[]).await;
+        let game = paths.game_dir(&player.id);
+        let (pinned, tuned) = (game.join("config/pinned.toml"), game.join("config/tuned.toml"));
+        std::fs::set_permissions(&pinned, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        let run = paths.server_run(&server.id);
+        tokio::fs::write(run.join("config/pinned.toml"), b"pinned = 2\n").await.unwrap();
+        choose_config(&paths, &server.id, Policy::ShipOnce).await;
+        let pack = pack_now(&paths, &server, "b").await;
+
+        // The update that carries the choice sends both files whole once more.
+        // One of them lands.
+        let report = update_offline(&paths, &mut player, &pack).await.unwrap();
+        assert_eq!(report.not_written.len(), 1, "{report:?}");
+        assert!(report.not_written[0].contains("config/pinned.toml"), "{report:?}");
+        assert_eq!(player.settings_owed, vec!["config/pinned.toml".to_string()]);
+        assert_eq!(std::fs::read(&pinned).unwrap(), b"pinned = 1\n");
+        assert_eq!(std::fs::read(&tuned).unwrap(), b"tuned = 1\n");
+
+        // The player does what the notice told them, and tunes the file that
+        // is theirs now. The admin changes nothing at all.
+        std::fs::set_permissions(&pinned, std::fs::Permissions::from_mode(0o644)).unwrap();
+        tokio::fs::write(&tuned, b"tuned = 99\n").await.unwrap();
+        let pack = pack_now(&paths, &server, "c").await;
+        let report = update_offline(&paths, &mut player, &pack).await.unwrap();
+
+        assert!(report.not_written.is_empty(), "{report:?}");
+        assert!(player.settings_owed.is_empty(), "{:?}", player.settings_owed);
+        assert_eq!(
+            std::fs::read(&pinned).unwrap(),
+            b"pinned = 2\n",
+            "the file the player made writable never arrived"
+        );
+        assert_eq!(
+            std::fs::read(&tuned).unwrap(),
+            b"tuned = 99\n",
+            "a file that had already landed was sent again over the player's own changes"
+        );
     }
 
     /// A new version of a server's mod usually has a new file name. The player
@@ -6610,9 +7376,10 @@ mod tests {
     /// asymmetry with everything else an update applies. A player who turns the
     /// mod back on has it turned off again by the server's next update, and the
     /// honest consequence is that playing with it means playing somewhere else.
-    /// What the test calls `update` is what a Play runs only when the server's
-    /// revision has moved, which is why the claim is about updates and not
-    /// about Plays.
+    /// What the test calls `update` is what a Play runs once it has a pack in
+    /// hand, which is why the claim is about updates and not about Plays. A
+    /// moved revision is one reason a Play fetches one; an owed settings file
+    /// is the other, and the test below is that one.
     #[tokio::test]
     async fn a_mod_turned_back_on_is_turned_off_again_on_the_next_update() {
         let (scratch, mut player, pack) = one_mod_the_server_forbids("ban-again").await;
@@ -6642,6 +7409,91 @@ mod tests {
         // once is not left wondering whether it still applies.
         let steady = update_offline(&paths, &mut player, &pack).await.unwrap();
         assert_eq!(steady.banned, first.banned);
+    }
+
+    /// The Play that re-applies the rule without the server having changed a
+    /// thing, which is why the claim above is about a pack arriving rather than
+    /// about a revision moving.
+    ///
+    /// A settings file this instance could not write is left owed, and an owed
+    /// path on its own makes the next Play fetch the server's pack —
+    /// `commands::fetch_due`, where `update_due` alone would not. The pack that
+    /// comes back is the revision the instance already holds, and it still runs
+    /// a whole update through here, so a mod the player turned back on goes off
+    /// again on that Play.
+    ///
+    /// Pinned because the two halves were built apart and met in a merge: bans
+    /// were written when a pack only ever arrived on a revision that had moved,
+    /// and the settings retry gave a pack a second reason to arrive.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_pack_fetched_only_to_retry_a_settings_file_applies_the_bans_again() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (scratch, server) = small_server(
+            "ban-owed",
+            &[
+                ("mods/homemade.jar", b"homemade".to_vec()),
+                ("config/c.toml", b"c = 1\n".to_vec()),
+            ],
+            true,
+        )
+        .await;
+        let paths = scratch.paths.clone();
+        let mut player = join_now(&paths, &server, "ban-owed-player", &[]).await;
+        let mods = paths.game_dir(&player.id).join("mods");
+
+        tokio::fs::write(mods.join("minimap.jar"), b"their minimap")
+            .await
+            .unwrap();
+        player.content.push(ContentRecord {
+            project_id: "XRAY".into(),
+            name: "X-ray Minimap".into(),
+            ..record("modrinth", "minimap.jar", ContentKind::Mod)
+        });
+        forbid(
+            &paths,
+            &server,
+            &[by_project("XRAY", "no x-ray on this server")],
+        )
+        .await;
+
+        // Their own copy of a file this server replaces, which their disk will
+        // not now take — so the path is owed, which is the whole premise.
+        let mine = paths.game_dir(&player.id).join("config/c.toml");
+        std::fs::set_permissions(&mine, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        let pack = pack_now(&paths, &server, "ban-owed-pack").await;
+        let first = update_offline(&paths, &mut player, &pack).await.unwrap();
+        assert_eq!(first.banned.len(), 1, "{first:?}");
+        assert_eq!(
+            player.settings_owed,
+            vec!["config/c.toml".to_string()],
+            "nothing is owed, so this is not the case under test: {first:?}"
+        );
+
+        crate::instance::content::set_enabled_in(&mods, "minimap.jar.disabled", true)
+            .await
+            .unwrap();
+        assert!(mods.join("minimap.jar").is_file());
+
+        // The very same pack, so the revision has not moved: this is the run a
+        // Play makes for the owed path and for nothing else.
+        let again = update_offline(&paths, &mut player, &pack).await.unwrap();
+        assert_eq!(
+            again.revision, first.revision,
+            "the pack moved under the test, so this proves nothing"
+        );
+        assert_eq!(again.banned, first.banned, "the rule stopped applying");
+        assert!(
+            !mods.join("minimap.jar").exists() && mods.join("minimap.jar.disabled").is_file(),
+            "a mod turned back on stayed on through a settings retry"
+        );
+        assert_eq!(
+            player.settings_owed,
+            vec!["config/c.toml".to_string()],
+            "the file stopped being owed while it still had not landed"
+        );
     }
 
     /// Nothing about a ban may ever reach a delete. The file keeps its bytes,
@@ -7573,6 +8425,7 @@ mod tests {
             files: Vec::new(),
             revision: None,
             listing: None,
+            settings: None,
             forbidden: Vec::new(),
         };
         let archive = dir.join("theirs.geodepack");
@@ -7637,6 +8490,7 @@ mod tests {
             files: Vec::new(),
             revision: None,
             listing: None,
+            settings: None,
             forbidden: Vec::new(),
         };
 

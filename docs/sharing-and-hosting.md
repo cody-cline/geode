@@ -301,9 +301,10 @@ connects straight to the admin's machine. Nothing sits in the middle.
   unchanged, so links already sent keep working. Geode generates it the first
   time a server is shared, and it stays the same through Stop sharing, sharing
   again and restarts: stopping renames `share.json` to `share.stopped.json`,
-  keeping the password and whether `config/` is sent, so sharing again brings
-  the links already sent back to life, and sends `config/` again if it was sent
-  before — the stopped Share tab says so. Stopping renames the file rather than
+  keeping the password, whether `config/` is sent and what the admin chose
+  happens to a player's own changes to it, so sharing again brings the links
+  already sent back to life, and sends `config/` again, the same way, if it was
+  sent before — the stopped Share tab says so. Stopping renames the file rather than
   marking it stopped because a Geode from before this reads every `share.json`
   as shared, and one opened after a stop would share the server again at
   startup, router and `config/` included, without telling anyone. Only New
@@ -347,11 +348,106 @@ connects straight to the admin's machine. Nothing sits in the middle.
   everything it brings is the server's (item 6). It installs only a server's
   pack, and only the one the player approved: a pack describing a different
   Minecraft version or loader from the preview is refused before an instance
-  exists, and a server pack cannot set the player's memory or Java arguments.
-  A server's pack may only name Modrinth, over HTTPS, as where to download a
-  mod: that is all a server writes, and a download from anywhere would let a
-  pack make the player's Geode request any address, their own router
-  included.
+  exists, and a server pack cannot set a **launcher setting** — not the
+  player's memory, Java arguments, window size or fullscreen. Geode writes
+  none of the five into a server's pack, so one that carries them was written
+  by something else; a hand-written pack could set the last three until this
+  guard covered them, and none of the five is named in the preview the player
+  agreed to. A person's pack still carries all five, which is what the kind on
+  the manifest is for. A server's pack may only name Modrinth, over HTTPS, as
+  where to download a mod: that is all a server writes, and a download from
+  anywhere would let a pack make the player's Geode request any address, their
+  own router included.
+- The description also says **how many settings files** are coming — the
+  regular files under `config/`, zero when the admin is not sending the folder
+  — and whether they are the player's to keep once they have them. The join
+  dialog shows the count beside the mod count, with a note saying both that
+  they are the player's to change afterwards and what the server does with
+  them on the next update. Config was the one thing in the whole flow that
+  arrived, and kept arriving, with nobody ever told: the preview named the
+  mods and the server list and said nothing about the folder that decides what
+  every one of those mods does. The count comes off the same walk the revision
+  hashes (`pack::config_files`), because two walks would be two answers and
+  the one a player is shown has to be the one the pack carries. A server on a
+  Geode older than this sends no count, which reads as zero, so the note stays
+  quiet rather than promising a number nobody sent.
+  `configKept` is a bool rather than the behaviour's name on purpose: it is the
+  only thing a player asks about those files, and a name invented by a newer
+  Geode would make the whole description fail to parse — which would leave a
+  player unable to check their server for changes at all. It is true of every
+  behaviour that is not Always replace, so the sentence it picks has to be true
+  of all of them: today "sent once, and nothing the admin changes later
+  replaces them", which is what both of them do. A behaviour that pushed
+  individual settings afterwards could not be described by a bool at all, and
+  would need the description to carry which one it is.
+- The admin chooses **what happens to a player's own changes** to the files in
+  that folder, on the Share tab beside the switch that decides whether the
+  folder travels:
+  **Send once** (`ship-once`) sends each file when the player has no copy and
+  never touches it again, so nothing the admin changes later reaches them; and
+  **Always replace** (`enforce`), which is what sending a config folder has
+  always done, puts the server's copy over the player's every time they press
+  Play. A third behaviour, `merge`, is named on the wire and **not offered**:
+  it would send the file whole the first time and afterwards only the settings
+  the admin changed, and nothing splices a setting into a player's file yet —
+  `pack::landings` handles it in the same arm as `ship-once`, and
+  `whenPlayersGetChanges` describes it as what it does. Offering it would tell
+  an admin their later edits travel when no code makes them.
+  Turning the folder off leaves the choice where it is, and turning it on sends
+  **no choice at all**: the behaviour already in force answers, which for a
+  share that has chosen nothing is Always replace. The switch has nothing to
+  send back anyway — a folder nobody is sent reports no behaviour — and a guess
+  in its place would date a new choice, move the revision, and hand every
+  player a pack that writes their settings files whole over work the screen had
+  told them was safe. `ServerShare::send_config` is that rule, so the command
+  cannot invent one.
+  The behaviours live in `ServerShare.settings` as `{ path, policy, from }`
+  (`share::manifest::Settings`), one entry per path, with the longest entry
+  covering a file deciding it — one matcher (`Settings::covering`), because the
+  import and the revision both ask and must never disagree. **A share that has
+  chosen nothing means Always replace**, which is the migration rule and the
+  reason nothing changes for any existing share: `Settings::policy_for` is that
+  rule in one place, picking the behaviour already in force writes nothing, and
+  so no existing server's revision moves and no player downloads anything.
+  Every choice carries the push it was made at (`from`) against a monotonic
+  counter in the same file, and a player below it gets the file whole once
+  however the behaviour reads — so a switch from one to another loses nothing
+  the admin had already changed. The client side is one integer and a list,
+  `Instance.settings_at` and `Instance.settings_owed`: a synced file is written
+  whole while the integer is below that path's `from`, or the player has no
+  copy, or the path is one a run before this could not write — because the
+  number says the push landed, and for that file it did not. Both must be
+  copied in `commands::save_update`, which deliberately copies only what an
+  update decides, or every file would be written whole again on the next Play,
+  or a file that never landed would never be tried again.
+- A pack states the behaviour of **everything it sends**, the choice nobody
+  made included (`Settings::spelling_out`), so the Geode reading it has one
+  rule for every file rather than a rule and an exception. That is also what
+  tells a settings file apart from every other file in the pack, and so what
+  makes **a settings file that cannot be written one line in the player's
+  report instead of a launch they cannot have**. A read-only or immutable
+  config used to cost a player their game outright: `File::create` on a 0444
+  file is EACCES, which failed the extraction, which failed the import, which
+  failed the update, which `bring_up_to_date` turned into a hard launch
+  failure — and because the revision was never recorded, it did it again on
+  the next Play, and every Play after. Now the file is skipped, named in a
+  notice with what to do about it, and the rest of the update finishes and
+  records its revision. The notice ends by telling the player to make the file
+  writable and press Play, and that is kept rather than asserted: the path is
+  left owed on the instance, which is what `commands::fetch_due` makes the next
+  Play fetch a pack for even though the revision is the one it holds, and what
+  `pack::landings` offers again whatever behaviour was chosen for it. Without
+  the list the file would be skipped for good — present, caught up, and never
+  sent again. The departure from the rule that a due update must finish is
+  deliberate: a mod the player is short of stops them joining, and a settings
+  file they kept their own copy of usually does not. A pack with no settings
+  half — every `.mrpack`, every personal `.geodepack` — still fails hard, as it
+  always has.
+  Not bumping `geodeFormat` for the settings half is the same judgement as the
+  listing's: a reader that ignores it writes every settings file whole on every
+  update, which is exactly what every reader did before the field existed. A
+  miss, not a misread. The admin should hear once that a player on an older
+  Geode gets the whole file rather than only the settings that changed.
 - A server's description carries a **revision**, which changes exactly when
   what a player receives changes, and `serverId`, the server's id on the
   admin's machine, so a player's Geode can tell the same server apart under a
@@ -361,8 +457,19 @@ connects straight to the admin's machine. Nothing sits in the middle.
   pack carries: its path on disk, `.disabled` included, the side it is sent
   with, and what it is. A mod whose record names a provider, project and
   version is those and its size; any other is the SHA-1 of its bytes. When
-  `config/` is sent, each regular file under it adds its path and SHA-1, found
-  the way the pack's walk finds them, through no link. Left out on purpose: the
+  `config/` is sent, each behaviour the admin chose adds a `settings <path>
+  <policy> <from>` line — it lives in `share.json`, which nothing in that walk
+  reads, so without the line the admin would change what everyone gets and
+  nobody would be told — and each regular file the server **replaces** adds its
+  path and SHA-1, found the way the pack's walk finds them, through no link. A
+  file the player keeps their own copy of adds its path and the word `sent`,
+  with no hash: its bytes are not what a player receives, so hashing them would
+  send everybody a pack over an edit none of them gets, which is what a mod
+  rewriting its own config on boot would do on every restart. Named all the
+  same, because a player who has no copy of it **is** sent one, and this line
+  is the only thing that tells their Geode to come and look — leave it out and
+  a new settings file reaches nobody until the admin happens to change a mod.
+  Left out on purpose: the
   server's name, notes and artwork, which an update does not apply to a
   player's instance; its worlds, logs and properties, which never travel; and
   every modification time, so a restart that writes the same configs again
@@ -873,16 +980,23 @@ Three things about it are load-bearing, and the third is the most important.
 turns the mod back on has it turned off again by the server's next update,
 because a standing rule is not a one-time change — and the honest consequence,
 which the notice says, is that playing with that mod means playing somewhere
-else. The next *update*, not the next Play: `bring_up_to_date` returns before
-it downloads anything while `update_due` is false, so a server whose revision
-has not moved re-applies nothing, and a player who turns the mod back on keeps
-it for as long as the admin changes nothing else. That is the limit of the one
-thing in sharing that enforces, and it is why `forbiddenRuleHint` and
-`forbiddenPlayerHint` both say "every time this server's pack updates" rather
-than anything about a Play. It is the one asymmetry in the update, and it is
-deliberate. Nothing is written onto the instance, which is what keeps the rule
-to the joined instance and to the time it is joined: a duplicate of a joined
-instance is not a join, never updates, and inherits no rule.
+else. The next *update*, not every Play: `bring_up_to_date` returns before it
+downloads anything while `commands::fetch_due` is false, and what reaches
+`enforce_the_servers_bans` is a pack, so a Play that fetches none re-applies
+nothing. `fetch_due` is two reasons, not one — a revision the instance does not
+hold, **or** a settings file an earlier run could not write and still owes — so
+a player who owes one has the rule re-applied on their very next Play with the
+revision exactly where it was — pinned by
+`a_pack_fetched_only_to_retry_a_settings_file_applies_the_bans_again`. Short of
+that, a player who turns the mod back on keeps it for as long as the admin
+changes nothing else. That is the limit of the one thing in sharing that
+enforces, and it is why `forbiddenRuleHint` and `forbiddenPlayerHint` both say
+"every time this server's pack updates" rather than anything about a Play —
+which stays true either way, because a retry is an update too. It is the one
+asymmetry in the update, and it is deliberate. Nothing is written onto the
+instance, which is what keeps the rule to the joined instance and to the time
+it is joined: a duplicate of a joined instance is not a join, never updates,
+and inherits no rule.
 
 A weaker shape was designed and not built: ship the list, disable nothing, and
 tell the player "the server asks you not to use X" with a Turn off button. It

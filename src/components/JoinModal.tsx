@@ -12,6 +12,8 @@ import {
   joinStep,
   listingLine,
   outcomeLine,
+  settingsFact,
+  settingsLine,
   verificationLine,
 } from "../lib/share";
 import type { JoinForm, JoinRequest } from "../lib/share";
@@ -195,6 +197,8 @@ export default function JoinModal({
   const loader = info ? softwareName(info.loader) : "";
   /** What importing will add to the player's multiplayer list, if anything. */
   const willList = info ? listingLine(info) : null;
+  /** What the server's settings files will do to the player's, if it sends any. */
+  const willReplace = info ? settingsLine(info) : null;
 
   if (step === "done") {
     return (
@@ -406,6 +410,10 @@ export default function JoinModal({
               </dd>
               <dt>Mods</dt>
               <dd>{info.mods === 0 ? "None" : info.mods}</dd>
+              {/* Beside Mods because it is the other thing the import writes
+                  into the instance, and the one nothing here used to name. */}
+              <dt>Settings</dt>
+              <dd>{settingsFact(info)}</dd>
               <dt>Server</dt>
               <dd>{softwareName(info.serverKind)}</dd>
               {/* Two addresses, named apart. The pack comes from the first;
@@ -443,8 +451,12 @@ export default function JoinModal({
 
           <StatusNote line={verificationLine(preview.verified, typed)} />
 
-          {/* Said before Import rather than after: it is the one thing an
-              import writes outside the instance's own folders. */}
+          {/* Both said before Import rather than after: the multiplayer list
+              is the one thing an import writes outside the instance's own
+              folders, and the settings files are the admin's copies landing on
+              top of the player's. */}
+          {willReplace && <StatusNote line={willReplace} />}
+
           {willList && <StatusNote line={willList} />}
 
           {preview.existing && <StatusNote line={existingLine(preview.existing)} />}

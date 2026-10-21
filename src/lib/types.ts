@@ -103,6 +103,18 @@ export interface Instance {
   /** The joined server's id on the admin's machine, kept apart from its password. */
   joinedServerId?: string | null;
   /**
+   * How far this instance has caught up with the server's settings pushes. A
+   * synced file is written whole while this is below the push its behaviour
+   * was chosen at, and is the player's from then on.
+   */
+  settingsAt?: number | null;
+  /**
+   * Synced settings files the server sent that could not be written, by path.
+   * Offered again on the next Play whatever behaviour was chosen for them, and
+   * what makes an update due at all while one is outstanding.
+   */
+  settingsOwed?: string[];
+  /**
    * The game address this instance's row in servers.dat was last written at,
    * which is how a rename or a move edits that row rather than adding another.
    */
@@ -726,6 +738,13 @@ export interface ServerShareView {
   /** The second link, carrying this computer's own address, for players on the same network. Beside `link`, never instead of it. */
   localLink: string | null;
   includeConfig: boolean;
+  /**
+   * What happens to a player's own changes to the files in the config folder —
+   * `null` while the folder is not sent at all. A share that has chosen
+   * nothing reads as `"enforce"`, because replacing every file on every update
+   * is what sending a config folder has always done.
+   */
+  configPolicy: ConfigPolicy | null;
   /** False while sharing is stopped; the password is kept. */
   shared: boolean;
   /** Why this server cannot be shared, when it cannot (a proxy, an unsupported loader). */
@@ -741,6 +760,16 @@ export interface ServerShareView {
   forbidden: Forbidden[];
 }
 
+/**
+ * What happens to a player's own changes to a settings file the server sends.
+ *
+ * - `ship-once` — sent when the player has no copy, and never touched again.
+ * - `merge` — sent whole the first time, and afterwards only the settings the
+ *   admin changes, spliced into whatever the player has made of the file.
+ * - `enforce` — the server's copy replaces the player's on every update.
+ */
+export type ConfigPolicy = "ship-once" | "merge" | "enforce";
+
 /** What a server says it is sharing, shown before a player imports. */
 export interface PackInfo {
   name: string;
@@ -751,6 +780,17 @@ export interface PackInfo {
   /** Of `mods`, how many only the server needs. */
   serverMods: number;
   serverKind: string;
+  /**
+   * Settings files the server sends from its own config folder, which land in
+   * the instance on import and replace whatever is there again on every
+   * update. 0 from a server that sends none, and from an older Geode.
+   */
+  configFiles: number;
+  /**
+   * Whether those files are the player's to keep once they have them. False
+   * from a server that replaces them on every update, and from an older Geode.
+   */
+  configKept: boolean;
   /** Changes exactly when what a player receives changes; empty from an older Geode. */
   revision: string;
   /** The server's id on the admin's machine; empty from an older Geode. */

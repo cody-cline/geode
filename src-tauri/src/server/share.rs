@@ -34,6 +34,20 @@ pub struct ServerShare {
     /// secrets as readily as they hold anything a player needs.
     #[serde(default)]
     pub include_config: bool,
+    /// What happens to a player's own changes to the files this server sends,
+    /// per path, and the push counter that dates every change to that.
+    ///
+    /// Empty — which is every share from before this, and every one whose
+    /// admin has chosen nothing — means every file it sends is replaced on the
+    /// player's every Play, which is what sending a config folder has always
+    /// done. [`crate::share::manifest::Settings::policy_for`] is that rule.
+    ///
+    /// Here rather than in `server.json` for the reason the password is: the
+    /// counter must never go backwards, and nothing but sharing writes this
+    /// file. A backup covers `run/` alone, so it cannot sweep this up and hand
+    /// an older count back.
+    #[serde(default)]
+    pub settings: crate::share::manifest::Settings,
     /// How this server should appear in its players' multiplayer list: the
     /// name they see, and the address the *game* connects to. `None` until the
     /// admin sets it, and then no row is written for anybody.
@@ -69,6 +83,26 @@ pub struct ServerShare {
 
 fn shared_by_default() -> bool {
     true
+}
+
+impl ServerShare {
+    /// Send this server's `config/` folder or stop sending it, and choose what
+    /// happens to a player's own changes to it when the caller says so.
+    ///
+    /// `policy` is `None` for "leave the choice where it is", which is what
+    /// the switch on the Share tab sends: turning the folder off and on again
+    /// is the behaviour the admin already picked, not a fresh guess at one.
+    /// The switch has no choice to send back anyway — a folder nobody is sent
+    /// reports none — and a guess would be
+    /// [`Settings::choose`](crate::share::manifest::Settings::choose) with a
+    /// behaviour the admin never asked for, which moves the push counter and
+    /// so sends every player a pack that writes their settings files whole.
+    pub fn send_config(&mut self, include: bool, policy: Option<crate::share::manifest::Policy>) {
+        self.include_config = include;
+        if let Some(policy) = policy {
+            self.settings.choose("config", policy);
+        }
+    }
 }
 
 /// What to put in the admin's two fields before they have said anything.
@@ -242,6 +276,7 @@ pub async fn start(paths: &Paths, id: &str) -> Result<ServerShare> {
             let share = ServerShare {
                 code: crate::share::code::Code::generate(),
                 include_config: false,
+                settings: Default::default(),
                 listing: None,
                 forbidden: Vec::new(),
                 shared: true,
@@ -412,6 +447,7 @@ mod tests {
         let share = ServerShare {
             code: Code::generate(),
             include_config: true,
+            settings: Default::default(),
             listing: None,
             shared: true,
             forbidden: Vec::new(),
@@ -444,6 +480,88 @@ mod tests {
         // Stopping twice is not an error, and changes nothing.
         stop(&paths, "survival").await.unwrap();
         assert_eq!(load(&paths, "survival").await.unwrap(), Some(stopped));
+    }
+
+    /// What the admin chose happens to a player's own changes is kept like the
+    /// password is: through saving, through stopping, and through sharing
+    /// again. Sharing again the way it was shared before is the whole reason
+    /// stopping renames the file instead of deleting it, and the choice is now
+    /// part of "the way it was".
+    #[tokio::test]
+    async fn a_stopped_share_keeps_what_the_admin_chose_for_its_config() {
+        use crate::share::manifest::Policy;
+
+        let scratch = scratch("settings");
+        let paths = scratch.paths.clone();
+        std::fs::create_dir_all(paths.server("survival")).unwrap();
+
+        let mut share = ServerShare {
+            code: Code::generate(),
+            include_config: true,
+            settings: Default::default(),
+            listing: None,
+            forbidden: Vec::new(),
+            shared: true,
+        };
+        share.settings.choose("config", Policy::ShipOnce);
+        save(&paths, "survival", &share).await.unwrap();
+        assert_eq!(load(&paths, "survival").await.unwrap(), Some(share.clone()));
+
+        stop(&paths, "survival").await.unwrap();
+        let back = start(&paths, "survival").await.unwrap();
+        assert_eq!(back, share, "sharing again lost the choice");
+        assert_eq!(back.settings.paths[0].policy, Policy::ShipOnce);
+        assert_eq!(back.settings.at, 1, "the push counter went backwards");
+    }
+
+    /// The switch that sends the config folder must not be able to replace the
+    /// behaviour the admin chose for it. Turning the folder off and on again is
+    /// the choice they already made: a guess sent back in its place dates a new
+    /// choice, which moves the revision, which hands every player a pack that
+    /// writes their own settings files whole — and the Share tab has nothing to
+    /// send back anyway, since a folder nobody is sent reports no behaviour.
+    #[test]
+    fn turning_the_config_folder_off_and_on_again_keeps_the_choice() {
+        use crate::share::manifest::Policy;
+
+        let mut share = ServerShare {
+            code: Code::generate(),
+            include_config: false,
+            settings: Default::default(),
+            listing: None,
+            forbidden: Vec::new(),
+            shared: true,
+        };
+
+        // Opting in says nothing about behaviour, so what answers is the one
+        // already in force — which for a share that has chosen nothing is what
+        // sending a config folder has always done.
+        share.send_config(true, None);
+        assert!(share.include_config);
+        assert_eq!(share.settings, Default::default(), "the switch chose for the admin");
+        assert_eq!(
+            share.settings.policy_for(std::path::Path::new("config")),
+            Policy::Enforce
+        );
+
+        share.send_config(true, Some(Policy::ShipOnce));
+        let chosen = share.settings.clone();
+        assert_eq!(chosen.at, 1);
+
+        share.send_config(false, None);
+        assert!(!share.include_config);
+        assert_eq!(share.settings, chosen, "turning the folder off forgot the choice");
+
+        share.send_config(true, None);
+        assert!(share.include_config);
+        assert_eq!(
+            share.settings, chosen,
+            "turning the folder back on was a different behaviour from the one chosen"
+        );
+        assert_eq!(
+            share.settings.at, 1,
+            "the push counter moved, so every player is sent their settings files again"
+        );
     }
 
     /// The password is the server's, not one sharing's. Links already sent
@@ -554,6 +672,7 @@ mod tests {
         let leaked = ServerShare {
             code: Code::generate(),
             include_config: true,
+            settings: Default::default(),
             listing: None,
             shared: true,
             forbidden: Vec::new(),
@@ -565,6 +684,7 @@ mod tests {
         let replaced = ServerShare {
             code: Code::generate(),
             include_config: false,
+            settings: Default::default(),
             listing: None,
             shared: true,
             forbidden: Vec::new(),
@@ -678,6 +798,7 @@ mod tests {
         let share = ServerShare {
             code: Code::generate(),
             include_config: false,
+            settings: Default::default(),
             listing: None,
             shared: true,
             forbidden: Vec::new(),
@@ -701,6 +822,7 @@ mod tests {
         let b = ServerShare {
             code: Code::generate(),
             include_config: false,
+            settings: Default::default(),
             listing: None,
             shared: true,
             forbidden: Vec::new(),
@@ -708,6 +830,7 @@ mod tests {
         let a = ServerShare {
             code: Code::generate(),
             include_config: true,
+            settings: Default::default(),
             listing: None,
             shared: true,
             forbidden: Vec::new(),

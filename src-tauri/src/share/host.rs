@@ -272,6 +272,30 @@ pub struct PackInfo {
     pub server_mods: usize,
     /// The server software, for display: `paper`, `neoforge`, …
     pub server_kind: String,
+    /// Settings files the server sends from its own `config/` folder: the
+    /// admin's mod settings, which land in the player's instance on import and
+    /// replace whatever is there again on every update.
+    ///
+    /// Said before a player imports because nothing else in the preview says
+    /// it. Mods and the server list are both named, and config was the one
+    /// thing that arrived — and kept arriving — with nobody ever told. Zero
+    /// from a server that does not send config, and from a Geode older than
+    /// this.
+    #[serde(default)]
+    pub config_files: usize,
+    /// Whether those files are the player's to keep once they have them.
+    ///
+    /// The one thing a player asks about them, and the server answers it
+    /// rather than naming the behaviour it chose: a bool cannot fail to read
+    /// the way a policy name invented by a newer Geode would, and a
+    /// description that will not parse leaves a player unable to check their
+    /// server for changes at all.
+    ///
+    /// False from a server that replaces them on every update — which is what
+    /// sending a config folder has always done, and what a Geode older than
+    /// this reads as.
+    #[serde(default)]
+    pub config_kept: bool,
     /// Changes exactly when what a player receives changes, so a joined
     /// instance can tell whether it is behind. Empty from a Geode older than
     /// this.
@@ -1306,6 +1330,7 @@ pub(super) mod tests {
             &ServerShare {
                 code: code.clone(),
                 include_config: false,
+                settings: Default::default(),
                 listing: None,
                 shared: true,
                 forbidden: Vec::new(),
@@ -1587,6 +1612,7 @@ pub(super) mod tests {
         ServerShare {
             code: code.clone(),
             include_config: false,
+            settings: Default::default(),
             listing: None,
             shared: true,
             forbidden: Vec::new(),
@@ -2230,6 +2256,8 @@ pub(super) mod tests {
             mods: 300,
             server_mods: 0,
             server_kind: "fabric".into(),
+            config_files: 0,
+            config_kept: false,
             revision: "r".into(),
             server_id: "survival".into(),
             listing: None,
@@ -2704,6 +2732,7 @@ pub(super) mod tests {
         let replaced = ServerShare {
             code: Code::generate(),
             include_config: false,
+            settings: Default::default(),
             listing: None,
             shared: true,
             forbidden: Vec::new(),

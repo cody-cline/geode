@@ -672,7 +672,32 @@ pub async fn index_mods(archive: PathBuf) -> Result<PackMods> {
     .map_err(|e| Error::msg(format!("reading pack panicked: {e}")))?
 }
 
-/// Install a pack into an existing (already created) instance directory.
+/// What an import did that its caller has to pass on.
+#[derive(Debug, Default)]
+pub struct Imported {
+    /// Files the pack named and this did not install, each line naming the
+    /// file and what the user has to do with it — see [`import_into`].
+    pub left_out: Vec<String>,
+    /// Files the pack carried and this left as the user already had them,
+    /// because they could not be written. Only ever the paths a pack syncs; a
+    /// write that fails anywhere else fails the import.
+    pub not_written: Vec<NotWritten>,
+}
+
+/// One file the pack carried that the user keeps their own copy of, because
+/// this could not write over it.
+#[derive(Debug, Clone)]
+pub struct NotWritten {
+    /// Where it sits inside the game directory, as the pack named it. The
+    /// caller remembers these so the file is offered again rather than taken
+    /// as landed — see `share::pack::update`.
+    pub path: String,
+    /// What to tell the user: the file, and why it could not be written.
+    pub why: String,
+}
+
+/// Install a pack into an existing (already created) instance directory, with
+/// every override file written whole.
 ///
 /// Returns what the pack named and this did not install, each line naming the
 /// file and what the user has to do with it. That is a list and not an error
@@ -696,12 +721,21 @@ pub async fn import_into(
         instance,
         archive,
         curseforge_key,
+        &Overrides::replace(),
         progress,
     )
     .await
+    .map(|imported| imported.left_out)
 }
 
-/// The same, with both API bases injectable.
+/// The same, with the override files decided per path and both API bases
+/// injectable.
+///
+/// `overrides` is how a server's pack keeps a player's own settings: it is
+/// asked about every file in the pack's override trees, and `share::pack` is
+/// the only place that knows what to answer. Everything else passes
+/// [`Overrides::replace`], which is the behaviour this had before there was
+/// anything to decide.
 ///
 /// Injectable for the reason `curseforge::check_key_at` and
 /// `curseforge::match_fingerprints_at` are: what a CurseForge import does is
@@ -723,8 +757,9 @@ pub async fn import_into_at(
     instance: &mut Instance,
     archive: &Path,
     curseforge_key: Option<&str>,
+    overrides: &Overrides,
     progress: &Progress,
-) -> Result<Vec<String>> {
+) -> Result<Imported> {
     let game_dir = paths.game_dir(&instance.id);
     let archive_owned = archive.to_path_buf();
 
@@ -742,6 +777,10 @@ pub async fn import_into_at(
     // them, so none is left to a progress line nobody reads. Nothing a
     // `.mrpack` holds reaches this: its index names its own URLs.
     let mut left_out: Vec<String> = Vec::new();
+    // Files the pack carried that the user keeps their own copy of because
+    // this could not write over it. Reported beside `left_out` rather than in
+    // it: one is a file to go and fetch, the other is a file already on disk.
+    let mut not_written: Vec<NotWritten> = Vec::new();
 
     match pack {
         PackKind::Modrinth(index) => {
@@ -752,13 +791,16 @@ pub async fn import_into_at(
             // mods the index names, by project id, and never opens the
             // archive. Extracting it into a client instance would overwrite
             // the client's own config with a server's.
-            extract_trees(
-                &archive_owned,
-                &game_dir,
-                &[("overrides", ""), ("client-overrides", "")],
-                progress,
-            )
-            .await?;
+            not_written.extend(
+                extract_trees(
+                    &archive_owned,
+                    &game_dir,
+                    &[("overrides", ""), ("client-overrides", "")],
+                    overrides,
+                    progress,
+                )
+                .await?,
+            );
             progress.advance(1, "overrides").await;
 
             let mut downloads: Vec<Download> = Vec::new();
@@ -818,13 +860,16 @@ pub async fn import_into_at(
             })?;
 
             progress.stage("Extracting overrides", 1).await;
-            extract_trees(
-                &archive_owned,
-                &game_dir,
-                &[(manifest.overrides.as_str(), "")],
-                progress,
-            )
-            .await?;
+            not_written.extend(
+                extract_trees(
+                    &archive_owned,
+                    &game_dir,
+                    &[(manifest.overrides.as_str(), "")],
+                    overrides,
+                    progress,
+                )
+                .await?,
+            );
             progress.advance(1, "overrides").await;
 
             progress
@@ -1147,13 +1192,16 @@ pub async fn import_into_at(
                 .await?;
             } else {
                 progress.stage("Copying the instance", 1).await;
-                extract_trees(
-                    &archive_owned,
-                    &game_dir,
-                    &[(prism_instance.game_root().as_str(), "")],
-                    progress,
-                )
-                .await?;
+                not_written.extend(
+                    extract_trees(
+                        &archive_owned,
+                        &game_dir,
+                        &[(prism_instance.game_root().as_str(), "")],
+                        overrides,
+                        progress,
+                    )
+                    .await?,
+                );
                 progress.advance(1, &prism_instance.game_dir).await;
             }
 
@@ -1173,7 +1221,10 @@ pub async fn import_into_at(
         }
     }
 
-    Ok(left_out)
+    Ok(Imported {
+        left_out,
+        not_written,
+    })
 }
 
 /// How many bytes a pack's overrides may unpack to, all together.
@@ -1200,6 +1251,54 @@ fn overrides_budget(archive_bytes: u64) -> u64 {
     archive_bytes.saturating_mul(RATIO).clamp(FLOOR, CEILING)
 }
 
+/// How one file out of a pack's override trees lands in the instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Landing {
+    /// The pack's copy goes over whatever is there, and a write that fails
+    /// fails the import. Every file in a `.mrpack` lands this way, and so does
+    /// every file a pack says nothing about.
+    Replace,
+    /// The pack's copy goes over whatever is there, but a write that fails is
+    /// reported and the import carries on. For the paths a server syncs: a
+    /// settings file the player has made read-only should cost them a line in
+    /// a report, not the game — it used to fail the import, which failed the
+    /// update, which stopped the launch, on that Play and on every one after.
+    Offer,
+    /// The player's own copy stays where it is, and the pack's is not read.
+    Keep,
+}
+
+/// What decides how each of a pack's override files lands.
+///
+/// [`Overrides::replace`] answers [`Landing::Replace`] for everything, which
+/// is what importing a pack has always done and what every pack but a server's
+/// still gets. A server's pack is extracted through one built in `share::pack`,
+/// the only place that knows what the policies in a pack's settings half mean:
+/// nothing here understands a policy, it only asks.
+#[derive(Clone)]
+pub struct Overrides(std::sync::Arc<Decide>);
+
+/// Asked about one file: its path relative to the game directory, and whether
+/// the user already has a file there.
+type Decide = dyn Fn(&Path, bool) -> Landing + Send + Sync;
+
+impl Overrides {
+    /// Every file written whole, and a write that fails fails the import.
+    pub fn replace() -> Self {
+        Self(std::sync::Arc::new(|_, _| Landing::Replace))
+    }
+
+    /// Decided per file, from its path relative to the game directory and
+    /// whether the player already has a file there.
+    pub fn decided(by: impl Fn(&Path, bool) -> Landing + Send + Sync + 'static) -> Self {
+        Self(std::sync::Arc::new(by))
+    }
+
+    fn landing(&self, rel: &Path, present: bool) -> Landing {
+        (self.0)(rel, present)
+    }
+}
+
 /// Copy chosen trees out of an archive into a directory. Later trees win, so
 /// `client-overrides` correctly shadows `overrides`.
 ///
@@ -1212,6 +1311,11 @@ fn overrides_budget(archive_bytes: u64) -> u64 {
 /// A prefix of `""` is the archive's own root, which is how a world zip whose
 /// `level.dat` sits at the top is unpacked: every entry in it is the tree.
 ///
+/// Returns the files it left as the player had them because they could not be
+/// written, each line naming the file and why — only ever the paths the
+/// `overrides` answers [`Landing::Offer`] for, which for every pack but a
+/// server's is none of them.
+///
 /// Stops at the next entry when the run is cancelled. If it does not finish —
 /// cancelled, or refused for unpacking past its budget — it unlinks the files
 /// it brought into being and only those, so a file the player already had
@@ -1220,17 +1324,19 @@ async fn extract_trees(
     archive: &Path,
     dest_dir: &Path,
     trees: &[(&str, &str)],
+    overrides: &Overrides,
     progress: &Progress,
-) -> Result<()> {
+) -> Result<Vec<NotWritten>> {
     let archive = archive.to_path_buf();
     let dest_dir = dest_dir.to_path_buf();
     let trees: Vec<(String, PathBuf)> = trees
         .iter()
         .map(|(prefix, under)| (prefix.to_string(), PathBuf::from(under)))
         .collect();
+    let overrides = overrides.clone();
     let progress = progress.clone();
 
-    tokio::task::spawn_blocking(move || -> Result<()> {
+    tokio::task::spawn_blocking(move || -> Result<Vec<NotWritten>> {
         let archive_bytes = std::fs::metadata(&archive)?.len();
         let budget = overrides_budget(archive_bytes);
         let mut unpacked: u64 = 0;
@@ -1240,8 +1346,11 @@ async fn extract_trees(
         // the pack's copy is the one that was asked for, and an update extracts
         // over a game directory full of the player's own files.
         let mut created: Vec<PathBuf> = Vec::new();
+        // Left as the player had them, rather than aborting the whole import.
+        // Not unlinked either: there is nothing of this run's to take back.
+        let mut not_written: Vec<NotWritten> = Vec::new();
 
-        let mut unpack = || -> Result<()> {
+        let mut unpack = |not_written: &mut Vec<NotWritten>| -> Result<()> {
             for i in 0..zip.len() {
                 progress.check_cancelled()?;
                 let mut entry = zip.by_index(i)?;
@@ -1265,11 +1374,31 @@ async fn extract_trees(
                     continue;
                 }
                 let dest = dest_dir.join(under).join(rel_path);
-                if let Some(parent) = dest.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
                 let fresh = !dest.exists();
-                let mut out = std::fs::File::create(&dest)?;
+                let landing = overrides.landing(rel_path, !fresh);
+                if landing == Landing::Keep {
+                    continue;
+                }
+                // Both the folder and the file: a player who made the folder
+                // read-only stops the write just as surely as one who made the
+                // file read-only, and for a path the server syncs neither is a
+                // reason they cannot play.
+                let opened = std::fs::create_dir_all(dest.parent().unwrap_or(&dest_dir))
+                    .and_then(|()| std::fs::File::create(&dest));
+                let mut out = match opened {
+                    Ok(out) => out,
+                    Err(e) if landing == Landing::Offer => {
+                        not_written.push(NotWritten {
+                            path: rel.to_string(),
+                            why: format!(
+                                "{rel} could not be written, so what you already had is still \
+                                 there: {e}"
+                            ),
+                        });
+                        continue;
+                    }
+                    Err(e) => return Err(e.into()),
+                };
                 if fresh {
                     created.push(dest.clone());
                 }
@@ -1290,13 +1419,13 @@ async fn extract_trees(
             Ok(())
         };
 
-        let outcome = unpack();
+        let outcome = unpack(&mut not_written);
         if outcome.is_err() {
             for dest in &created {
                 let _ = std::fs::remove_file(dest);
             }
         }
-        outcome
+        outcome.map(|()| not_written)
     })
     .await
     .map_err(|e| Error::msg(format!("unpacking an archive panicked: {e}")))?
@@ -1379,7 +1508,9 @@ fn worlds_in(names: &[String], named_after_the_file: &str) -> Vec<(String, Strin
 /// everything a pack's overrides are *and* to one budget between them — entry
 /// names that climb out of the destination are skipped, the inflate budget
 /// stops a zip bomb, Cancel is heard between entries, and a run that does not
-/// finish takes back only what it wrote.
+/// finish takes back only what it wrote. Through [`Overrides::replace`]: a
+/// world nobody has yet is written whole, and a write that fails fails the
+/// import, since there is no copy of the player's own to leave in place.
 async fn unpack_world(archive: &Path, saves: &Path, progress: &Progress) -> Result<Vec<String>> {
     let names = {
         let archive = archive.to_path_buf();
@@ -1406,7 +1537,7 @@ async fn unpack_world(archive: &Path, saves: &Path, progress: &Progress) -> Resu
         .iter()
         .map(|(prefix, folder)| (prefix.as_str(), folder.as_str()))
         .collect();
-    extract_trees(archive, saves, &trees, progress).await?;
+    extract_trees(archive, saves, &trees, &Overrides::replace(), progress).await?;
     Ok(worlds.into_iter().map(|(_, folder)| folder).collect())
 }
 
@@ -3285,6 +3416,50 @@ mod tests {
             game.join("mods/filler.jar").exists(),
             "the file the budget stopped on was the player's, and it was deleted"
         );
+    }
+
+    /// A pack the user chose themselves has nothing synced in it, so a file it
+    /// cannot write is what it has always been: the import fails, and the user
+    /// is told rather than left with an instance quietly short of a file.
+    /// Only a sender that says which of its files are settings — see
+    /// [`Overrides`] — buys the gentler treatment.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_plain_pack_still_fails_when_it_cannot_write_a_file() {
+        use std::os::unix::fs::PermissionsExt;
+        use zip::CompressionMethod::Deflated;
+        let scratch = scratch_dir("readonly");
+        let dir = scratch.paths.root.clone();
+        let archive = dir.join("pack.mrpack");
+        write_zip(
+            &archive,
+            &[
+                ("modrinth.index.json", INDEX.as_bytes(), Deflated),
+                ("overrides/config/theirs.toml", b"theirs = true\n", Deflated),
+            ],
+        );
+
+        let (paths, mut inst) = unpacking(&dir);
+        let game = paths.game_dir(&inst.id);
+        std::fs::create_dir_all(game.join("config")).unwrap();
+        let mine = game.join("config/theirs.toml");
+        std::fs::write(&mine, b"mine = true\n").unwrap();
+        std::fs::set_permissions(&mine, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        let err = import_into(
+            &reqwest::Client::new(),
+            &paths,
+            &mut inst,
+            &archive,
+            None,
+            &Progress::silent("t"),
+        )
+        .await
+        .expect_err("a file that could not be written must fail a plain pack");
+        assert!(err.to_string().contains("Permission denied"), "{err}");
+        // And what was there is what is still there, untouched.
+        assert_eq!(std::fs::read(&mine).unwrap(), b"mine = true\n");
+        std::fs::set_permissions(&mine, std::fs::Permissions::from_mode(0o644)).unwrap();
     }
 
     /// Unpacking a joined server's pack is the longest step of an update the

@@ -15,6 +15,7 @@ import StatusNote from "../../components/StatusNote";
 import { api, errorMessage } from "../../lib/api";
 import {
   addressChangedLine,
+  configChoices,
   forbiddenAsTyped,
   forbiddenLabel,
   forbiddenRuleHint,
@@ -26,9 +27,10 @@ import {
   replacedPasswordBody,
   routerLine,
   stoppedLine,
+  whenPlayersGetChanges,
 } from "../../lib/share";
 import { useStore } from "../../lib/store";
-import type { Forbidden, Server, ServerShareView } from "../../lib/types";
+import type { ConfigPolicy, Forbidden, Server, ServerShareView } from "../../lib/types";
 
 /**
  * The new-rule fields before the admin has typed anything. The site is where
@@ -217,9 +219,19 @@ export default function ShareTab({ server }: { server: Server }) {
     if (await saveForbidden([...share.forbidden, forbiddenAsTyped(rule)])) setRule(NO_RULE);
   }
 
-  async function setIncludeConfig(include: boolean) {
+  /**
+   * Send the config folder or stop sending it, and pick a behaviour for a
+   * player's own changes to it when that is what the admin clicked.
+   *
+   * The switch sends no behaviour: turning the folder off and on again is
+   * whatever the admin already picked, and this screen has nothing to send
+   * back anyway, since a folder nobody is sent reports no behaviour. A guess
+   * here would replace their choice and write every player's settings files
+   * whole.
+   */
+  async function sendConfig(include: boolean, policy: ConfigPolicy | null) {
     const view = await run("config", "Could not change what is shared", () =>
-      api.setServerShareConfig(server.id, include),
+      api.setServerShareConfig(server.id, include, policy),
     );
     if (view) setShare(view);
   }
@@ -471,10 +483,7 @@ export default function ShareTab({ server }: { server: Server }) {
             </div>
 
             <p className="hint" style={{ marginTop: 0 }}>
-              Players who joined get your changes to mods, client mods and,
-              while it is included, the config folder the next time they press
-              Play. Their Geode checks with this computer first, so keep Geode
-              open and this server shared.
+              {whenPlayersGetChanges(share.configPolicy)}
             </p>
 
             {/* The address as well as the password: typed by hand, a player
@@ -598,26 +607,55 @@ export default function ShareTab({ server }: { server: Server }) {
               </div>
             )}
 
-            <label className={viewStyles.settingToggle}>
-              <input
-                type="checkbox"
-                checked={share.includeConfig}
-                disabled={busy !== null}
-                onChange={(e) => void setIncludeConfig(e.target.checked)}
-              />
-              <span>
-                <strong>Include the config folder</strong>
-                <span className={viewStyles.settingWhy}>
-                  Sends this server&apos;s config folder with the pack, for
-                  mods whose settings have to match on both sides.{" "}
-                  <span className={styles.secret}>
-                    Configs can hold secrets — bot tokens, database passwords,
-                    proxy keys — and everyone with the password gets them.
-                    Look through the folder before turning this on.
+            <div>
+              <label className={viewStyles.settingToggle}>
+                <input
+                  type="checkbox"
+                  checked={share.configPolicy !== null}
+                  disabled={busy !== null}
+                  onChange={(e) => void sendConfig(e.target.checked, null)}
+                />
+                <span>
+                  <strong>Include the config folder</strong>
+                  <span className={viewStyles.settingWhy}>
+                    Sends this server&apos;s config folder with the pack, for
+                    mods whose settings have to match on both sides.{" "}
+                    <span className={styles.secret}>
+                      Configs can hold secrets — bot tokens, database passwords,
+                      proxy keys — and everyone with the password gets them.
+                      Look through the folder before turning this on.
+                    </span>
                   </span>
                 </span>
-              </span>
-            </label>
+              </label>
+              {/* Only once the folder is going anywhere. What happens to a
+                  player's own changes to a folder nobody is sent is not a
+                  choice worth making. */}
+              {share.configPolicy !== null && (
+                <div className={styles.choices}>
+                  {configChoices.map((choice) => (
+                    <label
+                      key={choice.policy}
+                      className={viewStyles.settingToggle}
+                    >
+                      <input
+                        type="radio"
+                        name="config-policy"
+                        checked={share.configPolicy === choice.policy}
+                        disabled={busy !== null}
+                        onChange={() => void sendConfig(true, choice.policy)}
+                      />
+                      <span>
+                        <strong>{choice.label}</strong>
+                        <span className={viewStyles.settingWhy}>
+                          {choice.detail}
+                        </span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
 
             {/* A rule, and the tab says so where it is written: Geode turns a
                 mod off in its own launcher and nothing more. An admin who

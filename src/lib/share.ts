@@ -5,6 +5,7 @@
 
 import type {
   Account,
+  ConfigPolicy,
   DriveStatus,
   ExistingInstance,
   ExportReport,
@@ -156,6 +157,119 @@ export function listingLine(info: PackInfo): StatusLine | null {
     title: `${info.listing.name} will be added to your server list`,
     detail: `Importing adds ${info.listing.name} at ${info.listing.address} to this instance's multiplayer list${andPlay} Your own servers are left alone. Close Minecraft first if it is open — the game rewrites that list when it closes.`,
   };
+}
+
+/**
+ * The join dialog's Settings row: how many of the admin's settings files are
+ * on their way.
+ *
+ * A row rather than a footnote, beside Mods, because it is the other thing the
+ * import writes into the instance and the only one a player was never told
+ * about. A server that sends none says so plainly: "None" reads as an answer,
+ * where a missing row reads as a question nobody asked.
+ */
+export function settingsFact(info: PackInfo): string {
+  if (info.configFiles === 0) return "None";
+  return `${info.configFiles} ${info.configFiles === 1 ? "file" : "files"}`;
+}
+
+/**
+ * What the admin's settings files will do to the player's, for the join
+ * dialog — or null when the server sends none.
+ *
+ * Config was the one thing in the whole flow that arrived, and kept arriving,
+ * with nobody ever told: the preview named the mods and the server list and
+ * said nothing about the folder that decides what every one of those mods
+ * does. So this says both halves of the truth — they are the player's to
+ * change, and whether the server puts its own copy back afterwards — because
+ * the second half is the one that would otherwise be discovered by losing an
+ * afternoon's tweaking.
+ *
+ * Which half that is now depends on the admin: a server that keeps replacing
+ * them is the only one that costs the player their work, and a server that
+ * sends them once should not be described as if it did.
+ *
+ * `configKept` is one bool over every behaviour that is not "always replace",
+ * so the sentence it picks has to be true of all of them — today that is
+ * "sent once, and nothing later replaces them", which is what both of them do
+ * (`share::pack::landings` has one arm for the pair). A behaviour that pushed
+ * individual settings afterwards could not be described by this bool, and
+ * would need the description to carry which one it is.
+ */
+export function settingsLine(info: PackInfo): StatusLine | null {
+  if (info.configFiles === 0) return null;
+  const files =
+    info.configFiles === 1 ? "1 settings file" : `${info.configFiles} settings files`;
+  return {
+    tone: "info",
+    title: `This server sends ${files}`,
+    detail: info.configKept
+      ? "These are the admin's own mod settings, and they arrive in place of yours. They are yours from then on: the server sends them once, and nothing the admin changes later replaces them — so anything you tune afterwards stays tuned. Worth a look once you have joined — a settings file decides what the server's mods do on your machine."
+      : "These are the admin's own mod settings, and they arrive in place of yours. You can change them afterwards, but this server replaces them again each time it updates — so keep a copy of anything you tune. Worth a look once you have joined: a settings file decides what the server's mods do on your machine.",
+  };
+}
+
+/**
+ * The behaviours an admin can choose for the config folder, in the order they
+ * are offered: what each is called, and who ends up with what.
+ *
+ * Here rather than in the Share tab because it is the copy this whole choice
+ * exists for — an admin picking the wrong one hands their players a folder
+ * that quietly overwrites work, or quietly never updates — and copy in this
+ * file is tested.
+ *
+ * In increasing order of what the server takes from the player, so the
+ * gentlest is read first. Which one a fresh opt-in gets is not decided here:
+ * turning the folder on sends no choice at all, and the behaviour already in
+ * force answers (`ServerShare::send_config`).
+ *
+ * `merge` is a third behaviour the wire names and nothing yet implements — a
+ * pack carries the admin's choice, and the splicing that would make it mean
+ * anything is not written, so `share::pack::landings` handles it exactly as
+ * ship-once. It is not offered: an admin told their later edits would reach
+ * players would be told something no code does.
+ */
+export const configChoices: readonly {
+  policy: ConfigPolicy;
+  label: string;
+  detail: string;
+}[] = [
+  {
+    policy: "ship-once",
+    label: "Send once",
+    detail:
+      "Players get these files the first time they join and never again. Whatever they change afterwards is theirs to keep, and nothing you change later reaches them.",
+  },
+  {
+    policy: "enforce",
+    label: "Always replace",
+    detail:
+      "Your copy replaces every player's each time they press Play, and anything they had changed in these files is lost. For a config that has to match this server exactly.",
+  },
+];
+
+/**
+ * What the admin is told about when their changes reach the people who joined.
+ *
+ * The config half depends on what they chose, and saying it wrong is the one
+ * mistake this screen can cause: an admin who edits a config file under "Send
+ * once" and expects it to travel will think sharing is broken, and one who
+ * expects "Always replace" to spare their players' work will find out from
+ * the players.
+ *
+ * `merge` reads the same as "Send once" because that is what it does — see
+ * `configChoices`, and `share::pack::landings`, which has one arm for the
+ * pair. It is not offered, but a share that already holds it is still
+ * described.
+ */
+export function whenPlayersGetChanges(policy: ConfigPolicy | null): string {
+  const config =
+    policy === null
+      ? ""
+      : policy === "enforce"
+        ? " The config folder goes with them, replacing their copies."
+        : " The config folder does not: they were sent it once and it is theirs now.";
+  return `Players who joined get your changes to mods and client mods the next time they press Play.${config} Their Geode checks with this computer first, so keep Geode open and this server shared.`;
 }
 
 /**

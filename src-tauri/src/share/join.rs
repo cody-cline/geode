@@ -967,6 +967,8 @@ mod tests {
             mods: 1,
             server_mods: 0,
             server_kind: "fabric".into(),
+            config_files: 0,
+            config_kept: false,
             revision: String::new(),
             server_id: String::new(),
             listing: None,
@@ -974,8 +976,10 @@ mod tests {
     }
 
     /// An admin on an older Geode sends a description without a revision, a
-    /// server id or a count of server-side mods. It still reads, as a server
-    /// that says nothing about any of them.
+    /// server id, a count of server-side mods or a count of the settings files
+    /// it sends. It still reads, as a server that says nothing about any of
+    /// them — and a settings count of zero says nothing rather than promising
+    /// none, which is the honest reading of a field that was not sent.
     #[test]
     fn a_pack_info_from_an_older_geode_still_reads() {
         let info: PackInfo = serde_json::from_value(serde_json::json!({
@@ -986,6 +990,7 @@ mod tests {
         assert_eq!(info.revision, "");
         assert_eq!(info.server_id, "");
         assert_eq!(info.server_mods, 0);
+        assert_eq!(info.config_files, 0);
         assert_eq!(info.mods, 3);
     }
 

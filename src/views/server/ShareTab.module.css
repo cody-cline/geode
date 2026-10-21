@@ -78,6 +78,13 @@
   }
 }
 
+/* The three behaviours for the config folder, indented under the switch that
+   decides whether the folder travels at all — so the choice reads as being
+   about that folder rather than as a fourth setting beside it. */
+.choices {
+  margin-left: 25px;
+}
+
 /* The rules already written, above the fields that add another. One line each,
    with the admin's own reason under it: the reason is what a player reads, so
    it is shown here rather than hidden behind an edit. */

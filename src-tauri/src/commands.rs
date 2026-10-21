@@ -2778,6 +2778,24 @@ fn update_due(stored: Option<&str>, offered: &str) -> bool {
     !offered.is_empty() && stored != Some(offered)
 }
 
+/// Whether this instance has to fetch its server's pack before it plays.
+///
+/// A revision it does not hold, or a settings file a run before this one could
+/// not write. The second is not an extra: the pack is the only place that
+/// file's bytes are, so without this the notice telling the player to make it
+/// writable and press Play would be a promise nothing keeps — the revision is
+/// recorded, so [`update_due`] says no, for ever.
+fn fetch_due(inst: &Instance, offered: &str) -> bool {
+    // A server that names no revision is never behind, as [`update_due`] says,
+    // and an owed file is no reason to ask it for a pack: a Geode old enough
+    // to name no revision writes no settings half either, so the file would
+    // come back as a failed import on every Play rather than as a retry.
+    if offered.is_empty() {
+        return false;
+    }
+    update_due(inst.joined_revision.as_deref(), offered) || !inst.settings_owed.is_empty()
+}
+
 /// Bring a joined instance up to its server's current pack, before it plays.
 ///
 /// Returned notices are for after the game starts; an error means it must not.
@@ -2788,6 +2806,13 @@ fn update_due(stored: Option<&str>, offered: &str) -> bool {
 /// the server does say is due is different: a client that does not match its
 /// server cannot join it, so a download or an import that does not finish
 /// stops the launch, and the next Play runs it again.
+///
+/// An instance that holds the server's revision and is only fetching to retry
+/// a settings file it could not write is on the first side of that line: it
+/// matches its server and can join it, so a fetch that fails is one more
+/// notice and the next Play tries again. Stopping the launch would be a
+/// read-only config file costing the player their game, which is the thing
+/// reporting it instead of failing was for.
 async fn bring_up_to_date(
     state: &AppState,
     inst: &mut Instance,
@@ -2836,7 +2861,11 @@ async fn bring_up_to_date(
     // that renaming a server does not re-download its pack for every player.
     let mut notices = reconcile_listing(state, inst, &info).await;
 
-    if !update_due(inst.joined_revision.as_deref(), &info.revision) {
+    // Why this instance is fetching, which is what a failure below costs it: a
+    // revision it does not hold means it cannot join until it has the pack,
+    // where a settings file it owes means it is playable already.
+    let behind = update_due(inst.joined_revision.as_deref(), &info.revision);
+    if !fetch_due(inst, &info.revision) {
         if learned_id {
             save_learned_id(&state.paths, &inst.id, &info.server_id).await?;
         }
@@ -2853,6 +2882,10 @@ async fn bring_up_to_date(
         // was the first description to name one.
         if learned_id {
             save_learned_id(&state.paths, &inst.id, &info.server_id).await?;
+        }
+        if !behind {
+            notices.push(settings_not_retried(&address, &e));
+            return Ok(notices);
         }
         return Err(e);
     }
@@ -2875,6 +2908,10 @@ async fn bring_up_to_date(
             // that fails as well is not what to say here — what stopped the
             // update is, and a cancel has its own wording downstream.
             let _ = save_update(&state.paths, inst).await;
+            if !behind {
+                notices.push(settings_not_retried(&address, &e));
+                return Ok(notices);
+            }
             return Err(e);
         }
     };
@@ -2892,6 +2929,9 @@ async fn bring_up_to_date(
     }
     if !report.missing.is_empty() {
         notices.push(fetch_by_hand(&report.missing));
+    }
+    if !report.not_written.is_empty() {
+        notices.push(settings_not_written(&report.not_written));
     }
     Ok(notices)
 }
@@ -2914,6 +2954,15 @@ async fn save_update(paths: &crate::paths::Paths, updated: &Instance) -> Result<
     inst.pack = updated.pack.clone();
     inst.joined_server_id = updated.joined_server_id.clone();
     inst.joined_revision = updated.joined_revision.clone();
+    // How far the update got through the server's settings pushes. The update
+    // decided it, so it crosses over; left out, every synced file would be
+    // written whole again on the next Play, over whatever the player had
+    // changed in between — which is the thing this whole mechanism exists to
+    // stop.
+    inst.settings_at = updated.settings_at;
+    // And which of them it could not write, for the same reason: left out, a
+    // file the player has since made writable would never be tried again.
+    inst.settings_owed = updated.settings_owed.clone();
     inst.save(paths).await
 }
 
@@ -3033,6 +3082,38 @@ fn own_copies_off(names: &[String]) -> String {
     format!(
         "Your own {} {verb} off: the server provides {it}.",
         names.join(", ")
+    )
+}
+
+/// What to say about the settings files the server sent that could not be
+/// written, so the player's own are still there.
+///
+/// A notice rather than a failure: the update itself finished, and the only
+/// thing left of it is the file named here. Before this the write failed the
+/// import, which failed the update, which stopped the launch — and because the
+/// revision was never recorded, it stopped the next one too.
+///
+/// What it promises at the end is kept by [`fetch_due`]: the file is owed
+/// until it lands, so the next Play fetches the pack again however the
+/// revision reads.
+fn settings_not_written(files: &[String]) -> String {
+    format!(
+        "The server's copy of {} settings file(s) could not be written, so yours are still there: {}. Make them writable and Geode will apply the server's copies the next time you press Play.",
+        files.len(),
+        files.join(", ")
+    )
+}
+
+/// What to say when the pack fetched only to retry a settings file did not
+/// arrive, or did not import.
+///
+/// A notice, because this instance holds the server's revision: it can join,
+/// and the only thing it is short of is a file the player already has their
+/// own copy of. The next Play tries again, since the path stays owed.
+fn settings_not_retried(address: &str, e: &Error) -> String {
+    format!(
+        "Geode could not fetch {address}'s copy of the settings file(s) it could not write last \
+         time, so yours are still there: {e}"
     )
 }
 
@@ -3576,6 +3657,13 @@ pub struct ServerShareView {
     /// instead of it: it reaches no further than this network.
     pub local_link: Option<String>,
     pub include_config: bool,
+    /// What happens to a player's own changes to the files in that folder.
+    /// `None` while the folder is not sent at all.
+    ///
+    /// Answered even for a share that has chosen nothing, as the behaviour
+    /// then in force — which is `enforce`, because replacing every file on
+    /// every update is what sending a config folder has always done.
+    pub config_policy: Option<share::manifest::Policy>,
     /// False while sharing is stopped. The password is kept either way.
     pub shared: bool,
     pub unsupported: Option<String>,
@@ -3626,6 +3714,9 @@ async fn share_view(
         link,
         local_link,
         include_config: share.include_config,
+        config_policy: share
+            .include_config
+            .then(|| share.settings.policy_for(std::path::Path::new("config"))),
         shared: share.shared,
         unsupported: share::pack::client_loader(server).err().map(|e| e.to_string()),
         last_link_address: crate::server::share::link_address(&state.paths, &server.id).await,
@@ -3838,15 +3929,26 @@ pub async fn unshare_server(app: AppHandle, state: State<'_, AppState>, id: Stri
     Ok(())
 }
 
+/// Send this server's `config/` folder or stop sending it, and say what
+/// happens to a player's own changes to it when the admin has picked one.
+///
+/// `policy` is `None` from the switch that turns the folder on and off, which
+/// leaves the choice where it is: turning it back on is the behaviour the
+/// admin already picked rather than a fresh guess, and a guess here would move
+/// the push counter and write every player's settings files whole. A choice is
+/// stamped with the next push by
+/// [`share::manifest::Settings::choose`], which is also what makes picking
+/// what is already in force cost nobody a download.
 #[tauri::command]
 pub async fn set_server_share_config(
     state: State<'_, AppState>,
     id: String,
-    include_config: bool,
+    include: bool,
+    policy: Option<share::manifest::Policy>,
 ) -> Result<ServerShareView> {
     let server = crate::server::load(&state.paths, &id).await?;
     let mut share = shared(&state, &id).await?;
-    share.include_config = include_config;
+    share.send_config(include, policy);
     crate::server::share::save(&state.paths, &id, &share).await?;
     // A pack already being built or sent was built as the share was, and one
     // with `config/` in it must not keep streaming once config is not sent.
@@ -4288,6 +4390,7 @@ mod tests {
         let share = ServerShare {
             code: Code::generate(),
             include_config: false,
+            settings: Default::default(),
             listing: None,
             forbidden: Vec::new(),
             shared: true,
@@ -5566,6 +5669,8 @@ mod tests {
             mods: 1,
             server_mods: 0,
             server_kind: "fabric".into(),
+            config_files: 0,
+            config_kept: false,
             revision: "r1".into(),
             server_id: "survival".into(),
             listing,
@@ -5839,6 +5944,117 @@ mod tests {
         );
         // Nothing recorded, so the next Play tries again.
         assert_eq!(inst.joined_listing_address, None);
+    }
+
+    /// The Share tab's three-way control reads one field, so it has to answer
+    /// for a share that has chosen nothing as well as one that has: not
+    /// sending the folder is no behaviour at all, and sending it without a
+    /// choice is the behaviour sending a config folder has always had.
+    #[tokio::test]
+    async fn the_share_tab_is_told_what_happens_to_a_players_own_config_changes() {
+        use crate::share::manifest::Policy;
+
+        let admin = Scratch::new("cmd-config-policy");
+        let paths = admin.paths.clone();
+        let state = AppState::new(paths.clone(), crate::config::Config::default());
+        let (server, mut share) = shared_server(&paths).await;
+
+        assert_eq!(
+            share_view(&state, &server, &share).await.config_policy,
+            None,
+            "a folder nobody is sent has no behaviour to report"
+        );
+
+        share.include_config = true;
+        assert_eq!(
+            share_view(&state, &server, &share).await.config_policy,
+            Some(Policy::Enforce),
+            "a share that chose nothing reads as something other than what it does"
+        );
+
+        share.settings.choose("config", Policy::Merge);
+        assert_eq!(
+            share_view(&state, &server, &share).await.config_policy,
+            Some(Policy::Merge)
+        );
+
+        // And turning the folder off hides the choice without forgetting it,
+        // which is what makes turning it back on the admin's own choice again.
+        share.include_config = false;
+        assert_eq!(share_view(&state, &server, &share).await.config_policy, None);
+        assert_eq!(share.settings.policy_for(std::path::Path::new("config")), Policy::Merge);
+    }
+
+    /// A settings file the server could not write is the one thing that makes
+    /// an update due while the revision says the instance is current. Without
+    /// it the notice telling the player to make the file writable and press
+    /// Play promises something nothing does: the revision was recorded, so no
+    /// pack is ever fetched again, and the pack is the only place that file's
+    /// bytes are.
+    #[tokio::test]
+    async fn a_settings_file_that_could_not_be_written_makes_the_next_play_fetch() {
+        let player = Scratch::new("cmd-settings-owed");
+        let paths = player.paths.clone();
+        let mut inst = joined_instance(&paths, "owed").await;
+        inst.joined_revision = Some("r1".into());
+
+        assert!(!fetch_due(&inst, "r1"), "a current instance fetched for nothing");
+        assert!(fetch_due(&inst, "r2"));
+
+        inst.settings_owed = vec!["config/c.toml".into()];
+        assert!(
+            fetch_due(&inst, "r1"),
+            "the file the player was told to make writable is never fetched again"
+        );
+        // And this instance is not behind its server: it holds the revision,
+        // and is fetching only to retry that one file. That is the pair
+        // `bring_up_to_date` reads to decide that a fetch which fails here is
+        // a notice rather than a launch the player cannot have.
+        assert!(!update_due(inst.joined_revision.as_deref(), "r1"));
+
+        // And a server too old to name a revision still says nothing is due,
+        // owed file or not: there is nothing to compare, and no pack to ask
+        // for.
+        assert!(!fetch_due(&inst, ""), "an older server was asked for a pack it cannot describe");
+    }
+
+    /// `save_update` copies only what an update decides, because the launch
+    /// loaded its own copy minutes earlier and saving that whole would put
+    /// back a name or a memory setting the player changed while they waited.
+    /// So every new thing an update decides has to be added to it by hand —
+    /// how far the update got through the server's settings pushes, and which
+    /// of those files it could not write. Left out, every synced file would be
+    /// written whole again on the next Play, over whatever the player had
+    /// changed since, or the one that never landed would never be sent again.
+    #[tokio::test]
+    async fn an_update_saves_how_far_it_got_through_the_servers_settings() {
+        let player = Scratch::new("cmd-settings-at");
+        let paths = player.paths.clone();
+        let mut inst = joined_instance(&paths, "caught-up").await;
+        assert_eq!(inst.settings_at, None);
+
+        // What the player changed while the update ran, which is the reason
+        // this is not a whole save.
+        let mut theirs = instance::load(&paths, "caught-up").await.unwrap();
+        theirs.name = "Mine".into();
+        theirs.overrides.memory_mb = Some(6144);
+        theirs.save(&paths).await.unwrap();
+
+        // What the update decided.
+        inst.settings_at = Some(7);
+        inst.settings_owed = vec!["config/c.toml".into()];
+        inst.joined_revision = Some("r2".into());
+        save_update(&paths, &inst).await.unwrap();
+
+        let saved = instance::load(&paths, "caught-up").await.unwrap();
+        assert_eq!(saved.settings_at, Some(7));
+        // And which of those files it could not write, for the same reason:
+        // left out, one the player has since made writable is never tried
+        // again, whatever the notice told them.
+        assert_eq!(saved.settings_owed, vec!["config/c.toml".to_string()]);
+        assert_eq!(saved.joined_revision.as_deref(), Some("r2"));
+        assert_eq!(saved.name, "Mine", "the player's own copy was overwritten");
+        assert_eq!(saved.overrides.memory_mb, Some(6144));
     }
 }
 

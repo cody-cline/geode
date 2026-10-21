@@ -12,6 +12,7 @@ import {
   addressChangedLine,
   arrivalLine,
   authorDefault,
+  configChoices,
   copiedByReason,
   driveLine,
   existingLine,
@@ -41,8 +42,11 @@ import {
   readOutHint,
   replacedPasswordBody,
   routerLine,
+  settingsFact,
+  settingsLine,
   stoppedLine,
   verificationLine,
+  whenPlayersGetChanges,
 } from "./share.ts";
 
 function status(mapping, extra = {}) {
@@ -1016,7 +1020,7 @@ test("the Drive line tells not configured, not connected and reconnect apart", (
   assert.match(driveLine(driveStatus({ account: null })).title, /^Connected$/);
 });
 
-function described(listing, mcVersion = "1.21.1") {
+function described(listing, mcVersion = "1.21.1", configFiles = 0, configKept = false) {
   return {
     name: "Survival",
     mcVersion,
@@ -1025,6 +1029,8 @@ function described(listing, mcVersion = "1.21.1") {
     mods: 4,
     serverMods: 0,
     serverKind: "fabric",
+    configFiles,
+    configKept,
     revision: "r1",
     serverId: "survival",
     listing,
@@ -1108,6 +1114,107 @@ test("the admin is told which address is the pack's and which one players play o
   const nothing = gameAddressHint(shareView());
   assert.match(nothing, /Geode's own port/);
   assert.match(nothing, /cannot work out the game address/);
+});
+
+test("a player is told the server sends settings files, and what happens to them", () => {
+  // The count sits beside Mods, so it has to read as an answer either way.
+  assert.equal(settingsFact(described(null, "1.21.1", 14)), "14 files");
+  assert.equal(settingsFact(described(null, "1.21.1", 1)), "1 file");
+  assert.equal(settingsFact(described(null, "1.21.1", 0)), "None");
+
+  const line = settingsLine(described(null, "1.21.1", 14));
+  assert.equal(line.tone, "info");
+  assert.match(line.title, /14 settings files/);
+  // Both halves of today's truth: theirs to change, and replaced on every
+  // update. The second is the one that costs an afternoon if nobody says it.
+  assert.match(line.detail, /change them afterwards/);
+  assert.match(line.detail, /replaces them again each time it updates/);
+
+  const one = settingsLine(described(null, "1.21.1", 1));
+  assert.match(one.title, /1 settings file\b/);
+  assert.doesNotMatch(one.title, /files/);
+
+  // A server that sends none, and an admin on a Geode too old to say, both
+  // say nothing at all rather than reassuring a player about a folder that is
+  // not coming.
+  assert.equal(settingsLine(described(null, "1.21.1", 0)), null);
+});
+
+test("a server that lets players keep their settings is not described as replacing them", () => {
+  const kept = settingsLine(described(null, "1.21.1", 14, true));
+  // The whole point of the admin's choice: the sentence that cost a player an
+  // afternoon is not said about a server that does not do it.
+  assert.doesNotMatch(kept.detail, /replaces them again each time it updates/);
+  assert.match(kept.detail, /yours from then on/);
+  assert.match(kept.detail, /sends them once/);
+  // And the bool covers Send once, whose whole definition is that nothing the
+  // admin changes later arrives — so the sentence must not promise a player
+  // settings that will never come.
+  assert.match(kept.detail, /nothing the admin changes later replaces them/);
+  assert.doesNotMatch(kept.detail, /deliberately/);
+
+  // And still said, in full, about one that does.
+  const replaced = settingsLine(described(null, "1.21.1", 14, false));
+  assert.match(replaced.detail, /replaces them again each time it updates/);
+  assert.doesNotMatch(replaced.detail, /yours from then on/);
+
+  // The count itself is the same fact either way.
+  assert.equal(settingsFact(described(null, "1.21.1", 14, true)), "14 files");
+});
+
+test("the behaviours offered for the config folder say who ends up with what", () => {
+  assert.deepEqual(
+    configChoices.map((choice) => choice.policy),
+    ["ship-once", "enforce"],
+    "gentlest first",
+  );
+  const detail = (policy) =>
+    configChoices.find((choice) => choice.policy === policy).detail;
+
+  // Each one has to say the thing an admin would otherwise find out from their
+  // players: that nothing later reaches them, or that their work is lost.
+  assert.match(detail("ship-once"), /never again/);
+  assert.match(detail("ship-once"), /nothing you change later reaches them/);
+  assert.match(detail("enforce"), /each time they press Play/);
+  assert.match(detail("enforce"), /is lost/);
+
+  // Not offered, because nothing splices a setting into a player's file yet:
+  // an admin who picked it would be told their later edits travel, and none
+  // of them would.
+  assert.ok(
+    !configChoices.some((choice) => choice.policy === "merge"),
+    "a behaviour nothing implements is offered to admins",
+  );
+
+  // Named for what happens, not for the word the code uses.
+  assert.deepEqual(
+    configChoices.map((choice) => choice.label),
+    ["Send once", "Always replace"],
+  );
+});
+
+test("the admin is told when a config change reaches players, per behaviour", () => {
+  // Always the same promise about mods; the config half is the admin's choice.
+  for (const policy of [null, "ship-once", "merge", "enforce"]) {
+    assert.match(whenPlayersGetChanges(policy), /changes to mods and client mods/);
+    assert.match(whenPlayersGetChanges(policy), /keep Geode open/);
+  }
+
+  // A folder nobody is sent is not mentioned at all.
+  assert.doesNotMatch(whenPlayersGetChanges(null), /config folder/);
+
+  assert.match(whenPlayersGetChanges("enforce"), /replacing their copies/);
+  // The mistake this sentence exists to stop: an admin editing a config file
+  // under Send once and waiting for it to travel.
+  assert.match(whenPlayersGetChanges("ship-once"), /does not/);
+  assert.match(whenPlayersGetChanges("ship-once"), /theirs now/);
+  // A share that already holds the behaviour nothing implements is described
+  // by what it does, which is what Send once does.
+  assert.equal(
+    whenPlayersGetChanges("merge"),
+    whenPlayersGetChanges("ship-once"),
+  );
+  assert.doesNotMatch(whenPlayersGetChanges("merge"), /the settings you change/);
 });
 
 // ---------------------------------------------------------------------------

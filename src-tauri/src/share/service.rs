@@ -1052,6 +1052,7 @@ mod tests {
         let share = ServerShare {
             code: Code::generate(),
             include_config: false,
+            settings: Default::default(),
             listing: None,
             shared: true,
             forbidden: Vec::new(),
@@ -1603,6 +1604,7 @@ mod tests {
         let other_share = ServerShare {
             code: Code::generate(),
             include_config: false,
+            settings: Default::default(),
             listing: None,
             shared: true,
             forbidden: Vec::new(),
