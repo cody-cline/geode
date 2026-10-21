@@ -274,6 +274,38 @@ export interface LogFile {
   current: boolean;
 }
 
+/**
+ * Where a suspect in a crash report came from, worst first.
+ *
+ * `frame` is weak on purpose: half the stack of a modded crash belongs to
+ * mods that did nothing wrong. `named` is the report saying this mod failed.
+ * `suspected` is the loader's own `Suspected Mods` conclusion.
+ */
+export type CrashEvidence = "frame" | "named" | "suspected";
+
+/** One mod a crash report points at, and what pointed at it. */
+export interface CrashSuspect {
+  modId?: string;
+  name?: string;
+  jar?: string;
+  evidence: CrashEvidence;
+  /** The line the conclusion was drawn from. */
+  quote: string;
+  /** The installed file to turn off; absent when this instance has no record of it. */
+  file?: string;
+  enabled: boolean;
+}
+
+/** The newest crash report, read for which mod broke. */
+export interface CrashReport {
+  name: string;
+  modified: number;
+  description: string;
+  exception?: string;
+  /** Strongest evidence first. Empty means the report names no mod. */
+  suspects: CrashSuspect[];
+}
+
 /** One backup of a server's files. Its name is also its timestamp. */
 export interface BackupInfo {
   name: string;

@@ -2,6 +2,7 @@ pub mod auth;
 pub mod commands;
 pub mod config;
 pub mod connector;
+pub mod crash;
 pub mod deeplink;
 pub mod diagnostics;
 pub mod desktop;
@@ -193,6 +194,7 @@ pub fn run() {
             commands::list_instance_logs,
             commands::read_instance_log,
             commands::delete_instance_log,
+            commands::instance_crash,
             commands::instance_report,
             commands::server_report,
             commands::git_status,
@@ -212,6 +214,7 @@ pub fn run() {
             commands::remove_from_server_list,
             commands::kick_server_player,
             commands::set_server_whitelist,
+            commands::game_port_clashes,
             commands::list_accounts,
             commands::begin_microsoft_login,
             commands::complete_microsoft_login,
@@ -236,6 +239,7 @@ pub fn run() {
             commands::export_curseforge_pack,
             commands::export_prism_instance,
             commands::get_share_status,
+            commands::recheck_router,
             commands::set_share_settings,
             commands::get_server_share,
             commands::share_server,

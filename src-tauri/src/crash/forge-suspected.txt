@@ -1,0 +1,19 @@
+---- Minecraft Crash Report ----
+// Embeddium instance tainted by mods: [fusion, sodiumoptionsapi, valkyrienskies, supplementaries, oculus, sodiumdynamiclights]
+// Please do not reach out for Embeddium support without removing these mods first.
+// -------
+// Don't do that.
+
+Time: 2026-05-19 14:21:06
+Description: Unexpected error
+
+java.lang.RuntimeException: Exception thrown while executing job
+	at me.jellysquid.mods.sodium.client.render.chunk.compile.executor.ChunkJobResult.unwrap(ChunkJobResult.java:27) ~[embeddium-0.3.31+mc1.20.1.jar%23593!/:?] {re:computing_frames,re:classloading}
+	at me.jellysquid.mods.sodium.client.render.chunk.RenderSectionManager.collectChunkBuildResults(RenderSectionManager.java:472) ~[embeddium-0.3.31+mc1.20.1.jar%23593!/:?] {re:mixin,re:classloading,pl:mixin:APP:mixins.oculus.compat.sodium.json:options.MixinRenderSectionManager,pl:mixin:APP:mixins.oculus.compat.sodium.json:shadow_map.MixinRenderSectionManager,pl:mixin:APP:mixins.oculus.compat.sodium.json:vertex_format.MixinRenderSectionManager,pl:mixin:APP:valkyrienskies-common.mixins.json:mod_compat.sodium.MixinRenderSectionManager,pl:mixin:APP:valkyrienskies-common.mixins.json:mod_compat.sodium.RenderSectionManagerAccessor,pl:mixin:A}
+-- Head --
+Thread: Render thread
+Suspected Mods: 
+	Mekalus (Oculus) (oculus), Version: 1.8.0.1
+		Issue tracker URL: https://github.com/Asek3/Oculus/issues
+		Mixin class: net.irisshaders.iris.mixin.LevelRendererAccessor
+		Target: net.minecraft.client.renderer.LevelRenderer

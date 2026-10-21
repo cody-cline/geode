@@ -19,6 +19,32 @@ import styles from "./Properties.module.css";
 /** Where keys the table does not recognise go. */
 const OTHER = "Other";
 
+/** The one key whose value another server can be holding. */
+const PORT_KEY = "server-port";
+
+/**
+ * What two servers on one port means, naming the others.
+ *
+ * A warning rather than a refusal: servers that are never run at the same
+ * time share a port perfectly well, and Geode cannot know which those are.
+ * What it can do is say so now instead of letting the second one find out by
+ * failing to start.
+ *
+ * `port` is how to refer to the port, because there are two places to say
+ * this: beside the setting, where the number is on screen, and on a server
+ * that has never started, where there is no file and so no number yet.
+ */
+function portClashLine(names: string[], port: string): string {
+  const others =
+    names.length === 1
+      ? names[0]
+      : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+  return `${others} ${names.length === 1 ? "is" : "are"} also set to ${port}. Only one of them can run at a time — whichever starts second will fail to bind it.`;
+}
+
+/** How to name the port of a server that has not written its file yet. */
+const UNWRITTEN_PORT = "the port this server will take the first time it starts";
+
 /**
  * A readable title for a key nobody has written a description for.
  *
@@ -48,6 +74,7 @@ export default function Properties({ server }: { server: Server }) {
   const [edited, setEdited] = useState<Record<string, string>>({});
   const [filter, setFilter] = useState("");
   const [saving, setSaving] = useState(false);
+  const [portClash, setPortClash] = useState<string[]>([]);
 
   useEffect(() => {
     api
@@ -58,6 +85,34 @@ export default function Properties({ server }: { server: Server }) {
 
   const changedCount = Object.keys(edited).length;
   const valueOf = (p: ServerProperty) => edited[p.key] ?? p.value;
+
+  // The port as it stands, edited or not, and `undefined` when this file has
+  // no such line — a server that has never started has no file at all.
+  const port = edited[PORT_KEY] ?? props?.find((p) => p.key === PORT_KEY)?.value;
+
+  // Asked whenever the port is on screen rather than only after a change: a
+  // second server made today took the default port exactly as the first one
+  // did, and nobody set it. With no port to pass, the backend answers about
+  // whatever port this server has — including the one it has not written yet.
+  useEffect(() => {
+    if (props === null) return;
+    const typed = port === undefined ? undefined : Number(port);
+    if (
+      typed !== undefined &&
+      (!Number.isInteger(typed) || typed < 0 || typed > 65535)
+    ) {
+      setPortClash([]);
+      return;
+    }
+    let cancelled = false;
+    api
+      .gamePortClashes(server.id, typed)
+      .then((names) => !cancelled && setPortClash(names))
+      .catch(() => !cancelled && setPortClash([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [server.id, props, port]);
   const edit = (key: string, value: string) =>
     setEdited((was) => ({ ...was, [key]: value }));
 
@@ -133,10 +188,21 @@ export default function Properties({ server }: { server: Server }) {
 
   if (props.length === 0) {
     return (
-      <p className="hint">
-        This file appears the first time the server starts — it is written by
-        the server, not by Geode. Start it once and its settings show up here.
-      </p>
+      <>
+        <p className="hint">
+          This file appears the first time the server starts — it is written by
+          the server, not by Geode. Start it once and its settings show up here.
+        </p>
+        {/* Nobody set this port: a new server takes the default, which is
+            exactly what the server beside it took. Worth saying before either
+            has ever run, since there is no row here to hang it off. */}
+        {portClash.length > 0 && (
+          <p className={styles.danger}>
+            <AlertTriangle size={12} />
+            {portClashLine(portClash, UNWRITTEN_PORT)}
+          </p>
+        )}
+      </>
     );
   }
 
@@ -168,6 +234,11 @@ export default function Properties({ server }: { server: Server }) {
                   value={valueOf(p)}
                   changed={p.key in edited}
                   running={server.running}
+                  warning={
+                    p.key === PORT_KEY && portClash.length > 0
+                      ? portClashLine(portClash, "this port")
+                      : undefined
+                  }
                   onEdit={edit}
                   onApplyNow={applyNow}
                 />
@@ -201,6 +272,7 @@ function Field({
   value,
   changed,
   running,
+  warning,
   onEdit,
   onApplyNow,
 }: {
@@ -208,6 +280,8 @@ function Field({
   value: string;
   changed: boolean;
   running: boolean;
+  /** Something true about the value as it stands, said where it is set. */
+  warning?: string;
   onEdit: (key: string, value: string) => void;
   onApplyNow: (key: string, command: string) => void;
 }) {
@@ -337,6 +411,14 @@ function Field({
         <p className="hint">
           Newer versions set this with a game rule instead, which is why an
           up-to-date server has no such line in this file.
+        </p>
+      )}
+      {/* Not only while the server runs, unlike the note below: this is about
+          the value itself, and the point is to say it as the port is set. */}
+      {warning && (
+        <p className={styles.danger}>
+          <AlertTriangle size={12} />
+          {warning}
         </p>
       )}
       {running && info?.danger && (

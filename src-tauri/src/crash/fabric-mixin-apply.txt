@@ -1,0 +1,36 @@
+---- Minecraft Crash Report ----
+// Surprise! Haha. Well, this is awkward.
+
+Time: 2025-01-02 16:07:57
+Description: Initializing game
+
+java.lang.RuntimeException: Mixin transformation of me.jellysquid.mods.sodium.client.render.SodiumWorldRenderer failed
+	at net.fabricmc.loader.impl.launch.knot.KnotClassDelegate.getPostMixinClassByteArray(KnotClassDelegate.java:427)
+	at net.fabricmc.loader.impl.launch.knot.KnotClassDelegate.tryLoadClass(KnotClassDelegate.java:323)
+	at net.fabricmc.loader.impl.launch.knot.KnotClassDelegate.loadClass(KnotClassDelegate.java:218)
+	at net.fabricmc.loader.impl.launch.knot.KnotClassLoader.loadClass(KnotClassLoader.java:119)
+	at java.base/java.lang.ClassLoader.loadClass(ClassLoader.java:525)
+	at knot//net.minecraft.class_761.handler$dcg000$sodium$init(class_761.java:10730)
+	at knot//net.minecraft.class_761.<init>(class_761.java:307)
+	at knot//net.minecraft.class_310.<init>(class_310.java:583)
+	at knot//net.minecraft.client.main.Main.main(Main.java:211)
+	at net.fabricmc.loader.impl.game.minecraft.MinecraftGameProvider.launch(MinecraftGameProvider.java:480)
+	at net.fabricmc.loader.impl.launch.knot.Knot.launch(Knot.java:74)
+	at net.fabricmc.loader.impl.launch.knot.KnotClient.main(KnotClient.java:23)
+Caused by: org.spongepowered.asm.mixin.transformer.throwables.MixinTransformerError: An unexpected critical error was encountered
+	at org.spongepowered.asm.mixin.transformer.MixinProcessor.applyMixins(MixinProcessor.java:392)
+	at org.spongepowered.asm.mixin.transformer.MixinTransformer.transformClass(MixinTransformer.java:234)
+	at org.spongepowered.asm.mixin.transformer.MixinTransformer.transformClassBytes(MixinTransformer.java:202)
+	at net.fabricmc.loader.impl.launch.knot.KnotClassDelegate.getPostMixinClassByteArray(KnotClassDelegate.java:422)
+	... 11 more
+Caused by: org.spongepowered.asm.mixin.throwables.MixinApplyError: Mixin [valkyrienskies-common.mixins.json:mod_compat.sodium.MixinSodiumWorldRenderer from mod valkyrienskies] from phase [DEFAULT] in config [valkyrienskies-common.mixins.json] FAILED during APPLY
+	at org.spongepowered.asm.mixin.transformer.MixinProcessor.handleMixinError(MixinProcessor.java:638)
+	at org.spongepowered.asm.mixin.transformer.MixinProcessor.handleMixinApplyError(MixinProcessor.java:589)
+	at org.spongepowered.asm.mixin.transformer.MixinProcessor.applyMixins(MixinProcessor.java:379)
+
+	Fabric Mods: 
+		create: Create 0.5.1-j-build.1631+mc1.20.1
+			com_google_code_findbugs_jsr305: jsr305 3.0.2
+			flywheel: Flywheel 0.6.11-4
+			forgeconfigapiport: Forge Config API Port 8.0.0
+			milk: Milk Lib 1.2.60

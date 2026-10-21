@@ -156,7 +156,7 @@ async fn suggest_address(
     let crate::share::link::Address::Direct { host, .. } = share_address? else {
         return None;
     };
-    let port = game_port(paths, id).await?;
+    let port = crate::server::properties::game_port(paths, id).await?;
     let text = if host.contains(':') {
         format!("[{host}]:{port}")
     } else {
@@ -166,27 +166,6 @@ async fn suggest_address(
     // router reporting something unusable produces no suggestion rather than
     // a bad one — and Minecraft's own port comes back off the end.
     crate::share::link::game_address(&text).ok()
-}
-
-/// The port this server listens on for the game, from its own
-/// `server.properties`.
-///
-/// A server that has never started has no such file yet, and 25565 is what it
-/// will write there on its first boot — so that, rather than nothing, is the
-/// answer for one not yet run.
-async fn game_port(paths: &Paths, id: &str) -> Option<u16> {
-    let properties = crate::server::properties::read(paths, id)
-        .await
-        .unwrap_or_default();
-    match properties.iter().find(|p| p.key == "server-port") {
-        Some(property) => property
-            .value
-            .trim()
-            .parse::<u16>()
-            .ok()
-            .filter(|port| *port != 0),
-        None => Some(crate::share::link::GAME_PORT),
-    }
 }
 
 /// What sharing looks like across every server.

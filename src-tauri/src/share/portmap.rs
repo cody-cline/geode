@@ -120,6 +120,116 @@ pub enum Status {
     Failed(Failure),
 }
 
+/// Making a sleeping router loop come round now.
+///
+/// Both loops that talk to the router — the mapping's renewal here, and the
+/// ask that reads the address under manual setup — spend nearly all their time
+/// asleep, so a change out on the network takes until the next wake to show.
+/// An admin who has just bridged a modem or switched UPnP on is left looking
+/// at an answer up to half an hour old with no way to hurry it.
+///
+/// So this wakes the loop that is already there rather than adding a third
+/// path that asks the router in parallel: there stays exactly one conversation
+/// with the router, the mapping is renewed by the same request that always
+/// renews it, and what the router said goes out the way everything else about
+/// it does.
+///
+/// Asks are counted, not queued. A loop takes the count as it begins an
+/// attempt and reports that count when the attempt is done, so any number of
+/// asks arriving while it sleeps are answered by the one attempt that follows
+/// — pressing the button ten times is one conversation with the router — and
+/// an ask is never answered by an attempt that was already in flight when it
+/// arrived.
+#[derive(Clone)]
+pub struct Rouse(std::sync::Arc<Counts>);
+
+struct Counts {
+    asked: watch::Sender<u64>,
+    served: watch::Sender<u64>,
+}
+
+impl Default for Rouse {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Rouse {
+    pub fn new() -> Self {
+        Rouse(std::sync::Arc::new(Counts {
+            asked: watch::channel(0).0,
+            served: watch::channel(0).0,
+        }))
+    }
+
+    /// Ask the loop to come round now, and wait for the attempt that follows.
+    ///
+    /// `false` when `within` ran out first. A router that has stopped
+    /// answering can hold an attempt up for as long as its own timeouts allow,
+    /// and whoever is waiting is better told than left; the attempt carries on
+    /// and reports through the status like any other.
+    pub async fn now(&self, within: Duration) -> bool {
+        let mut round = 0;
+        self.0.asked.send_modify(|count| {
+            *count += 1;
+            round = *count;
+        });
+        let mut served = self.0.served.subscribe();
+        let waited = timeout(within, served.wait_for(|done| *done >= round)).await;
+        waited.is_ok()
+    }
+
+    /// The loop's half, made once before the loop starts so that an ask
+    /// arriving while it is busy still brings it round afterwards.
+    pub(super) fn roused(&self) -> Roused {
+        Roused {
+            served: self.clone(),
+            asks: self.0.asked.subscribe(),
+        }
+    }
+}
+
+/// The loop's half of a [`Rouse`].
+///
+/// A type of its own because the two halves of one attempt have to agree: the
+/// asks it takes are the asks it reports, and an ask it has taken must not
+/// bring the loop round a second time. Reading the count without taking it is
+/// how one press becomes two conversations with the router.
+pub(super) struct Roused {
+    served: Rouse,
+    asks: watch::Receiver<u64>,
+}
+
+impl Roused {
+    /// The asks an attempt starting now will answer, taken so that [`asked`]
+    /// does not fire again for them.
+    ///
+    /// [`asked`]: Roused::asked
+    pub(super) fn taking(&mut self) -> u64 {
+        *self.asks.borrow_and_update()
+    }
+
+    /// An attempt is finished: release everyone it answered.
+    pub(super) fn finished(&self, round: u64) {
+        self.served.0.served.send_if_modified(|done| {
+            let moved = *done < round;
+            if moved {
+                *done = round;
+            }
+            moved
+        });
+    }
+
+    /// Wait for an ask that [`taking`] has not already taken.
+    ///
+    /// [`taking`]: Roused::taking
+    pub(super) async fn asked(&mut self) {
+        // Only the sender inside the shared `Rouse` sends here, and this holds
+        // it, so the channel cannot close while the loop runs.
+        let _ = self.asks.changed().await;
+    }
+}
+
 /// A held mapping. Renews itself until [`PortMapper::stop`].
 ///
 /// Await `stop` before starting another mapper on the same port. A mapper
@@ -133,6 +243,8 @@ pub struct PortMapper {
     /// on its own network is the one facing the router, which is not what the
     /// default route answers with on a machine holding a VPN open.
     gateway: watch::Receiver<Option<IpAddr>>,
+    /// Making the renewal come round now. See [`Rouse`].
+    rouse: Rouse,
     /// Tells the task to stop. Dropping it does too, so a mapper dropped
     /// rather than stopped still removes its mapping if the runtime outlives
     /// the removal — but nobody waits to find out.
@@ -164,13 +276,22 @@ impl PortMapper {
         let (publish, status) = watch::channel(Status::Searching);
         let (found, gateway) = watch::channel(None);
         let (stop, stopped) = oneshot::channel();
+        let rouse = Rouse::new();
         // Tauri's spawn, not Tokio's: this is a plain function that may be
         // called outside any Tokio runtime context, where `tokio::spawn` panics.
-        let task =
-            tauri::async_runtime::spawn(hold(port, finder, timings, publish, found, stopped));
+        let task = tauri::async_runtime::spawn(hold(
+            port,
+            finder,
+            timings,
+            rouse.clone(),
+            publish,
+            found,
+            stopped,
+        ));
         Self {
             status,
             gateway,
+            rouse,
             stop,
             task,
         }
@@ -183,6 +304,12 @@ impl PortMapper {
     /// Where the router was found, for [`local_address`].
     pub fn gateway(&self) -> watch::Receiver<Option<IpAddr>> {
         self.gateway.clone()
+    }
+
+    /// Making the renewal come round now, for the admin who has just changed
+    /// something on their router. See [`Rouse`].
+    pub fn rouse(&self) -> Rouse {
+        self.rouse.clone()
     }
 
     /// Stop renewing and remove the mapping, giving up after a few seconds —
@@ -411,13 +538,18 @@ async fn hold(
     port: u16,
     finder: Finder,
     timings: Timings,
+    rouse: Rouse,
     publish: watch::Sender<Status>,
     found: watch::Sender<Option<IpAddr>>,
     mut stop: oneshot::Receiver<()>,
 ) {
     let mut held = Held::default();
     let mut retry = timings.retry;
+    let mut rouse = rouse.roused();
     loop {
+        // Taken before the attempt, so an ask that arrives during it waits for
+        // the next one rather than reading this as its answer.
+        let round = rouse.taking();
         let now = match held.refresh(&finder, port, timings, &mut stop).await {
             Ok(external_ip) => Status::Mapped {
                 external_ip,
@@ -449,8 +581,14 @@ async fn hold(
             *current = now;
             changed
         });
+        // Whoever asked for this attempt has their answer now, in the status
+        // just published.
+        rouse.finished(round);
         tokio::select! {
             _ = &mut stop => break,
+            // Somebody pressed "ask again": come round now rather than when
+            // half the lease has gone.
+            _ = rouse.asked() => {}
             _ = tokio::time::sleep(wait) => {}
         }
     }
@@ -895,6 +1033,117 @@ pub(super) mod tests {
         router
     }
 
+    /// The seam the button works through, on its own — because the other loop
+    /// it wakes, the ask that reads the address under manual setup, searches
+    /// the real LAN and so can never be tested.
+    ///
+    /// Two things are asserted: a loop asleep on a long timer comes round now,
+    /// and an ask is not answered by an attempt that was already running when
+    /// it arrived.
+    #[tokio::test]
+    async fn a_sleeping_loop_comes_round_and_the_ask_waits_for_that_attempt() {
+        let rouse = Rouse::new();
+        let done = std::sync::Arc::new(std::sync::Mutex::new(0u32));
+        // How many attempts the test has let through, so each one can be held
+        // in flight for as long as the test needs it there.
+        let (allow, mut gate) = watch::channel(0u32);
+
+        let mut roused = rouse.roused();
+        let counted = done.clone();
+        let looping = tokio::spawn(async move {
+            loop {
+                let round = roused.taking();
+                let so_far = *counted.lock().unwrap();
+                let _ = gate.wait_for(|allowed| *allowed > so_far).await;
+                *counted.lock().unwrap() += 1;
+                roused.finished(round);
+                tokio::select! {
+                    _ = roused.asked() => {}
+                    // An hour, so only an ask can bring it round.
+                    _ = tokio::time::sleep(Duration::from_secs(3600)) => {}
+                }
+            }
+        });
+
+        let waiting = tokio::spawn({
+            let rouse = rouse.clone();
+            async move { rouse.now(Duration::from_secs(10)).await }
+        });
+
+        // The first attempt was already under way when the ask arrived, so
+        // finishing it must leave the ask waiting: its answer would be the
+        // state of the router from before the admin changed anything.
+        allow.send_replace(1);
+        until(|| *done.lock().unwrap() == 1).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !waiting.is_finished(),
+            "the attempt already in flight was read as the ask's answer"
+        );
+
+        // The attempt that follows is the ask's own.
+        allow.send_replace(2);
+        assert!(waiting.await.unwrap(), "the ask timed out");
+        assert_eq!(*done.lock().unwrap(), 2);
+        looping.abort();
+    }
+
+    /// Four presses in the same moment are one conversation with the router.
+    /// Nothing serialises them: the asks are counted, and the one attempt that
+    /// follows answers every count that was waiting when it began.
+    ///
+    /// At the seam rather than against the mock router, because the mapper's
+    /// loop runs on Tauri's own runtime and may wake between two presses — in
+    /// which case two attempts is the right answer, and a count proves nothing
+    /// either way. Here the loop is the test's, so when it is asleep is known.
+    #[tokio::test]
+    async fn several_asks_while_the_loop_sleeps_are_answered_by_one_attempt() {
+        let rouse = Rouse::new();
+        // Published before the attempt is declared finished, where the real
+        // loop publishes its status.
+        let (attempted, mut attempts) = watch::channel(0u32);
+
+        let mut roused = rouse.roused();
+        let looping = tokio::spawn(async move {
+            loop {
+                let round = roused.taking();
+                attempted.send_modify(|count| *count += 1);
+                roused.finished(round);
+                tokio::select! {
+                    _ = roused.asked() => {}
+                    // An hour, so only an ask can bring it round.
+                    _ = tokio::time::sleep(Duration::from_secs(3600)) => {}
+                }
+            }
+        });
+
+        // Asleep, with its first attempt behind it.
+        attempts.wait_for(|count| *count == 1).await.unwrap();
+
+        let press = || rouse.now(Duration::from_secs(10));
+        let (a, b, c, d) = tokio::join!(press(), press(), press(), press());
+        assert!(a && b && c && d, "an ask was left hanging");
+        assert_eq!(
+            *attempts.borrow(),
+            2,
+            "four presses became more than one ask"
+        );
+
+        // And back to sleep: no ask was left over to bring it round again.
+        tokio::task::yield_now().await;
+        assert_eq!(*attempts.borrow(), 2, "an ask it had answered woke it");
+        looping.abort();
+    }
+
+    /// Wait for something to become true, or panic rather than hang.
+    async fn until(mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(Instant::now() < deadline, "it never happened");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
     #[test]
     fn every_kind_of_external_address_is_classified() {
         use Reachability::*;
@@ -1070,6 +1319,79 @@ pub(super) mod tests {
         assert_eq!(add.lease_duration, 3600);
         assert_eq!(add.description, "Geode server packs");
         assert!(add.enabled);
+
+        mapper.stop().await;
+    }
+
+    /// The admin has just bridged their modem. Nothing is due for half an
+    /// hour, and the button must not leave them waiting for it.
+    #[tokio::test]
+    async fn asking_again_re_asks_the_router_without_waiting_for_the_renewal() {
+        let router = router().await;
+        router
+            .mock(Action::add_port_mapping(), Responder::success())
+            .await;
+        router
+            .mock(Action::delete_port_mapping(), Responder::success())
+            .await;
+        // Behind the modem to begin with, public once it has been bridged.
+        router
+            .mock_with_times(
+                Action::GetExternalIPAddress,
+                Responder::success().with_external_ip(ip("192.168.1.4")),
+                1,
+            )
+            .await;
+        router
+            .mock(
+                Action::GetExternalIPAddress,
+                Responder::success().with_external_ip(ip("81.2.69.160")),
+            )
+            .await;
+
+        // An hour's lease, so the next renewal is half an hour away and
+        // nothing but the ask can explain a second add.
+        let timings = quick(Duration::from_secs(3600));
+        let mapper = mapper_at(&[router.http_addr()], timings);
+        settle(&mapper, |s| matches!(s, Status::Mapped { .. })).await;
+        let before = adds(&router).await;
+        assert_eq!(before.len(), 1);
+
+        assert!(
+            mapper.rouse().now(Duration::from_secs(10)).await,
+            "the ask never came back"
+        );
+
+        // Answered through the status the Share tab already reads.
+        assert_eq!(
+            *mapper.status().borrow(),
+            Status::Mapped {
+                external_ip: ip("81.2.69.160"),
+                port: PORT,
+                reachability: Reachability::Public,
+            }
+        );
+
+        // And the working mapping was renewed by the identical request, not
+        // taken down and put back.
+        let after = adds(&router).await;
+        assert_eq!(after.len(), 2, "the router was not asked again");
+        assert_eq!(
+            (
+                after[0].external_port,
+                after[0].internal_client.clone(),
+                after[0].lease_duration
+            ),
+            (
+                after[1].external_port,
+                after[1].internal_client.clone(),
+                after[1].lease_duration
+            ),
+        );
+        assert!(
+            deletes(&router).await.is_empty(),
+            "asking again dropped the mapping"
+        );
 
         mapper.stop().await;
     }

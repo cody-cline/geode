@@ -1,0 +1,24 @@
+---- Minecraft Crash Report ----
+
+// *plays dead*
+Please make sure this issue is not caused by Sable before reporting it to other mod authors.
+If you cannot reproduce it without Sable, file a report on the issue tracker
+https://github.com/ryanhcode/sable/issues
+
+// Why did you do that?
+
+Time: 2026-09-24 17:55:21
+Description: Initializing game
+
+net.neoforged.fml.ModLoadingException: Loading errors encountered:
+	- SpaceCraft (spacecraft) encountered an error while dispatching the net.neoforged.neoforge.client.event.RegisterGuiLayersEvent event
+	  java.lang.IllegalArgumentException: Attempted to order against an unregistered layer spacecraft:hud_staging. Only order against vanilla's and your own.
+
+	at MC-BOOTSTRAP/fml_loader@4.0.42/net.neoforged.fml.ModContainer.acceptEvent(ModContainer.java:181) ~[loader-4.0.42.jar%23149!/:4.0] {}
+	at MC-BOOTSTRAP/fml_loader@4.0.42/net.neoforged.fml.ModLoader.lambda$postEvent$13(ModLoader.java:358) ~[loader-4.0.42.jar%23149!/:4.0] {re:mixin}
+	at java.base/java.lang.Iterable.forEach(Iterable.java:75) ~[?:?] {re:mixin}
+	at MC-BOOTSTRAP/fml_loader@4.0.42/net.neoforged.fml.ModList.forEachModInOrder(ModList.java:174) ~[loader-4.0.42.jar%23149!/:4.0] {}
+	at MC-BOOTSTRAP/fml_loader@4.0.42/net.neoforged.fml.ModLoader.postEvent(ModLoader.java:358) ~[loader-4.0.42.jar%23149!/:4.0] {re:mixin}
+	at TRANSFORMER/neoforge@21.1.228/net.neoforged.neoforge.client.gui.GuiLayerManager.initModdedLayers(GuiLayerManager.java:84) ~[neoforge-21.1.228-universal.jar%23186!/:?] {re:classloading}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.gui.Gui.initModdedOverlays(Gui.java:1426) ~[client-1.21.1-20240808.144430-srg.jar%23185!/:?] {re:mixin,pl:accesstransformer:B,pl:runtimedistcleaner:A,re:classloading,pl:accesstransformer:B,pl:mixin:APP:create.mixins.json:accessor.GuiAccessor from mod create,pl:mixin:APP:sable.mixins.json:camera.camera_rotation.GuiMixin from mod sable,pl:mixin:A,pl:runtimedistcleaner:A}
+	at TRANSFORMER/neoforge@21.1.228/net.neoforged.neoforge.client.ClientHooks.initClientHooks(ClientHooks.java:1033) ~[neoforge-21.1.228-universal.jar%23186!/:?] {re:classloading}

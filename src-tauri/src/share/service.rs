@@ -21,7 +21,7 @@ use serde::Serialize;
 use tokio::sync::{watch, Mutex};
 
 use crate::config::{PortMapping, ShareConfig};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::events::{self, EventSink};
 use crate::paths::Paths;
 use crate::server::share::ServerShare;
@@ -29,7 +29,7 @@ use crate::server::share::ServerShare;
 use super::host::Host;
 use super::identity::Identity;
 use super::link::{Address, Link, Pin};
-use super::portmap::{self, PortMapper, Reachability};
+use super::portmap::{self, PortMapper, Reachability, Rouse};
 
 /// Sent with a [`ShareStatus`] whenever the running state changes.
 pub const STATUS_EVENT: &str = "geode://share-status";
@@ -47,6 +47,14 @@ pub const LISTEN_EVENT: &str = "geode://share-listen";
 /// how soon it tries again after the router did not answer.
 const DETECT_EVERY: Duration = Duration::from_secs(30 * 60);
 const DETECT_RETRY: Duration = Duration::from_secs(60);
+
+/// How long [`ShareService::recheck_router`] waits for the answer before
+/// giving the admin back their page.
+///
+/// Long enough for the slowest honest case: two searches with their own
+/// windows, then a request or two, each under its own timeout. A router that
+/// is not there uses all of it.
+const ASK_WITHIN: Duration = Duration::from_secs(45);
 
 /// How long the listener may go on failing before the admin is told and the
 /// screens stop saying Geode is still trying.
@@ -292,8 +300,23 @@ struct Running {
     mapper: Option<PortMapper>,
     /// With manual setup: what the router says the public address is.
     detected: Option<watch::Receiver<Detection>>,
+    /// With manual setup: bringing that ask round now. Automatic setup has no
+    /// such ask — its mapper carries its own.
+    asking: Option<Rouse>,
     /// Re-announces the status as the mapping or the detected address changes.
     watcher: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Running {
+    /// Whichever loop is talking to the router in this setup: the mapping's
+    /// renewal, or the ask that reads the address when the admin forwards the
+    /// port themselves. `None` while neither is running.
+    fn rouse(&self) -> Option<Rouse> {
+        self.mapper
+            .as_ref()
+            .map(PortMapper::rouse)
+            .or_else(|| self.asking.clone())
+    }
 }
 
 /// Whether anything is shared, as far as can be told.
@@ -570,6 +593,7 @@ impl ShareService {
                             port: config.port,
                             mapper: None,
                             detected: None,
+                            asking: None,
                             watcher: None,
                         });
                     }
@@ -593,6 +617,7 @@ impl ShareService {
             match config.mapping {
                 PortMapping::Auto => {
                     running.detected = None;
+                    running.asking = None;
                     if running.mapper.is_none() {
                         running.mapper = Some(PortMapper::start(config.port));
                     }
@@ -602,7 +627,9 @@ impl ShareService {
                         mapper.stop().await;
                     }
                     if running.detected.is_none() && !self.quiet {
-                        running.detected = Some(detect());
+                        let (detected, asking) = detect();
+                        running.detected = Some(detected);
+                        running.asking = Some(asking);
                     }
                 }
             }
@@ -628,6 +655,48 @@ impl ShareService {
             Wanted::Stop => Outcome::Idle,
             Wanted::Unknown => Outcome::Unknown,
         }
+    }
+
+    /// Ask the router again now, and answer with what it said.
+    ///
+    /// The mapping is renewed, and the address under manual setup re-read, on
+    /// a timer — so a change out on the network takes up to half an hour to
+    /// show, which is no use to an admin who has just bridged a modem or
+    /// turned UPnP on. This brings whichever of those two loops is running
+    /// round now rather than asking the router itself: the mapping that
+    /// already works is renewed by the request that always renews it, the
+    /// listener is not touched, and several asks at once become one
+    /// conversation with the router.
+    ///
+    /// Refused when nothing is talking to the router yet, which is the honest
+    /// answer: there is no ask to hurry.
+    pub async fn recheck_router(
+        &self,
+        paths: &Paths,
+        config: &ShareConfig,
+        sink: Option<EventSink>,
+    ) -> Result<ShareStatus> {
+        let rouse = {
+            let inner = self.inner.lock().await;
+            inner
+                .running
+                .as_ref()
+                .and_then(Running::rouse)
+                .ok_or_else(|| {
+                    Error::msg(
+                        "Geode has not asked your router anything yet. \
+                         Share a server first, and it will.",
+                    )
+                })?
+        };
+        // Whatever came of it, the status is read afresh below: an ask that
+        // ran out of time leaves the page showing the last thing the router
+        // said rather than nothing, and the attempt reports itself when it
+        // finishes.
+        rouse.now(ASK_WITHIN).await;
+        let status = self.status(paths, config).await;
+        events::emit(&sink, STATUS_EVENT, &status);
+        Ok(status)
     }
 
     pub async fn status(&self, paths: &Paths, config: &ShareConfig) -> ShareStatus {
@@ -767,10 +836,19 @@ async fn stop(mut running: Running) {
 ///
 /// Manual setup means the admin forwards the port; it does not have to mean
 /// they also look up their own address and type it in before a link exists.
-fn detect() -> watch::Receiver<Detection> {
+///
+/// The [`Rouse`] beside the answers brings this ask round now, for the admin
+/// who has just changed something on their router and would otherwise wait
+/// half an hour to see whether it worked.
+fn detect() -> (watch::Receiver<Detection>, Rouse) {
     let (publish, detected) = watch::channel(Detection::default());
+    let rouse = Rouse::new();
+    let mut roused = rouse.roused();
     tauri::async_runtime::spawn(async move {
         loop {
+            // Taken before the ask, so one arriving during it waits for the
+            // next rather than reading this as its answer.
+            let round = roused.taking();
             let read = portmap::read_external_ip().await.ok().map(|answer| {
                 (
                     answer.gateway,
@@ -786,16 +864,24 @@ fn detect() -> watch::Receiver<Detection> {
                 DETECT_RETRY
             };
             let next = publish.borrow().after(read);
-            if publish.send(next).is_err() {
+            let listening = publish.send(next).is_ok();
+            // After the answer is published, so an ask released here reads the
+            // answer and not the one before it — but before giving up, or an
+            // admin who pressed the button as the setup changed under them
+            // would wait out the whole timeout for an answer nobody will send.
+            roused.finished(round);
+            if !listening {
                 return; // nobody is listening any more
             }
             tokio::select! {
                 _ = tokio::time::sleep(wait) => {}
+                // Somebody pressed "ask again".
+                _ = roused.asked() => {}
                 _ = publish.closed() => return,
             }
         }
     });
-    detected
+    (detected, rouse)
 }
 
 /// Where this machine's own address on its network is asked for, and how
@@ -1662,6 +1748,7 @@ mod tests {
             port,
             mapper: Some(mapper),
             detected: None,
+            asking: None,
             watcher: None,
         };
 

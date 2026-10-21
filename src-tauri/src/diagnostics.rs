@@ -95,11 +95,11 @@ pub async fn report(subject: &Subject, log: &str) -> String {
     // A crash report, when there is a fresh one, is worth more than any amount
     // of log: it is the same failure already narrowed down.
     if let Some(dir) = &subject.crash_dir {
-        if let Some((name, text)) = newest_crash(dir).await {
+        if let Some(found) = crate::crash::newest(dir).await {
             out.push_str("\n## Crash report: ");
-            out.push_str(&name);
+            out.push_str(&found.name);
             out.push_str("\n\n```\n");
-            out.push_str(&clamp(&text, MAX_CRASH, Keep::Start));
+            out.push_str(&clamp(&found.text, MAX_CRASH, Keep::Start));
             out.push_str("\n```\n");
         }
     }
@@ -161,31 +161,6 @@ fn ceil_char_boundary(text: &str, mut at: usize) -> usize {
         at += 1;
     }
     at
-}
-
-/// The most recent crash report, if one was written.
-async fn newest_crash(dir: &Path) -> Option<(String, String)> {
-    let mut entries = tokio::fs::read_dir(dir).await.ok()?;
-    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let path = entry.path();
-        if path.extension().map(|e| e != "txt").unwrap_or(true) {
-            continue;
-        }
-        let Ok(meta) = entry.metadata().await else {
-            continue;
-        };
-        let Ok(modified) = meta.modified() else {
-            continue;
-        };
-        if best.as_ref().map(|(seen, _)| modified > *seen).unwrap_or(true) {
-            best = Some((modified, path));
-        }
-    }
-    let (_, path) = best?;
-    let text = tokio::fs::read_to_string(&path).await.ok()?;
-    let name = path.file_name()?.to_string_lossy().to_string();
-    Some((name, text))
 }
 
 /// Read a log file's tail for the report, whatever its size.

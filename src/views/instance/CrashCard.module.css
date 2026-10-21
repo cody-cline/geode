@@ -1,0 +1,95 @@
+.card {
+  margin: 14px 22px 0;
+  padding: 13px 15px;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--danger) 26%, transparent);
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--danger);
+}
+
+.when {
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.what {
+  margin: 7px 0 0;
+  font-size: 12.5px;
+  color: var(--text);
+}
+
+.exception {
+  display: block;
+  margin-top: 4px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.suspects {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 11px;
+}
+
+.suspect {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 11px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+.who {
+  min-width: 0;
+  flex: 1;
+}
+
+.name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.id {
+  margin-left: 6px;
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.because {
+  margin: 3px 0 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.quote {
+  display: block;
+  margin-top: 4px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  color: var(--text-faint);
+  overflow-wrap: anywhere;
+}
+
+.nothing {
+  margin: 11px 0 0;
+  font-size: 12.5px;
+  color: var(--text-dim);
+}

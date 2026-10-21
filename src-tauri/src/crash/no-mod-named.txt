@@ -1,0 +1,43 @@
+---- Minecraft Crash Report ----
+// This doesn't make any sense!
+
+Time: 2026-07-31 16:39:44
+Description: Initializing game
+
+java.lang.OutOfMemoryError: Out of stack space.
+	at knot//org.lwjgl.system.MemoryStack.nmalloc(MemoryStack.java:322)
+	at knot//org.lwjgl.vulkan.VkExtensionProperties.malloc(VkExtensionProperties.java:210)
+	at knot//org.lwjgl.vulkan.VkInstance.getAvailableDeviceExtensions(VkInstance.java:82)
+	at knot//org.lwjgl.vulkan.VkInstance.getInstanceCapabilities(VkInstance.java:45)
+	at knot//org.lwjgl.vulkan.VkInstance.<init>(VkInstance.java:29)
+	at knot//net.vulkanmod.vulkan.Vulkan.createInstance(Vulkan.java:244)
+	at knot//net.vulkanmod.vulkan.Vulkan.initVulkan(Vulkan.java:139)
+	at knot//net.vulkanmod.vulkan.VRenderSystem.initRenderer(VRenderSystem.java:63)
+	at knot//com.mojang.blaze3d.systems.RenderSystem.initRenderer(RenderSystem.java:856)
+	at knot//net.minecraft.class_310.<init>(class_310.java:533)
+	at knot//net.minecraft.client.main.Main.main(Main.java:250)
+	at net.fabricmc.loader.impl.game.minecraft.MinecraftGameProvider.launch(MinecraftGameProvider.java:514)
+	at net.fabricmc.loader.impl.launch.knot.Knot.launch(Knot.java:72)
+	at net.fabricmc.loader.impl.launch.knot.KnotClient.main(KnotClient.java:23)
+	at org.prismlauncher.launcher.impl.StandardLauncher.launch(StandardLauncher.java:115)
+	at org.prismlauncher.EntryPoint.listen(EntryPoint.java:129)
+	at org.prismlauncher.EntryPoint.main(EntryPoint.java:70)
+
+
+A detailed walkthrough of the error, its code path and all known details is as follows:
+---------------------------------------------------------------------------------------
+
+-- Head --
+Thread: Render thread
+Stacktrace:
+	at knot//org.lwjgl.system.MemoryStack.nmalloc(MemoryStack.java:322)
+	at knot//org.lwjgl.vulkan.VkExtensionProperties.malloc(VkExtensionProperties.java:210)
+	at knot//org.lwjgl.vulkan.VkInstance.getAvailableDeviceExtensions(VkInstance.java:82)
+	at knot//org.lwjgl.vulkan.VkInstance.getInstanceCapabilities(VkInstance.java:45)
+	at knot//org.lwjgl.vulkan.VkInstance.<init>(VkInstance.java:29)
+	at knot//net.vulkanmod.vulkan.Vulkan.createInstance(Vulkan.java:244)
+	at knot//net.vulkanmod.vulkan.Vulkan.initVulkan(Vulkan.java:139)
+	at knot//net.vulkanmod.vulkan.VRenderSystem.initRenderer(VRenderSystem.java:63)
+	at knot//com.mojang.blaze3d.systems.RenderSystem.initRenderer(RenderSystem.java:856)
+	at knot//net.minecraft.class_310.<init>(class_310.java:533)
+

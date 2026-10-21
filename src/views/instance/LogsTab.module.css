@@ -204,3 +204,17 @@
   background: var(--surface-3);
   color: var(--text);
 }
+
+/* The crash card takes the height it needs at the top; the files take the
+   rest, which they size themselves against. */
+.filesView {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+
+.filesBody {
+  flex: 1;
+  min-height: 0;
+}

@@ -118,6 +118,7 @@ export default function ShareTab({ server }: { server: Server }) {
   const config = useStore((s) => s.config);
   const status = useStore((s) => s.shareStatus);
   const loadShareStatus = useStore((s) => s.loadShareStatus);
+  const setShareStatus = useStore((s) => s.setShareStatus);
   // The sidebar and the Servers cards badge a stale link from the server
   // list's own payload, so a change made here has to be asked for again or
   // the badge goes on saying what was true before.
@@ -156,6 +157,12 @@ export default function ShareTab({ server }: { server: Server }) {
   /** The rule the admin is typing, before it is added to the list. */
   const [rule, setRule] = useState<Forbidden>(NO_RULE);
   const [confirming, setConfirming] = useState<"rotate" | "stop" | null>(null);
+  /**
+   * The router is being asked again, right now. Its own state rather than
+   * `busy`: the ask changes nothing, so none of the buttons that do need
+   * disabling while it runs.
+   */
+  const [asking, setAsking] = useState(false);
   /**
    * The two listing fields while the admin is editing them. `null` means they
    * have not touched them, so what is shown is what the backend last said —
@@ -221,6 +228,25 @@ export default function ShareTab({ server }: { server: Server }) {
       return undefined;
     } finally {
       setBusy(null);
+    }
+  }
+
+  /**
+   * Ask the router now instead of waiting for the next time Geode would.
+   *
+   * For the admin who has just bridged a modem or turned UPnP on: the answer
+   * here is otherwise up to half an hour old, and nothing on the page can
+   * tell them whether what they just did worked. Changes nothing on the
+   * router, and comes back with the same status the page already reads.
+   */
+  async function askRouter() {
+    setAsking(true);
+    try {
+      setShareStatus(await api.recheckRouter());
+    } catch (e) {
+      reportError("Could not ask your router again", e);
+    } finally {
+      setAsking(false);
     }
   }
 
@@ -898,11 +924,29 @@ export default function ShareTab({ server }: { server: Server }) {
                 />
                 <StatusNote
                   line={routerLine(status, hasPublicAddress)}
-                  busy={status.mapping.state === "searching"}
+                  busy={asking || status.mapping.state === "searching"}
                 />
               </>
             )}
             <div className={styles.actions}>
+              {/* The answer above is otherwise as much as half an hour old,
+                  which is no use to an admin who has just changed something on
+                  the router and wants to know whether it worked. */}
+              {status && !statusError && (
+                <button
+                  className="btn"
+                  onClick={() => void askRouter()}
+                  disabled={asking}
+                  title="Ask your router for its address again, without touching the mapping it already has"
+                >
+                  {asking ? (
+                    <Loader2 size={14} className="spin" />
+                  ) : (
+                    <RefreshCw size={14} />
+                  )}
+                  {asking ? "Asking the router…" : "Ask the router again"}
+                </button>
+              )}
               {/* The port above is the one packs come down, and the only one
                   Geode ever opens — an admin who reads it as the game address
                   hands out a port nothing is listening on. */}

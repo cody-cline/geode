@@ -1,0 +1,14 @@
+Time: 2026-05-19 14:21:06
+Description: Unexpected error
+
+-- Head --
+Thread: Render thread
+Suspected Mods: 
+	Mekalus (Oculus) (oculus), Version: 1.8.0.1
+
+	Mod List: 
+		YungsBetterDungeons-1.20-Forge-4.0.4.jar          |YUNG's Better Dungeons        |betterdungeons                |1.20-Forge-4.0.4    |DONE      |Manifest: NOSIGNATURE
+		mekalus-mc1.20.1-1.8.0.1.jar                      |Mekalus (Oculus)              |oculus                        |1.8.0.1             |DONE      |Manifest: NOSIGNATURE
+		modernfix-forge-5.27.22+mc1.20.1.jar              |ModernFix                     |modernfix                     |5.27.22+mc1.20.1    |DONE      |Manifest: NOSIGNATURE
+		EvilCraft-1.20.1-1.2.59.jar                       |EvilCraft                     |evilcraft                     |1.2.59              |DONE      |Manifest: NOSIGNATURE
+		useitemonblockevent-1.20.1-1.0.0.2.jar            |Use Item on Block Event       |useitemonblockevent           |1.0.0.2             |DONE      |Manifest: NOSIGNATURE

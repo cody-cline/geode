@@ -1,0 +1,9 @@
+Time: 2026-05-19 18:10:20
+Description: Rendering overlay
+
+net.minecraftforge.fml.ModLoadingException: LowDragLib (ldlib) encountered an error during the enqueue_imc event phase
+§7java.lang.OutOfMemoryError: Java heap space
+
+	Mod List: 
+		YungsBetterDungeons-1.20-Forge-4.0.4.jar          |YUNG's Better Dungeons        |betterdungeons                |1.20-Forge-4.0.4    |ENQUEUE_IM|Manifest: NOSIGNATURE
+		ldlib-forge-1.20.1-1.0.40.b.jar                   |LowDragLib                    |ldlib                         |1.0.40.b            |ENQUEUE_IM|Manifest: NOSIGNATURE

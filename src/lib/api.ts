@@ -10,6 +10,7 @@ import type {
   ConnectorSupport,
   ContentItem,
   ContentKind,
+  CrashReport,
   DeviceCodeStart,
   Disconnected,
   DriveShare,
@@ -326,6 +327,12 @@ export const api = {
   deleteInstanceLog: (id: string, name: string) =>
     invoke<void>("delete_instance_log", { id, name }),
   /**
+   * The newest crash report, read for which mod broke — `null` when the game
+   * has never crashed here. Each suspect says what the evidence was and
+   * quotes the line it came from; an empty list means the report names no mod.
+   */
+  instanceCrash: (id: string) => invoke<CrashReport | null>("instance_crash", { id }),
+  /**
    * A pasteable report: what is installed, the crash report if there is one,
    * and the log — with a prompt on top asking for the cause rather than a
    * guess. `live` is the console's own text, used only when no log file has
@@ -475,6 +482,20 @@ export const api = {
   /** Only the settings passed are changed; the rest of the file is left alone. */
   writeServerProperties: (id: string, properties: ServerProperty[]) =>
     invoke<void>("write_server_properties", { id, properties }),
+  /**
+   * Other servers already configured on this game port, by name.
+   *
+   * Two servers on one port is allowed — they may never run together — but
+   * only one of them can be up at a time, and nothing says so until the
+   * second fails to start. Empty when the port is this server's alone.
+   *
+   * `port` is the one being typed. Leave it out to ask about the port this
+   * server already has, which is the only way to ask about a server that has
+   * never started: it has no `server.properties` yet, and what it will write
+   * there on its first boot is the backend's to know.
+   */
+  gamePortClashes: (id: string, port?: number) =>
+    invoke<string[]>("game_port_clashes", { id, port }),
 
   /**
    * The whitelist, the operators and both ban lists, read from the files
@@ -638,6 +659,17 @@ export const api = {
   // Sharing a server with players. Status changes also arrive as the
   // `geode://share-status` event with a ShareStatus payload.
   getShareStatus: () => invoke<ShareStatus>("get_share_status"),
+  /**
+   * Ask the router again now, and resolve to what it said.
+   *
+   * The mapping is renewed and the address re-read on a timer, so a change
+   * out there — a modem bridged, UPnP switched on — otherwise takes up to
+   * half an hour to show. This hurries that along without disturbing a
+   * mapping that works or the listener. Several calls at once collapse into
+   * one ask; the status also arrives as the usual `geode://share-status`
+   * event, so a page that is not waiting on this still catches up.
+   */
+  recheckRouter: () => invoke<ShareStatus>("recheck_router"),
   setShareSettings: (settings: ShareSettings) =>
     invoke<ShareStatus>("set_share_settings", { settings }),
   getServerShare: (id: string) =>

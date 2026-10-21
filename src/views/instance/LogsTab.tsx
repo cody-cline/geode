@@ -4,6 +4,7 @@ import { ArrowDownToLine, Copy, Search, Terminal, Trash2 } from "lucide-react";
 
 import LogFilesPanel from "../../components/LogFilesPanel";
 import type { LogSource } from "../../components/LogFilesPanel";
+import CrashCard from "./CrashCard";
 import { api } from "../../lib/api";
 import { useStore } from "../../lib/store";
 import type { LogEntry } from "../../lib/types";
@@ -88,7 +89,14 @@ export default function LogsTab({ instanceId }: { instanceId: string }) {
       </div>
 
       {view === "files" ? (
-        <LogFilesPanel source={source} />
+        <div className={styles.filesView}>
+          {/* Above the files, because the crash report is the same failure
+              already narrowed down to a mod. */}
+          <CrashCard instanceId={instanceId} />
+          <div className={styles.filesBody}>
+            <LogFilesPanel source={source} />
+          </div>
+        </div>
       ) : (
       <>
       <div className={styles.toolbar}>

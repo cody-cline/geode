@@ -653,8 +653,9 @@ function unreachableLine(
         title: "Another router is in front of this one",
         // Bridging the outer router changes nothing here until Geode asks
         // again, which it does on its own — so saying when saves an admin who
-        // has just done it from going back through Settings to no effect.
-        detail: `${reported} is a private one, so there is a second router — often your provider's modem — between it and the internet. ${then} Geode asks your router again within half an hour, so a change out there shows up here on its own.${workaround}`,
+        // has just done it from going back through Settings to no effect, and
+        // pointing at the button saves them the half hour.
+        detail: `${reported} is a private one, so there is a second router — often your provider's modem — between it and the internet. ${then} Geode asks your router again within half an hour, so a change out there shows up here on its own — or ask it again now, below.${workaround}`,
       };
     }
     case "noIpv4":

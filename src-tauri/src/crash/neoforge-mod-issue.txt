@@ -1,0 +1,22 @@
+---- Minecraft Crash Report ----
+// I'm sorry, Dave.
+
+Time: 2026-08-16 22:13:42
+Description: Mod loading failures have occurred; consult the issue messages for more details
+
+net.neoforged.neoforge.logging.CrashReportExtender$ModLoadingCrashException: Mod loading has failed
+
+
+A detailed walkthrough of the error, its code path and all known details is as follows:
+---------------------------------------------------------------------------------------
+
+-- Mod loading issue for: colorwheel --
+Details:
+	Mod file: /home/codyc/.local/share/PrismLauncher/instances/Create Simulated/minecraft/mods/colorwheel-neoforge-1.2.9+mc1.21.1.jar
+	Failure message: Mod colorwheel is incompatible with irisflw any
+		Currently, irisflw is 2.4.0
+		The reason is: Mixin conflict with Iris Flywheel Compat
+	Mod version: 1.2.9+mc1.21.1
+	Mod issues URL: https://github.com/djefrey/Colorwheel/issues
+	Exception message: <No associated exception found>
+

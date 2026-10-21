@@ -1612,6 +1612,17 @@ pub async fn delete_instance_log(
     crate::instance::logs::delete(&state.paths, &id, &name).await
 }
 
+/// The newest crash report, read for which mod broke — `None` when the game
+/// has never crashed here.
+#[tauri::command]
+pub async fn instance_crash(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Option<crate::crash::Report>> {
+    let inst = instance::load(&state.paths, &id).await?;
+    crate::instance::logs::crash(&state.paths, &inst, &state.jars).await
+}
+
 /// A report about an instance, ready to paste to someone who can diagnose it.
 ///
 /// `log_name` picks which log to include; without one it uses whatever the
@@ -2685,6 +2696,22 @@ pub async fn read_server_properties(
     id: String,
 ) -> Result<Vec<crate::server::properties::Property>> {
     crate::server::properties::read(&state.paths, &id).await
+}
+
+/// The other servers already set to this game port, by name.
+///
+/// Asked as the port is being set, so a clash is said then rather than when
+/// the second server fails to start. Said, not enforced — see
+/// [`crate::server::properties::clashes`] for why, and for what it cannot see.
+/// `port` is what the admin has typed; without one, the port this server
+/// already has.
+#[tauri::command]
+pub async fn game_port_clashes(
+    state: State<'_, AppState>,
+    id: String,
+    port: Option<u16>,
+) -> Result<Vec<String>> {
+    crate::server::properties::clashes(&state.paths, &id, port).await
 }
 
 #[tauri::command]
@@ -4106,6 +4133,26 @@ async fn shared(state: &AppState, id: &str) -> Result<crate::server::share::Serv
 pub async fn get_share_status(state: State<'_, AppState>) -> Result<share::service::ShareStatus> {
     let config = state.config().await;
     Ok(state.share.status(&state.paths, &config.share).await)
+}
+
+/// Ask the router again now, rather than when the mapping next renews.
+///
+/// The answer the Share tab shows is otherwise up to half an hour old, which
+/// is no use to an admin who has just changed something on their router.
+#[tauri::command]
+pub async fn recheck_router(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<share::service::ShareStatus> {
+    let config = state.config().await;
+    state
+        .share
+        .recheck_router(
+            &state.paths,
+            &config.share,
+            Some(crate::desktop::sink(app.clone())),
+        )
+        .await
 }
 
 #[tauri::command]

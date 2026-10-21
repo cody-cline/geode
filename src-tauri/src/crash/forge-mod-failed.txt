@@ -1,0 +1,27 @@
+---- Minecraft Crash Report ----
+// Embeddium instance tainted by mods: [sodiumoptionsapi, valkyrienskies, oculus]
+// Please do not reach out for Embeddium support without removing these mods first.
+// -------
+// Hi. I'm Minecraft, and I'm a crashaholic.
+
+Time: 2026-06-12 21:51:24
+Description: Mod loading error has occurred
+
+java.lang.Exception: Mod Loading has failed
+
+A detailed walkthrough of the error, its code path and all known details is as follows:
+---------------------------------------------------------------------------------------
+
+
+-- Head --
+Thread: Render thread
+Suspected Mods: NONE
+Stacktrace:
+	at it.unimi.dsi.fastutil.objects.Object2ObjectOpenHashMap.rehash(Object2ObjectOpenHashMap.java:1275) ~[fastutil-8.5.9.jar%23129!/:?] {re:mixin}
+-- MOD quark --
+Details:
+	Mod File: /C:/Users/codyc/curseforge/minecraft/Instances/Some of the Mods 9 (Cody's Edition)/mods/Quark-4.0-462.jar
+	Failure message: Quark (quark) has failed to load correctly
+		java.lang.ArrayIndexOutOfBoundsException: Index 512 out of bounds for length 257
+	Mod Version: 4.0-462
+	Mod Issue URL: https://github.com/VazkiiMods/Quark

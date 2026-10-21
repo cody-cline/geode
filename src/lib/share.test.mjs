@@ -238,6 +238,9 @@ test("double NAT says how long a change out there takes to show up", () => {
   assert.match(opened.detail, /half an hour/);
   const byHand = routerLine(manual({ detected: { ip: "192.168.1.2", reachability: "doubleNat" } }), false);
   assert.match(byHand.detail, /half an hour/);
+  // And that they need not wait it out, since there is now a button.
+  assert.match(opened.detail, /ask it again now/);
+  assert.match(byHand.detail, /ask it again now/);
 });
 
 test("double NAT does not promise that forwarding alone makes a link", () => {
