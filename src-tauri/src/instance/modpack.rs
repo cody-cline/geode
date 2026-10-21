@@ -25,12 +25,15 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Context, Error, Result};
-use crate::install::identity::{travel, Ask, Carry, Catalogue, Copied, Identity, Travel};
+use crate::install::identity::{
+    travel, Ask, Carry, Catalogue, Copied, Identity, PlatformRef, Travel,
+};
 use crate::meta::Loader;
 use crate::net::{Download, Progress};
 use crate::paths::Paths;
 
 use super::content::{ContentKind, ContentRecord};
+use super::export::Selection;
 use super::{prism, Instance};
 
 // ---------------------------------------------------------------------------
@@ -752,7 +755,7 @@ pub async fn import_into_at(
             extract_trees(
                 &archive_owned,
                 &game_dir,
-                &["overrides", "client-overrides"],
+                &[("overrides", ""), ("client-overrides", "")],
                 progress,
             )
             .await?;
@@ -818,7 +821,7 @@ pub async fn import_into_at(
             extract_trees(
                 &archive_owned,
                 &game_dir,
-                &[manifest.overrides.as_str()],
+                &[(manifest.overrides.as_str(), "")],
                 progress,
             )
             .await?;
@@ -1005,7 +1008,16 @@ pub async fn import_into_at(
                 // has to find and unzip by hand is an import that calls itself
                 // a success and leaves an empty singleplayer list.
                 if matches!(placement, CfPlacement::Saves) {
-                    worlds.push((version.name.clone(), game_dir.join(&rel)));
+                    let zipped = game_dir.join(&rel);
+                    // A manifest listing the same file twice is two entries
+                    // downloading to the one path, which the loop above
+                    // tolerates. Unpacking it twice would not: the first
+                    // unpack deletes the zip, so the second fails on a missing
+                    // file and the failure reads as advice about a zip the
+                    // player no longer has.
+                    if !worlds.iter().any(|(_, already)| already == &zipped) {
+                        worlds.push((version.name.clone(), zipped));
+                    }
                 }
 
                 if let Some(kind) = record_kind {
@@ -1060,23 +1072,43 @@ pub async fn import_into_at(
                     )
                 };
                 match unpack_world(&zipped, &saves, progress).await {
-                    Ok(Some(folder)) => {
+                    Ok(folders) if !folders.is_empty() => {
                         // The zip has nothing left to say, and leaving it in
                         // `saves/` beside the world it became is clutter the
                         // game ignores and the player has to wonder about.
                         let _ = tokio::fs::remove_file(&zipped).await;
+                        // Every folder, because the zip is gone: a map
+                        // published in chapters arrives as several worlds in
+                        // one archive, and one the notice does not name is one
+                        // the player cannot be told about afterwards.
+                        let arrived = folders
+                            .iter()
+                            .map(|folder| format!("\"{folder}\""))
+                            .collect::<Vec<_>>()
+                            .join(", ");
                         progress.notice(
-                            "A world came with this pack",
-                            format!(
-                                "\"{name}\" is unpacked into this instance's saves folder as \
-                                 \"{folder}\", so it is in the game's singleplayer list."
-                            ),
+                            if folders.len() == 1 {
+                                "A world came with this pack"
+                            } else {
+                                "Worlds came with this pack"
+                            },
+                            match folders.len() {
+                                1 => format!(
+                                    "\"{name}\" is unpacked into this instance's saves folder as \
+                                     {arrived}, so it is in the game's singleplayer list."
+                                ),
+                                several => format!(
+                                    "\"{name}\" held {several} worlds, unpacked into this \
+                                     instance's saves folder as {arrived}, so they are in the \
+                                     game's singleplayer list."
+                                ),
+                            },
                         );
                     }
                     // A zip with no `level.dat` in it is not a world, whatever
                     // CurseForge files it under, and inventing a save folder
                     // for it would be worse than saying so.
-                    Ok(None) => left_out.push(by_hand("")),
+                    Ok(_) => left_out.push(by_hand("")),
                     // Cancel is the user's answer and not a thing to report.
                     Err(Error::Cancelled) => return Err(Error::Cancelled),
                     Err(e) => left_out.push(by_hand(&format!(" Geode could not unpack — {e}"))),
@@ -1118,7 +1150,7 @@ pub async fn import_into_at(
                 extract_trees(
                     &archive_owned,
                     &game_dir,
-                    &[prism_instance.game_root().as_str()],
+                    &[(prism_instance.game_root().as_str(), "")],
                     progress,
                 )
                 .await?;
@@ -1168,10 +1200,16 @@ fn overrides_budget(archive_bytes: u64) -> u64 {
     archive_bytes.saturating_mul(RATIO).clamp(FLOOR, CEILING)
 }
 
-/// Copy chosen trees out of an archive into a directory. Later roots win, so
+/// Copy chosen trees out of an archive into a directory. Later trees win, so
 /// `client-overrides` correctly shadows `overrides`.
 ///
-/// A root of `""` is the archive's own root, which is how a world zip whose
+/// Each one is the entry prefix to strip and where it goes under `dest_dir`.
+/// The second is `""` for a pack's own trees, which mirror the archive, and a
+/// folder name for a world — an archive holding several worlds is unpacked in
+/// one pass, so the inflate budget below is the archive's own rather than one
+/// budget per world.
+///
+/// A prefix of `""` is the archive's own root, which is how a world zip whose
 /// `level.dat` sits at the top is unpacked: every entry in it is the tree.
 ///
 /// Stops at the next entry when the run is cancelled. If it does not finish —
@@ -1181,12 +1219,15 @@ fn overrides_budget(archive_bytes: u64) -> u64 {
 async fn extract_trees(
     archive: &Path,
     dest_dir: &Path,
-    roots: &[&str],
+    trees: &[(&str, &str)],
     progress: &Progress,
 ) -> Result<()> {
     let archive = archive.to_path_buf();
     let dest_dir = dest_dir.to_path_buf();
-    let roots: Vec<String> = roots.iter().map(|s| s.to_string()).collect();
+    let trees: Vec<(String, PathBuf)> = trees
+        .iter()
+        .map(|(prefix, under)| (prefix.to_string(), PathBuf::from(under)))
+        .collect();
     let progress = progress.clone();
 
     tokio::task::spawn_blocking(move || -> Result<()> {
@@ -1208,11 +1249,12 @@ async fn extract_trees(
                     continue;
                 }
                 let name = entry.name().to_string();
-                let Some(rel) = roots.iter().find_map(|root| {
-                    if root.is_empty() {
-                        Some(name.as_str())
+                let Some((rel, under)) = trees.iter().find_map(|(prefix, under)| {
+                    if prefix.is_empty() {
+                        Some((name.as_str(), under))
                     } else {
-                        name.strip_prefix(&format!("{root}/"))
+                        name.strip_prefix(&format!("{prefix}/"))
+                            .map(|rel| (rel, under))
                     }
                 }) else {
                     continue;
@@ -1222,7 +1264,7 @@ async fn extract_trees(
                 if !crate::paths::is_safe_relative(rel_path) {
                     continue;
                 }
-                let dest = dest_dir.join(rel_path);
+                let dest = dest_dir.join(under).join(rel_path);
                 if let Some(parent) = dest.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
@@ -1260,8 +1302,8 @@ async fn extract_trees(
     .map_err(|e| Error::msg(format!("unpacking an archive panicked: {e}")))?
 }
 
-/// Where the world is inside a zip of one, and what to call the folder it
-/// unpacks into: `(the entry prefix to unpack, the folder's name)`.
+/// Every world inside a zip of them, as `(the entry prefix to unpack, the
+/// folder's name)`.
 ///
 /// Both shapes a real world zip comes in. The common one wraps everything in a
 /// folder — `CoolMap/level.dat`, `CoolMap/region/...` — and that folder *is*
@@ -1270,13 +1312,17 @@ async fn extract_trees(
 /// is called and the file's own name is all there is to go on.
 ///
 /// Read off `level.dat`, because that is the file the game requires and the
-/// only thing that makes a directory a world. The shallowest one wins, so a
-/// world that happens to carry another world deeper inside unpacks as itself.
+/// only thing that makes a directory a world. Every one at the shallowest
+/// depth is a world: a map published in chapters puts them side by side in one
+/// archive, and a world that happens to carry another world deeper inside
+/// unpacks as itself. Sorted, so one archive always unpacks the same way.
 ///
-/// `None` when there is no `level.dat` at all — that is not a world, and
+/// Empty when there is no `level.dat` at all — that is not a world, and
 /// guessing would leave a junk folder in somebody's singleplayer list — and
-/// when the wrapping folder is not a name Geode will make a directory for.
-fn world_in(names: &[String], named_after_the_file: &str) -> Option<(String, String)> {
+/// when any wrapping folder is not a name Geode will make a directory for,
+/// because a zip that names its way out of `saves/` is not one to unpack half
+/// of.
+fn worlds_in(names: &[String], named_after_the_file: &str) -> Vec<(String, String)> {
     let depth = |prefix: &str| {
         if prefix.is_empty() {
             0
@@ -1285,53 +1331,56 @@ fn world_in(names: &[String], named_after_the_file: &str) -> Option<(String, Str
         }
     };
 
-    let mut shallowest: Option<&str> = None;
-    for name in names {
-        let (prefix, file) = name.rsplit_once('/').unwrap_or(("", name.as_str()));
-        if file != "level.dat" {
-            continue;
-        }
-        // Ties broken by name so one archive always unpacks the same way.
-        let better = match shallowest {
-            Some(best) => (depth(prefix), prefix) < (depth(best), best),
-            None => true,
-        };
-        if better {
-            shallowest = Some(prefix);
-        }
-    }
-    let prefix = shallowest?;
-
-    let folder = match prefix.rsplit('/').next() {
-        Some(last) if !last.is_empty() => last,
-        _ => named_after_the_file,
+    let mut prefixes: Vec<&str> = names
+        .iter()
+        .filter_map(|name| {
+            let (prefix, file) = name.rsplit_once('/').unwrap_or(("", name.as_str()));
+            (file == "level.dat").then_some(prefix)
+        })
+        .collect();
+    let Some(shallowest) = prefixes.iter().map(|prefix| depth(prefix)).min() else {
+        return Vec::new();
     };
-    // The name comes out of somebody else's archive, so it is held to more
-    // than the `is_safe_relative` its entries are: exactly one ordinary
-    // component. That refuses `..` and `/` as that rule does, and also `.` and
-    // `a/b`, each of which would unpack a world somewhere other than its own
-    // folder under `saves/`.
-    let mut parts = Path::new(folder).components();
-    let one_plain_name =
-        matches!(parts.next(), Some(std::path::Component::Normal(_))) && parts.next().is_none();
-    if !one_plain_name {
-        return None;
-    }
+    prefixes.retain(|prefix| depth(prefix) == shallowest);
+    prefixes.sort_unstable();
+    prefixes.dedup();
 
-    Some((prefix.to_string(), folder.to_string()))
+    let mut worlds = Vec::with_capacity(prefixes.len());
+    for prefix in prefixes {
+        let folder = match prefix.rsplit('/').next() {
+            Some(last) if !last.is_empty() => last,
+            _ => named_after_the_file,
+        };
+        // The name comes out of somebody else's archive, so it is held to more
+        // than the `is_safe_relative` its entries are: exactly one ordinary
+        // component. That refuses `..` and `/` as that rule does, and also `.`
+        // and `a/b`, each of which would unpack a world somewhere other than
+        // its own folder under `saves/`.
+        let mut parts = Path::new(folder).components();
+        let one_plain_name =
+            matches!(parts.next(), Some(std::path::Component::Normal(_))) && parts.next().is_none();
+        if !one_plain_name {
+            return Vec::new();
+        }
+        worlds.push((prefix.to_string(), folder.to_string()));
+    }
+    worlds
 }
 
-/// Turn a world that arrived as a zip into the folder the game reads, and say
-/// what that folder ended up being called.
+/// Turn the worlds that arrived as a zip into the folders the game reads, and
+/// say what those folders ended up being called.
 ///
-/// `Ok(None)` for an archive that holds no world: it is left exactly where it
-/// is, for the report to name.
+/// Empty for an archive that holds no world: it is left exactly where it is,
+/// for the report to name. Several for an archive that holds several, all
+/// unpacked, because the caller deletes the archive afterwards and a world
+/// dropped here is one the player cannot get back.
 ///
-/// Unpacked through [`extract_trees`], so a world is held to everything a
-/// pack's overrides are — entry names that climb out of the destination are
-/// skipped, the inflate budget stops a zip bomb, Cancel is heard between
-/// entries, and a run that does not finish takes back only what it wrote.
-async fn unpack_world(archive: &Path, saves: &Path, progress: &Progress) -> Result<Option<String>> {
+/// Unpacked through [`extract_trees`], in one pass, so the worlds are held to
+/// everything a pack's overrides are *and* to one budget between them — entry
+/// names that climb out of the destination are skipped, the inflate budget
+/// stops a zip bomb, Cancel is heard between entries, and a run that does not
+/// finish takes back only what it wrote.
+async fn unpack_world(archive: &Path, saves: &Path, progress: &Progress) -> Result<Vec<String>> {
     let names = {
         let archive = archive.to_path_buf();
         tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
@@ -1348,12 +1397,17 @@ async fn unpack_world(archive: &Path, saves: &Path, progress: &Progress) -> Resu
         .file_stem()
         .map(|stem| stem.to_string_lossy().to_string())
         .unwrap_or_default();
-    let Some((prefix, folder)) = world_in(&names, &named_after_the_file) else {
-        return Ok(None);
-    };
+    let worlds = worlds_in(&names, &named_after_the_file);
+    if worlds.is_empty() {
+        return Ok(Vec::new());
+    }
 
-    extract_trees(archive, &saves.join(&folder), &[prefix.as_str()], progress).await?;
-    Ok(Some(folder))
+    let trees: Vec<(&str, &str)> = worlds
+        .iter()
+        .map(|(prefix, folder)| (prefix.as_str(), folder.as_str()))
+        .collect();
+    extract_trees(archive, saves, &trees, progress).await?;
+    Ok(worlds.into_iter().map(|(_, folder)| folder).collect())
 }
 
 /// Give every file a `.mrpack` installed a link back to its project.
@@ -1553,6 +1607,91 @@ pub struct ExportReport {
     pub author: Option<String>,
 }
 
+/// What a pack will do with one file.
+///
+/// [`Travel`] is what [`travel`] decides from the file and the format; this is
+/// that plus the one reason only the writer can know, because it depends on
+/// what the pack has already said about another file. Each writer's planning
+/// pass produces these, and [`ExportReport::count`] is the only place they
+/// become numbers — which is what lets the export dialog show the counts
+/// before the pack is written and be right.
+pub enum Journey<'a> {
+    /// An index entry: a URL and a pair of hashes the recipient fetches with
+    /// nobody's credentials.
+    Linked(&'a PlatformRef),
+    /// Named by id in the pack's own by-id channel.
+    Named(&'a PlatformRef),
+    /// Bytes, for one of the reasons [`travel`] gives.
+    Copied(Copied),
+    /// A second copy of a file this pack already names by the same ids, whose
+    /// bytes ride along so the recipient still ends up with both. Not a limit
+    /// of the format — the mod *is* named — which is why it is counted apart.
+    Duplicate,
+}
+
+impl ExportReport {
+    /// Count one file's journey.
+    ///
+    /// The one place a [`Journey`] becomes a number, so a dry run and the
+    /// writer that follows it cannot disagree about what the export did.
+    pub fn count(&mut self, journey: &Journey<'_>) {
+        match journey {
+            Journey::Linked(_) | Journey::Named(_) => self.referenced += 1,
+            Journey::Copied(Copied::Unknown) => self.embedded_unknown += 1,
+            Journey::Copied(Copied::Elsewhere) => self.embedded_elsewhere += 1,
+            Journey::Copied(Copied::TurnedOff) => self.embedded_turned_off += 1,
+            Journey::Copied(Copied::Blocked) => self.embedded_blocked += 1,
+            Journey::Duplicate => self.embedded_duplicate += 1,
+        }
+    }
+}
+
+/// The catalogue's files a pack of this selection carries, in the order every
+/// writer walks them.
+///
+/// Sorted by where the file sits, so exporting the same instance twice is the
+/// same bytes twice. The catalogue is a map, and the record order that used to
+/// decide this no longer comes into it.
+///
+/// A file in a group the sharer left out is not here at all. The writers name
+/// what they find here, so naming one would have the recipient fetch a mod
+/// whose bytes stayed at home — and [`ExportReport::count`] would report it as
+/// having travelled.
+pub(super) fn in_writing_order<'a>(
+    catalogue: &'a Catalogue,
+    selection: &Selection,
+) -> Vec<&'a Identity> {
+    let mut identities: Vec<&Identity> = catalogue
+        .identities()
+        .filter(|ident| selection.carries(&ident.disk_rel))
+        .collect();
+    identities.sort_by(|a, b| a.disk_rel.cmp(&b.disk_rel));
+    identities
+}
+
+/// What an `.mrpack`-shaped pack would do with each of the catalogue's files.
+///
+/// Nothing but [`travel`], because an index entry and a `.geodepack` note can
+/// both say everything they need to about one file on their own: there is no
+/// second file whose presence changes the answer.
+pub(super) fn plan_pack<'a>(
+    catalogue: &'a Catalogue,
+    carry: Carry,
+    selection: &Selection,
+) -> Vec<(&'a Identity, Journey<'a>)> {
+    in_writing_order(catalogue, selection)
+        .into_iter()
+        .map(|ident| {
+            let journey = match travel(ident, carry) {
+                Travel::Linked(reference) => Journey::Linked(reference),
+                Travel::Named(reference) => Journey::Named(reference),
+                Travel::Copied(why) => Journey::Copied(why),
+            };
+            (ident, journey)
+        })
+        .collect()
+}
+
 /// Write the instance out as a plain `.mrpack`.
 ///
 /// Every file Modrinth can name by hash becomes an index entry — a URL and a
@@ -1578,7 +1717,7 @@ pub async fn export_mrpack(
     paths: &Paths,
     instance: &Instance,
     dest: PathBuf,
-    include_saves: bool,
+    selection: &Selection,
     progress: &Progress,
 ) -> Result<ExportReport> {
     let catalogue = crate::install::identity::for_instance(ask, paths, instance, progress).await?;
@@ -1586,7 +1725,7 @@ pub async fn export_mrpack(
         paths,
         instance,
         dest,
-        include_saves,
+        selection,
         GeodeHalf::default(),
         &catalogue,
         progress,
@@ -1604,13 +1743,13 @@ pub async fn write_instance_pack(
     paths: &Paths,
     instance: &Instance,
     dest: PathBuf,
-    include_saves: bool,
+    selection: &Selection,
     half: GeodeHalf,
     catalogue: &Catalogue,
     progress: &Progress,
 ) -> Result<ExportReport> {
     write_mrpack(
-        instance_input(paths, instance, include_saves),
+        instance_input(paths, instance, selection),
         dest,
         half,
         catalogue,
@@ -1626,19 +1765,8 @@ pub async fn write_instance_pack(
 pub(super) fn instance_input<'a>(
     paths: &Paths,
     instance: &'a Instance,
-    include_saves: bool,
+    selection: &Selection,
 ) -> PackInput<'a> {
-    let mut skip_dirs: Vec<&'static str> = vec![
-        "logs",
-        "crash-reports",
-        "screenshots",
-        ".fabric",
-        "versions",
-    ];
-    if !include_saves {
-        skip_dirs.push("saves");
-    }
-
     PackInput {
         root: paths.game_dir(&instance.id),
         name: &instance.name,
@@ -1651,20 +1779,26 @@ pub(super) fn instance_input<'a>(
         mc_version: &instance.mc_version,
         loader: instance.loader,
         loader_version: &instance.loader_version,
-        walk: Walk::Except(skip_dirs),
+        walk: Walk::Groups(selection.clone()),
     }
 }
 
 /// Which entries under a pack's root the writer may carry as bytes.
 pub enum Walk {
-    /// Everything except these top-level entries. Right for an instance, whose
-    /// game directory is the player's own and mostly worth sending.
+    /// The groups of an instance the sharer chose, and the ones the format
+    /// never carries left out. Right for an instance, whose game directory is
+    /// the player's own and mostly worth sending.
+    ///
+    /// A list of what to *keep out* used to live here, which is how a pack
+    /// came to decide for the sharer that their screenshots were nobody's
+    /// business. [`super::export::group_of`] is the one place that reads the
+    /// layout now, so the dialog's counts and this walk cannot disagree.
     ///
     /// This walk follows links. The player exporting is the one who made them
     /// — a `saves` or `resourcepacks` shared between instances is a common
     /// setup — and the file it writes goes wherever they take it, so the pack
     /// should hold what they see in game.
-    Except(Vec<&'static str>),
+    Groups(Selection),
     /// Nothing but these, and never through a link. Right for anything holding
     /// files that must never leave the machine, where a list of what to keep
     /// out is only ever one forgotten name from shipping a secret.
@@ -1695,8 +1829,11 @@ impl Walk {
     fn step(&self, rel: &Path, entry: &std::fs::DirEntry) -> Step {
         let top = rel.components().next().and_then(|c| c.as_os_str().to_str());
         match self {
-            Walk::Except(skip) => {
-                if top.is_some_and(|t| skip.contains(&t)) {
+            Walk::Groups(selection) => {
+                let chosen = top
+                    .and_then(super::export::group_of)
+                    .is_some_and(|group| selection.travels(group));
+                if !chosen {
                     Step::Skip
                 } else if entry.path().is_dir() {
                     Step::Descend
@@ -1747,6 +1884,23 @@ pub struct PackInput<'a> {
     pub walk: Walk,
 }
 
+impl PackInput<'_> {
+    /// Which of the instance's groups this pack carries, as the writers'
+    /// planning passes need it.
+    ///
+    /// Taken off the walk rather than passed a second time, so what a pack
+    /// names and what its walk carries cannot come to disagree.
+    fn selection(&self) -> Selection {
+        match &self.walk {
+            Walk::Groups(selection) => selection.clone(),
+            // A pack walked by allowlist is a server's pack for its players,
+            // whose catalogue holds exactly the files that walk named: no
+            // group was left out for a writer to honour.
+            Walk::Only { .. } => Selection::everything(),
+        }
+    }
+}
+
 /// Where a file on a server's disk goes in the pack its players get.
 ///
 /// A server keeps client mods in `client-mods/`, which no loader reads, and a
@@ -1776,6 +1930,7 @@ pub async fn write_mrpack(
     catalogue: &Catalogue,
     progress: &Progress,
 ) -> Result<ExportReport> {
+    let selection = input.selection();
     let game_dir = input.root;
     let players_pack = matches!(input.walk, Walk::Only { .. });
     let mut report = ExportReport {
@@ -1818,34 +1973,22 @@ pub async fn write_mrpack(
     // Modrinth can name by hash is indexed whatever Geode happens to have
     // written down about it, and a record Modrinth has disowned is not.
     //
-    // Sorted by where the file sits, so exporting the same instance twice is
-    // the same bytes twice. The catalogue is a map, and the record order that
-    // used to decide this no longer comes into it.
-    let mut identities: Vec<&Identity> = catalogue.identities().collect();
-    identities.sort_by(|a, b| a.disk_rel.cmp(&b.disk_rel));
-
+    // Worked out by the same planning pass the export dialog's dry run calls,
+    // and counted by the same `count`, so what the sharer was shown before
+    // pressing the button is what the report tells them afterwards.
     let mut indexed: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-    for ident in identities {
-        let reference = match travel(ident, half.carry) {
-            Travel::Linked(reference) => reference,
+    for (ident, journey) in plan_pack(catalogue, half.carry, &selection) {
+        report.count(&journey);
+        let reference = match journey {
+            Journey::Linked(reference) => reference,
             // Named in the Geode half, which the caller wrote and whose paths
-            // reach the walk through `half.referenced`.
-            Travel::Named(_) => {
-                report.referenced += 1;
-                continue;
-            }
-            // Counted by reason. "Nothing has this mod" and "this format
-            // cannot link to where it came from" are different things to be
-            // told, and only the first of them is nobody's fault.
-            Travel::Copied(why) => {
-                match why {
-                    Copied::Unknown => report.embedded_unknown += 1,
-                    Copied::Elsewhere => report.embedded_elsewhere += 1,
-                    Copied::TurnedOff => report.embedded_turned_off += 1,
-                    Copied::Blocked => report.embedded_blocked += 1,
-                }
-                continue;
-            }
+            // reach the walk through `half.referenced`. Counted, as every
+            // journey is, and nothing more to write here.
+            //
+            // `Duplicate` never arrives: it is a CurseForge manifest's limit,
+            // and this format's by-id channel carries a path alongside the ids
+            // so a second copy of a mod gets a note of its own.
+            Journey::Named(_) | Journey::Copied(_) | Journey::Duplicate => continue,
         };
 
         // Where it belongs — the folder, then what the jar itself says, then
@@ -1907,7 +2050,6 @@ pub async fn write_mrpack(
             file_size: Some(ident.size),
         });
         indexed.insert(ident.disk_rel.clone());
-        report.referenced += 1;
     }
 
     progress.stage("Writing pack", 1).await;
@@ -2126,12 +2268,12 @@ pub async fn export_cfpack(
     instance: &Instance,
     dest: PathBuf,
     author: &str,
-    include_saves: bool,
+    selection: &Selection,
     progress: &Progress,
 ) -> Result<ExportReport> {
     let catalogue = crate::install::identity::for_instance(ask, paths, instance, progress).await?;
     write_cfpack(
-        instance_input(paths, instance, include_saves),
+        instance_input(paths, instance, selection),
         author,
         dest,
         &catalogue,
@@ -2140,15 +2282,115 @@ pub async fn export_cfpack(
     .await
 }
 
+/// One file's journey through a CurseForge pack, with the manifest entry for
+/// the files it names.
+pub(super) struct CfPlanned<'a> {
+    pub(super) ident: &'a Identity,
+    pub(super) journey: Journey<'a>,
+    /// The `files[]` entry, present exactly when the journey is
+    /// [`Journey::Named`] — deciding needs the ids parsed, so parsing them
+    /// twice is how the plan and the manifest would come to disagree. The
+    /// writer's own, which is why it is not on show outside this file.
+    entry: Option<CfFileOut>,
+}
+
+/// What a CurseForge pack would do with each of the catalogue's files.
+///
+/// Two of the reasons here are the manifest's and not [`travel`]'s, which is
+/// why this is a pass over the whole catalogue rather than a decision per
+/// file: whether a second entry would collide depends on what the pack has
+/// already said.
+pub(super) fn plan_cfpack<'a>(
+    catalogue: &'a Catalogue,
+    selection: &Selection,
+) -> Vec<CfPlanned<'a>> {
+    let mut planned: Vec<CfPlanned<'a>> = Vec::new();
+    for ident in in_writing_order(catalogue, selection) {
+        let reference = match travel(ident, Carry::CFPACK) {
+            Travel::Named(reference) => reference,
+            // `Carry::CFPACK` has no index for anything to be linked from, so
+            // this does not arise. Were that ever to change, bytes are the
+            // safe answer rather than a panic in the middle of an export.
+            Travel::Linked(_) => {
+                planned.push(CfPlanned {
+                    ident,
+                    journey: Journey::Copied(Copied::Elsewhere),
+                    entry: None,
+                });
+                continue;
+            }
+            Travel::Copied(why) => {
+                planned.push(CfPlanned {
+                    ident,
+                    journey: Journey::Copied(why),
+                    entry: None,
+                });
+                continue;
+            }
+        };
+
+        // The format names a file by two integers, and every reader types them
+        // that way. A reference whose ids are not numbers is no reference
+        // here, so the bytes travel instead of a pair nothing can read.
+        let (Ok(project_id), Ok(file_id)) = (
+            reference.project_id.parse::<u32>(),
+            reference.version_id.parse::<u32>(),
+        ) else {
+            planned.push(CfPlanned {
+                ident,
+                journey: Journey::Copied(Copied::Unknown),
+                entry: None,
+            });
+            continue;
+        };
+
+        // Prism reads `files[]` into a map keyed on the file id
+        // (PackManifest.cpp), so a second entry with the same id silently
+        // replaces the first. Geode meets this for real, since one jar copied
+        // under a second name has the same fingerprint and so the same ids.
+        // The duplicate is left out of the manifest and its bytes travel, so
+        // the recipient still ends up with both files.
+        //
+        // Its own count, and not the format's limit: this pack just linked
+        // that mod, so "it cannot link to where this came from" is the one
+        // thing the sharer must not be told about it.
+        if planned
+            .iter()
+            .any(|other| other.entry.as_ref().is_some_and(|e| e.file_id == file_id))
+        {
+            planned.push(CfPlanned {
+                ident,
+                journey: Journey::Duplicate,
+                entry: None,
+            });
+            continue;
+        }
+
+        planned.push(CfPlanned {
+            ident,
+            journey: Journey::Named(reference),
+            entry: Some(CfFileOut {
+                project_id,
+                file_id,
+                // The nearest this format comes to saying a mod is turned off,
+                // and what its readers turn back into a `.disabled` file.
+                required: !ident.disabled,
+            }),
+        });
+    }
+    planned
+}
+
 /// The same writer, from a catalogue already built — which is the seam a
 /// preview uses, and what the tests write packs through.
-async fn write_cfpack(
+pub(super) async fn write_cfpack(
     input: PackInput<'_>,
     author: &str,
     dest: PathBuf,
     catalogue: &Catalogue,
     progress: &Progress,
 ) -> Result<ExportReport> {
+    let selection = input.selection();
     let game_dir = input.root;
     // The format requires an author and an instance has nowhere to keep one,
     // so an export can arrive here with nothing. "Anonymous" is what a reader
@@ -2182,73 +2424,19 @@ async fn write_cfpack(
         files: Vec::new(),
     };
 
-    // Sorted by where the file sits, so exporting the same instance twice is
-    // the same bytes twice — the same reason the mrpack writer sorts.
-    let mut identities: Vec<&Identity> = catalogue.identities().collect();
-    identities.sort_by(|a, b| a.disk_rel.cmp(&b.disk_rel));
-
     let mut carried: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut credits: Vec<(u32, String)> = Vec::new();
-    for ident in identities {
-        let reference = match travel(ident, Carry::CFPACK) {
-            Travel::Named(reference) => reference,
-            // `Carry::CFPACK` has no index for anything to be linked from, so
-            // this does not arise. Were that ever to change, bytes are the
-            // safe answer rather than a panic in the middle of an export.
-            Travel::Linked(_) => {
-                report.embedded_elsewhere += 1;
-                continue;
-            }
-            // Counted by reason, as the mrpack writer counts them: the sharer
-            // can act on "this format cannot link to where it came from" and
-            // nobody can act on "nothing has this mod".
-            Travel::Copied(why) => {
-                match why {
-                    Copied::Unknown => report.embedded_unknown += 1,
-                    Copied::Elsewhere => report.embedded_elsewhere += 1,
-                    Copied::TurnedOff => report.embedded_turned_off += 1,
-                    Copied::Blocked => report.embedded_blocked += 1,
-                }
-                continue;
-            }
-        };
-
-        // The format names a file by two integers, and every reader types them
-        // that way. A reference whose ids are not numbers is no reference
-        // here, so the bytes travel instead of a pair nothing can read.
-        let (Ok(project_id), Ok(file_id)) = (
-            reference.project_id.parse::<u32>(),
-            reference.version_id.parse::<u32>(),
-        ) else {
-            report.embedded_unknown += 1;
-            continue;
-        };
-
-        // Prism reads `files[]` into a map keyed on the file id
-        // (PackManifest.cpp), so a second entry with the same id silently
-        // replaces the first. Geode meets this for real, since one jar copied
-        // under a second name has the same fingerprint and so the same ids.
-        // The duplicate is left out of the manifest and its bytes travel, so
-        // the recipient still ends up with both files.
-        //
-        // Its own count, and not the format's limit: this pack just linked
-        // that mod, so "it cannot link to where this came from" is the one
-        // thing the sharer must not be told about it.
-        if manifest.files.iter().any(|f| f.file_id == file_id) {
-            report.embedded_duplicate += 1;
-            continue;
-        }
-
-        manifest.files.push(CfFileOut {
-            project_id,
-            file_id,
-            // The nearest this format comes to saying a mod is turned off, and
-            // what its readers turn back into a `.disabled` file.
-            required: !ident.disabled,
-        });
-        credits.push((project_id, ident.file_name.clone()));
+    for planned in plan_cfpack(catalogue, &selection) {
+        let CfPlanned {
+            ident,
+            journey,
+            entry,
+        } = planned;
+        report.count(&journey);
+        let Some(entry) = entry else { continue };
+        credits.push((entry.project_id, ident.file_name.clone()));
         carried.insert(ident.disk_rel.clone());
-        report.referenced += 1;
+        manifest.files.push(entry);
     }
 
     progress.stage("Writing pack", 1).await;
@@ -2336,14 +2524,15 @@ mod tests {
         }
     }
     use super::*;
+    use crate::instance::export::Group;
     use crate::paths::Scratch;
 
-    /// What an instance's pack leaves behind: the game's logs and caches, and
-    /// its worlds unless asked for. Pinned because the same writer walks a
-    /// server's run directory the other way round, by allowlist, and the
+    /// What an instance's pack carries is the sharer's choice, group by group,
+    /// and a cache is in no group at all. Pinned because the same writer walks
+    /// a server's run directory the other way round, by allowlist, and the
     /// instance's walk must not drift along with it.
     #[tokio::test]
-    async fn an_instance_pack_leaves_out_the_games_own_clutter() {
+    async fn an_instance_pack_carries_the_groups_it_was_asked_for() {
         let scratch = Scratch::new("mrpack-walk");
         let paths = scratch.paths.clone();
         let mut inst = Instance::new("Walk".into(), "1.21.1".into(), Loader::Fabric, "0.16.0".into());
@@ -2366,20 +2555,55 @@ mod tests {
             tokio::fs::write(path, b"x").await.unwrap();
         }
 
+        // What the default selection carries, which is what every caller that
+        // is not the export dialog still asks for: no worlds, no screenshots,
+        // and never the loader's own caches.
         let kept = [
             "modrinth.index.json",
             "overrides/config/mod.toml",
             "overrides/mods/hand.jar",
             "overrides/options.txt",
         ];
-        for include_saves in [false, true] {
-            let dest = paths.root.join(format!("walk-{include_saves}.mrpack"));
+        // Each run names the groups asked for and the entries that answer,
+        // so a group gained or lost names itself.
+        let asked: [(&str, Selection, Vec<&str>); 4] = [
+            ("the default", Selection::default(), Vec::new()),
+            (
+                "worlds too",
+                Selection::with_saves(true),
+                vec!["overrides/saves/world/level.dat"],
+            ),
+            (
+                "screenshots and logs too",
+                Selection::of(
+                    [
+                        Group::Mods,
+                        Group::Config,
+                        Group::ResourcePacks,
+                        Group::ShaderPacks,
+                        Group::DataPacks,
+                        Group::Other,
+                        Group::Logs,
+                    ]
+                    .to_vec(),
+                ),
+                vec![
+                    "overrides/crash-reports/crash.txt",
+                    "overrides/logs/latest.log",
+                    "overrides/screenshots/shot.png",
+                ],
+            ),
+            // Nothing of the player's at all: the index, and not one file.
+            ("nothing", Selection::of(Vec::new()), Vec::new()),
+        ];
+        for (what, selection, extra) in asked {
+            let dest = paths.root.join(format!("walk-{}.mrpack", what.replace(' ', "-")));
             export_mrpack(
                 Ask::Nobody,
                 &paths,
                 &inst,
                 dest.clone(),
-                include_saves,
+                &selection,
                 &Progress::silent("t"),
             )
             .await
@@ -2388,12 +2612,14 @@ mod tests {
             let zip = zip::ZipArchive::new(std::fs::File::open(&dest).unwrap()).unwrap();
             let mut names: Vec<String> = zip.file_names().map(str::to_string).collect();
             names.sort();
-            let mut expected: Vec<String> = kept.iter().map(|s| s.to_string()).collect();
-            if include_saves {
-                expected.push("overrides/saves/world/level.dat".into());
-                expected.sort();
-            }
-            assert_eq!(names, expected, "include_saves={include_saves}");
+            let mut expected: Vec<String> = if what == "nothing" {
+                vec!["modrinth.index.json".to_string()]
+            } else {
+                kept.iter().map(|s| s.to_string()).collect()
+            };
+            expected.extend(extra.iter().map(|s| s.to_string()));
+            expected.sort();
+            assert_eq!(names, expected, "asked for {what}");
         }
     }
 
@@ -2424,7 +2650,7 @@ mod tests {
             &paths,
             &inst,
             dest.clone(),
-            false,
+            &Selection::default(),
             &Progress::silent("t"),
         )
         .await
@@ -2496,7 +2722,7 @@ mod tests {
                 &paths,
                 &inst,
                 dest.clone(),
-                false,
+                &Selection::default(),
                 &Progress::silent("t"),
             )
             .await
@@ -2573,7 +2799,7 @@ mod tests {
         author: &str,
     ) -> ExportReport {
         write_cfpack(
-            instance_input(paths, inst, false),
+            instance_input(paths, inst, &Selection::default()),
             author,
             dest.to_path_buf(),
             catalogue,
@@ -2687,6 +2913,35 @@ mod tests {
             entries(&dest)
         );
         assert_eq!((report.referenced, bundled(&report)), (0, (0, 1, 0, 0, 0)));
+    }
+
+    /// A group the sharer unticked is named by nothing either. The manifest is
+    /// a list of ids the recipient's launcher fetches, so an entry for a mod
+    /// whose bytes the walk left at home installs the very file that was
+    /// excluded — and the report would have called it referenced.
+    #[tokio::test]
+    async fn a_group_left_out_is_named_in_no_manifest_entry() {
+        let (scratch, inst, mut catalogue) =
+            cf_fixture("cf-left-out", &[("mods", "create.jar"), ("config", "x.toml")]).await;
+        catalogue.pretend_curseforge_holds(&[("create.jar", 328085, 4593548, true)]);
+        let dest = scratch.paths.root.join("cf-left-out.zip");
+
+        let report = write_cfpack(
+            instance_input(&scratch.paths, &inst, &Selection::of(vec![Group::Config])),
+            "Somebody",
+            dest.clone(),
+            &catalogue,
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(manifest_of(&dest)["files"], serde_json::json!([]));
+        assert_eq!((report.referenced, bundled(&report)), (0, (0, 0, 0, 0, 0)));
+        assert_eq!(
+            entries(&dest),
+            vec!["manifest.json", "modlist.html", "overrides/config/x.toml"]
+        );
     }
 
     /// The distribution rule survives into this writer: a file whose author
@@ -3138,11 +3393,11 @@ mod tests {
             ],
         );
 
-        let folder = unpack_world(&saves.join("download.zip"), &saves, &Progress::silent("t"))
+        let folders = unpack_world(&saves.join("download.zip"), &saves, &Progress::silent("t"))
             .await
             .expect("a world zip unpacks");
 
-        assert_eq!(folder.as_deref(), Some("Sky Village"));
+        assert_eq!(folders, vec!["Sky Village".to_string()]);
         assert_eq!(
             std::fs::read(saves.join("Sky Village/level.dat")).unwrap(),
             b"NBT",
@@ -3163,6 +3418,49 @@ mod tests {
         );
     }
 
+    /// A map published in chapters is several worlds side by side in one
+    /// archive, and every one of them is a world the player downloaded. The
+    /// import deletes the zip once it has unpacked it, so a world left behind
+    /// here is one nobody can get back without downloading the pack again.
+    #[tokio::test]
+    async fn every_world_in_one_archive_is_unpacked() {
+        let (_scratch, saves) = arrived_world(
+            "world-siblings",
+            "chapters.zip",
+            &[
+                ("Chapter 1/level.dat", b"ONE"),
+                ("Chapter 1/region/r.0.0.mca", b"REGION ONE"),
+                ("Chapter 2/level.dat", b"TWO"),
+                ("Chapter 2/region/r.0.0.mca", b"REGION TWO"),
+                // Deeper than the shallowest, so it is part of Chapter 2
+                // rather than a world of its own.
+                ("Chapter 2/datapacks/inner/level.dat", b"DEEPER"),
+            ],
+        );
+
+        let folders = unpack_world(&saves.join("chapters.zip"), &saves, &Progress::silent("t"))
+            .await
+            .expect("a world zip unpacks");
+
+        assert_eq!(
+            folders,
+            vec!["Chapter 1".to_string(), "Chapter 2".to_string()]
+        );
+        assert_eq!(
+            std::fs::read(saves.join("Chapter 1/level.dat")).unwrap(),
+            b"ONE"
+        );
+        assert_eq!(
+            std::fs::read(saves.join("Chapter 2/region/r.0.0.mca")).unwrap(),
+            b"REGION TWO",
+            "the second world arrived without the rest of itself"
+        );
+        assert!(
+            !saves.join("Chapter 2/Chapter 2").exists(),
+            "a world was unpacked inside itself"
+        );
+    }
+
     /// The other shape: `level.dat` at the archive's root, where nothing
     /// inside the zip says what the world is called and the file's own name is
     /// all there is to go on.
@@ -3178,11 +3476,11 @@ mod tests {
             ],
         );
 
-        let folder = unpack_world(&saves.join("Spawn Town.zip"), &saves, &Progress::silent("t"))
+        let folders = unpack_world(&saves.join("Spawn Town.zip"), &saves, &Progress::silent("t"))
             .await
             .expect("a world zip unpacks");
 
-        assert_eq!(folder.as_deref(), Some("Spawn Town"));
+        assert_eq!(folders, vec!["Spawn Town".to_string()]);
         assert_eq!(
             std::fs::read(saves.join("Spawn Town/level.dat")).unwrap(),
             b"NBT"
@@ -3209,11 +3507,11 @@ mod tests {
             &[("pack.mcmeta", b"{}"), ("assets/icon.png", b"PNG")],
         );
 
-        let folder = unpack_world(&saves.join("resources.zip"), &saves, &Progress::silent("t"))
+        let folders = unpack_world(&saves.join("resources.zip"), &saves, &Progress::silent("t"))
             .await
             .expect("a zip that is not a world is not a failure");
 
-        assert_eq!(folder, None);
+        assert!(folders.is_empty(), "{folders:?}");
         let left: Vec<String> = std::fs::read_dir(&saves)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
@@ -3237,10 +3535,10 @@ mod tests {
         );
         let root = scratch.paths.root.clone();
 
-        let folder = unpack_world(&saves.join("map.zip"), &saves, &Progress::silent("t"))
+        let folders = unpack_world(&saves.join("map.zip"), &saves, &Progress::silent("t"))
             .await
             .expect("the world itself still unpacks");
-        assert_eq!(folder.as_deref(), Some("map"));
+        assert_eq!(folders, vec!["map".to_string()]);
         assert!(saves.join("map/level.dat").exists());
         for escaped in [root.join("pwned.txt"), saves.join("pwned.txt")] {
             assert!(!escaped.exists(), "{} was written", escaped.display());
@@ -3250,10 +3548,13 @@ mod tests {
         // otherwise be unpacked as `saves/..`.
         let (climbing, saves) = arrived_world("world-climb-root", "map.zip", &[("../level.dat", b"NBT")]);
         let root = climbing.paths.root.clone();
-        let folder = unpack_world(&saves.join("map.zip"), &saves, &Progress::silent("t"))
+        let folders = unpack_world(&saves.join("map.zip"), &saves, &Progress::silent("t"))
             .await
             .expect("a zip Geode will not make a folder for is not a failure");
-        assert_eq!(folder, None, "a world said to live outside saves/ was unpacked anyway");
+        assert!(
+            folders.is_empty(),
+            "a world said to live outside saves/ was unpacked anyway"
+        );
         assert!(!root.join("level.dat").exists(), "it was written outside saves/");
         assert!(!saves.join("level.dat").exists());
     }

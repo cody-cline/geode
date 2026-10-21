@@ -29,9 +29,10 @@ use crate::net::Progress;
 use crate::paths::Paths;
 
 use super::content::{ContentKind, ContentRecord};
+use super::export::Selection;
 use super::jar::Side;
 use super::modpack::{
-    instance_input, interop_loader_version, lay_out, ExportReport, Extras, Layout,
+    instance_input, interop_loader_version, lay_out, ExportReport, Extras, Journey, Layout,
 };
 use super::{Instance, InstanceOverrides};
 
@@ -620,24 +621,24 @@ pub async fn export_instance(
     paths: &Paths,
     instance: &Instance,
     dest: PathBuf,
-    include_saves: bool,
+    selection: &Selection,
     progress: &Progress,
 ) -> Result<ExportReport> {
     let catalogue = crate::install::identity::for_instance(ask, paths, instance, progress).await?;
-    write_instance(paths, instance, dest, include_saves, &catalogue, progress).await
+    write_instance(paths, instance, dest, selection, &catalogue, progress).await
 }
 
 /// The same writer, from a catalogue already built — the seam a preview uses,
 /// and what the tests write instances through.
-async fn write_instance(
+pub(super) async fn write_instance(
     paths: &Paths,
     instance: &Instance,
     dest: PathBuf,
-    include_saves: bool,
+    selection: &Selection,
     catalogue: &Catalogue,
     progress: &Progress,
 ) -> Result<ExportReport> {
-    let input = instance_input(paths, instance, include_saves);
+    let input = instance_input(paths, instance, selection);
     let game_dir = input.root;
     let mut report = ExportReport {
         trouble: catalogue.trouble.clone(),
@@ -653,120 +654,26 @@ async fn write_instance(
         .map(|record| ((record.kind, record.file_name.as_str()), record))
         .collect();
 
-    // Sorted by where the file sits, so exporting the same instance twice is
-    // the same bytes twice — the same reason the pack writers sort.
-    let mut identities: Vec<&Identity> = catalogue.identities().collect();
-    identities.sort_by(|a, b| a.disk_rel.cmp(&b.disk_rel));
-
     let mut index: Extras = Vec::new();
-    let mut written: HashSet<String> = HashSet::new();
-    for ident in identities {
-        // Where Prism keeps this kind's provenance, when it keeps any at all.
-        let folder = index_folder(ident.kind);
-        let named = match travel(ident, Carry::PRISM) {
-            Travel::Linked(reference) | Travel::Named(reference) => {
-                folder.map(|folder| (folder, reference))
-            }
-            Travel::Copied(why) => {
-                carried(&mut report, why);
-                continue;
-            }
-        };
-        let Some((folder, reference)) = named else {
-            // A platform names this file and an instance has nowhere to say
-            // so: Prism keeps no packwiz index for a data pack. The format's
-            // own limit, which is a different thing to hear from "nobody has
-            // this".
-            report.embedded_elsewhere += 1;
+    for planned in plan_instance(catalogue, instance, selection) {
+        let Planned {
+            ident,
+            journey,
+            entry: planned,
+        } = planned;
+        report.count(&journey);
+        let Some(PlannedEntry {
+            folder,
+            slug,
+            download,
+            update,
+        }) = planned
+        else {
             continue;
         };
         let record = records
             .get(&(ident.kind, ident.file_name.as_str()))
             .copied();
-
-        // The two providers are not interchangeable here: what a Modrinth
-        // entry says is a URL and a sha512, what a CurseForge one says is a
-        // pair of ids and a sha1, and neither reader will take the other's
-        // shape.
-        let (download, update) = match reference.provider.as_str() {
-            "modrinth" => (
-                IndexDownload {
-                    mode: "url",
-                    // The matched file's own URL when a lookup gave one.
-                    // Without a lookup there is only the record's ids and the
-                    // name on disk, so the URL is built from them — the same
-                    // fallback the mrpack writer has, and for the same reason.
-                    url: reference.url.clone().unwrap_or_else(|| {
-                        format!(
-                            "https://cdn.modrinth.com/data/{}/versions/{}/{}",
-                            reference.project_id,
-                            reference.version_id,
-                            urlencoding::encode(&ident.file_name)
-                        )
-                    }),
-                    // The hash algorithm is the provider's, not a preference:
-                    // Prism reads a Modrinth entry's hash as sha512 and a
-                    // CurseForge entry's as sha1, and verifies the download
-                    // with it.
-                    hash_format: "sha512",
-                    hash: ident.sha512.clone(),
-                },
-                IndexUpdate {
-                    modrinth: Some(ModrinthUpdate {
-                        mod_id: reference.project_id.clone(),
-                        version: reference.version_id.clone(),
-                    }),
-                    curseforge: None,
-                },
-            ),
-            "curseforge" => {
-                // CurseForge cannot be written as a URL here — the file is
-                // fetched through the API with the recipient's own key, which
-                // is what `metadata:curseforge` means and why the url is
-                // empty. The format types both ids as integers and Prism reads
-                // them that way, so a reference whose ids are not numbers is
-                // no reference here.
-                let (Ok(project_id), Ok(file_id)) = (
-                    reference.project_id.parse::<u32>(),
-                    reference.version_id.parse::<u32>(),
-                ) else {
-                    report.embedded_unknown += 1;
-                    continue;
-                };
-                (
-                    IndexDownload {
-                        mode: "metadata:curseforge",
-                        url: String::new(),
-                        hash_format: "sha1",
-                        hash: ident.sha1.clone(),
-                    },
-                    IndexUpdate {
-                        modrinth: None,
-                        curseforge: Some(CurseForgeUpdate {
-                            project_id,
-                            file_id,
-                        }),
-                    },
-                )
-            }
-            // packwiz knows these two providers and no others, and an entry
-            // naming a third would be read as one of them — a pair of ids
-            // with no room to say whose they are.
-            _ => {
-                report.embedded_elsewhere += 1;
-                continue;
-            }
-        };
-
-        // The entry's file name is the project's slug, so one mod gets one
-        // entry however many copies of its jar are in the folder. Geode meets
-        // this for real: a jar copied under a second name has the same bytes
-        // and so the same record.
-        let slug = slug_for(ident, record);
-        if !written.insert(format!("{folder}/{slug}")) {
-            report.embedded_duplicate += 1;
-            continue;
-        }
 
         // Where it belongs — the folder, then what the jar itself says, then
         // the listing — the same three answers in the same order the pack
@@ -812,7 +719,6 @@ async fn write_instance(
                 })?
                 .into_bytes(),
         ));
-        report.referenced += 1;
     }
 
     let icon = icon_entry(paths, instance).await;
@@ -865,14 +771,176 @@ async fn write_instance(
     Ok(report)
 }
 
-/// Count one file arriving anonymous, by the reason the sharer can act on.
-fn carried(report: &mut ExportReport, why: Copied) {
-    match why {
-        Copied::Unknown => report.embedded_unknown += 1,
-        Copied::Elsewhere => report.embedded_elsewhere += 1,
-        Copied::TurnedOff => report.embedded_turned_off += 1,
-        Copied::Blocked => report.embedded_blocked += 1,
+/// One file's journey into a Prism instance, and the index entry for the files
+/// that get one.
+pub(super) struct Planned<'a> {
+    pub(super) ident: &'a Identity,
+    pub(super) journey: Journey<'a>,
+    /// Present exactly where the journey names the file. Not re-derived by the
+    /// writer: working out whether an entry is possible *is* working out the
+    /// entry, and doing it twice is how a preview comes to promise a name the
+    /// export then does not write. The writer's own, which is why it is not on
+    /// show outside this file.
+    entry: Option<PlannedEntry>,
+}
+
+/// Where one file's packwiz entry goes and what it says, bar the two fields
+/// that need the jar itself read.
+struct PlannedEntry {
+    folder: &'static str,
+    slug: String,
+    download: IndexDownload,
+    update: IndexUpdate,
+}
+
+/// What a Prism instance zip would do with each of the catalogue's files.
+///
+/// Three of the reasons here are this format's and not [`travel`]'s — an
+/// instance keeps no packwiz index for a data pack, packwiz knows two
+/// providers and no others, and one mod gets one entry however many copies of
+/// its jar sit in the folder — which is why this is a pass over the whole
+/// catalogue rather than a decision per file.
+pub(super) fn plan_instance<'a>(
+    catalogue: &'a Catalogue,
+    instance: &Instance,
+    selection: &Selection,
+) -> Vec<Planned<'a>> {
+    let records: HashMap<(ContentKind, &str), &ContentRecord> = instance
+        .content
+        .iter()
+        .map(|record| ((record.kind, record.file_name.as_str()), record))
+        .collect();
+
+    let mut planned: Vec<Planned<'a>> = Vec::new();
+    let mut written: HashSet<String> = HashSet::new();
+    // The pack writers' own order, and their rule about what a pack of this
+    // selection holds: an index entry for a jar the walk left at home is Prism
+    // showing a mod that is not installed.
+    for ident in super::modpack::in_writing_order(catalogue, selection) {
+        let carried = |why: Copied| Planned {
+            ident,
+            journey: Journey::Copied(why),
+            entry: None,
+        };
+        let reference = match travel(ident, Carry::PRISM) {
+            Travel::Linked(reference) | Travel::Named(reference) => reference,
+            Travel::Copied(why) => {
+                planned.push(carried(why));
+                continue;
+            }
+        };
+        // Where Prism keeps this kind's provenance, when it keeps any at all.
+        // A platform names this file and an instance has nowhere to say so:
+        // Prism keeps no packwiz index for a data pack. The format's own
+        // limit, which is a different thing to hear from "nobody has this".
+        let Some(folder) = index_folder(ident.kind) else {
+            planned.push(carried(Copied::Elsewhere));
+            continue;
+        };
+
+        // The two providers are not interchangeable here: what a Modrinth
+        // entry says is a URL and a sha512, what a CurseForge one says is a
+        // pair of ids and a sha1, and neither reader will take the other's
+        // shape.
+        let (download, update) = match reference.provider.as_str() {
+            "modrinth" => (
+                IndexDownload {
+                    mode: "url",
+                    // The matched file's own URL when a lookup gave one.
+                    // Without a lookup there is only the record's ids and the
+                    // name on disk, so the URL is built from them — the same
+                    // fallback the mrpack writer has, and for the same reason.
+                    url: reference.url.clone().unwrap_or_else(|| {
+                        format!(
+                            "https://cdn.modrinth.com/data/{}/versions/{}/{}",
+                            reference.project_id,
+                            reference.version_id,
+                            urlencoding::encode(&ident.file_name)
+                        )
+                    }),
+                    // The hash algorithm is the provider's, not a preference:
+                    // Prism reads a Modrinth entry's hash as sha512 and a
+                    // CurseForge entry's as sha1, and verifies the download
+                    // with it.
+                    hash_format: "sha512",
+                    hash: ident.sha512.clone(),
+                },
+                IndexUpdate {
+                    modrinth: Some(ModrinthUpdate {
+                        mod_id: reference.project_id.clone(),
+                        version: reference.version_id.clone(),
+                    }),
+                    curseforge: None,
+                },
+            ),
+            "curseforge" => {
+                // CurseForge cannot be written as a URL here — the file is
+                // fetched through the API with the recipient's own key, which
+                // is what `metadata:curseforge` means and why the url is
+                // empty. The format types both ids as integers and Prism reads
+                // them that way, so a reference whose ids are not numbers is
+                // no reference here.
+                let (Ok(project_id), Ok(file_id)) = (
+                    reference.project_id.parse::<u32>(),
+                    reference.version_id.parse::<u32>(),
+                ) else {
+                    planned.push(carried(Copied::Unknown));
+                    continue;
+                };
+                (
+                    IndexDownload {
+                        mode: "metadata:curseforge",
+                        url: String::new(),
+                        hash_format: "sha1",
+                        hash: ident.sha1.clone(),
+                    },
+                    IndexUpdate {
+                        modrinth: None,
+                        curseforge: Some(CurseForgeUpdate {
+                            project_id,
+                            file_id,
+                        }),
+                    },
+                )
+            }
+            // packwiz knows these two providers and no others, and an entry
+            // naming a third would be read as one of them — a pair of ids
+            // with no room to say whose they are.
+            _ => {
+                planned.push(carried(Copied::Elsewhere));
+                continue;
+            }
+        };
+
+        // The entry's file name is the project's slug, so one mod gets one
+        // entry however many copies of its jar are in the folder. Geode meets
+        // this for real: a jar copied under a second name has the same bytes
+        // and so the same record.
+        let slug = slug_for(
+            ident,
+            records.get(&(ident.kind, ident.file_name.as_str())).copied(),
+        );
+        if !written.insert(format!("{folder}/{slug}")) {
+            planned.push(Planned {
+                ident,
+                journey: Journey::Duplicate,
+                entry: None,
+            });
+            continue;
+        }
+
+        planned.push(Planned {
+            ident,
+            journey: Journey::Named(reference),
+            entry: Some(PlannedEntry {
+                folder,
+                slug,
+                download,
+                update,
+            }),
+        });
     }
+    planned
 }
 
 /// Where a packwiz entry for this kind of file goes, when there is anywhere.
@@ -882,7 +950,7 @@ fn carried(report: &mut ExportReport, why: Copied) {
 /// folder of the kind's, which is where Prism keeps it today. `None` for a
 /// data pack: an instance has no packwiz index for one, so there is nowhere to
 /// write its provenance down.
-fn index_folder(kind: ContentKind) -> Option<&'static str> {
+pub(super) fn index_folder(kind: ContentKind) -> Option<&'static str> {
     INDEXED
         .iter()
         .find(|(indexed, _)| *indexed == kind)
@@ -1159,6 +1227,7 @@ mod tests {
     use std::io::Write;
     use std::path::PathBuf;
 
+    use crate::instance::export::Group;
     use crate::instance::modpack::{import_into, preview};
     use crate::instance::Instance;
     use crate::net::Progress;
@@ -1844,11 +1913,22 @@ project-id = 1649197
         dest: &Path,
         catalogue: &Catalogue,
     ) -> ExportReport {
+        write_chosen(paths, inst, dest, &Selection::default(), catalogue).await
+    }
+
+    /// The same, for a test about what the sharer chose to carry.
+    async fn write_chosen(
+        paths: &Paths,
+        inst: &Instance,
+        dest: &Path,
+        selection: &Selection,
+        catalogue: &Catalogue,
+    ) -> ExportReport {
         write_instance(
             paths,
             inst,
             dest.to_path_buf(),
-            false,
+            selection,
             catalogue,
             &Progress::silent("t"),
         )
@@ -2198,6 +2278,48 @@ project-id = 1649197
             .expect("an update table");
         assert_eq!(update["project-id"].as_integer(), Some(328085));
         assert_eq!(update["file-id"].as_integer(), Some(4593548));
+    }
+
+    /// An index entry is the one thing in this zip that is not the jar beside
+    /// it, so a group the sharer unticked must leave neither behind. Prism
+    /// reads a `.pw.toml` with no file as a mod that is not installed, and the
+    /// report would have called it named and checkable for updates.
+    #[tokio::test]
+    async fn a_group_left_out_leaves_no_index_entry_behind() {
+        let (scratch, mut inst, _) =
+            exportable("left-out", &[("mods", "sodium.jar"), ("config", "mod.toml")]).await;
+        inst.content = vec![record(
+            "sodium.jar",
+            ContentKind::Mod,
+            "modrinth",
+            "AANobbMI",
+            "Hu34AbCd",
+            "Sodium",
+            "sodium",
+        )];
+        let mut catalogue = catalogue_of(&scratch.paths, &inst).await;
+        catalogue.pretend_modrinth_holds(&["sodium.jar"]);
+
+        let dest = scratch.paths.root.join("left-out.zip");
+        let report = write_chosen(
+            &scratch.paths,
+            &inst,
+            &dest,
+            &Selection::of(vec![Group::Config]),
+            &catalogue,
+        )
+        .await;
+
+        assert_eq!(report.referenced, 0, "a file left at home was called named");
+        let names = entries(&dest);
+        assert!(
+            !names.iter().any(|name| name.contains(".pw.toml")),
+            "{names:?}"
+        );
+        assert!(
+            names.contains(&"minecraft/config/mod.toml".to_string()),
+            "the group that was asked for travelled: {names:?}"
+        );
     }
 
     /// Shader metadata sits flat in `shaderpacks/` with no `.index` folder.

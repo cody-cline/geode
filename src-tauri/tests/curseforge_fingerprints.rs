@@ -968,6 +968,81 @@ async fn a_bundled_world_arrives_as_a_folder_the_game_reads() {
     );
 }
 
+/// A map published in chapters is several worlds side by side in one archive.
+/// The zip is deleted once it has been unpacked, so a world taken out of it
+/// and left behind is one the player cannot get back without downloading the
+/// pack again — and the notice is the only place they are told what arrived.
+#[tokio::test]
+async fn every_world_in_one_archive_arrives() {
+    let api = curseforge_holding(vec![Held::a_mod(1000, 2000)
+        .named("chapters.zip")
+        .classed(17)
+        .holding(zip_of(&[
+            ("Chapter 1/level.dat", b"ONE"),
+            ("Chapter 1/region/r.0.0.mca", b"REGION ONE"),
+            ("Chapter 2/level.dat", b"TWO"),
+            ("Chapter 2/region/r.0.0.mca", b"REGION TWO"),
+        ]))]);
+    let (paths, mut instance, game) = importing("chapters");
+    let archive = pack_with(&paths.root, &manifest(&[(1000, 2000, true)]));
+
+    let (outcome, told) = import_telling(&api, &paths, &mut instance, &archive).await;
+    let problems = outcome.expect("the pack installs");
+
+    for (folder, region) in [
+        ("Chapter 1", &b"REGION ONE"[..]),
+        ("Chapter 2", &b"REGION TWO"[..]),
+    ] {
+        assert_eq!(
+            std::fs::read(game.join(format!("saves/{folder}/region/r.0.0.mca")))
+                .unwrap_or_else(|e| panic!("{folder}: {e}")),
+            region,
+            "{folder} is not in the singleplayer list unless its own files are"
+        );
+    }
+    assert!(
+        !game.join("saves/chapters.zip").exists(),
+        "the zip was left in saves/ beside the worlds it became"
+    );
+    assert!(problems.is_empty(), "{problems:?}");
+
+    assert_eq!(told.len(), 1, "{told:?}");
+    let body = told[0]["body"].as_str().expect("a body");
+    assert!(
+        body.contains("Chapter 1") && body.contains("Chapter 2"),
+        "a world the player was not told about is one they cannot be told about later: {body}"
+    );
+}
+
+/// A manifest may list the same `{projectID, fileID}` twice, which the import
+/// deliberately tolerates: two entries, one file on disk. Unpacking that file
+/// twice does not work — the first unpack deletes the zip — and the second
+/// attempt's failure used to be turned into advice about a file that was no
+/// longer there, which the command then reports as a failed import.
+#[tokio::test]
+async fn a_world_listed_twice_is_unpacked_once_and_reported_as_nothing() {
+    let api = curseforge_holding(vec![Held::a_mod(1000, 2000)
+        .named("spawn.zip")
+        .classed(17)
+        .holding(zip_of(&[("Spawn Town/level.dat", b"NBT")]))]);
+    let (paths, mut instance, game) = importing("world-twice");
+    let archive = pack_with(
+        &paths.root,
+        &manifest(&[(1000, 2000, true), (1000, 2000, true)]),
+    );
+
+    let problems = import(&api, &paths, &mut instance, &archive)
+        .await
+        .expect("the pack installs");
+
+    assert!(game.join("saves/Spawn Town/level.dat").exists());
+    assert!(
+        problems.is_empty(),
+        "a world that arrived playable was reported as something the player must deal with: \
+         {problems:?}"
+    );
+}
+
 /// The same class, on a zip that holds no `level.dat`. That is not a world,
 /// whatever CurseForge files it under, and a save folder invented out of a
 /// guess would show up in the singleplayer list with nothing in it that the

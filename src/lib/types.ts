@@ -891,6 +891,88 @@ export interface PackPreview {
   needsCurseforgeKey: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// Exporting: what the instance holds, and what a format would do with it
+// ---------------------------------------------------------------------------
+
+/** The formats an instance exports as. Mirrors `instance::export::PackFormat`. */
+export type PackFormat = "geodepack" | "mrpack" | "curseforge" | "prism";
+
+/**
+ * One of the things an instance holds, as the export dialog lists them.
+ * Mirrors `instance::export::Group`.
+ */
+export type Group =
+  | "mods"
+  | "config"
+  | "resourcePacks"
+  | "shaderPacks"
+  | "dataPacks"
+  | "saves"
+  /** Screenshots, logs and crash reports: one thing to decide about, not three. */
+  | "logs"
+  /** Everything else at the instance's root — `options.txt` and whatever the player put there. */
+  | "other";
+
+/** Every group, in the order the dialog shows them. Mirrors `instance::export::ALL`. */
+export const GROUPS: Group[] = [
+  "mods",
+  "config",
+  "resourcePacks",
+  "shaderPacks",
+  "dataPacks",
+  "saves",
+  "logs",
+  "other",
+];
+
+/** How much of one group there is to carry. */
+export interface GroupTally {
+  group: Group;
+  files: number;
+  bytes: number;
+}
+
+/** Whether a format can carry one group as a reference at all, read off the backend's `Carry`. */
+export interface GroupCarry {
+  group: Group;
+  canReference: boolean;
+}
+
+/** Which of the three things a pack does with a file. */
+export type Travels = "linked" | "named" | "copied";
+
+/** Why a file's bytes travel. */
+export type Why = "unknown" | "elsewhere" | "turnedOff" | "blocked" | "duplicate";
+
+/** What a pack would do with one of the instance's content files. */
+export interface FileJourney {
+  kind: "mod" | "resourcepack" | "shaderpack" | "datapack";
+  /** The enabled name, which is how the mods list keys a file. */
+  fileName: string;
+  disabled: boolean;
+  size: number;
+  travels: Travels;
+  /** Which platform the pack names it on, when it names one. */
+  provider: string | null;
+  /** Why its bytes travel, when they do. */
+  why: Why | null;
+}
+
+/** Everything the export dialog needs about one format, from the pass the export itself will make. */
+export interface ExportPlan {
+  carries: GroupCarry[];
+  /**
+   * Whether a reference spares the pack the bytes at all. False for a Prism
+   * instance zip, where every file travels either way and a reference buys the
+   * recipient a name and an update path instead of a smaller download.
+   */
+  sparesBytes: boolean;
+  content: FileJourney[];
+  /** The counts the export will report, counted from this very pass. */
+  report: ExportReport;
+}
+
 /** What an export did with the content it found, so a toast can say it rather than promise something. */
 export interface ExportReport {
   /** Files the recipient fetches themselves, from the index or by id. */

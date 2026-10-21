@@ -13,10 +13,13 @@ import type {
   Disconnected,
   DriveShare,
   DriveStatus,
+  ExportPlan,
   ExportReport,
   GameVersion,
   GitStatus,
   Forbidden,
+  Group,
+  GroupTally,
   ImportScan,
   InstallReport,
   Instance,
@@ -30,6 +33,7 @@ import type {
   LinkReport,
   LogFile,
   PackArrival,
+  PackFormat,
   PackImport,
   PackInfo,
   PackLinkView,
@@ -464,11 +468,31 @@ export const api = {
   /** Makes the instance and reports what it could not fetch beside it. Progress id `import:<instance id>`. */
   importModpack: (path: string, name?: string) =>
     invoke<PackImport>("import_modpack", { path, name: name ?? null }),
-  /** All four return what the export did with the instance's content, so the UI can say it. */
-  exportModpack: (id: string, dest: string, includeSaves: boolean) =>
-    invoke<ExportReport>("export_modpack", { id, dest, includeSaves }),
-  exportGeodepack: (id: string, dest: string, includeSaves: boolean) =>
-    invoke<ExportReport>("export_geodepack", { id, dest, includeSaves }),
+  /**
+   * What the instance holds, grouped. One walk of the game directory, so the
+   * export dialog asks once when it opens rather than per format.
+   */
+  exportGroups: (id: string) => invoke<GroupTally[]>("export_groups", { id }),
+  /**
+   * What exporting in this format would do, before it is done: the same
+   * identify and planning passes the export itself makes, so the counts shown
+   * are the counts reported. `groups` is part of the question — a group left
+   * out travels in no channel, so neither the journeys nor the counts are the
+   * same plan as the one beside it. Costs a hash of every content file and a
+   * request per platform, so hold on to the answer per format and selection.
+   * Progress id `plan:<instance id>`.
+   */
+  exportPlan: (id: string, format: PackFormat, groups: Group[]) =>
+    invoke<ExportPlan>("export_plan", { id, format, groups }),
+  /**
+   * All four return what the export did with the instance's content, so the UI
+   * can say it. `groups` is what the sharer chose to carry — every group left
+   * out stays at home.
+   */
+  exportModpack: (id: string, dest: string, groups: Group[]) =>
+    invoke<ExportReport>("export_modpack", { id, dest, groups }),
+  exportGeodepack: (id: string, dest: string, groups: Group[]) =>
+    invoke<ExportReport>("export_geodepack", { id, dest, groups }),
   /**
    * `author` is required by the CurseForge format and an instance has nowhere
    * to keep it, so the export flow asks. Null leaves it to the backend, which
@@ -478,16 +502,16 @@ export const api = {
     id: string,
     dest: string,
     author: string | null,
-    includeSaves: boolean,
-  ) => invoke<ExportReport>("export_curseforge_pack", { id, dest, author, includeSaves }),
+    groups: Group[],
+  ) => invoke<ExportReport>("export_curseforge_pack", { id, dest, author, groups }),
   /**
    * A zip Prism opens as an instance of its own. Every jar travels inside it —
    * the format has no way to say "download this" — so `referenced` counts the
    * mods the recipient's Prism will know the name and update path of, not what
    * the zip left out.
    */
-  exportPrismInstance: (id: string, dest: string, includeSaves: boolean) =>
-    invoke<ExportReport>("export_prism_instance", { id, dest, includeSaves }),
+  exportPrismInstance: (id: string, dest: string, groups: Group[]) =>
+    invoke<ExportReport>("export_prism_instance", { id, dest, groups }),
 
   // Google Drive. Connecting opens the user's browser and blocks until they
   // come back, the way completeMicrosoftLogin does; cancel it with

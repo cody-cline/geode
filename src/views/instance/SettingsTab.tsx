@@ -1,14 +1,14 @@
 import { useEffect, useState } from "react";
-import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { Copy, Loader2, PackageOpen, Trash2 } from "lucide-react";
 
+import ExportModal from "../../components/ExportModal";
 import ImageField from "../../components/ImageField";
 import Modal from "../../components/Modal";
 import { api } from "../../lib/api";
 import { forbiddenPlayerHint } from "../../lib/share";
 import { useStore } from "../../lib/store";
 import { LOADERS } from "../../lib/types";
-import type { ExportReport, Instance, InstanceOverrides } from "../../lib/types";
+import type { Instance, InstanceOverrides } from "../../lib/types";
 
 import viewStyles from "../ServerView.module.css";
 import styles from "./SettingsTab.module.css";
@@ -19,145 +19,6 @@ function numberOrNull(value: string): number | null {
   if (trimmed === "") return null;
   const n = Number(trimmed);
   return Number.isFinite(n) ? n : null;
-}
-
-/**
- * The formats an instance exports as: what to save it under, what the save
- * dialog's filter is called, and what to call the format in a sentence.
- *
- * A CurseForge pack is a plain `.zip` — the format has no extension of its own
- * — so what a pack is saved as and what it is called are no longer the same
- * string.
- */
-const FORMATS = {
-  geodepack: { ext: "geodepack", filter: "Geode pack", name: "a .geodepack" },
-  mrpack: { ext: "mrpack", filter: "Modrinth pack", name: "a .mrpack" },
-  curseforge: { ext: "zip", filter: "CurseForge pack", name: "a CurseForge pack" },
-  prism: { ext: "zip", filter: "Prism instance", name: "a Prism instance" },
-} as const;
-
-type Format = keyof typeof FORMATS;
-
-/**
- * What the export actually did, in the words the recipient's experience turns
- * on. The old copy promised that everything unlinked was "bundled in, jars
- * included", which stopped being true the moment the exporter started asking
- * Modrinth what it holds — and a count is the cheapest honest answer.
- *
- * One sentence per reason, because a single count cannot say which of them
- * applied: "nothing Geode asked has this mod" is something nobody can fix, "this
- * format cannot link to where it came from" and "this format cannot say a mod is
- * off" are answered by exporting another format, "a second copy of a mod this
- * pack already names" costs bytes and nothing else, and "the author turned
- * third-party downloads off" is somebody else's decision that no format gets
- * around — which is why it is counted only where no other platform names the
- * same bytes. Where one does, the backend reports the format's own limit
- * instead, because exporting a .geodepack or .mrpack would link it.
- */
-function exportSummary(format: Format, report: ExportReport): string {
-  const {
-    referenced,
-    embeddedUnknown,
-    embeddedElsewhere,
-    embeddedTurnedOff,
-    embeddedBlocked,
-    embeddedDuplicate,
-  } = report;
-  const bundled =
-    embeddedUnknown + embeddedElsewhere + embeddedTurnedOff + embeddedBlocked + embeddedDuplicate;
-  const lines: string[] = [];
-  // A Prism instance zip is the one format where a link is not an alternative
-  // to the bytes: Prism's own importer takes the extracted tree as it finds it
-  // and downloads nothing, so every jar travels either way. The same counts
-  // therefore mean something else here — how many mods arrive named, with an
-  // update path, rather than how many the zip did not have to carry — and
-  // saying "linked for the recipient to download" would be a plain lie.
-  if (format === "prism") {
-    if (referenced === 0 && bundled === 0) {
-      lines.push("There were no mods, packs or datapacks to carry.");
-    } else if (bundled === 0) {
-      lines.push(`All ${referenced} named, so Prism can check every one for updates.`);
-    } else {
-      lines.push(`${referenced} named, so Prism can check them for updates.`);
-      lines.push(
-        `${bundled} arrive as plain jars with no update path, because nothing Geode asked could name them or this format has nowhere to record it.`,
-      );
-    }
-    lines.push(
-      "Every jar travels inside the zip: a Prism instance has no way to say \u201cdownload this\u201d. Export .mrpack instead if you want Prism to fetch the mods itself.",
-    );
-    lines.push(...report.trouble);
-    if (report.unnameable.length > 0) {
-      lines.push(`Left out, because a zip cannot carry these names: ${report.unnameable.join(", ")}.`);
-    }
-    return lines.join(" ");
-  }
-  if (referenced === 0 && bundled === 0) {
-    lines.push("There were no mods, packs or datapacks to carry.");
-  } else if (bundled === 0) {
-    lines.push(`All ${referenced} linked for the recipient to download, nothing bundled in.`);
-  } else {
-    lines.push(`${referenced} linked for the recipient to download.`);
-    if (embeddedUnknown > 0) {
-      // Not "no platform has them": an export asks the platforms whose answer
-      // the format it is writing could use, so a .mrpack export asks Modrinth
-      // alone — a fingerprint costs a second read of every file in the
-      // instance, and a .mrpack cannot carry a CurseForge reference whatever
-      // the answer. Claiming more than was asked is the kind of wrong a user
-      // can catch.
-      lines.push(`${embeddedUnknown} bundled in because nothing Geode asked has them.`);
-    }
-    if (embeddedElsewhere > 0) {
-      lines.push(
-        `${embeddedElsewhere} bundled in because ${FORMATS[format].name} cannot link to where they came from.`,
-      );
-    }
-    if (embeddedTurnedOff > 0) {
-      lines.push(
-        `${embeddedTurnedOff} bundled in because ${FORMATS[format].name} cannot record that a mod is turned off.`,
-      );
-    }
-    if (embeddedBlocked > 0) {
-      lines.push(
-        `${embeddedBlocked} bundled in because their author has turned off third-party downloads, so a link would be one nobody could follow.`,
-      );
-    }
-    if (embeddedDuplicate > 0) {
-      lines.push(
-        `${embeddedDuplicate} bundled in as a second copy of a mod this pack already links.`,
-      );
-    }
-  }
-  if (format === "geodepack") lines.push("Your settings and artwork travel with it.");
-  if (format === "curseforge") {
-    // The limit worth hearing even when nothing hit it this time: the format
-    // names ids and no folder, so only a mod can be linked and a resource pack
-    // would arrive wherever the recipient's own guess put it.
-    lines.push(
-      "Only mods can be linked in this format, because it records no folder — resource packs, shaders and data packs are always bundled in.",
-    );
-    // The one thing in a pack that is about the sharer rather than the
-    // instance, and the export never asked: the format requires an author, so
-    // the signed-in account's name went in. Said here until the export dialog
-    // asks for it, because a name travels with the file.
-    if (report.author) lines.push(`Credited to ${report.author}.`);
-  }
-  lines.push(...report.trouble);
-  if (report.unnameable.length > 0) {
-    lines.push(`Left out, because a pack cannot carry these names: ${report.unnameable.join(", ")}.`);
-  }
-  return lines.join(" ");
-}
-
-/**
- * A name made safe to suggest as a file name. Instance names are free text —
- * and a pack's manifest can set one — so "ATM10 / hardcore" would otherwise be
- * read by the dialog as a folder that does not exist. Same rules as the
- * backend's own `share::pack::file_name`.
- */
-function safeFileStem(name: string): string {
-  const cleaned = name.replace(/[/\\:*?"<>|]/g, "-").trim();
-  return cleaned || "pack";
 }
 
 function textOrNull(value: string): string | null {
@@ -183,6 +44,7 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
 
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [duplicating, setDuplicating] = useState(false);
   const [changingServerSide, setChangingServerSide] = useState(false);
   const [systemMemory, setSystemMemory] = useState<number | null>(null);
@@ -274,54 +136,6 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
       reportError("Could not duplicate", e);
     } finally {
       setDuplicating(false);
-    }
-  }
-
-  function exportAs(format: Format, dest: string) {
-    switch (format) {
-      case "mrpack":
-        return api.exportModpack(instance.id, dest, false);
-      case "geodepack":
-        return api.exportGeodepack(instance.id, dest, false);
-      case "curseforge":
-        // No author: the dialog that asks for one is not built yet, and the
-        // backend stands in the signed-in account's name, which is the only
-        // answer it holds to whose pack this is.
-        return api.exportCurseforgePack(instance.id, dest, null, false);
-      case "prism":
-        return api.exportPrismInstance(instance.id, dest, false);
-    }
-  }
-
-  // The format is picked by which button was pressed, never read back off the
-  // file name: the save dialog does not report which filter was chosen, and on
-  // Linux it does not add the extension either, so "ForPrism" typed under the
-  // Modrinth filter would come back with no extension at all. And two of the
-  // four save under a name the format does not own — a CurseForge pack and a
-  // Prism instance are both plain .zips. The four differ in what they can say,
-  // so guessing wrong silently changes what the file contains: a .geodepack
-  // names a CurseForge mod and lets the recipient fetch it, a .mrpack has
-  // nowhere to record that and has to carry the jar, a CurseForge pack is the
-  // same trade the other way round, and a Prism instance carries every jar
-  // whatever it can name.
-  async function exportPack(format: Format) {
-    const { ext, filter, name } = FORMATS[format];
-    const chosen = await saveDialog({
-      defaultPath: `${safeFileStem(instance.name)}.${ext}`,
-      filters: [{ name: filter, extensions: [ext] }],
-    });
-    if (!chosen) return;
-    const dest = chosen.toLowerCase().endsWith(`.${ext}`) ? chosen : `${chosen}.${ext}`;
-
-    try {
-      const report = await exportAs(format, dest);
-      toast({
-        kind: "success",
-        title: `Exported ${name}`,
-        body: exportSummary(format, report),
-      });
-    } catch (e) {
-      reportError("Export failed", e);
     }
   }
 
@@ -663,35 +477,11 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
             </button>
             <button
               className="btn"
-              onClick={() => exportPack("geodepack")}
-              title="Settings and artwork included; mods are linked rather than copied"
+              onClick={() => setExporting(true)}
+              title="Pick a format, choose what travels, and see what each mod will do before anything is written"
             >
               <PackageOpen size={14} />
-              Export .geodepack
-            </button>
-            <button
-              className="btn"
-              onClick={() => exportPack("mrpack")}
-              title="For Prism, the Modrinth app and other launchers; mods Modrinth has are linked, the rest are bundled in"
-            >
-              <PackageOpen size={14} />
-              Export .mrpack
-            </button>
-            <button
-              className="btn"
-              onClick={() => exportPack("curseforge")}
-              title="A .zip for the CurseForge app and Prism; mods CurseForge has are linked by id, and everything else — including a Modrinth mod it does not have — is bundled in. The format requires an author, so the pack credits your signed-in account"
-            >
-              <PackageOpen size={14} />
-              Export CurseForge .zip
-            </button>
-            <button
-              className="btn"
-              onClick={() => exportPack("prism")}
-              title="A .zip Prism opens as a full instance — settings, loader and all — with every mod named so Prism can check it for updates. Every jar travels inside it: a Prism instance has no way to say “download this”. Export .mrpack instead if you want Prism to fetch the mods itself"
-            >
-              <PackageOpen size={14} />
-              Export Prism instance
+              Export
             </button>
             <div style={{ flex: 1 }} />
             <button
@@ -728,6 +518,10 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
             Save changes
           </button>
         </div>
+      )}
+
+      {exporting && (
+        <ExportModal instance={instance} onClose={() => setExporting(false)} />
       )}
 
       {confirmDelete && (

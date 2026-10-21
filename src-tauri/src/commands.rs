@@ -3337,6 +3337,66 @@ pub async fn import_modpack(
     }
 }
 
+/// What the instance holds, grouped the way its owner reads it.
+///
+/// One walk of the game directory, which is why the export dialog asks for
+/// this once when it opens rather than per format: the groups are a fact about
+/// the instance and nothing the sharer picks changes them. See
+/// [`instance::export::tally`] for what the walk costs.
+#[tauri::command]
+pub async fn export_groups(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<instance::export::GroupTally>> {
+    let inst = instance::load(&state.paths, &id).await?;
+    instance::export::tally(state.paths.game_dir(&inst.id)).await
+}
+
+/// What exporting this instance in this format would do, before it is done.
+///
+/// The same identify pass the export itself makes, through the same `Ask`, and
+/// the same planning pass each writer makes — so the counts the sharer is shown
+/// are the counts the export then reports. It costs what the export's identify
+/// pass costs, a hash of every content file and a request per platform, which
+/// is why the dialog holds on to the answer per format and selection instead of
+/// asking again.
+///
+/// `groups` is what the sharer has ticked, because it is part of the question:
+/// a group left out travels in no channel, so neither the list nor the counts
+/// are the same plan as the one beside it.
+#[tauri::command]
+pub async fn export_plan(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    format: instance::export::PackFormat,
+    groups: Vec<instance::export::Group>,
+) -> Result<instance::export::ExportPlan> {
+    let inst = instance::load(&state.paths, &id).await?;
+    let progress = Progress::new(crate::desktop::sink(app), format!("plan:{id}"));
+    state.register_cancel(progress.id(), progress.cancel_flag());
+    let cf_key = state.cf_key().await;
+
+    let plan = instance::export::plan(
+        crate::install::identity::Ask::exporting(&state.http, cf_key.as_deref(), format.carry()),
+        &state.paths,
+        &inst,
+        format,
+        &instance::export::Selection::of(groups),
+        &progress,
+    )
+    .await;
+    state.clear_cancel(progress.id());
+
+    // Failed or finished explicitly: the dock drops a job only when it hears
+    // one is done, so a bar left unfinished stays there for the session.
+    match &plan {
+        Ok(_) => progress.finish().await,
+        Err(e) => progress.fail(&e.to_string()).await,
+    }
+    plan
+}
+
 /// Write an instance out as a `.geodepack`.
 ///
 /// The same `.mrpack` other launchers read, plus the Geode half: settings,
@@ -3348,7 +3408,7 @@ pub async fn export_geodepack(
     state: State<'_, AppState>,
     id: String,
     dest: String,
-    include_saves: bool,
+    groups: Vec<instance::export::Group>,
 ) -> Result<instance::modpack::ExportReport> {
     let inst = instance::load(&state.paths, &id).await?;
     let progress = Progress::new(crate::desktop::sink(app), format!("export:{id}"));
@@ -3362,12 +3422,12 @@ pub async fn export_geodepack(
         crate::install::identity::Ask::exporting(
             &state.http,
             cf_key.as_deref(),
-            crate::install::identity::Carry::GEODEPACK,
+            instance::export::PackFormat::Geodepack.carry(),
         ),
         &state.paths,
         &inst,
         dest,
-        include_saves,
+        &instance::export::Selection::of(groups),
         &progress,
     )
     .await;
@@ -3383,7 +3443,7 @@ pub async fn export_modpack(
     state: State<'_, AppState>,
     id: String,
     dest: String,
-    include_saves: bool,
+    groups: Vec<instance::export::Group>,
 ) -> Result<instance::modpack::ExportReport> {
     let inst = instance::load(&state.paths, &id).await?;
     let progress = Progress::new(crate::desktop::sink(app), format!("export:{id}"));
@@ -3394,12 +3454,12 @@ pub async fn export_modpack(
         crate::install::identity::Ask::exporting(
             &state.http,
             cf_key.as_deref(),
-            crate::install::identity::Carry::MRPACK,
+            instance::export::PackFormat::Mrpack.carry(),
         ),
         &state.paths,
         &inst,
         dest,
-        include_saves,
+        &instance::export::Selection::of(groups),
         &progress,
     )
     .await;
@@ -3422,7 +3482,7 @@ pub async fn export_curseforge_pack(
     id: String,
     dest: String,
     author: Option<String>,
-    include_saves: bool,
+    groups: Vec<instance::export::Group>,
 ) -> Result<instance::modpack::ExportReport> {
     let inst = instance::load(&state.paths, &id).await?;
     let progress = Progress::new(crate::desktop::sink(app), format!("export:{id}"));
@@ -3445,13 +3505,13 @@ pub async fn export_curseforge_pack(
         crate::install::identity::Ask::exporting(
             &state.http,
             cf_key.as_deref(),
-            crate::install::identity::Carry::CFPACK,
+            instance::export::PackFormat::Curseforge.carry(),
         ),
         &state.paths,
         &inst,
         dest,
         &author,
-        include_saves,
+        &instance::export::Selection::of(groups),
         &progress,
     )
     .await;
@@ -3474,7 +3534,7 @@ pub async fn export_prism_instance(
     state: State<'_, AppState>,
     id: String,
     dest: String,
-    include_saves: bool,
+    groups: Vec<instance::export::Group>,
 ) -> Result<instance::modpack::ExportReport> {
     let inst = instance::load(&state.paths, &id).await?;
     let progress = Progress::new(crate::desktop::sink(app), format!("export:{id}"));
@@ -3485,12 +3545,12 @@ pub async fn export_prism_instance(
         crate::install::identity::Ask::exporting(
             &state.http,
             cf_key.as_deref(),
-            crate::install::identity::Carry::PRISM,
+            instance::export::PackFormat::Prism.carry(),
         ),
         &state.paths,
         &inst,
         dest,
-        include_saves,
+        &instance::export::Selection::of(groups),
         &progress,
     )
     .await;
@@ -5418,7 +5478,7 @@ mod tests {
             paths,
             &inst,
             archive.clone(),
-            false,
+            &instance::export::Selection::default(),
             &Progress::silent("t"),
         )
         .await
@@ -5914,12 +5974,14 @@ pub async fn stage_drive_pack(
         crate::install::identity::Ask::exporting(
             &state.http,
             cf_key.as_deref(),
-            crate::install::identity::Carry::GEODEPACK,
+            instance::export::PackFormat::Geodepack.carry(),
         ),
         &state.paths,
         &inst,
         dest.clone(),
-        include_saves,
+        // The Drive dialog asks about worlds and nothing else, so it still has
+        // a boolean to give rather than a selection.
+        &instance::export::Selection::with_saves(include_saves),
         &progress,
     )
     .await;

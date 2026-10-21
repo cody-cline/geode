@@ -113,7 +113,10 @@ itself. New code should take an `EventSink`.
 - **`instance/`** owns instance CRUD and what an instance holds: `content.rs`
   (tracked content records, `Origin` for whose mod it is, `Sharing` marks),
   `jar.rs` (reading a jar for its name and which `Side` it runs on),
-  `modpack.rs` (`.mrpack` and CurseForge zip import/export), `logs.rs`,
+  `modpack.rs` (`.mrpack` and CurseForge zip import/export), `export.rs` (what
+  an export would carry and what each format would do with it, which is what
+  the export dialog is shown before anything is written — and the `Selection`
+  of file groups every writer takes), `logs.rs`,
   `multiplayer.rs` (the player's own `servers.dat`, added to without losing a
   byte of it — the same rule as `server/properties.rs`, in binary).
 - **`connector.rs`** is Sinytra Connector support — running Fabric mods on

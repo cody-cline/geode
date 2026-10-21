@@ -4,18 +4,23 @@
 // the app's extensionless imports.
 
 import type {
+  Account,
   DriveStatus,
   ExistingInstance,
   ExportReport,
+  FileJourney,
   Forbidden,
+  Group,
   Instance,
   JoinInput,
   JoinOutcome,
   JoinPreview,
   PackArrival,
+  PackFormat,
   PackLinkView,
   PublicCheck,
   PackInfo,
+  Why,
   ServerShareView,
   ShareStatus,
 } from "./types";
@@ -1028,4 +1033,289 @@ export function driveLine(status: DriveStatus): StatusLine {
       ? `Packs you share go into ${status.folderName} in your Drive. Geode cannot see anything else there.`
       : "Geode cannot see anything in your Drive but the files it created there.",
   };
+}
+
+// ---------------------------------------------------------------------------
+// The export dialog
+// ---------------------------------------------------------------------------
+
+/**
+ * The formats an instance exports as: what to save it under, what the save
+ * dialog's filter is called, and what to call the format in a sentence.
+ *
+ * A CurseForge pack is a plain `.zip` — the format has no extension of its own
+ * — so what a pack is saved as and what it is called are not the same string.
+ */
+export const EXPORT_FORMATS: Record<
+  PackFormat,
+  { ext: string; filter: string; name: string; blurb: string }
+> = {
+  geodepack: {
+    ext: "geodepack",
+    filter: "Geode pack",
+    name: "a .geodepack",
+    blurb:
+      "For another Geode. Your settings and artwork travel with it, and anything a platform can name travels as a link rather than a copy.",
+  },
+  mrpack: {
+    ext: "mrpack",
+    filter: "Modrinth pack",
+    name: "a .mrpack",
+    blurb:
+      "For Prism, the Modrinth app and most other launchers. Mods Modrinth has are linked; the rest are bundled in.",
+  },
+  curseforge: {
+    ext: "zip",
+    filter: "CurseForge pack",
+    name: "a CurseForge pack",
+    blurb:
+      "For the CurseForge app and Prism. Mods are linked by id and fetched with the recipient's own key. The format requires an author.",
+  },
+  prism: {
+    ext: "zip",
+    filter: "Prism instance",
+    name: "a Prism instance",
+    blurb:
+      "A zip Prism opens as a full instance — settings, loader and all. Every file travels inside it; what is named is what Prism can check for updates.",
+  },
+};
+
+/** What to call one of the instance's groups. */
+export function groupLabel(group: Group): string {
+  switch (group) {
+    case "mods":
+      return "Mods";
+    case "config":
+      return "Config";
+    case "resourcePacks":
+      return "Resource packs";
+    case "shaderPacks":
+      return "Shader packs";
+    case "dataPacks":
+      return "Data packs";
+    case "saves":
+      return "Worlds";
+    case "logs":
+      return "Screenshots and logs";
+    case "other":
+      return "Everything else";
+  }
+}
+
+/** What is in a group, where its name does not already say. */
+export function groupHint(group: Group): string | null {
+  switch (group) {
+    case "logs":
+      return "screenshots/, logs/ and crash-reports/";
+    case "other":
+      return "options.txt and anything else loose in the instance folder";
+    case "saves":
+      return "saves/, every world and its backups";
+    default:
+      return null;
+  }
+}
+
+/**
+ * What ticking a group means in the format that is picked.
+ *
+ * Read off what the backend said the format can do, never off the format's
+ * name: `canReference` comes from the one `Carry` the export itself uses, so
+ * this cannot come to promise a link the writer then does not make.
+ */
+export function groupNote(
+  format: PackFormat,
+  group: Group,
+  canReference: boolean,
+  sparesBytes: boolean,
+): string {
+  if (!canReference) {
+    // A group a platform could name, in a format with nowhere to put the
+    // name. The sharer can act on this by picking another format, which is
+    // why it says which format is refusing.
+    if (group !== "config" && group !== "saves" && group !== "logs" && group !== "other") {
+      return `Always bundled in as bytes: ${EXPORT_FORMATS[format].name} can only link mods.`;
+    }
+    return "Bundled in as bytes. No platform names a file like this, so no format could link it.";
+  }
+  if (!sparesBytes) {
+    return "Named, so the recipient's launcher knows what each file is and can check it for updates. The files travel inside the zip either way.";
+  }
+  // Which platform's copy this format can link, not "a platform": a .mrpack
+  // carries a Modrinth index and nothing else, and a CurseForge manifest names
+  // CurseForge ids — so a mod only the other platform has is bundled in
+  // although a platform does have it, which the summary below says in so many
+  // words.
+  const has =
+    format === "mrpack" ? "Modrinth" : format === "curseforge" ? "CurseForge" : "a platform";
+  return `Linked where ${has} has the file, and bundled in as bytes otherwise.`;
+}
+
+/** Why a file's bytes travel, as the heading above the list of them. */
+export function whyLabel(why: Why, format: PackFormat): string {
+  switch (why) {
+    case "unknown":
+      // Not "no platform has them": an export asks only the platforms whose
+      // answer the format it is writing could use.
+      return "Nothing Geode asked has these";
+    case "elsewhere":
+      return `${sentenceCase(EXPORT_FORMATS[format].name)} cannot link to where these came from`;
+    case "turnedOff":
+      return `${sentenceCase(EXPORT_FORMATS[format].name)} cannot record that a mod is turned off`;
+    case "blocked":
+      return "Their author has turned off third-party downloads, so a link would be one nobody could follow";
+    case "duplicate":
+      return "A second copy of a mod this pack already names";
+  }
+}
+
+/** "a .mrpack" at the start of a sentence. */
+function sentenceCase(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/**
+ * The files whose bytes travel, by the reason the sharer can act on.
+ *
+ * In the order [`Why`] is declared in, so the list does not reshuffle itself
+ * when a mod is added, and empty reasons left out.
+ */
+export function copiedByReason(content: FileJourney[]): { why: Why; files: FileJourney[] }[] {
+  const order: Why[] = ["unknown", "elsewhere", "turnedOff", "blocked", "duplicate"];
+  return order
+    .map((why) => ({ why, files: content.filter((file) => file.why === why) }))
+    .filter((group) => group.files.length > 0);
+}
+
+/**
+ * Who the CurseForge pack is credited to before the sharer changes it.
+ *
+ * The signed-in account's name, which is the only answer Geode holds to whose
+ * pack this is. Empty when nobody is signed in — the backend writes the
+ * "Anonymous" a reader shows for an author it cannot find, rather than anybody
+ * here inventing a name.
+ */
+export function authorDefault(accounts: Account[]): string {
+  return accounts.find((account) => account.active)?.username ?? "";
+}
+
+/**
+ * A name made safe to suggest as a file name. Instance names are free text —
+ * and a pack's manifest can set one — so "ATM10 / hardcore" would otherwise be
+ * read by the dialog as a folder that does not exist. Same rules as the
+ * backend's own `share::pack::file_name`.
+ */
+export function safeFileStem(name: string): string {
+  const cleaned = name.replace(/[/\\:*?"<>|]/g, "-").trim();
+  return cleaned || "pack";
+}
+
+/**
+ * What the export will do, or did, with the instance's content.
+ *
+ * One function for both, because the dialog's dry run and the export itself
+ * count through the same pass in the backend: a second wording would be a
+ * second chance to be wrong about the same numbers.
+ *
+ * One sentence per reason, because a single count cannot say which of them
+ * applied: "nothing Geode asked has this mod" is something nobody can fix,
+ * "this format cannot link to where it came from" and "this format cannot say a
+ * mod is off" are answered by exporting another format, "a second copy of a mod
+ * this pack already names" costs bytes and nothing else, and "the author turned
+ * third-party downloads off" is somebody else's decision that no format gets
+ * around — which is why it is counted only where no other platform names the
+ * same bytes.
+ */
+export function exportSummary(format: PackFormat, report: ExportReport): string {
+  const {
+    referenced,
+    embeddedUnknown,
+    embeddedElsewhere,
+    embeddedTurnedOff,
+    embeddedBlocked,
+    embeddedDuplicate,
+  } = report;
+  const bundled =
+    embeddedUnknown + embeddedElsewhere + embeddedTurnedOff + embeddedBlocked + embeddedDuplicate;
+  const lines: string[] = [];
+  // A Prism instance zip is the one format where a link is not an alternative
+  // to the bytes: Prism's own importer takes the extracted tree as it finds it
+  // and downloads nothing, so every jar travels either way. The same counts
+  // therefore mean something else here — how many mods arrive named, with an
+  // update path, rather than how many the zip did not have to carry — and
+  // saying "linked for the recipient to download" would be a plain lie.
+  if (format === "prism") {
+    if (referenced === 0 && bundled === 0) {
+      lines.push("There were no mods, packs or datapacks to carry.");
+    } else if (bundled === 0) {
+      lines.push(`All ${referenced} named, so Prism can check every one for updates.`);
+    } else {
+      lines.push(`${referenced} named, so Prism can check them for updates.`);
+      lines.push(
+        `${bundled} arrive as plain jars with no update path, because nothing Geode asked could name them or this format has nowhere to record it.`,
+      );
+    }
+    lines.push(
+      "Every jar travels inside the zip: a Prism instance has no way to say “download this”. Export .mrpack instead if you want Prism to fetch the mods itself.",
+    );
+    lines.push(...report.trouble);
+    if (report.unnameable.length > 0) {
+      lines.push(`Left out, because a zip cannot carry these names: ${report.unnameable.join(", ")}.`);
+    }
+    return lines.join(" ");
+  }
+  if (referenced === 0 && bundled === 0) {
+    lines.push("There were no mods, packs or datapacks to carry.");
+  } else if (bundled === 0) {
+    lines.push(`All ${referenced} linked for the recipient to download, nothing bundled in.`);
+  } else {
+    lines.push(`${referenced} linked for the recipient to download.`);
+    if (embeddedUnknown > 0) {
+      // Not "no platform has them": an export asks the platforms whose answer
+      // the format it is writing could use, so a .mrpack export asks Modrinth
+      // alone — a fingerprint costs a second read of every file in the
+      // instance, and a .mrpack cannot carry a CurseForge reference whatever
+      // the answer. Claiming more than was asked is the kind of wrong a user
+      // can catch.
+      lines.push(`${embeddedUnknown} bundled in because nothing Geode asked has them.`);
+    }
+    if (embeddedElsewhere > 0) {
+      lines.push(
+        `${embeddedElsewhere} bundled in because ${EXPORT_FORMATS[format].name} cannot link to where they came from.`,
+      );
+    }
+    if (embeddedTurnedOff > 0) {
+      lines.push(
+        `${embeddedTurnedOff} bundled in because ${EXPORT_FORMATS[format].name} cannot record that a mod is turned off.`,
+      );
+    }
+    if (embeddedBlocked > 0) {
+      lines.push(
+        `${embeddedBlocked} bundled in because their author has turned off third-party downloads, so a link would be one nobody could follow.`,
+      );
+    }
+    if (embeddedDuplicate > 0) {
+      lines.push(
+        `${embeddedDuplicate} bundled in as a second copy of a mod this pack already links.`,
+      );
+    }
+  }
+  if (format === "geodepack") lines.push("Your settings and artwork travel with it.");
+  if (format === "curseforge") {
+    // The limit worth hearing even when nothing hit it this time: the format
+    // names ids and no folder, so only a mod can be linked and a resource pack
+    // would arrive wherever the recipient's own guess put it.
+    lines.push(
+      "Only mods can be linked in this format, because it records no folder — resource packs, shaders and data packs are always bundled in.",
+    );
+    // The one thing in a pack that is about the sharer rather than the
+    // instance. The dialog asks for it now; a report that still names one is
+    // saying which name actually went into the file.
+    if (report.author) lines.push(`Credited to ${report.author}.`);
+  }
+  lines.push(...report.trouble);
+  if (report.unnameable.length > 0) {
+    lines.push(`Left out, because a pack cannot carry these names: ${report.unnameable.join(", ")}.`);
+  }
+  return lines.join(" ");
 }

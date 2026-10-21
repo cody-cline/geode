@@ -1,0 +1,172 @@
+.heading {
+  margin: 0 0 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+/* Two columns, because the four formats are a choice between four things the
+   sharer has to read: a row of tabs makes them look interchangeable, and they
+   are not — each one changes what the pack can say. */
+.formats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.format {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 0.12s var(--ease), background 0.12s var(--ease);
+}
+
+.format:hover {
+  border-color: var(--border-strong);
+}
+
+.format[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.formatName {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.formatBlurb {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.groups {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.group {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.group:hover {
+  background: var(--surface-2);
+}
+
+/* A group with no files in it is still on screen: "no worlds here" is an
+   answer, and a row that vanishes makes the sharer wonder what they missed. */
+.group[data-empty] {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.group input {
+  margin-top: 3px;
+  flex-shrink: 0;
+}
+
+.groupBody {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.groupTop {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.groupSize {
+  font-size: 12px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.groupWhy {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.pending {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-faint);
+}
+
+.error {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--danger) 38%, var(--border));
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  font-size: 12.5px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.error svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--danger);
+}
+
+.summary {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  user-select: text;
+}
+
+/* The files whose bytes travel, named. A jar carried as a copy is about to be
+   handed to somebody else, so it is readable and selectable rather than a
+   count the sharer has to take on trust. */
+.reason {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 10px;
+  padding: 9px 11px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+.reasonWhy {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.reasonFiles {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+  user-select: text;
+}

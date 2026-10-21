@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::install::identity::{self, travel, Ask, Carry, Catalogue, Travel};
+use crate::instance::export::Selection;
 use crate::instance::modpack::ExportReport;
 use crate::instance::multiplayer::Wrote;
 use crate::instance::{self, Instance};
@@ -26,11 +27,17 @@ use super::manifest::{
 /// must agree: a file the index is carrying must not also be named a source
 /// here, or the recipient would fetch it twice — once by URL and once by id,
 /// the second needing a key for a file Modrinth hosts.
-pub async fn manifest_for(paths: &Paths, instance: &Instance, catalogue: &Catalogue) -> Manifest {
+pub async fn manifest_for(
+    paths: &Paths,
+    instance: &Instance,
+    selection: &Selection,
+    catalogue: &Catalogue,
+) -> Manifest {
     let media = paths.instance_media(&instance.id);
     let files = notes_for(
         &paths.game_dir(&instance.id),
         &instance.content.iter().collect::<Vec<_>>(),
+        selection,
         catalogue,
     )
     .await;
@@ -103,15 +110,23 @@ fn sanitise(file_name: &str, ext: &str) -> String {
 ///
 /// For an instance's pack, which follows links like the rest of its walk. A
 /// server's pack follows none, and writes its notes with [`server_notes`].
+///
+/// Only files the pack carries get a note. A note is this half's channel for
+/// naming a source, so writing one for a group the sharer left out would have
+/// the recipient fetch a file the index and `overrides/` both left behind.
 async fn notes_for(
     game_dir: &Path,
     records: &[&instance::content::ContentRecord],
+    selection: &Selection,
     catalogue: &Catalogue,
 ) -> Vec<FileNote> {
     let mut out = Vec::new();
 
     for record in records {
         let rel = PathBuf::from(record.kind.folder()).join(&record.file_name);
+        if !selection.carries(&rel) {
+            continue;
+        }
 
         // A record is provenance, not proof. Deleting a file outside the
         // launcher leaves its record behind forever — the module says as much,
@@ -161,7 +176,10 @@ async fn notes_for(
     // switched on. Which is worse than not sending it: the sharer turned it
     // off for a reason.
     for ident in catalogue.identities() {
-        if !ident.disabled || !matches!(travel(ident, Carry::GEODEPACK), Travel::Linked(_)) {
+        if !ident.disabled
+            || !selection.carries(&ident.disk_rel)
+            || !matches!(travel(ident, Carry::GEODEPACK), Travel::Linked(_))
+        {
             continue;
         }
         let path = format!("{}/{}", ident.kind.folder(), ident.file_name);
@@ -276,11 +294,11 @@ pub async fn export(
     paths: &Paths,
     instance: &Instance,
     dest: PathBuf,
-    include_saves: bool,
+    selection: &Selection,
     progress: &Progress,
 ) -> Result<ExportReport> {
     let catalogue = identity::for_instance(ask, paths, instance, progress).await?;
-    export_with(paths, instance, dest, include_saves, &catalogue, progress).await
+    export_with(paths, instance, dest, selection, &catalogue, progress).await
 }
 
 /// The same, from a catalogue already built.
@@ -294,11 +312,11 @@ pub async fn export_with(
     paths: &Paths,
     instance: &Instance,
     dest: PathBuf,
-    include_saves: bool,
+    selection: &Selection,
     catalogue: &Catalogue,
     progress: &Progress,
 ) -> Result<ExportReport> {
-    let manifest = manifest_for(paths, instance, catalogue).await;
+    let manifest = manifest_for(paths, instance, selection, catalogue).await;
     let half = instance::modpack::GeodeHalf {
         extras: extras_for(paths, instance, &manifest).await?,
         referenced: referenced(&manifest),
@@ -309,7 +327,7 @@ pub async fn export_with(
         paths,
         instance,
         dest,
-        include_saves,
+        selection,
         half,
         catalogue,
         progress,
@@ -2834,7 +2852,7 @@ mod tests {
         let paths = scratch.paths.clone();
         inst.content = vec![record("curseforge", "create.jar", ContentKind::Mod)];
 
-        let manifest = manifest_for(&paths, &inst, &from_records(&paths, &inst).await).await;
+        let manifest = manifest_for(&paths, &inst, &Selection::default(), &from_records(&paths, &inst).await).await;
         let note = manifest.note("mods/create.jar").expect("a note was written");
         assert_eq!(
             note.source,
@@ -2846,7 +2864,7 @@ mod tests {
         );
 
         let dest = paths.root.join("out.geodepack");
-        export(Ask::Nobody, &paths, &inst, dest.clone(), false, &Progress::silent("t")).await.unwrap();
+        export(Ask::Nobody, &paths, &inst, dest.clone(), &Selection::default(), &Progress::silent("t")).await.unwrap();
         let names = entries(&dest);
 
         assert!(
@@ -2870,7 +2888,7 @@ mod tests {
         let paths = scratch.paths.clone();
         inst.content = vec![record("curseforge", "create.jar", ContentKind::Mod)];
 
-        let manifest = manifest_for(&paths, &inst, &from_records(&paths, &inst).await).await;
+        let manifest = manifest_for(&paths, &inst, &Selection::default(), &from_records(&paths, &inst).await).await;
         assert!(
             manifest.note("mods/create.jar").is_some_and(|n| n.source.is_some()),
             "a disabled file still has a source: {:?}",
@@ -2878,12 +2896,42 @@ mod tests {
         );
 
         let dest = paths.root.join("off.geodepack");
-        export(Ask::Nobody, &paths, &inst, dest.clone(), false, &Progress::silent("t")).await.unwrap();
+        export(Ask::Nobody, &paths, &inst, dest.clone(), &Selection::default(), &Progress::silent("t")).await.unwrap();
         let names = entries(&dest);
         assert!(
             !names.iter().any(|n| n.contains("create.jar")),
             "the disabled jar was embedded: {names:?}"
         );
+    }
+
+    /// A note is this half's channel for naming a source, so a group the
+    /// sharer unticked must have none. A note naming a mod whose bytes stayed
+    /// at home is the recipient fetching the very file that was excluded —
+    /// which is worse than leaving it out, because the index and `overrides/`
+    /// both honoured the choice.
+    #[tokio::test]
+    async fn a_group_left_out_is_named_in_no_note() {
+        let (scratch, mut inst) =
+            fixture("left-out", &[("mods", "create.jar"), ("config", "create.toml")]).await;
+        let paths = scratch.paths.clone();
+        inst.content = vec![record("curseforge", "create.jar", ContentKind::Mod)];
+        let selection = Selection::of(vec![instance::export::Group::Config]);
+
+        let manifest =
+            manifest_for(&paths, &inst, &selection, &from_records(&paths, &inst).await).await;
+        assert!(
+            manifest.note("mods/create.jar").is_none(),
+            "a file the pack was asked not to carry was named anyway: {:?}",
+            manifest.files
+        );
+
+        let dest = paths.root.join("left-out.geodepack");
+        export(Ask::Nobody, &paths, &inst, dest.clone(), &selection, &Progress::silent("t"))
+            .await
+            .unwrap();
+        let names = entries(&dest);
+        assert!(!names.iter().any(|n| n.contains("create.jar")), "{names:?}");
+        assert!(names.contains(&"overrides/config/create.toml".to_string()), "{names:?}");
     }
 
     /// A jar somebody dragged in has no link to give, so it is still carried.
@@ -2904,7 +2952,7 @@ mod tests {
         // writes a record for at all.
         inst.content = vec![record("", "homemade.jar", ContentKind::Mod)];
 
-        let manifest = manifest_for(&paths, &inst, &from_records(&paths, &inst).await).await;
+        let manifest = manifest_for(&paths, &inst, &Selection::default(), &from_records(&paths, &inst).await).await;
         for path in ["mods/homemade.jar", "mods/no-record-at-all.jar"] {
             assert!(
                 manifest.note(path).is_none_or(|n| n.source.is_none()),
@@ -2913,7 +2961,7 @@ mod tests {
         }
 
         let dest = paths.root.join("hand.geodepack");
-        export(Ask::Nobody, &paths, &inst, dest.clone(), false, &Progress::silent("t")).await.unwrap();
+        export(Ask::Nobody, &paths, &inst, dest.clone(), &Selection::default(), &Progress::silent("t")).await.unwrap();
         let names = entries(&dest);
         for path in ["mods/homemade.jar", "mods/no-record-at-all.jar"] {
             assert!(
@@ -2936,7 +2984,7 @@ mod tests {
             record("curseforge", "deleted-by-hand.jar", ContentKind::Mod),
         ];
 
-        let manifest = manifest_for(&paths, &inst, &from_records(&paths, &inst).await).await;
+        let manifest = manifest_for(&paths, &inst, &Selection::default(), &from_records(&paths, &inst).await).await;
         assert!(manifest.note("mods/present.jar").is_some());
         assert!(
             manifest.note("mods/deleted-by-hand.jar").is_none(),
@@ -2953,7 +3001,7 @@ mod tests {
         let paths = scratch.paths.clone();
         inst.content = vec![record("modrinth", "sodium.jar", ContentKind::Mod)];
 
-        let manifest = manifest_for(&paths, &inst, &from_records(&paths, &inst).await).await;
+        let manifest = manifest_for(&paths, &inst, &Selection::default(), &from_records(&paths, &inst).await).await;
         assert!(manifest.files.iter().all(|n| n.source.is_none()), "{:?}", manifest.files);
     }
 
@@ -2980,9 +3028,9 @@ mod tests {
             record("", "homemade.jar", ContentKind::Mod),
         ];
 
-        let manifest = manifest_for(&paths, &inst, &from_records(&paths, &inst).await).await;
+        let manifest = manifest_for(&paths, &inst, &Selection::default(), &from_records(&paths, &inst).await).await;
         let dest = paths.root.join("inv.geodepack");
-        export(Ask::Nobody, &paths, &inst, dest.clone(), false, &Progress::silent("t")).await.unwrap();
+        export(Ask::Nobody, &paths, &inst, dest.clone(), &Selection::default(), &Progress::silent("t")).await.unwrap();
         let names = entries(&dest);
         let index = index_of(&dest);
 
@@ -3017,7 +3065,7 @@ mod tests {
             paths,
             inst,
             dest.to_path_buf(),
-            false,
+            &Selection::default(),
             instance::modpack::GeodeHalf::default(),
             catalogue,
             &Progress::silent("t"),
@@ -3087,7 +3135,7 @@ mod tests {
         catalogue.pretend_modrinth_holds(&["create.jar"]);
 
         let dest = paths.root.join("both.geodepack");
-        let report = export_with(&paths, &inst, dest.clone(), false, &catalogue, &Progress::silent("t"))
+        let report = export_with(&paths, &inst, dest.clone(), &Selection::default(), &catalogue, &Progress::silent("t"))
             .await
             .unwrap();
 
@@ -3202,7 +3250,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let report = export_with(&paths, &inst, dest.clone(), false, &catalogue, &Progress::silent("t"))
+        let report = export_with(&paths, &inst, dest.clone(), &Selection::default(), &catalogue, &Progress::silent("t"))
             .await
             .unwrap();
 
@@ -3311,7 +3359,7 @@ mod tests {
         catalogue.pretend_modrinth_holds(&["heavy.jar"]);
 
         let geode = paths.root.join("off.geodepack");
-        export_with(&paths, &inst, geode.clone(), false, &catalogue, &Progress::silent("t"))
+        export_with(&paths, &inst, geode.clone(), &Selection::default(), &catalogue, &Progress::silent("t"))
             .await
             .unwrap();
         assert_eq!(
@@ -3364,7 +3412,7 @@ mod tests {
             &paths,
             &inst,
             dest.clone(),
-            false,
+            &Selection::default(),
             &catalogue,
             &Progress::silent("t"),
         )
@@ -3408,7 +3456,7 @@ mod tests {
         catalogue.pretend_modrinth_holds(&["heavy.jar"]);
 
         let archive = paths.root.join("offtrip.geodepack");
-        export_with(&paths, &inst, archive.clone(), false, &catalogue, &Progress::silent("t"))
+        export_with(&paths, &inst, archive.clone(), &Selection::default(), &catalogue, &Progress::silent("t"))
             .await
             .unwrap();
 
@@ -3462,7 +3510,7 @@ mod tests {
         inst.icon = Some("icon.png".into());
 
         let dest = paths.root.join("round.geodepack");
-        export(Ask::Nobody, &paths, &inst, dest.clone(), false, &Progress::silent("t"))
+        export(Ask::Nobody, &paths, &inst, dest.clone(), &Selection::default(), &Progress::silent("t"))
             .await
             .unwrap();
 
@@ -3504,7 +3552,7 @@ mod tests {
         inst.content = vec![record("", "homemade.jar", ContentKind::Mod)];
 
         let dest = paths.root.join("full.geodepack");
-        export(Ask::Nobody, &paths, &inst, dest.clone(), false, &Progress::silent("t"))
+        export(Ask::Nobody, &paths, &inst, dest.clone(), &Selection::default(), &Progress::silent("t"))
             .await
             .unwrap();
 
@@ -3532,7 +3580,7 @@ mod tests {
         inst.content = vec![record("", "private-anticheat.jar", ContentKind::Mod)];
 
         let dest = paths.root.join("server.geodepack");
-        export(Ask::Nobody, &paths, &inst, dest.clone(), false, &Progress::silent("t"))
+        export(Ask::Nobody, &paths, &inst, dest.clone(), &Selection::default(), &Progress::silent("t"))
             .await
             .unwrap();
         rewrite_pack(&dest, |m| m.kind = Kind::Server, &[]);
@@ -3576,7 +3624,7 @@ mod tests {
         ));
 
         let personal = paths.root.join("jvm-personal.geodepack");
-        export(Ask::Nobody, &paths, &inst, personal.clone(), false, &Progress::silent("t")).await.unwrap();
+        export(Ask::Nobody, &paths, &inst, personal.clone(), &Selection::default(), &Progress::silent("t")).await.unwrap();
         let hostile = paths.root.join("jvm-server.geodepack");
         std::fs::copy(&personal, &hostile).unwrap();
         rewrite_pack(&hostile, |m| m.kind = Kind::Server, &[]);
@@ -3664,7 +3712,7 @@ mod tests {
         inst.content = vec![record("", "homemade.jar", ContentKind::Mod)];
 
         let dest = paths.root.join("personal.geodepack");
-        export(Ask::Nobody, &paths, &inst, dest.clone(), false, &Progress::silent("t"))
+        export(Ask::Nobody, &paths, &inst, dest.clone(), &Selection::default(), &Progress::silent("t"))
             .await
             .unwrap();
 
@@ -3697,7 +3745,7 @@ mod tests {
             record("curseforge", "fine.jar", ContentKind::Mod),
         ];
 
-        let manifest = manifest_for(&paths, &inst, &from_records(&paths, &inst).await).await;
+        let manifest = manifest_for(&paths, &inst, &Selection::default(), &from_records(&paths, &inst).await).await;
         assert!(manifest.note("mods/crashes.jar").is_some_and(|n| n.disabled), "{:?}", manifest.files);
         assert!(manifest.note("mods/fine.jar").is_some_and(|n| !n.disabled), "{:?}", manifest.files);
         assert_eq!(disabled_rel(Path::new("mods/crashes.jar")), Some(PathBuf::from("mods/crashes.jar.disabled")));
@@ -3712,7 +3760,7 @@ mod tests {
         let (scratch, inst) = fixture("art", &[("config", "x.toml")]).await;
         let paths = scratch.paths.clone();
         let dest = paths.root.join("art.geodepack");
-        export(Ask::Nobody, &paths, &inst, dest.clone(), false, &Progress::silent("t"))
+        export(Ask::Nobody, &paths, &inst, dest.clone(), &Selection::default(), &Progress::silent("t"))
             .await
             .unwrap();
         rewrite_pack(
@@ -3746,7 +3794,7 @@ mod tests {
         let (scratch, inst) = fixture("big", &[("config", "x.toml")]).await;
         let paths = scratch.paths.clone();
         let dest = paths.root.join("big.geodepack");
-        export(Ask::Nobody, &paths, &inst, dest.clone(), false, &Progress::silent("t"))
+        export(Ask::Nobody, &paths, &inst, dest.clone(), &Selection::default(), &Progress::silent("t"))
             .await
             .unwrap();
         rewrite_pack(
@@ -3797,7 +3845,7 @@ mod tests {
         let (scratch, inst) = fixture("unsafe", &[("config", "x.toml")]).await;
         let paths = scratch.paths.clone();
         let dest = paths.root.join("unsafe.geodepack");
-        export(Ask::Nobody, &paths, &inst, dest.clone(), false, &Progress::silent("t"))
+        export(Ask::Nobody, &paths, &inst, dest.clone(), &Selection::default(), &Progress::silent("t"))
             .await
             .unwrap();
         rewrite_pack(
@@ -3871,7 +3919,7 @@ mod tests {
         assert_eq!(server_pack_info(&paths, &server).await.unwrap().listing, None);
 
         // A personal pack never carries one.
-        let instance_manifest = manifest_for(&paths, &instance(), &Catalogue::default()).await;
+        let instance_manifest = manifest_for(&paths, &instance(), &Selection::default(), &Catalogue::default()).await;
         assert_eq!(instance_manifest.listing, None);
     }
 
@@ -3888,7 +3936,7 @@ mod tests {
         let (scratch, inst) = fixture("listed", &[("mods", "homemade.jar")]).await;
         let paths = scratch.paths.clone();
         let personal = paths.root.join("listed-personal.geodepack");
-        export(Ask::Nobody, &paths, &inst, personal.clone(), false, &Progress::silent("t"))
+        export(Ask::Nobody, &paths, &inst, personal.clone(), &Selection::default(), &Progress::silent("t"))
             .await
             .unwrap();
 
@@ -3978,7 +4026,7 @@ mod tests {
         let (scratch, inst) = fixture("claimed", &[("mods", "homemade.jar")]).await;
         let paths = scratch.paths.clone();
         let pack = paths.root.join("claimed-server.geodepack");
-        export(Ask::Nobody, &paths, &inst, pack.clone(), false, &Progress::silent("t"))
+        export(Ask::Nobody, &paths, &inst, pack.clone(), &Selection::default(), &Progress::silent("t"))
             .await
             .unwrap();
         rewrite_pack(
@@ -7302,7 +7350,7 @@ mod tests {
         let (scratch, inst) = fixture("personal-update", &[("mods", "homemade.jar")]).await;
         let paths = scratch.paths.clone();
         let pack = paths.root.join("personal.geodepack");
-        export(Ask::Nobody, &paths, &inst, pack.clone(), false, &Progress::silent("t"))
+        export(Ask::Nobody, &paths, &inst, pack.clone(), &Selection::default(), &Progress::silent("t"))
             .await
             .unwrap();
 

@@ -11,13 +11,17 @@ import {
   OLD_ADDRESS_LABEL,
   addressChangedLine,
   arrivalLine,
+  authorDefault,
+  copiedByReason,
   driveLine,
   existingLine,
+  exportSummary,
   forbiddenAsTyped,
   forbiddenLabel,
   forbiddenPlayerHint,
   forbiddenRuleHint,
   gameAddressHint,
+  groupNote,
   joinInput,
   joinStep,
   linkKind,
@@ -864,8 +868,11 @@ function report(over = {}) {
     embeddedUnknown: 0,
     embeddedElsewhere: 0,
     embeddedTurnedOff: 0,
+    embeddedBlocked: 0,
+    embeddedDuplicate: 0,
     unnameable: [],
     trouble: [],
+    author: null,
     ...over,
   };
 }
@@ -1101,4 +1108,137 @@ test("the admin is told which address is the pack's and which one players play o
   const nothing = gameAddressHint(shareView());
   assert.match(nothing, /Geode's own port/);
   assert.match(nothing, /cannot work out the game address/);
+});
+
+// ---------------------------------------------------------------------------
+// The export dialog
+// ---------------------------------------------------------------------------
+
+const account = (username, active) => ({
+  id: username,
+  username,
+  kind: "microsoft",
+  active,
+  needsReauth: false,
+  sourceLabel: null,
+});
+
+test("authorDefault credits the signed-in account and invents nobody", () => {
+  assert.equal(
+    authorDefault([account("Someone", false), account("Notch", true)]),
+    "Notch",
+  );
+
+  // Nobody signed in: empty, so the backend writes the "Anonymous" a reader
+  // shows rather than anything here guessing a name that travels in the file.
+  assert.equal(authorDefault([account("Someone", false)]), "");
+  assert.equal(authorDefault([]), "");
+});
+
+// The author box is the one thing in a pack that is about the sharer rather
+// than the instance, and the name in it travels inside the file. There is no
+// DOM or React renderer under `npm test`, so the invariant is checked where it
+// is written.
+test("an emptied author box credits nobody, not the account it was filled from", async () => {
+  const source = await readFile(new URL("../components/ExportModal.tsx", import.meta.url), "utf8");
+  const call = source.slice(source.indexOf("api.exportCurseforgePack("));
+  // To the end of the call, not the first `)` — `author.trim()` has one of its
+  // own.
+  const args = call.slice(0, call.indexOf(");"));
+
+  // `null` is the backend's "nobody answered", which it stands the signed-in
+  // account's name in for. Sending it for a box the sharer emptied writes
+  // their real account name into the pack under a placeholder promising
+  // "Anonymous" — and the toast then credits them by name.
+  assert.match(args, /author\.trim\(\)/);
+  assert.doesNotMatch(args, /null/);
+});
+
+test("groupNote says bytes, and names the format refusing to link, from what the backend answered", () => {
+  // A shader pack in a CurseForge pack: the format names two integers and no
+  // folder, so only mods can be linked. It says which format, because that is
+  // the thing the sharer can act on.
+  const refused = groupNote("curseforge", "shaderPacks", false, true);
+  assert.match(refused, /bundled in as bytes/i);
+  assert.match(refused, /a CurseForge pack/);
+  assert.match(refused, /only link mods/);
+
+  // The same group in a format that can link it says so instead — and names
+  // the platform whose copy it can link, because that is what decides whether
+  // a given file travels as a link. A .mrpack carries a Modrinth index and
+  // nothing else; a CurseForge manifest names CurseForge ids. "A platform"
+  // promised a link for a mod only the other one has, which the summary
+  // immediately below then counted as bundled in.
+  assert.match(groupNote("mrpack", "shaderPacks", true, true), /Linked where Modrinth has/);
+  assert.match(groupNote("curseforge", "mods", true, true), /Linked where CurseForge has/);
+  assert.doesNotMatch(groupNote("curseforge", "mods", true, true), /a platform/);
+  // A .geodepack's notes name any platform Geode can ask, so there it is true.
+  assert.match(groupNote("geodepack", "mods", true, true), /Linked where a platform has/);
+
+  // Nothing names a world, so no format is blamed for not linking one.
+  const world = groupNote("geodepack", "saves", false, true);
+  assert.match(world, /No platform names a file like this/);
+  assert.doesNotMatch(world, /geodepack/);
+
+  // A Prism instance zip is the one format where a link is not an alternative
+  // to the bytes, so it must not promise a smaller download.
+  const prism = groupNote("prism", "mods", true, false);
+  assert.match(prism, /travel inside the zip either way/);
+  assert.doesNotMatch(prism, /Linked where/);
+});
+
+const journey = (fileName, why) => ({
+  kind: "mod",
+  fileName,
+  disabled: false,
+  size: 1,
+  travels: why ? "copied" : "linked",
+  provider: why ? null : "modrinth",
+  why: why ?? null,
+});
+
+test("copiedByReason keeps one list per reason, in a fixed order, and leaves out the rest", () => {
+  const listed = copiedByReason([
+    journey("linked.jar", null),
+    journey("dupe.jar", "duplicate"),
+    journey("secret.jar", "unknown"),
+    journey("off.jar", "turnedOff"),
+    journey("other.jar", "unknown"),
+  ]);
+
+  // Declared order, not the order the files happened to arrive in: the list
+  // must not reshuffle itself when a mod is added.
+  assert.deepEqual(
+    listed.map((group) => group.why),
+    ["unknown", "turnedOff", "duplicate"],
+  );
+  assert.deepEqual(
+    listed[0].files.map((file) => file.fileName),
+    ["secret.jar", "other.jar"],
+  );
+  // A file that travels as a link is in no reason's list.
+  assert.ok(!listed.some((group) => group.files.some((file) => file.fileName === "linked.jar")));
+  assert.deepEqual(copiedByReason([journey("linked.jar", null)]), []);
+});
+
+test("exportSummary never tells a Prism recipient to download anything", () => {
+  const prism = exportSummary("prism", report({ referenced: 12 }));
+  assert.match(prism, /All 12 named/);
+  assert.match(prism, /check every one for updates/);
+  assert.match(prism, /Every jar travels inside the zip/);
+  assert.doesNotMatch(prism, /linked for the recipient to download/);
+
+  // Every other format counts what the recipient fetches instead.
+  assert.match(
+    exportSummary("mrpack", report({ referenced: 12 })),
+    /All 12 linked for the recipient to download/,
+  );
+});
+
+test("exportSummary blames the format that could not link, by name", () => {
+  const said = exportSummary("curseforge", report({ referenced: 3, embeddedElsewhere: 2 }));
+  assert.match(said, /3 linked for the recipient to download/);
+  assert.match(said, /2 bundled in because a CurseForge pack cannot link to where they came from/);
+  // The author is the one thing in a pack about the sharer, and it travels.
+  assert.match(exportSummary("curseforge", report({ author: "Notch" })), /Credited to Notch/);
 });

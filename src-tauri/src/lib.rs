@@ -216,6 +216,8 @@ pub fn run() {
             commands::cancel_task,
             commands::preview_modpack,
             commands::import_modpack,
+            commands::export_groups,
+            commands::export_plan,
             commands::export_modpack,
             commands::export_geodepack,
             commands::export_curseforge_pack,
