@@ -382,28 +382,28 @@ connects straight to the admin's machine. Nothing sits in the middle.
   the one a player is shown has to be the one the pack carries. A server on a
   Geode older than this sends no count, which reads as zero, so the note stays
   quiet rather than promising a number nobody sent.
-  `configKept` is a bool rather than the behaviour's name on purpose: it is the
-  only thing a player asks about those files, and a name invented by a newer
-  Geode would make the whole description fail to parse — which would leave a
-  player unable to check their server for changes at all. It is true of every
-  behaviour that is not Always replace, so the sentence it picks has to be true
-  of all of them: today "sent once, and nothing the admin changes later
-  replaces them", which is what both of them do. A behaviour that pushed
-  individual settings afterwards could not be described by a bool at all, and
-  would need the description to carry which one it is.
+  `configKept` and `configPushed` are bools rather than the behaviour's name on
+  purpose: they are the only things a player asks about those files, and a name
+  invented by a newer Geode would make the whole description fail to parse —
+  which would leave a player unable to check their server for changes at all.
+  Two are needed because "the files are yours" is true of two different
+  behaviours and only one of them sends the admin's later changes:
+  `configPushed` is Keep in sync, it is never true without `configKept`, and
+  both read false from a Geode older than this, which is what sending a config
+  folder has always been.
 - The admin chooses **what happens to a player's own changes** to the files in
   that folder, on the Share tab beside the switch that decides whether the
   folder travels:
   **Send once** (`ship-once`) sends each file when the player has no copy and
-  never touches it again, so nothing the admin changes later reaches them; and
-  **Always replace** (`enforce`), which is what sending a config folder has
-  always done, puts the server's copy over the player's every time they press
-  Play. A third behaviour, `merge`, is named on the wire and **not offered**:
-  it would send the file whole the first time and afterwards only the settings
-  the admin changed, and nothing splices a setting into a player's file yet —
-  `pack::landings` handles it in the same arm as `ship-once`, and
-  `whenPlayersGetChanges` describes it as what it does. Offering it would tell
-  an admin their later edits travel when no code makes them.
+  never touches it again, so nothing the admin changes later reaches them;
+  **Keep in sync** (`merge`) sends each file the first time and afterwards only
+  the settings the admin pushes, spliced into whatever the player has made of
+  the file; and **Always replace** (`enforce`), which is what sending a config
+  folder has always done, puts the server's copy over the player's every time
+  they press Play. `pack::landings` is the one place a behaviour turns into an
+  action, and `pack::landing_for` is the rule itself, asked both by the
+  extraction and by `pack::pushes_to_splice` so the two can never disagree
+  about a file.
   Turning the folder off leaves the choice where it is, and turning it on sends
   **no choice at all**: the behaviour already in force answers, which for a
   share that has chosen nothing is Always replace. The switch has nothing to
@@ -454,6 +454,119 @@ connects straight to the admin's machine. Nothing sits in the middle.
   file they kept their own copy of usually does not. A pack with no settings
   half — every `.mrpack`, every personal `.geodepack` — still fails hard, as it
   always has.
+- **A push** is how a later change travels under Keep in sync, and it is a
+  button rather than something ambient. The admin edits the config file on the
+  server as they already do, presses **Review settings changes**, sees the
+  settings that moved with old and new, and sends the ones they confirm;
+  players get them the next time they press Play. Pushing is deliberate
+  because mods rewrite their own config files on boot — new default keys, a
+  bumped `_version`, reflowed comments — and Java's `Properties.store()` writes
+  a timestamp as line 2, so a file whose settings never moved still has new
+  bytes. Propagating an edit by itself would push that noise to every player
+  and show the admin a list of settings they never touched. The Share tab says
+  so beside the button, where it is read before the screen is opened, and says
+  the other half too: there is no undo, because sharing has no channel back
+  from a player, so changing one's mind means changing the setting again and
+  sending that.
+  What travels is the **keys**, never the bytes and never a three-way merge.
+  `Settings.overrides` is one entry per setting the server owns —
+  `{ path, key, value, was, at }` — cumulative rather than a log, so it is
+  prunable by definition and a player who skipped a year of pushes still ends
+  up with exactly the current values in one pass. `value` is the **raw source
+  text** of the value in the admin's own file, so nothing has to understand it
+  and TOML's types, JSON's quoting and Java's escaping (`minecraft\:normal` is
+  in a live `server.properties`) survive untouched — any re-escaper would
+  differ from the one that wrote the file and churn values nobody touched.
+  `key` is a list of **literal segments**, never a dotted string, because real
+  table names hold dots, spaces and colons and quoting rules applied to a
+  stranger's text are somewhere to hide an injection. `was` is what the admin
+  last published, and decides nothing: it is only how the player's Geode can
+  tell a setting they had changed themselves from one that still held the
+  server's own value.
+  The diff runs **once, on the admin's machine, in front of the one person who
+  can tell whether it is right**, against a snapshot of what was last published
+  under `Paths::server_published` — outside `run/`, so neither a backup nor the
+  pack's own walk can see it. The snapshot is taken when a path becomes Keep in
+  sync, which is also the moment every player is sent those files whole, and
+  for a file that appears later at the Review that first finds it. Picking the
+  behaviour already in force re-publishes nothing, or the admin's unpushed
+  edits would silently become the baseline. `settings::push` is all of this;
+  `commands.rs` only validates and delegates.
+- **Applying a push** is one sentence, and everything the feature promises
+  falls out of it: for each synced path, write the file whole when the
+  behaviour is Always replace, or the file is absent, or `settings_at` is below
+  that path's `from`; otherwise leave the file alone and splice in every
+  override for it whose `at` is above `settings_at`. Then record the pack's
+  `at`. So a first join writes the default config whole; a push reaches one
+  setting and reads nothing else in the file; **a player who changes it back
+  keeps their change for ever**, because that push's number never moves again;
+  a player who skipped three pushes catches up in one pass; and a player who
+  deleted the file gets it back whole. No baseline on a player's disk, no diff
+  on a player's machine, and nothing can touch a setting the admin did not
+  name.
+  The splice itself is `settings`: `sniff` reads a file's format from its
+  **content** and never its name (a real `polylib.json` holds `//` comments,
+  and `.cfg` is `RMBTweak=1` in one mod and `current_profile = default` in the
+  next), with a defined answer for "I do not recognise this" — a file Geode
+  cannot read one setting at a time falls back to being **sent once**, never to
+  Always replace, and Review names which files those are rather than leaving a
+  label reading "only the settings I change" over something that does
+  otherwise. `settings::kv` is today's locator: `.properties`, flat `.cfg` and
+  `options.txt`, split at the **first** separator because a keybind's value
+  holds more of them, with each line's own spacing around its separator, the
+  file's own line endings and its final-newline state all preserved — a writer
+  that normalises any of those rewrites every line of the file as far as a
+  later diff or hash can tell. It is deliberately not
+  `server::properties::apply`, which rewrites the changed line as `{key}=
+  {value}` and normalises CRLF and the final newline across the whole file:
+  seven tests pin that, and `server.properties` wants it. TOML and the JSON
+  family are each a locator of their own and sniff as unknown until they land.
+  The splice runs at Play time, inside `pack::update`, and never while the game
+  is up: Minecraft and mods both rewrite their config from memory on exit, over
+  anything written under them.
+- **What the player is told**, because a merge nobody hears about is a file
+  that changed by itself. The update writes `instances/<id>/last-sync.json`
+  (`Paths::instance_sync`, beside `instance.json` so no export carries it) and
+  Settings → Server reads it: a line saying how many settings moved and that
+  **nothing else in these files was changed**, a row for each setting the
+  player had changed themselves — the setting, what the server set it to, what
+  they had — with a **Change it back** button, and a count for the ones they
+  had never touched, which earn no interruption because their file held the
+  server's own value. The launch notice says one sentence and points at the
+  panel; a notice is one toast alive for four and a half seconds with its
+  sentences run together, which is nowhere to read what a setting used to be.
+  Change it back writes the value Geode recorded as theirs, found by path and
+  key in that report, so nothing arriving over the command boundary decides
+  what goes into a file — and it sticks, because the push it came from never
+  takes a new number.
+  One switch, **Let the server update settings**, beside the server-side mods
+  switch that is its precedent, on by default and with no silent exceptions: it
+  stops the Always replace writes too. Nothing on disk changes when it is
+  flipped, nothing here is undoable, and `settings_at` does not move while it
+  is off — so turning it back on applies the whole backlog in one pass. While
+  it is off an owed file is not a reason to fetch a pack either
+  (`commands::fetch_due`), or every Play would download one to finish a job
+  nothing would let it finish.
+- **A settings half is untrusted input**, and this is the one place in sharing
+  where a stranger names positions inside the recipient's own files. So
+  `Settings::checked` holds one to every ceiling — at most 512 paths, 1024
+  settings, 8 key segments, 128 bytes a segment, 8 KiB a value, 256 KiB in all
+  — and to the path rule every entry obeys: safe-relative, and never inside
+  `mods/` or `client-mods/`, so a settings path can never splice bytes into a
+  jar. Going past one is refused **by name**, and the half is then dropped
+  whole rather than trimmed: with no settings half every file is written whole
+  and a failure stops the import, which is exactly what a pack leaving the
+  field out gets, where refusing the pack would cost the recipient every mod in
+  it over a list they cannot see. The same check runs before a push is written,
+  so a list Geode would refuse to apply is one it refuses to make. The splice
+  also refuses a destination that is not an **ordinary file** and leaves a
+  read-only one alone, each named in the player's report —
+  `extract_overrides` has written through a symlink since before any of this
+  and is left as it is, so the difference is a decision rather than an
+  oversight. A file a splice could not be written to is not left owed and not
+  retried: the player has their own copy of it, so there is nothing owed to
+  them, and offering the file whole instead would replace the very work keeping
+  it was for. The admin's next push tries again.
   Not bumping `geodeFormat` for the settings half is the same judgement as the
   listing's: a reader that ignores it writes every settings file whole on every
   update, which is exactly what every reader did before the field existed. A

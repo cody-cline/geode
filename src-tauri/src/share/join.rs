@@ -969,6 +969,7 @@ mod tests {
             server_kind: "fabric".into(),
             config_files: 0,
             config_kept: false,
+            config_pushed: false,
             revision: String::new(),
             server_id: String::new(),
             listing: None,

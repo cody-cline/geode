@@ -152,9 +152,73 @@ pub struct Settings {
     /// see [`Settings::covering`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<SyncedPath>,
+    /// The settings the sender owns: one entry per key they have pushed, with
+    /// the value they pushed and the push it went out at.
+    ///
+    /// Cumulative, and one entry per key rather than a log of pushes. A log
+    /// would grow for ever and could never be pruned — nobody can know every
+    /// player has applied an entry — where this is prunable by definition, and
+    /// a player who skipped a year of pushes still ends up with exactly the
+    /// current values in one pass, with no ordering to get right.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<Override>,
     /// The push these behaviours were last changed at. Monotonic and never
     /// reused: a number that went backwards would send a player a file they
     /// have since made their own.
+    #[serde(default)]
+    pub at: u32,
+}
+
+/// One setting the sender owns, inside one of the files it syncs.
+///
+/// Two things here are what make this safe to apply to a stranger's file, and
+/// both are deliberate:
+///
+/// `value` is the **raw source text** of the value as it stands in the
+/// sender's own file — `8`, `true`, `"right"`, `["vanilla","fabric"]`,
+/// `minecraft\:normal`. Nothing has to understand it: the splice puts those
+/// bytes where the old value's bytes were. That is what keeps TOML's types,
+/// JSON's quoting and Java's escaping intact, and it is why no re-serialiser
+/// is ever needed — any re-escaper would differ from the one that wrote the
+/// file and churn values nobody touched.
+///
+/// `key` is a list of literal segments and never a dotted string. Real table
+/// names hold dots, spaces and colons (`["Configs for Create: Tweaked
+/// Controllers"]`), so a dotted path would need quoting rules — and quoting
+/// rules applied to text a stranger's pack supplies are somewhere to hide an
+/// injection. Segments matched literally have no syntax to abuse — as long as
+/// a segment is a name rather than lines of a file, which is part of what
+/// [`Settings::checked`] holds this to.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Override {
+    /// The file this setting is in, relative to the game directory. Held to
+    /// the same rule as a [`SyncedPath`], and only applied at all when a
+    /// [`Policy::Merge`] path covers it.
+    pub path: String,
+    /// The key, segment by segment. One segment for a key-and-value file.
+    pub key: Vec<String>,
+    /// The value to put there, as raw text. `None` removes the key — the one
+    /// irreversible thing in this whole mechanism, which is why the sender has
+    /// to ask for it rather than have it inferred from a diff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// What the sender's own copy held before this push, as raw text. `None`
+    /// when the sender's copy did not have the key either.
+    ///
+    /// Not a baseline — the recipient stores nothing and this is the same for
+    /// everybody — and nothing is decided by it. It is only how the recipient
+    /// can say whether *they* had changed this setting: a file holding what
+    /// the sender last published is a setting they never touched, and one
+    /// holding anything else is a setting of theirs that this push moved. Told
+    /// apart, the second earns a line in their report and the first collapses
+    /// into a count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub was: Option<String>,
+    /// The push this value went out at. The number that makes the whole
+    /// mechanism work: a recipient applies every entry above the push they
+    /// have caught up with, and because this never moves again, a recipient
+    /// who changes the setting back keeps their change for ever.
     #[serde(default)]
     pub at: u32,
 }
@@ -283,23 +347,158 @@ impl Settings {
 }
 
 impl SyncedPath {
-    /// Whether this is a path a pack may name at all.
-    ///
-    /// Safe-relative, so no entry reaches outside the instance, and never
-    /// inside `mods/` or `client-mods/`. What a settings entry decides is
-    /// whether the pack's own copy of a file is written and whether failing to
-    /// write it stops the import — and neither is a decision a stranger's pack
-    /// gets to make about a jar. Geode names neither folder; a pack that does
-    /// was written by something else.
+    /// Whether this is a path a pack may name at all — see [`nameable`].
     fn allowed(&self) -> bool {
-        let rel = std::path::Path::new(&self.path);
-        if self.path.trim().is_empty() || !crate::paths::is_safe_relative(rel) {
-            return false;
+        nameable(&self.path)
+    }
+}
+
+impl Override {
+    /// Whether this is a path a pack may name at all — see [`nameable`].
+    pub fn allowed(&self) -> bool {
+        nameable(&self.path)
+    }
+
+    /// Whether this entry names the same setting as another, which is what
+    /// makes the list cumulative: a second push of one key replaces its entry
+    /// rather than adding to a log.
+    pub fn same_key(&self, other: &Override) -> bool {
+        self.path == other.path && self.key == other.key
+    }
+}
+
+/// Whether a pack may name this path in its settings half.
+///
+/// Safe-relative, so no entry reaches outside the instance, and never inside
+/// `mods/` or `client-mods/`. What a settings entry decides is whether the
+/// pack's own copy of a file is written, whether failing to write it stops the
+/// import, and — for an override — which bytes inside it are replaced. None of
+/// those is a decision a stranger's pack gets to make about a jar. Geode names
+/// neither folder; a pack that does was written by something else.
+fn nameable(path: &str) -> bool {
+    let rel = std::path::Path::new(path);
+    if path.trim().is_empty() || !crate::paths::is_safe_relative(rel) {
+        return false;
+    }
+    !matches!(
+        rel.components().next().and_then(|c| c.as_os_str().to_str()),
+        Some("mods") | Some("client-mods")
+    )
+}
+
+/// What a settings half may hold at most.
+///
+/// A pack is untrusted input — this is the one part of sharing where a
+/// stranger names positions inside the recipient's own files — so every list
+/// and every field here has a stated ceiling, and going past one is refused by
+/// name rather than ignored. Each is far above anything an admin produces: the
+/// largest real `config/` measured on a developer's machine is 96 files, and a
+/// push names the handful of settings that moved.
+mod ceiling {
+    pub const PATHS: usize = 512;
+    pub const OVERRIDES: usize = 1024;
+    pub const DEPTH: usize = 8;
+    pub const SEGMENT: usize = 128;
+    pub const VALUE: usize = 8 * 1024;
+    pub const TOTAL: usize = 256 * 1024;
+}
+
+impl Settings {
+    /// Hold this half to every ceiling and every path rule, naming the first
+    /// one it goes past.
+    ///
+    /// Called on the recipient's side before a single byte of it is acted on,
+    /// and on the sender's before a push is written, so a list Geode would
+    /// refuse to apply is one it also refuses to make.
+    pub fn checked(&self) -> crate::error::Result<()> {
+        use crate::error::Error;
+        if self.paths.len() > ceiling::PATHS {
+            return Err(Error::msg(format!(
+                "this pack chooses a behaviour for {} settings paths, and Geode applies at most {}",
+                self.paths.len(),
+                ceiling::PATHS
+            )));
         }
-        !matches!(
-            rel.components().next().and_then(|c| c.as_os_str().to_str()),
-            Some("mods") | Some("client-mods")
-        )
+        if self.overrides.len() > ceiling::OVERRIDES {
+            return Err(Error::msg(format!(
+                "this pack carries {} settings, and Geode applies at most {}",
+                self.overrides.len(),
+                ceiling::OVERRIDES
+            )));
+        }
+        let mut total = 0usize;
+        for named in &self.paths {
+            if !named.allowed() {
+                return Err(Error::msg(format!(
+                    "this pack chooses a behaviour for '{}', which is not a path Geode will \
+                     write settings to",
+                    named.path
+                )));
+            }
+            total += named.path.len();
+        }
+        for entry in &self.overrides {
+            if !entry.allowed() {
+                return Err(Error::msg(format!(
+                    "this pack sets a setting inside '{}', which is not a file Geode will write \
+                     settings to",
+                    entry.path
+                )));
+            }
+            if entry.key.is_empty() || entry.key.len() > ceiling::DEPTH {
+                return Err(Error::msg(format!(
+                    "a setting in '{}' is named by {} parts, and Geode reads between 1 and {}",
+                    entry.path,
+                    entry.key.len(),
+                    ceiling::DEPTH
+                )));
+            }
+            for segment in &entry.key {
+                if segment.len() > ceiling::SEGMENT {
+                    return Err(Error::msg(format!(
+                        "a setting name in '{}' is {} bytes long, and Geode reads at most {}",
+                        entry.path,
+                        segment.len(),
+                        ceiling::SEGMENT
+                    )));
+                }
+                // A segment is matched literally and written literally, which
+                // is what this type's own doc rests on — so a segment holding
+                // a line break or a control character is syntax to abuse
+                // after all: it would write lines of its own into the
+                // recipient's file, settings the push never named. No format
+                // Geode reads names a setting with one, and a segment of
+                // nothing at all would write a line with no name.
+                if segment.trim().is_empty() || segment.chars().any(char::is_control) {
+                    return Err(Error::msg(format!(
+                        "a setting in '{}' is named by something Geode will not write into a \
+                         settings file",
+                        entry.path
+                    )));
+                }
+            }
+            for text in [entry.value.as_deref(), entry.was.as_deref()] {
+                if text.unwrap_or_default().len() > ceiling::VALUE {
+                    return Err(Error::msg(format!(
+                        "a setting value in '{}' is {} bytes long, and Geode writes at most {}",
+                        entry.path,
+                        text.unwrap_or_default().len(),
+                        ceiling::VALUE
+                    )));
+                }
+            }
+            total += entry.path.len()
+                + entry.key.iter().map(String::len).sum::<usize>()
+                + entry.value.as_deref().unwrap_or_default().len()
+                + entry.was.as_deref().unwrap_or_default().len();
+        }
+        if total > ceiling::TOTAL {
+            return Err(Error::msg(format!(
+                "this pack's settings come to {total} bytes, and Geode applies at most {}",
+                ceiling::TOTAL
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -1024,6 +1223,7 @@ mod tests {
                 chosen("config/keys", Policy::ShipOnce, 2),
                 chosen("config/locked.toml", Policy::Enforce, 1),
             ],
+            overrides: Vec::new(),
             at: 4,
         };
         let json = serde_json::to_string(&settings).unwrap();
@@ -1086,6 +1286,7 @@ mod tests {
                 chosen("config/locked.toml", Policy::Enforce, 2),
                 chosen("config/keys", Policy::ShipOnce, 3),
             ],
+            overrides: Vec::new(),
             at: 3,
         };
 
@@ -1124,6 +1325,7 @@ mod tests {
         ] {
             let settings = Settings {
                 paths: vec![chosen(path, Policy::ShipOnce, 1)],
+                overrides: Vec::new(),
                 at: 1,
             };
             assert_eq!(
@@ -1137,6 +1339,98 @@ mod tests {
                 "{path} decided something about itself"
             );
         }
+    }
+
+    /// Every ceiling a settings half is held to, and that going past one is
+    /// refused by name rather than ignored. This is the one part of sharing
+    /// where a stranger's pack names positions inside the recipient's own
+    /// files, so a list Geode cannot vouch for is one it does not apply at
+    /// all — and the reason says which rule it hit, because that line is what
+    /// the recipient reads.
+    #[test]
+    fn a_settings_half_is_held_to_every_ceiling_and_says_which_one_it_hit() {
+        let one = |path: &str, key: Vec<String>, value: Option<String>| Settings {
+            paths: vec![chosen("config", Policy::Merge, 1)],
+            overrides: vec![Override {
+                path: path.to_string(),
+                key,
+                value,
+                was: None,
+                at: 1,
+            }],
+            at: 1,
+        };
+        let refusal = |settings: Settings| settings.checked().unwrap_err().to_string();
+
+        // What a real push looks like: allowed.
+        one("config/a.properties", vec!["fov".into()], Some("90".into()))
+            .checked()
+            .unwrap();
+
+        // A setting inside a jar, or outside the instance altogether.
+        for path in ["mods/evil.jar", "client-mods/evil.jar", "../evil", "/etc/passwd"] {
+            let why = refusal(one(path, vec!["a".into()], Some("x".into())));
+            assert!(why.contains(path), "{why}");
+        }
+
+        // A key that names nothing, and one nested past anything real.
+        for key in [vec![], (0..9).map(|n| n.to_string()).collect::<Vec<_>>()] {
+            let why = refusal(one("config/a.toml", key, Some("x".into())));
+            assert!(why.contains("parts"), "{why}");
+        }
+
+        // A key segment and a value past their own ceilings.
+        let why = refusal(one(
+            "config/a.toml",
+            vec!["k".repeat(129)],
+            Some("x".into()),
+        ));
+        assert!(why.contains("129 bytes long"), "{why}");
+
+        // A segment that is lines of a file rather than a name. A splice
+        // writes a segment literally, so this is the one place the promise
+        // that a segment has no syntax to abuse is kept: `evil\nhack=1` would
+        // append two lines to a `.properties` file and leave a setting called
+        // `hack` in it that no push ever named.
+        for segment in ["evil\nhack=1", "a\rb", "a\tb", ""] {
+            let why = refusal(one(
+                "config/a.properties",
+                vec![segment.into()],
+                Some("x".into()),
+            ));
+            assert!(why.contains("will not write"), "{segment:?}: {why}");
+        }
+        let why = refusal(one(
+            "config/a.toml",
+            vec!["k".into()],
+            Some("v".repeat(8 * 1024 + 1)),
+        ));
+        assert!(why.contains("8192"), "{why}");
+
+        // Too many paths, too many settings, and too many bytes in total.
+        let many = |n: usize| Settings {
+            paths: vec![chosen("config", Policy::Merge, 1)],
+            overrides: (0..n)
+                .map(|at| Override {
+                    path: "config/a.properties".into(),
+                    key: vec![format!("k{at}")],
+                    value: Some("v".repeat(256)),
+                    was: None,
+                    at: 1,
+                })
+                .collect(),
+            at: 1,
+        };
+        let why = refusal(Settings {
+            paths: (0..513).map(|n| chosen(&format!("config/{n}"), Policy::Merge, 1)).collect(),
+            ..Settings::default()
+        });
+        assert!(why.contains("513 settings paths"), "{why}");
+        let why = refusal(many(1025));
+        assert!(why.contains("1025 settings"), "{why}");
+        // Each of these is inside every other ceiling; together they are not.
+        let why = refusal(many(1024));
+        assert!(why.contains("bytes, and Geode applies at most"), "{why}");
     }
 
     /// A choice is dated so a player who has not caught up with it gets the

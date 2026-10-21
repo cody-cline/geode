@@ -60,6 +60,16 @@ impl Paths {
     pub fn instance_media(&self, id: &str) -> PathBuf {
         self.instance(id).join("media")
     }
+    /// What the last update from this instance's server changed in its
+    /// settings files, for the panel that tells the player about it.
+    ///
+    /// Beside `instance.json` rather than inside `.minecraft`, for the reason
+    /// `media/` is: no export and no pack ever carries it. And a file of its
+    /// own rather than a field on `instance.json`, which long jobs rewrite
+    /// whole — the hazard `server::share`'s module header describes.
+    pub fn instance_sync(&self, id: &str) -> PathBuf {
+        self.instance(id).join("last-sync.json")
+    }
     /// Modpack plans. Not under `instances/` because a plan is not one: nothing
     /// is downloaded for it, and the same plan can be built more than once.
     pub fn plans(&self) -> PathBuf {
@@ -90,6 +100,17 @@ impl Paths {
     /// swept into the next one.
     pub fn server_backups(&self, id: &str) -> PathBuf {
         self.server(id).join("backups")
+    }
+    /// The copy of each synced settings file as it was when its settings were
+    /// last published, which is what the next push is measured against.
+    ///
+    /// Beside the run directory for the same reasons `media/` and `backups/`
+    /// are: a backup covers `run/` alone, so this can never be swept into one
+    /// and handed back later as though it were the admin's own file, and the
+    /// pack's own allowlisted walk of `run/` cannot see it, so it never
+    /// travels to a player.
+    pub fn server_published(&self, id: &str) -> PathBuf {
+        self.server(id).join("published")
     }
     /// The game's working directory — what vanilla calls `.minecraft`.
     pub fn game_dir(&self, id: &str) -> PathBuf {

@@ -4,11 +4,22 @@ import { Copy, Loader2, PackageOpen, Trash2 } from "lucide-react";
 import ExportModal from "../../components/ExportModal";
 import ImageField from "../../components/ImageField";
 import Modal from "../../components/Modal";
+import StatusNote from "../../components/StatusNote";
 import { api } from "../../lib/api";
-import { forbiddenPlayerHint } from "../../lib/share";
+import {
+  forbiddenPlayerHint,
+  lastSyncLine,
+  serverSettingsHint,
+  yourSetting,
+} from "../../lib/share";
 import { useStore } from "../../lib/store";
 import { LOADERS } from "../../lib/types";
-import type { Instance, InstanceOverrides } from "../../lib/types";
+import type {
+  Instance,
+  InstanceOverrides,
+  LastServerSync,
+  YourSetting,
+} from "../../lib/types";
 
 import viewStyles from "../ServerView.module.css";
 import styles from "./SettingsTab.module.css";
@@ -47,11 +58,37 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
   const [exporting, setExporting] = useState(false);
   const [duplicating, setDuplicating] = useState(false);
   const [changingServerSide, setChangingServerSide] = useState(false);
+  const [changingSettings, setChangingSettings] = useState(false);
   const [systemMemory, setSystemMemory] = useState<number | null>(null);
+  /**
+   * What the last update from this instance's server changed in its settings
+   * files. `undefined` while it is being read, `null` when no update has
+   * changed one.
+   */
+  const [sync, setSync] = useState<LastServerSync | null | undefined>(undefined);
+  /** The setting being put back, by its file and key, so only its own row waits. */
+  const [reverting, setReverting] = useState<string | null>(null);
 
   useEffect(() => {
     api.systemMemoryMb().then(setSystemMemory).catch(() => setSystemMemory(null));
   }, []);
+
+  // Read for a joined instance only: nothing else has a server to have
+  // changed anything.
+  useEffect(() => {
+    if (!instance.joined) {
+      setSync(null);
+      return;
+    }
+    let cancelled = false;
+    api
+      .lastServerSync(instance.id)
+      .then((found) => !cancelled && setSync(found))
+      .catch(() => !cancelled && setSync(null));
+    return () => {
+      cancelled = true;
+    };
+  }, [instance.id, instance.joined]);
 
   useEffect(() => {
     if (loader === "vanilla") {
@@ -122,6 +159,49 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
       reportError("Could not change server-side mods", e);
     } finally {
       setChangingServerSide(false);
+    }
+  }
+
+  /**
+   * Let this server's settings changes reach this instance, or stop them.
+   *
+   * Applied the moment it is ticked, like the switch above it, and nothing on
+   * disk changes either way — it decides what the next update writes.
+   */
+  async function setServerSettings(on: boolean) {
+    setChangingSettings(true);
+    try {
+      await api.setServerSettingsAllowed(instance.id, on);
+      await refreshInstances();
+      toast({
+        kind: "success",
+        title: on ? "The server can update settings" : "The server's settings are off",
+        body: on
+          ? "Everything it changed while this was off arrives the next time you press Play."
+          : "Nothing here changed. Your settings files are as they are.",
+      });
+    } catch (e) {
+      reportError("Could not change this", e);
+    } finally {
+      setChangingSettings(false);
+    }
+  }
+
+  /** Put one setting back to what this instance had before the server set it. */
+  async function changeBack(one: YourSetting) {
+    const id = [one.path, ...one.key].join("\u0000");
+    setReverting(id);
+    try {
+      setSync(await api.changeSettingBack(instance.id, one.path, one.key));
+      toast({
+        kind: "success",
+        title: "Changed back",
+        body: "That is yours now: the server will not set it again unless the admin changes that setting afresh.",
+      });
+    } catch (e) {
+      reportError("Could not change that setting back", e);
+    } finally {
+      setReverting(null);
     }
   }
 
@@ -465,6 +545,65 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
                 on — which they would otherwise learn from a Play that takes a
                 minute to go wrong. */}
             <p className="hint">{forbiddenPlayerHint()}</p>
+
+            <label
+              className={viewStyles.settingToggle}
+              title={instance.running ? "Stop the game to change this" : undefined}
+            >
+              <input
+                type="checkbox"
+                checked={!instance.serverSettingsOff}
+                disabled={changingSettings || instance.running}
+                onChange={(e) => void setServerSettings(e.target.checked)}
+              />
+              <span>
+                <strong>Let the server update settings</strong>
+                <span className={viewStyles.settingWhy}>
+                  {serverSettingsHint(Boolean(instance.serverSettingsOff))}
+                </span>
+              </span>
+            </label>
+
+            {/* What the last update actually changed. A list, because a
+                setting and what it used to be cannot be read off a toast that
+                is gone in four seconds — and only the settings this instance
+                had changed itself get a row, since one that still held the
+                server's own value is not news. */}
+            {sync && (
+              <div className={styles.lastSync}>
+                <span className="label">Last update from the server</span>
+                <StatusNote line={lastSyncLine(sync)} />
+                {sync.yours.length > 0 && (
+                  <ul className={styles.settings}>
+                    {sync.yours.map((one) => {
+                      const id = [one.path, ...one.key].join(" ");
+                      return (
+                        <li className={styles.setting} key={id}>
+                          <span className={styles.settingWhat}>
+                            {yourSetting(one)}
+                          </span>
+                          <button
+                            className="btn btn-sm"
+                            disabled={reverting !== null || instance.running}
+                            title={
+                              instance.running
+                                ? "Stop the game first — it rewrites its own settings when it closes"
+                                : undefined
+                            }
+                            onClick={() => void changeBack(one)}
+                          >
+                            {reverting === id && (
+                              <Loader2 size={14} className="spin" />
+                            )}
+                            Change it back
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
+            )}
           </section>
         )}
 

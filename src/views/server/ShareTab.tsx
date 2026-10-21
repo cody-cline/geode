@@ -7,6 +7,7 @@ import {
   RefreshCw,
   Settings as SettingsIcon,
   Share2,
+  SlidersHorizontal,
   Square,
 } from "lucide-react";
 
@@ -23,6 +24,9 @@ import {
   linkPendingReason,
   listenLine,
   localAddressHint,
+  movedSetting,
+  nothingToPushHint,
+  pushingHint,
   readOutHint,
   replacedPasswordBody,
   routerLine,
@@ -30,7 +34,23 @@ import {
   whenPlayersGetChanges,
 } from "../../lib/share";
 import { useStore } from "../../lib/store";
-import type { ConfigPolicy, Forbidden, Server, ServerShareView } from "../../lib/types";
+import type {
+  ConfigPolicy,
+  Forbidden,
+  PushedSetting,
+  Server,
+  ServerShareView,
+  SettingsReview,
+  WantedSetting,
+} from "../../lib/types";
+
+/**
+ * One setting, named the same way wherever it is listed: by its file and the
+ * parts of its key, with nothing joined by a character a real key could hold.
+ */
+function settingId(one: { path: string; key: string[] }): string {
+  return [one.path, ...one.key].join("\u0000");
+}
 
 /**
  * The new-rule fields before the admin has typed anything. The site is where
@@ -115,8 +135,24 @@ export default function ShareTab({ server }: { server: Server }) {
   const [shareError, setShareError] = useState<string | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [busy, setBusy] = useState<
-    "share" | "config" | "listing" | "forbidden" | "rotate" | "stop" | null
+    | "share"
+    | "config"
+    | "listing"
+    | "forbidden"
+    | "rotate"
+    | "stop"
+    | "review"
+    | "push"
+    | null
   >(null);
+  /**
+   * What Review found, while the admin looks at it. `null` when the screen is
+   * closed — it is read fresh every time it opens, because the file on disk is
+   * the admin's and may have moved on since.
+   */
+  const [review, setReview] = useState<SettingsReview | null>(null);
+  /** Which of those settings are ticked, by [`settingId`]. */
+  const [chosen, setChosen] = useState<Set<string>>(new Set());
   /** The rule the admin is typing, before it is added to the list. */
   const [rule, setRule] = useState<Forbidden>(NO_RULE);
   const [confirming, setConfirming] = useState<"rotate" | "stop" | null>(null);
@@ -234,6 +270,45 @@ export default function ShareTab({ server }: { server: Server }) {
       api.setServerShareConfig(server.id, include, policy),
     );
     if (view) setShare(view);
+  }
+
+  /**
+   * Open Review: read what has moved since this server last published, and
+   * tick everything but the removals.
+   *
+   * Removals start unticked because taking a setting out of somebody's config
+   * is the one thing here that changing a value again cannot undo.
+   */
+  async function openReview() {
+    const found = await run("review", "Could not read this server's settings", () =>
+      api.reviewServerSettings(server.id),
+    );
+    if (!found) return;
+    setChosen(
+      new Set(found.moved.filter((one) => one.now !== null).map(settingId)),
+    );
+    setReview(found);
+  }
+
+  /** Send the settings named. Players get them the next time they press Play. */
+  async function send(wanted: WantedSetting[]) {
+    const view = await run("push", "Could not send those settings", () =>
+      api.pushServerSettings(server.id, wanted),
+    );
+    if (!view) return;
+    setShare(view);
+    setReview(null);
+    toast({
+      kind: "success",
+      title: wanted.length === 1 ? "1 setting sent" : `${wanted.length} settings sent`,
+      body: "Players get it the next time they press Play, spliced into their own copies. Nothing else in those files changes.",
+    });
+  }
+
+  /** Send one the admin already owns again, which is what a setting changed
+   * and changed back needs: the value has not moved, so Review cannot see it. */
+  function sendAgain(one: PushedSetting) {
+    void send([{ path: one.path, key: one.key, value: one.value, was: one.was }]);
   }
 
   /**
@@ -655,6 +730,27 @@ export default function ShareTab({ server }: { server: Server }) {
                       </span>
                     </label>
                   ))}
+                  {/* Only the behaviour that has anything to send. The hint
+                      stays here beside the button rather than appearing once
+                      in a dialog: an edit nobody sent reaches nobody, and a
+                      push cannot be recalled. */}
+                  {share.configPolicy === "merge" && (
+                    <div className={styles.push}>
+                      <button
+                        className="btn"
+                        onClick={() => void openReview()}
+                        disabled={busy !== null}
+                      >
+                        {busy === "review" ? (
+                          <Loader2 size={14} className="spin" />
+                        ) : (
+                          <SlidersHorizontal size={14} />
+                        )}
+                        Review settings changes
+                      </button>
+                      <p className="hint">{pushingHint()}</p>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -873,6 +969,127 @@ export default function ShareTab({ server }: { server: Server }) {
             good, use New password. What players already imported stays on
             their computers.
           </p>
+        </Modal>
+      )}
+
+      {/* What moved since this server last published, for the admin to look
+          at before anybody gets it. A confirm step, so it is a dialog — but
+          what it costs is written on the tab behind it, where it is read
+          before this is ever opened. */}
+      {review && (
+        <Modal
+          title="Settings to send"
+          subtitle={server.name}
+          onClose={() => setReview(null)}
+          width={620}
+          footer={
+            <>
+              <button className="btn" onClick={() => setReview(null)}>
+                Cancel
+              </button>
+              <button
+                className="btn btn-primary"
+                disabled={busy !== null || chosen.size === 0}
+                onClick={() =>
+                  void send(
+                    review.moved
+                      .filter((one) => chosen.has(settingId(one)))
+                      .map((one) => ({
+                        path: one.path,
+                        key: one.key,
+                        value: one.now,
+                        was: one.was,
+                      })),
+                  )
+                }
+              >
+                {busy === "push" && <Loader2 size={14} className="spin" />}
+                {chosen.size === 1 ? "Send 1 setting" : `Send ${chosen.size} settings`}
+              </button>
+            </>
+          }
+        >
+          {review.moved.length === 0 ? (
+            <p className="hint">{nothingToPushHint()}</p>
+          ) : (
+            <ul className={styles.rules}>
+              {review.moved.map((one) => {
+                const id = settingId(one);
+                return (
+                  <li className={styles.rule} key={id}>
+                    <label className={viewStyles.settingToggle}>
+                      <input
+                        type="checkbox"
+                        checked={chosen.has(id)}
+                        disabled={busy !== null}
+                        onChange={(e) =>
+                          setChosen((was) => {
+                            const next = new Set(was);
+                            if (e.target.checked) next.add(id);
+                            else next.delete(id);
+                            return next;
+                          })
+                        }
+                      />
+                      <span>
+                        <strong className={styles.mono}>{one.path}</strong>
+                        <span className={viewStyles.settingWhy}>
+                          {movedSetting(one)}
+                        </span>
+                      </span>
+                    </label>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+
+          {/* Named rather than left out: a label reading "only the settings I
+              change" over a file that silently does something else is the one
+              thing this screen must not do. */}
+          {review.unreadable.length > 0 && (
+            <>
+              <span className="label">Sent once instead</span>
+              <ul className={styles.rules}>
+                {review.unreadable.map((one) => (
+                  <li className={styles.rule} key={one.path}>
+                    <span className={styles.ruleWhat}>
+                      <strong className={styles.mono}>{one.path}</strong>
+                      <span className={viewStyles.settingWhy}>{one.why}</span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+
+          {review.pushed.length > 0 && (
+            <>
+              <span className="label">Already sent</span>
+              <ul className={styles.rules}>
+                {review.pushed.map((one) => (
+                  <li className={styles.rule} key={settingId(one)}>
+                    <span className={styles.ruleWhat}>
+                      <strong className={styles.mono}>{one.path}</strong>
+                      <span className={viewStyles.settingWhy}>
+                        {one.key.join(" → ")}
+                        {one.value === null
+                          ? " — removed"
+                          : ` — ${one.value}`}
+                      </span>
+                    </span>
+                    <button
+                      className="btn btn-sm"
+                      disabled={busy !== null}
+                      onClick={() => sendAgain(one)}
+                    >
+                      Send again
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
         </Modal>
       )}
     </div>

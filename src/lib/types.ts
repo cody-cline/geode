@@ -98,6 +98,14 @@ export interface Instance {
   joined?: JoinLink | null;
   /** A joined instance keeps its server's server-side mods turned off. */
   serverSideModsOff?: boolean;
+  /**
+   * The player has stopped the server's settings reaching this instance — with
+   * no exceptions, so a file the admin replaces every time stops being
+   * replaced too. Nothing on disk changes when it is flipped, and how far the
+   * instance has caught up does not move while it is set, so turning it back
+   * off applies the whole backlog at once.
+   */
+  serverSettingsOff?: boolean;
   /** The server revision this joined instance last installed completely. */
   joinedRevision?: string | null;
   /** The joined server's id on the admin's machine, kept apart from its password. */
@@ -878,6 +886,79 @@ export interface ServerShareView {
  */
 export type ConfigPolicy = "ship-once" | "merge" | "enforce";
 
+/**
+ * One setting that has moved in a server's own config file since it last
+ * published, as the Review screen lists it.
+ *
+ * `now` is null for a setting the admin took out — the one change here that
+ * cannot be undone by changing a value back, so the row is offered switched
+ * off. `was` is null for one that is new since, which no player has been sent.
+ */
+export interface MovedSetting {
+  /** The file, relative to the server's run folder and to a player's instance. */
+  path: string;
+  /** The setting, segment by segment. One segment for a file of one setting per line. */
+  key: string[];
+  was: string | null;
+  now: string | null;
+}
+
+/** One setting the admin confirmed, as a push sends it back. */
+export interface WantedSetting {
+  path: string;
+  key: string[];
+  value: string | null;
+  was: string | null;
+}
+
+/** A settings file Geode cannot read one setting at a time. */
+export interface UnreadableSetting {
+  path: string;
+  /** What to tell the admin about it, in a sentence. */
+  why: string;
+}
+
+/** One setting a server already owns, with the push it went out at. */
+export interface PushedSetting {
+  path: string;
+  key: string[];
+  value: string | null;
+  was: string | null;
+  at: number;
+}
+
+/** What has moved in this server's settings files since it last published. */
+export interface SettingsReview {
+  moved: MovedSetting[];
+  unreadable: UnreadableSetting[];
+  /** Newest push first. What lets a setting changed and changed back be pushed again. */
+  pushed: PushedSetting[];
+}
+
+/** One setting the server changed that this instance's own copy did not hold. */
+export interface YourSetting {
+  path: string;
+  key: string[];
+  /** What this instance held. Null when it had no such setting and this one was added. */
+  had: string | null;
+  /** What the server set it to. Null when the server took it out. */
+  now: string | null;
+}
+
+/** What the last update from a server changed in this instance's settings files. */
+export interface LastServerSync {
+  /** The server's push this was. */
+  at: number;
+  /** When it ran, in seconds since the epoch. */
+  when: number;
+  /** Settings this instance had changed itself, which the update moved. */
+  yours: YourSetting[];
+  /** How many other settings moved — ones that still held the server's own value. */
+  rest: number;
+  /** Files a change could not be written to, each naming why. */
+  skipped: string[];
+}
+
 /** What a server says it is sharing, shown before a player imports. */
 export interface PackInfo {
   name: string;
@@ -899,6 +980,13 @@ export interface PackInfo {
    * from a server that replaces them on every update, and from an older Geode.
    */
   configKept: boolean;
+  /**
+   * Whether the admin can push an individual setting into them afterwards.
+   * Only ever true with `configKept`: the files are the player's, and what the
+   * admin changes later reaches them setting by setting rather than by
+   * replacing the file. False from an older Geode.
+   */
+  configPushed: boolean;
   /** Changes exactly when what a player receives changes; empty from an older Geode. */
   revision: string;
   /** The server's id on the admin's machine; empty from an older Geode. */

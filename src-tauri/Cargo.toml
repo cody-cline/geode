@@ -53,6 +53,18 @@ sha2 = "0.10"
 hex = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 toml = { version = "1", default-features = false, features = ["parse", "display"] }
+# Finding one setting inside a Forge or NeoForge config and nothing else. The
+# 145 TOML files measured under the `config/` folders on a real machine are the
+# single biggest group, and the comments beside each setting are the only
+# documentation it has, so `toml` itself is no use here: parse one of these to a
+# map and print it back and 1150 bytes come out as 299, every comment gone, the
+# keys alphabetised and the indentation lost. This reads where each value *is*
+# — `toml_edit` reports a byte span per value — and the splice puts the new
+# bytes there, so nothing outside the one setting is rewritten at all.
+# Already resolved and vendored in this workspace at 0.25.13 by way of
+# `proc-macro-crate` under `zbus_macros`, so nothing new is downloaded, and it
+# does not move the Rust this needs: the `toml 1` above already wants 1.85.
+toml_edit = { version = "0.25", default-features = false, features = ["parse", "display"] }
 tar = "0.4"
 flate2 = "1"
 uuid = { version = "1", features = ["v4", "v3", "serde"] }

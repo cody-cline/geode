@@ -31,6 +31,7 @@ import type {
   JoinOutcome,
   JoinPreview,
   KeyCheck,
+  LastServerSync,
   LinkReport,
   ListedClientOnly,
   LogFile,
@@ -60,10 +61,12 @@ import type {
   ServerProperty,
   ServerSettings,
   ServerShareView,
+  SettingsReview,
   ShareSettings,
   ShareStatus,
   StagedPack,
   UpdateCandidate,
+  WantedSetting,
 } from "./types";
 
 /** Backend errors arrive as plain strings; normalise them for the toast layer. */
@@ -149,6 +152,15 @@ export const api = {
   /** Turn a joined instance's server-side mods on or off; resolves to how many changed. */
   setServerSideMods: (id: string, on: boolean) =>
     invoke<number>("set_server_side_mods", { id, on }),
+  /** Let this server's settings changes reach a joined instance, or stop them. Nothing on disk changes either way. */
+  setServerSettingsAllowed: (id: string, on: boolean) =>
+    invoke<void>("set_server_settings_allowed", { id, on }),
+  /** What the last update from this instance's server changed in its settings files; null until one has. */
+  lastServerSync: (id: string) =>
+    invoke<LastServerSync | null>("last_server_sync", { id }),
+  /** Put one setting back to what this instance had; resolves to what is left of the report. */
+  changeSettingBack: (id: string, path: string, key: string[]) =>
+    invoke<LastServerSync>("change_setting_back", { id, path, key }),
   removeContent: (id: string, kind: ContentKind, file: string) =>
     invoke<void>("remove_content", { id, kind, file }),
   addLocalContent: (id: string, kind: ContentKind, files: string[]) =>
@@ -639,6 +651,12 @@ export const api = {
     policy: ConfigPolicy | null,
   ) =>
     invoke<ServerShareView>("set_server_share_config", { id, include, policy }),
+  /** Which settings have moved in this server's own config files since it last published them. */
+  reviewServerSettings: (id: string) =>
+    invoke<SettingsReview>("review_server_settings", { id }),
+  /** Send the settings the admin confirmed. Players get them the next time they press Play, and there is no undo. */
+  pushServerSettings: (id: string, settings: WantedSetting[]) =>
+    invoke<ServerShareView>("push_server_settings", { id, settings }),
   /** Call this when the admin takes the link, so Geode can tell them later if the address it points at has changed. */
   shareLinkCopied: (id: string) =>
     invoke<ServerShareView>("share_link_copied", { id }),

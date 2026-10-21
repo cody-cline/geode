@@ -541,6 +541,60 @@ pub async fn set_server_side_mods(
     Ok(changed)
 }
 
+/// Let the server's settings changes reach this instance, or stop them.
+///
+/// Nothing on disk changes either way: this decides what the *next* update
+/// writes, and nothing here is undoable. While it is off, how far the
+/// instance has caught up does not move either, so turning it back on applies
+/// everything the server pushed in the meantime in one pass.
+#[tauri::command]
+pub async fn set_server_settings_allowed(
+    state: State<'_, AppState>,
+    id: String,
+    on: bool,
+) -> Result<()> {
+    let mut inst = instance::load(&state.paths, &id).await?;
+    if inst.joined.is_none() {
+        return Err(Error::msg(
+            "only an instance joined from a server receives settings from one",
+        ));
+    }
+    inst.server_settings_off = !on;
+    inst.save(&state.paths).await
+}
+
+/// What the last update from this instance's server changed in its settings
+/// files. `None` until one has changed something.
+#[tauri::command]
+pub async fn last_server_sync(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Option<crate::settings::report::LastSync>> {
+    crate::settings::report::load(&state.paths, &id).await
+}
+
+/// Put one setting back to what this instance had before the server changed
+/// it.
+///
+/// The value written is the one Geode recorded as theirs, found by path and
+/// key in that report — so nothing arriving here decides what goes into a
+/// file. It sticks: the push it came in never moves again, so no later update
+/// applies it a second time.
+#[tauri::command]
+pub async fn change_setting_back(
+    state: State<'_, AppState>,
+    id: String,
+    path: String,
+    key: Vec<String>,
+) -> Result<crate::settings::report::LastSync> {
+    // The game rewrites its own config from memory when it exits, over
+    // anything written under it — so this would last until they quit.
+    if state.games.is_running(&id) {
+        return Err(Error::msg("Stop the game before changing a setting back"));
+    }
+    crate::settings::report::change_back(&state.paths, &id, &path, &key).await
+}
+
 #[tauri::command]
 pub async fn remove_content(
     state: State<'_, AppState>,
@@ -2959,7 +3013,11 @@ fn fetch_due(inst: &Instance, offered: &str) -> bool {
     if offered.is_empty() {
         return false;
     }
-    update_due(inst.joined_revision.as_deref(), offered) || !inst.settings_owed.is_empty()
+    // And an owed file is no reason either while the player keeps the server's
+    // settings off: nothing would write it, so fetching the pack for it would
+    // be a download on every Play that could never finish the job.
+    update_due(inst.joined_revision.as_deref(), offered)
+        || (!inst.settings_owed.is_empty() && !inst.server_settings_off)
 }
 
 /// Bring a joined instance up to its server's current pack, before it plays.
@@ -3099,6 +3157,9 @@ async fn bring_up_to_date(
     if !report.not_written.is_empty() {
         notices.push(settings_not_written(&report.not_written));
     }
+    if let Some(settings) = &report.settings {
+        notices.push(settings_changed(settings));
+    }
     Ok(notices)
 }
 
@@ -3129,6 +3190,8 @@ async fn save_update(paths: &crate::paths::Paths, updated: &Instance) -> Result<
     // And which of them it could not write, for the same reason: left out, a
     // file the player has since made writable would never be tried again.
     inst.settings_owed = updated.settings_owed.clone();
+    // Not `server_settings_off`: the player's switch is the player's, and the
+    // copy on disk is the newer one if they flipped it while they waited.
     inst.save(paths).await
 }
 
@@ -3267,6 +3330,54 @@ fn settings_not_written(files: &[String]) -> String {
         "The server's copy of {} settings file(s) could not be written, so yours are still there: {}. Make them writable and Geode will apply the server's copies the next time you press Play.",
         files.len(),
         files.join(", ")
+    )
+}
+
+/// What to say about the settings the server changed in files the player keeps
+/// their own copy of.
+///
+/// One sentence, and the rest in the panel: a notice is one toast alive for
+/// four and a half seconds with its sentences run together, which is nowhere
+/// to read what each setting used to be. So this says how many moved, how many
+/// of them were the player's own, and where to look.
+///
+/// The promise is in the sentence rather than left to be discovered, because
+/// it is the whole mechanism: nothing in those files moved but the settings
+/// named.
+fn settings_changed(report: &crate::settings::report::LastSync) -> String {
+    let moved = report.yours.len() + report.rest;
+    // Nothing moved, which for a report worth saying at all means every
+    // change was skipped: the server tried to change a setting and could not.
+    // "Changed 0 setting(s)" is a count, and a count is read and believed —
+    // so saying it is worse than saying nothing, because what happened is the
+    // opposite of nothing.
+    if moved == 0 {
+        return format!(
+            "The server's settings could not be applied to {} of your settings file(s), so what you had is still there: {}.",
+            report.skipped.len(),
+            report.skipped.join(", ")
+        );
+    }
+    let mine = if report.yours.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " {} of them you had changed yourself — see Settings → Server, where you can change {} back.",
+            report.yours.len(),
+            if report.yours.len() == 1 { "it" } else { "them" }
+        )
+    };
+    let skipped = if report.skipped.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " {} could not be written, so what you had is still there: {}.",
+            report.skipped.len(),
+            report.skipped.join(", ")
+        )
+    };
+    format!(
+        "The server changed {moved} setting(s) in your settings files, and nothing else in them.{mine}{skipped}"
     )
 }
 
@@ -4114,11 +4225,60 @@ pub async fn set_server_share_config(
 ) -> Result<ServerShareView> {
     let server = crate::server::load(&state.paths, &id).await?;
     let mut share = shared(&state, &id).await?;
+    let before = share.settings.at;
     share.send_config(include, policy);
     crate::server::share::save(&state.paths, &id, &share).await?;
+    // Choosing to keep the folder in sync publishes what is in it now, which
+    // is what every later push is measured against — and it is the right
+    // moment, because the choice also sends every player those files whole.
+    // Only when the choice actually moved: re-publishing when the admin picks
+    // what is already in force would make their unpushed edits the baseline
+    // and lose them without a word.
+    if share.settings.at != before && policy == Some(share::manifest::Policy::Merge) {
+        crate::settings::push::publish_all(&state.paths, &id).await?;
+    }
     // A pack already being built or sent was built as the share was, and one
     // with `config/` in it must not keep streaming once config is not sent.
     state.share.cut_revoked(&state.paths).await;
+    Ok(share_view(&state, &server, &share).await)
+}
+
+/// Which settings have moved in this server's own config files since it last
+/// published them, for the admin to look at before anything is sent.
+///
+/// Read-only for the admin's files, with one exception that is not an edit to
+/// any of them: a file kept in sync that has appeared since the choice was
+/// made has no published copy to compare with, and gets one taken now. What it
+/// holds is what players who do not have it are sent, so it is the baseline by
+/// definition.
+#[tauri::command]
+pub async fn review_server_settings(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<crate::settings::push::Review> {
+    crate::settings::push::review(&state.paths, &id).await
+}
+
+/// Send the settings the admin confirmed: they become this server's own, and
+/// reach every player the next time they press Play.
+///
+/// There is no undo, and the Share tab says so beside the button: a push that
+/// went out cannot be recalled, and changing one's mind means changing the
+/// setting again and pushing that. What makes that safe is that a push only
+/// ever names the settings in it — a player's own changes to everything else
+/// in the file are untouched — and that the push's number never moves again,
+/// so a player who changes one back keeps their change.
+#[tauri::command]
+pub async fn push_server_settings(
+    state: State<'_, AppState>,
+    id: String,
+    settings: Vec<crate::settings::push::Wanted>,
+) -> Result<ServerShareView> {
+    let server = crate::server::load(&state.paths, &id).await?;
+    crate::settings::push::push(&state.paths, &id, &settings).await?;
+    let share = crate::server::share::load(&state.paths, &id)
+        .await?
+        .ok_or_else(|| Error::msg("this server has not been shared yet — share it first"))?;
     Ok(share_view(&state, &server, &share).await)
 }
 
@@ -5275,6 +5435,35 @@ mod tests {
         );
     }
 
+    /// An update that only *failed* to change a setting changed nothing — and
+    /// "changed 0 setting(s)" is a count, which a player reads and believes.
+    /// What they have to be told is the file it could not be written to, and
+    /// that what they had is still in it.
+    #[test]
+    fn the_notice_about_settings_that_could_not_be_applied_does_not_count_them_as_changed() {
+        let nothing_landed = crate::settings::report::LastSync {
+            at: 4,
+            skipped: vec!["config/a.properties — this is not an ordinary file".into()],
+            ..Default::default()
+        };
+        let said = settings_changed(&nothing_landed);
+        assert!(!said.contains("0 setting"), "{said}");
+        assert!(said.contains("could not be applied to 1"), "{said}");
+        assert!(said.contains("config/a.properties"), "{said}");
+        assert!(said.contains("still there"), "{said}");
+
+        // One that did land is still counted, and still carries the promise
+        // that nothing else in the file moved.
+        let one_landed = crate::settings::report::LastSync {
+            rest: 1,
+            ..nothing_landed
+        };
+        let said = settings_changed(&one_landed);
+        assert!(said.contains("changed 1 setting(s)"), "{said}");
+        assert!(said.contains("nothing else in them"), "{said}");
+        assert!(said.contains("config/a.properties"), "{said}");
+    }
+
     /// A mod the server does not allow went off while the player was looking
     /// at a progress bar. The notice has to answer all three of the things
     /// they will wonder: which mod, why, and whether Geode deleted it. And it
@@ -5837,6 +6026,7 @@ mod tests {
             server_kind: "fabric".into(),
             config_files: 0,
             config_kept: false,
+            config_pushed: false,
             revision: "r1".into(),
             server_id: "survival".into(),
             listing,
@@ -6204,6 +6394,9 @@ mod tests {
         let mut theirs = instance::load(&paths, "caught-up").await.unwrap();
         theirs.name = "Mine".into();
         theirs.overrides.memory_mb = Some(6144);
+        // Including the switch that decides whether any of this reaches them
+        // at all, which is theirs and not the update's.
+        theirs.server_settings_off = true;
         theirs.save(&paths).await.unwrap();
 
         // What the update decided.
@@ -6221,6 +6414,10 @@ mod tests {
         assert_eq!(saved.joined_revision.as_deref(), Some("r2"));
         assert_eq!(saved.name, "Mine", "the player's own copy was overwritten");
         assert_eq!(saved.overrides.memory_mb, Some(6144));
+        assert!(
+            saved.server_settings_off,
+            "the update put back the player's switch as it was when the launch loaded it"
+        );
     }
 }
 

@@ -117,6 +117,19 @@ pub struct Instance {
     /// stops sending drops out of it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub settings_owed: Vec<String>,
+    /// The player has turned off the server's settings reaching this
+    /// instance: nothing of theirs is written, whatever behaviour the admin
+    /// chose for it.
+    ///
+    /// One switch for the whole class, which is `server_side_mods_off`'s
+    /// precedent, and with no silent exception — a file the admin replaces
+    /// every time stops being replaced too, because a switch that said it
+    /// stopped the server's changes and did not would be worse than no switch.
+    /// Nothing already on disk is touched when it is turned on; nothing here
+    /// is undoable. And `settings_at` does not move while it is on, so
+    /// turning it back off applies the whole backlog in one pass.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub server_settings_off: bool,
     /// The game address this instance's row in `servers.dat` was last written
     /// at, which is how the row is found again to rename or move it instead of
     /// adding a second one beside it.
@@ -228,6 +241,7 @@ impl Instance {
             joined_server_id: None,
             settings_at: None,
             settings_owed: Vec::new(),
+            server_settings_off: false,
             joined_listing_address: None,
             joined_listing_claimed: false,
         }

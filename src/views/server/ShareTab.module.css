@@ -117,3 +117,14 @@
   flex-direction: column;
   gap: 3px;
 }
+
+/* The Review button and what it costs, under the behaviour that has anything
+   to send. The hint lives here rather than inside the dialog: an admin reads
+   it before they open the screen, which is when it changes what they do. */
+.push {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 10px;
+}

@@ -18,8 +18,8 @@ use crate::net::Progress;
 use crate::paths::Paths;
 
 use super::manifest::{
-    format_for, FileNote, Forbidden, Kind, Listing, Manifest, Policy, Profile, Settings, SourceRef,
-    EXTENSION, FORMAT,
+    format_for, FileNote, Forbidden, Kind, Listing, Manifest, Override, Policy, Profile, Settings,
+    SourceRef, SyncedPath, EXTENSION, FORMAT,
 };
 
 /// Build the Geode half of a pack for an instance.
@@ -503,6 +503,7 @@ fn landings(
     settings: Option<&Settings>,
     applied: u32,
     owed: &[String],
+    allowed: bool,
 ) -> instance::modpack::Overrides {
     use instance::modpack::Landing;
 
@@ -512,17 +513,156 @@ fn landings(
         let Some(named) = settings.covering(rel) else {
             return Landing::Replace;
         };
-        match named.policy {
-            Policy::Enforce => Landing::Offer,
-            Policy::ShipOnce | Policy::Merge => {
-                if present && applied >= named.from && !owed.iter().any(|path| path == rel) {
-                    Landing::Keep
-                } else {
-                    Landing::Offer
-                }
+        // The player's own switch, and it has no exceptions: a file replaced
+        // every time stops being replaced too. Their files are not touched
+        // when they turn it off — nothing here is undoable — and because
+        // nothing records where they got to while it is off, turning it back
+        // on applies everything at once.
+        if !allowed {
+            return Landing::Keep;
+        }
+        landing_for(named, applied, &owed, rel, present)
+    })
+}
+
+/// A pack's settings half, held to every ceiling and every path rule before
+/// anything acts on it — and a line for the recipient's report when it goes
+/// past one.
+///
+/// Past a ceiling the half is dropped whole rather than trimmed, and the pack
+/// is still imported. That is the safe answer and not a lenient one: with no
+/// settings half, every file the pack carries is written whole and a write
+/// that fails stops the import — exactly what every Geode did before the field
+/// existed, and what a pack leaving the field out gets today. Refusing the
+/// pack instead would cost the recipient every mod in it over a list they
+/// cannot see, and trimming it would apply half of what a stranger sent.
+///
+/// Geode cannot build a half this refuses — `settings::push::push` checks the
+/// same ceilings before writing one — so a refusal here means the pack came
+/// from something else.
+fn settings_half(manifest: Option<&Manifest>) -> (Option<&Settings>, Vec<String>) {
+    let Some(half) = manifest.and_then(|m| m.settings.as_ref()) else {
+        return (None, Vec::new());
+    };
+    match half.checked() {
+        Ok(()) => (Some(half), Vec::new()),
+        Err(e) => (
+            None,
+            vec![format!(
+                "Geode did not use what this pack says about its settings files, and wrote each \
+                 of them whole instead: {e}"
+            )],
+        ),
+    }
+}
+
+/// How one synced file lands, as one rule in one place.
+///
+/// Two things ask it and must never disagree: the extraction, which decides
+/// whether the pack's copy of a file is written at all, and
+/// [`pushes_to_splice`], which decides whether the sender's individual
+/// settings have to be spliced into the copy the player kept. A file written
+/// whole already holds every one of those settings, so splicing it too would
+/// be work at best and, if the two rules ever drifted, a file written whole
+/// and then edited again.
+fn landing_for(
+    named: &SyncedPath,
+    applied: u32,
+    owed: &[PathBuf],
+    rel: &Path,
+    present: bool,
+) -> instance::modpack::Landing {
+    use instance::modpack::Landing;
+
+    match named.policy {
+        Policy::Enforce => Landing::Offer,
+        Policy::ShipOnce | Policy::Merge => {
+            if present && applied >= named.from && !owed.iter().any(|path| path == rel) {
+                Landing::Keep
+            } else {
+                Landing::Offer
             }
         }
-    })
+    }
+}
+
+/// Which of the sender's settings this update has to splice into files the
+/// player keeps, worked out **before** anything is written.
+///
+/// Before, because the rule turns on whether the player already has the file,
+/// and after the extraction every synced file is there. A file that lands
+/// whole is left out: it arrives holding every setting the sender owns, so
+/// there is nothing to splice into it.
+///
+/// Only a [`Policy::Merge`] path. A path sent once is never touched again,
+/// even if the sender owns a setting inside it — "sent once" has to mean that
+/// or it means nothing — and a path replaced every time has just been
+/// replaced.
+///
+/// Grouped by file, so each file is read, spliced and written once however
+/// many settings landed in it.
+fn pushes_to_splice(
+    settings: &Settings,
+    applied: u32,
+    owed: &[String],
+    game_dir: &Path,
+) -> Vec<(String, Vec<Override>)> {
+    use instance::modpack::Landing;
+
+    let owed: Vec<PathBuf> = owed.iter().map(PathBuf::from).collect();
+    let mut plan: Vec<(String, Vec<Override>)> = Vec::new();
+    for entry in &settings.overrides {
+        // Everything above what this instance has caught up with, and nothing
+        // at or below it: a setting the player has already been sent is never
+        // applied again, which is what makes their own change back stick.
+        if entry.at <= applied || !entry.allowed() {
+            continue;
+        }
+        let rel = Path::new(&entry.path);
+        let Some(named) = settings.covering(rel) else {
+            continue;
+        };
+        if named.policy != Policy::Merge {
+            continue;
+        }
+        let present = game_dir.join(rel).exists();
+        if landing_for(named, applied, &owed, rel, present) != Landing::Keep {
+            continue;
+        }
+        match plan.iter_mut().find(|(path, _)| *path == entry.path) {
+            Some((_, group)) => group.push(entry.clone()),
+            None => plan.push((entry.path.clone(), vec![entry.clone()])),
+        }
+    }
+    plan
+}
+
+/// Splice the sender's settings into the files the player kept, and say what
+/// moved and what could not be written.
+///
+/// A file that cannot be spliced — read-only, or not an ordinary file, or in a
+/// format Geode cannot read one setting at a time — is named in the player's
+/// report and left exactly as it is. Not retried on the next Play either, and
+/// that is deliberate: the player has their own copy of it, so there is
+/// nothing owed to them, and offering the file whole instead would replace the
+/// very work keeping it was for. The sender's next push tries again.
+async fn splice_the_pushes(
+    paths: &Paths,
+    instance: &Instance,
+    plan: &[(String, Vec<Override>)],
+) -> (Vec<(String, crate::settings::Applied)>, Vec<String>) {
+    let game_dir = paths.game_dir(&instance.id);
+    let mut landed = Vec::new();
+    let mut skipped = Vec::new();
+    for (rel, overrides) in plan {
+        match crate::settings::splice_file(&game_dir.join(rel), overrides).await {
+            Ok(applied) => {
+                landed.extend(applied.into_iter().map(|one| (rel.clone(), one)));
+            }
+            Err(e) => skipped.push(format!("{rel} — {e}")),
+        }
+    }
+    (landed, skipped)
 }
 
 /// Import a pack into a freshly created instance — both halves, in order.
@@ -577,14 +717,20 @@ pub async fn import(
     };
 
     let from_a_server = manifest.as_ref().is_some_and(|m| m.kind == Kind::Server);
+    // The pack's settings half, held to every ceiling before a byte of it is
+    // acted on — and treated as absent, with a line for the report, when it
+    // goes past one. Absent is the safe answer: it is what every Geode from
+    // before the field existed does, which is to write each file whole.
+    let (half, refused) = settings_half(manifest.as_ref());
     // How the pack's own settings files land, worked out before anything is
     // written. A fresh instance has caught up with nothing, so on a first
     // join every one of them arrives whole — which is what a default config
     // being shipped means.
     let how = landings(
-        manifest.as_ref().and_then(|m| m.settings.as_ref()),
+        half,
         instance.settings_at.unwrap_or(0),
         &instance.settings_owed,
+        !instance.server_settings_off,
     );
 
     let outcome = async {
@@ -621,6 +767,7 @@ pub async fn import(
         .await?;
         let mut missing = imported.left_out;
         missing.extend(imported.not_written.into_iter().map(|file| file.why));
+        missing.extend(refused.clone());
         // A plain `.mrpack` has no Geode half.
         if let Some(manifest) = &manifest {
             missing.extend(
@@ -688,6 +835,16 @@ pub struct UpdateReport {
     /// read before the pack was built. A pack from an admin's Geode older
     /// than this has none, and the caller keeps the description's.
     pub revision: Option<String>,
+    /// What the server's own settings pushes did to the player's files: the
+    /// settings that moved, how many of them the player had changed
+    /// themselves, and any file a change could not be written to.
+    ///
+    /// `None` when nothing moved, which is every update from a server that
+    /// has pushed nothing. Already written to this instance's own
+    /// `last-sync.json` by the time this is returned — the copy here is so
+    /// the launch can say one sentence and point at the panel that holds the
+    /// rest.
+    pub settings: Option<crate::settings::report::LastSync>,
 }
 
 /// One mod of the player's own that is off because the server does not allow
@@ -768,11 +925,19 @@ pub fn pack_revision(manifest: &Manifest) -> Option<String> {
 /// Everything else in the instance is left alone: the player's own records and
 /// untracked files, worlds, options, resource packs, shaders, memory, Java, and
 /// whether server-side mods are on. Config files the server sends land as the
-/// behaviour its admin chose for them says — replaced every time, or sent once
-/// and the player's from then on (`super::manifest::Settings`); config files it
-/// stopped sending stay, whichever it was. One that could not be written is
-/// reported and left owed, so the next run offers it again however its
-/// behaviour reads.
+/// behaviour its admin chose for them says — replaced every time, sent once and
+/// the player's from then on, or kept in sync, where the file is the player's
+/// and only the settings the admin pushed are spliced into it
+/// (`super::manifest::Settings`); config files it stopped sending stay,
+/// whichever it was. One that could not be written whole is reported and left
+/// owed, so the next run offers it again however its behaviour reads. One a
+/// setting could not be spliced into is reported and **not** owed: the player
+/// has their own copy of it, so offering the file whole instead would replace
+/// the work keeping it was for.
+///
+/// A player who has turned the server's settings off gets none of this and
+/// keeps where they had got to, so turning it back on applies the backlog in
+/// one pass.
 pub async fn update(
     client: &reqwest::Client,
     paths: &Paths,
@@ -801,14 +966,31 @@ pub async fn update(
     };
 
     let player_off = players_own_off(paths, instance).await;
+    let allowed = !instance.server_settings_off;
+    // The pack's settings half, held to every ceiling before anything acts on
+    // it — see [`settings_half`].
+    let (half, refused) = settings_half(Some(&manifest));
     // How the pack's own settings files land, worked out before anything is
     // written — and from what this instance has caught up with, which is why
     // a file the player has already been sent once is not sent again.
     let how = landings(
-        manifest.settings.as_ref(),
+        half,
         instance.settings_at.unwrap_or(0),
         &instance.settings_owed,
+        allowed,
     );
+    // And which of the sender's individual settings have to be spliced into
+    // the files this player keeps. Worked out here, before the extraction,
+    // because the rule turns on whether they already have the file.
+    let plan = match half.filter(|_| allowed) {
+        Some(half) => pushes_to_splice(
+            half,
+            instance.settings_at.unwrap_or(0),
+            &instance.settings_owed,
+            &paths.game_dir(&instance.id),
+        ),
+        None => Vec::new(),
+    };
     let mut not_written: Vec<instance::modpack::NotWritten> = Vec::new();
 
     // What the pack's index says each file it names is, so only that very file
@@ -894,7 +1076,19 @@ pub async fn update(
     // Settled before the outcome is asked for, and not a line sooner: a half
     // that failed or was cancelled still left the server's files on disk, and
     // they are the server's however it ended.
-    let missing = outcome?;
+    let mut missing = outcome?;
+    missing.extend(refused);
+
+    // The settings the admin pushed, spliced into the files this player kept —
+    // after the extraction, so the files are as this update leaves them, and
+    // only once it has otherwise finished, since a run that stopped partway
+    // leaves `settings_at` where it was and this would run again next time.
+    //
+    // At Play time and never while the game is up: `bring_up_to_date` is the
+    // only caller, and both Minecraft and a mod rewrite their config from
+    // memory when they exit, over anything written under them.
+    let (landed, could_not) = splice_the_pushes(paths, instance, &plan).await;
+
     instance.mc_version = described.mc_version;
     instance.loader = described.loader;
     instance.loader_version = described.loader_version;
@@ -902,20 +1096,42 @@ pub async fn update(
     // that did not finish leaves this where it was, so the next Play decides
     // every synced path again from the same place rather than from half of
     // this one.
-    if let Some(settings) = &manifest.settings {
-        instance.settings_at = Some(settings.at);
+    //
+    // Nothing of it moves while the player keeps the server's settings off:
+    // none of it was written, so a number saying it had been would lose the
+    // whole backlog the moment they turned it back on.
+    if allowed {
+        if let Some(settings) = &manifest.settings {
+            instance.settings_at = Some(settings.at);
+        }
+        // And the paths this run could not write, which that number cannot
+        // speak for: it says the push landed, and for these files it did not.
+        // Assigned rather than added to, so a path that went in this time — or
+        // one the server has stopped sending — drops out of it.
+        instance.settings_owed = not_written.iter().map(|file| file.path.clone()).collect();
     }
-    // And the paths this run could not write, which that number cannot speak
-    // for: it says the push landed, and for these files it did not. Assigned
-    // rather than added to, so a path that went in this time — or one the
-    // server has stopped sending — drops out of it.
-    instance.settings_owed = not_written.iter().map(|file| file.path.clone()).collect();
+
+    // What the player is told about their own settings, in a file beside
+    // `instance.json` rather than in a toast that is gone in four seconds.
+    // Written only when there is something in it, so an update that moved no
+    // setting leaves the last one that did where they can still read it.
+    let settings = instance
+        .settings_at
+        .map(|at| crate::settings::report::from_applied(at, &landed, could_not))
+        .filter(|report| report.worth_saying());
+    if let Some(report) = &settings {
+        // Not worth failing an update over: every setting in it is already on
+        // disk, and the player hears the same thing in the launch notice.
+        let _ = crate::settings::report::save(paths, &instance.id, report).await;
+    }
+
     Ok(UpdateReport {
         missing,
         turned_off,
         not_written: not_written.into_iter().map(|file| file.why).collect(),
         banned,
         revision: pack_revision(&manifest),
+        settings,
     })
 }
 
@@ -2480,6 +2696,11 @@ pub async fn server_pack_info(
         // all.
         config_kept: include_config
             && settings.policy_for(Path::new("config")) != Policy::Enforce,
+        // The other half of the same question, for the one behaviour a single
+        // bool could not describe: the files are the player's, *and* what the
+        // admin changes later arrives as the settings they changed.
+        config_pushed: include_config
+            && settings.policy_for(Path::new("config")) == Policy::Merge,
         revision,
         server_id: server.id.clone(),
         // Read here as well as written into the pack, and on purpose: this is
@@ -2536,15 +2757,17 @@ pub(crate) async fn listing_for(paths: &Paths, id: &str) -> Result<Option<Listin
 /// the pack's own walk finds them: through no link, and nothing at all when
 /// `config/` is itself one.
 ///
-/// One function because two things count on this set and must never disagree.
-/// [`server_revision`] hashes these files, so they are what a player's update
-/// is triggered by; [`server_pack_info`] counts them, so they are what the join
-/// preview promises is coming. A second walk that drifted would tell a player a
-/// number the pack does not carry.
+/// One function because three things count on this set and must never
+/// disagree. [`server_revision`] hashes these files, so they are what a
+/// player's update is triggered by; [`server_pack_info`] counts them, so they
+/// are what the join preview promises is coming; and `settings::push` reviews
+/// them, so they are what the admin can push a setting out of. A second walk
+/// that drifted would tell a player a number the pack does not carry, or offer
+/// the admin a setting inside a file nobody is sent.
 ///
 /// The caller decides whether config is sent at all — [`sends_config`] — so
 /// this answers only "which files", never "whether".
-async fn config_files(run: &Path) -> Result<Vec<PathBuf>> {
+pub(crate) async fn config_files(run: &Path) -> Result<Vec<PathBuf>> {
     let config = run.join("config");
     tokio::task::spawn_blocking(move || {
         let mut files = Vec::new();
@@ -2707,6 +2930,26 @@ async fn server_revision(
                 named.path,
                 named.policy.as_str(),
                 named.from
+            ));
+        }
+        // Each setting the admin owns, by the push it went out at. The push
+        // is enough on its own — a value cannot change without one, since
+        // every push takes the next number and stamps it on every entry it
+        // writes — and it is what a player compares against what they have
+        // caught up with. Only a path whose files are kept in sync: a setting
+        // inside a file players are sent whole, or sent once, reaches nobody,
+        // and a revision that moved for it would send every player a pack for
+        // nothing.
+        //
+        // The key is written as the list it is, quoted and escaped, so two
+        // different keys cannot be spelled the same way here.
+        for entry in &settings.overrides {
+            if settings.policy_for(Path::new(&entry.path)) != Policy::Merge {
+                continue;
+            }
+            lines.push(format!(
+                "setting {} {} {:?}",
+                entry.path, entry.at, entry.key
             ));
         }
         for full in config_files(&run).await? {
@@ -4925,6 +5168,7 @@ mod tests {
                 policy: Policy::Enforce,
                 from: 0,
             }],
+            overrides: Vec::new(),
             at: 0,
         };
         assert_eq!(
@@ -5244,6 +5488,7 @@ mod tests {
                 // its way even though `run/config` has one in it.
                 config_files: 0,
                 config_kept: false,
+                config_pushed: false,
                 revision: info.revision.clone(),
                 server_id: "srv-info".into(),
                 // No listing set on this server, so none is described.
@@ -7035,6 +7280,510 @@ mod tests {
             b"tuned = 99\n",
             "a file that had already landed was sent again over the player's own changes"
         );
+    }
+
+
+    /// Keep this server's config folder in sync, the way the admin's control
+    /// does: the choice, and the snapshot of what is published that the choice
+    /// takes with it.
+    async fn keep_in_sync(paths: &Paths, id: &str) {
+        choose_config(paths, id, Policy::Merge).await;
+        crate::settings::push::publish_all(paths, id).await.unwrap();
+    }
+
+    /// Press Review and send everything it found, which is what an admin who
+    /// leaves every row ticked does. Returns how many settings went.
+    async fn push_everything(paths: &Paths, id: &str) -> u32 {
+        let review = crate::settings::push::review(paths, id).await.unwrap();
+        let wanted: Vec<crate::settings::push::Wanted> = review
+            .moved
+            .iter()
+            .map(|one| crate::settings::push::Wanted {
+                path: one.path.clone(),
+                key: one.key.clone(),
+                value: one.now.clone(),
+                was: one.was.clone(),
+            })
+            .collect();
+        if wanted.is_empty() {
+            return 0;
+        }
+        crate::settings::push::push(paths, id, &wanted).await.unwrap()
+    }
+
+    /// The whole feature, end to end and offline: the admin changes one
+    /// setting in a `.properties` on the server, presses Review and sends it,
+    /// and the player's copy gains that one setting with everything they had
+    /// tuned still tuned — in a file whose CRLF endings, comments and spacing
+    /// are the bytes they were.
+    #[tokio::test]
+    async fn one_pushed_setting_lands_and_everything_else_the_player_changed_stays() {
+        let shipped = "#Sat Oct 17 23:58:04 EDT 2026\r\n\
+                       # Range: 0 ~ 32\r\nrenderDistance=8\r\nfov = 70\r\nshader=none\r\n";
+        let (scratch, server) = small_server(
+            "push-one",
+            &[
+                ("mods/a.jar", b"a".to_vec()),
+                ("config/iris.properties", shipped.as_bytes().to_vec()),
+            ],
+            true,
+        )
+        .await;
+        let paths = scratch.paths.clone();
+        keep_in_sync(&paths, &server.id).await;
+
+        let mut player = join_now(&paths, &server, "push-one-player", &[]).await;
+        let mine = paths.game_dir(&player.id).join("config/iris.properties");
+        assert_eq!(
+            std::fs::read_to_string(&mine).unwrap(),
+            shipped,
+            "the default config did not arrive on the first join"
+        );
+
+        // The player tunes two of the three settings.
+        let tuned = "#Sat Oct 17 23:58:04 EDT 2026\r\n\
+                     # Range: 0 ~ 32\r\nrenderDistance=24\r\nfov = 110\r\nshader=none\r\n";
+        tokio::fs::write(&mine, tuned).await.unwrap();
+
+        // The admin changes one setting — and the mod rewrites the file's own
+        // timestamp comment while the server runs, which is not a setting and
+        // must not be offered as one.
+        let run = paths.server_run(&server.id);
+        tokio::fs::write(
+            run.join("config/iris.properties"),
+            "#Mon Oct 19 11:02:55 EDT 2026\r\n\
+             # Range: 0 ~ 32\r\nrenderDistance=8\r\nfov = 70\r\nshader=complementary\r\n",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            push_everything(&paths, &server.id).await,
+            1,
+            "Review offered something other than the one setting that moved"
+        );
+
+        let pack = pack_now(&paths, &server, "b").await;
+        let report = update_offline(&paths, &mut player, &pack).await.unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&mine).unwrap(),
+            "#Sat Oct 17 23:58:04 EDT 2026\r\n\
+             # Range: 0 ~ 32\r\nrenderDistance=24\r\nfov = 110\r\nshader=complementary\r\n",
+            "the push did not land as exactly one changed line"
+        );
+        // And the player is told: one setting moved, and it was not one of
+        // theirs — their own two are untouched, so there is nothing to argue
+        // about and no row to interrupt them with.
+        let settings = report.settings.expect("the update recorded what it changed");
+        assert_eq!(settings.rest, 1);
+        assert!(settings.yours.is_empty(), "{:?}", settings.yours);
+        assert!(settings.skipped.is_empty(), "{:?}", settings.skipped);
+        assert_eq!(
+            crate::settings::report::load(&paths, &player.id).await.unwrap(),
+            Some(settings),
+            "the panel reads the same report the launch was told about"
+        );
+    }
+
+    /// The sentence the whole design rests on: a push is applied once, and a
+    /// player who sets the setting back keeps it set back for ever — because
+    /// the push it came in never takes a new number.
+    #[tokio::test]
+    async fn a_push_applies_once_and_a_players_change_back_sticks() {
+        let (scratch, server) = small_server(
+            "push-twice",
+            &[
+                ("mods/a.jar", b"a".to_vec()),
+                ("config/sodium.properties", b"renderDistance=8\n".to_vec()),
+            ],
+            true,
+        )
+        .await;
+        let paths = scratch.paths.clone();
+        keep_in_sync(&paths, &server.id).await;
+        let mut player = join_now(&paths, &server, "push-twice-player", &[]).await;
+        let mine = paths.game_dir(&player.id).join("config/sodium.properties");
+
+        let run = paths.server_run(&server.id);
+        tokio::fs::write(run.join("config/sodium.properties"), b"renderDistance=12\n")
+            .await
+            .unwrap();
+        push_everything(&paths, &server.id).await;
+
+        let pack = pack_now(&paths, &server, "b").await;
+        update_offline(&paths, &mut player, &pack).await.unwrap();
+        assert_eq!(std::fs::read(&mine).unwrap(), b"renderDistance=12\n");
+
+        // The player prefers their own, and says so. Every update after that
+        // leaves it alone: the push is below where they have got to.
+        tokio::fs::write(&mine, b"renderDistance=24\n").await.unwrap();
+        for round in ["c", "d"] {
+            tokio::fs::write(run.join(format!("mods/{round}.jar")), b"x").await.unwrap();
+            let pack = pack_now(&paths, &server, round).await;
+            let report = update_offline(&paths, &mut player, &pack).await.unwrap();
+            assert!(
+                report.settings.is_none(),
+                "an update re-applied a push: {:?}",
+                report.settings
+            );
+            assert_eq!(
+                std::fs::read(&mine).unwrap(),
+                b"renderDistance=24\n",
+                "the server took the player's own change back off them"
+            );
+        }
+
+        // And the admin pushing a different setting does not drag the old one
+        // along with it.
+        tokio::fs::write(
+            run.join("config/sodium.properties"),
+            b"renderDistance=12\nfog=fancy\n",
+        )
+        .await
+        .unwrap();
+        assert_eq!(push_everything(&paths, &server.id).await, 1);
+        let pack = pack_now(&paths, &server, "e").await;
+        update_offline(&paths, &mut player, &pack).await.unwrap();
+        assert_eq!(
+            std::fs::read(&mine).unwrap(),
+            b"renderDistance=24\nfog=fancy\n",
+            "a setting the player never had was not appended, or their own was replaced"
+        );
+    }
+
+    /// A player who missed three pushes catches up in one pass, in one update,
+    /// with the current value of every setting — not a chain of patches. The
+    /// three are a setting pushed twice, a setting their file does not have,
+    /// and a setting taken out.
+    #[tokio::test]
+    async fn a_player_who_skipped_three_pushes_gets_all_of_them_at_once() {
+        let (scratch, server) = small_server(
+            "push-backlog",
+            &[
+                ("mods/a.jar", b"a".to_vec()),
+                ("config/mod.cfg", b"quality = low\nlegacy = 1\n".to_vec()),
+            ],
+            true,
+        )
+        .await;
+        let paths = scratch.paths.clone();
+        keep_in_sync(&paths, &server.id).await;
+        let mut player = join_now(&paths, &server, "push-backlog-player", &[]).await;
+        let mine = paths.game_dir(&player.id).join("config/mod.cfg");
+        let run = paths.server_run(&server.id);
+        let on_the_server = run.join("config/mod.cfg");
+
+        // Push one: a value. Push two: the same setting again, which replaces
+        // its entry rather than adding to a log. Push three: a setting added
+        // and a setting removed.
+        tokio::fs::write(&on_the_server, b"quality = medium\nlegacy = 1\n").await.unwrap();
+        push_everything(&paths, &server.id).await;
+        tokio::fs::write(&on_the_server, b"quality = high\nlegacy = 1\n").await.unwrap();
+        push_everything(&paths, &server.id).await;
+        tokio::fs::write(&on_the_server, b"quality = high\nshadows = on\n").await.unwrap();
+        push_everything(&paths, &server.id).await;
+
+        let share = crate::server::share::load(&paths, &server.id).await.unwrap().unwrap();
+        assert_eq!(
+            share.settings.overrides.len(),
+            3,
+            "the list grew into a log of pushes: {:?}",
+            share.settings.overrides
+        );
+
+        let pack = pack_now(&paths, &server, "b").await;
+        update_offline(&paths, &mut player, &pack).await.unwrap();
+        assert_eq!(
+            std::fs::read(&mine).unwrap(),
+            b"quality = high\nshadows = on\n",
+            "the backlog did not land as the current values in one pass"
+        );
+        assert_eq!(player.settings_at, Some(share.settings.at));
+    }
+
+    /// A player whose instance predates all of this has had every config file
+    /// replaced on every Play, so their copy already holds the admin's values.
+    /// They get each file whole exactly once more, with nothing spliced — and
+    /// merge from then on.
+    #[tokio::test]
+    async fn an_instance_that_has_caught_up_with_nothing_gets_the_file_whole_once() {
+        let (scratch, server) = small_server(
+            "push-none",
+            &[
+                ("mods/a.jar", b"a".to_vec()),
+                ("config/a.properties", b"a=1\nb=2\n".to_vec()),
+            ],
+            true,
+        )
+        .await;
+        let paths = scratch.paths.clone();
+        keep_in_sync(&paths, &server.id).await;
+        let mut player = join_now(&paths, &server, "push-none-player", &[]).await;
+        let mine = paths.game_dir(&player.id).join("config/a.properties");
+        // Joined before any of this existed, which reads as having caught up
+        // with nothing.
+        player.settings_at = None;
+        tokio::fs::write(&mine, b"a=99\nb=99\n").await.unwrap();
+
+        let run = paths.server_run(&server.id);
+        tokio::fs::write(run.join("config/a.properties"), b"a=1\nb=3\n").await.unwrap();
+        push_everything(&paths, &server.id).await;
+        let pack = pack_now(&paths, &server, "b").await;
+        let report = update_offline(&paths, &mut player, &pack).await.unwrap();
+
+        assert_eq!(
+            std::fs::read(&mine).unwrap(),
+            b"a=1\nb=3\n",
+            "the file was not sent whole to an instance that had caught up with nothing"
+        );
+        // Whole, so nothing was spliced and there is nothing to report: the
+        // file arrived holding every setting the admin owns.
+        assert!(report.settings.is_none(), "{:?}", report.settings);
+
+        // From then on it is theirs, and a push reaches only its own setting.
+        tokio::fs::write(&mine, b"a=99\nb=3\n").await.unwrap();
+        tokio::fs::write(run.join("config/a.properties"), b"a=1\nb=4\n").await.unwrap();
+        push_everything(&paths, &server.id).await;
+        let pack = pack_now(&paths, &server, "c").await;
+        update_offline(&paths, &mut player, &pack).await.unwrap();
+        assert_eq!(std::fs::read(&mine).unwrap(), b"a=99\nb=4\n");
+    }
+
+    /// The player's own switch, with no exceptions: nothing of the server's
+    /// settings is written while it is off, and nothing records that they
+    /// caught up — so turning it back on applies the whole backlog at once.
+    #[tokio::test]
+    async fn with_the_servers_settings_turned_off_nothing_is_written_and_nothing_is_lost() {
+        let (scratch, server) = small_server(
+            "push-off",
+            &[
+                ("mods/a.jar", b"a".to_vec()),
+                ("config/kept.properties", b"a=1\n".to_vec()),
+                ("config/forced.properties", b"b=1\n".to_vec()),
+            ],
+            true,
+        )
+        .await;
+        let paths = scratch.paths.clone();
+        keep_in_sync(&paths, &server.id).await;
+        // One file the admin replaces every time, to prove the switch stops
+        // that too rather than only the per-setting pushes.
+        let mut share = crate::server::share::load(&paths, &server.id).await.unwrap().unwrap();
+        share.settings.choose("config/forced.properties", Policy::Enforce);
+        crate::server::share::save(&paths, &server.id, &share).await.unwrap();
+
+        let mut player = join_now(&paths, &server, "push-off-player", &[]).await;
+        let game = paths.game_dir(&player.id);
+        let (kept, forced) = (
+            game.join("config/kept.properties"),
+            game.join("config/forced.properties"),
+        );
+        let caught_up = player.settings_at.expect("the join recorded where it got to");
+        player.server_settings_off = true;
+        tokio::fs::write(&kept, b"a=99\n").await.unwrap();
+        tokio::fs::write(&forced, b"b=99\n").await.unwrap();
+
+        let run = paths.server_run(&server.id);
+        tokio::fs::write(run.join("config/kept.properties"), b"a=2\n").await.unwrap();
+        tokio::fs::write(run.join("config/forced.properties"), b"b=2\n").await.unwrap();
+        push_everything(&paths, &server.id).await;
+        let pack = pack_now(&paths, &server, "b").await;
+        let report = update_offline(&paths, &mut player, &pack).await.unwrap();
+
+        assert_eq!(std::fs::read(&kept).unwrap(), b"a=99\n");
+        assert_eq!(
+            std::fs::read(&forced).unwrap(),
+            b"b=99\n",
+            "a file the admin replaces every time was written while the switch was off"
+        );
+        assert!(report.settings.is_none(), "{:?}", report.settings);
+        assert_eq!(
+            player.settings_at,
+            Some(caught_up),
+            "the instance recorded catching up with a push it never applied"
+        );
+
+        // Turned back on, with no new pack and no new push: everything that
+        // happened in between lands in one pass.
+        player.server_settings_off = false;
+        let pack = pack_now(&paths, &server, "c").await;
+        update_offline(&paths, &mut player, &pack).await.unwrap();
+        assert_eq!(std::fs::read(&kept).unwrap(), b"a=2\n");
+        assert_eq!(std::fs::read(&forced).unwrap(), b"b=2\n");
+        assert!(player.settings_at.unwrap() > caught_up);
+    }
+
+    /// A settings file the player has made something other than an ordinary
+    /// file is not written through, and is named in their report. The whole
+    /// file path never gets written either, because this is the copy they
+    /// kept — so there is nothing owed and nothing is retried behind their
+    /// back.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_setting_is_not_spliced_through_a_link_and_is_reported() {
+        let (scratch, server) = small_server(
+            "push-link",
+            &[
+                ("mods/a.jar", b"a".to_vec()),
+                ("config/a.properties", b"a=1\n".to_vec()),
+            ],
+            true,
+        )
+        .await;
+        let paths = scratch.paths.clone();
+        keep_in_sync(&paths, &server.id).await;
+        let mut player = join_now(&paths, &server, "push-link-player", &[]).await;
+        let game = paths.game_dir(&player.id);
+        let mine = game.join("config/a.properties");
+
+        // The player's own file is a link to somewhere else of theirs.
+        let elsewhere = game.join("shared.properties");
+        tokio::fs::write(&elsewhere, b"a=99\n").await.unwrap();
+        tokio::fs::remove_file(&mine).await.unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &mine).unwrap();
+
+        let run = paths.server_run(&server.id);
+        tokio::fs::write(run.join("config/a.properties"), b"a=2\n").await.unwrap();
+        push_everything(&paths, &server.id).await;
+        let pack = pack_now(&paths, &server, "b").await;
+        let report = update_offline(&paths, &mut player, &pack).await.unwrap();
+
+        assert_eq!(
+            std::fs::read(&elsewhere).unwrap(),
+            b"a=99\n",
+            "the splice was written through a link"
+        );
+        let settings = report.settings.expect("a skipped file is worth saying");
+        assert_eq!(settings.skipped.len(), 1, "{settings:?}");
+        assert!(
+            settings.skipped[0].contains("config/a.properties")
+                && settings.skipped[0].contains("ordinary file"),
+            "{settings:?}"
+        );
+        assert!(
+            player.settings_owed.is_empty(),
+            "a file the player keeps their own copy of was left owed: {:?}",
+            player.settings_owed
+        );
+    }
+
+    /// A pack whose settings half is past a ceiling, or names a path Geode
+    /// will not write settings to, is not applied at all — every file is
+    /// written whole, which is what every Geode did before any of this — and
+    /// the reason names what it hit.
+    #[tokio::test]
+    async fn a_settings_half_past_a_ceiling_is_not_applied_and_says_what_it_hit() {
+        let (scratch, server) = small_server(
+            "push-hostile",
+            &[
+                ("mods/a.jar", b"a".to_vec()),
+                ("config/a.properties", b"a=1\n".to_vec()),
+            ],
+            true,
+        )
+        .await;
+        let paths = scratch.paths.clone();
+        keep_in_sync(&paths, &server.id).await;
+        let mut player = join_now(&paths, &server, "push-hostile-player", &[]).await;
+        let mine = paths.game_dir(&player.id).join("config/a.properties");
+        tokio::fs::write(&mine, b"a=99\n").await.unwrap();
+
+        let run = paths.server_run(&server.id);
+        tokio::fs::write(run.join("config/a.properties"), b"a=2\n").await.unwrap();
+        let pack = pack_now(&paths, &server, "b").await;
+        // A half no Geode would write: a setting spliced into a jar.
+        rewrite_pack(
+            &pack,
+            |m| {
+                let half = m.settings.as_mut().expect("a server pack syncs its config");
+                half.at += 1;
+                half.overrides.push(Override {
+                    path: "mods/a.jar".into(),
+                    key: vec!["anything".into()],
+                    value: Some("x".into()),
+                    was: None,
+                    at: half.at,
+                });
+            },
+            &[],
+        );
+
+        let report = update_offline(&paths, &mut player, &pack).await.unwrap();
+        assert!(
+            report.missing.iter().any(|line| line.contains("mods/a.jar")),
+            "the refusal did not name what it hit: {:?}",
+            report.missing
+        );
+        assert_eq!(
+            std::fs::read(&mine).unwrap(),
+            b"a=2\n",
+            "a pack with no usable settings half should write each file whole"
+        );
+        assert_eq!(std::fs::read(paths.game_dir(&player.id).join("mods/a.jar")).unwrap(), b"a");
+    }
+
+    /// A push is what players are told about: the revision moves for a setting
+    /// the admin sends, and the pack carries the same list the description was
+    /// worked out from.
+    #[tokio::test]
+    async fn pushing_a_setting_moves_the_revision_and_rides_the_pack() {
+        let (scratch, server) = small_server(
+            "push-revision",
+            &[
+                ("mods/a.jar", b"a".to_vec()),
+                ("config/a.properties", b"a=1\n".to_vec()),
+                ("config/sent-once.properties", b"b=1\n".to_vec()),
+            ],
+            true,
+        )
+        .await;
+        let paths = scratch.paths.clone();
+        keep_in_sync(&paths, &server.id).await;
+        let mut share = crate::server::share::load(&paths, &server.id).await.unwrap().unwrap();
+        share.settings.choose("config/sent-once.properties", Policy::ShipOnce);
+        crate::server::share::save(&paths, &server.id, &share).await.unwrap();
+        let before = revision_of(&paths, &server).await;
+
+        // An edit nobody has pushed yet reaches no player, so it moves
+        // nothing: that is what makes a mod rewriting its own config on boot
+        // cost nobody a download.
+        let run = paths.server_run(&server.id);
+        tokio::fs::write(run.join("config/a.properties"), b"a=2\n").await.unwrap();
+        assert_eq!(revision_of(&paths, &server).await, before);
+
+        // Pushing it does move it.
+        push_everything(&paths, &server.id).await;
+        let pushed = revision_of(&paths, &server).await;
+        assert_ne!(pushed, before, "a push reached nobody");
+
+        // And the pack says the same thing the description does.
+        let pack = pack_now(&paths, &server, "b").await;
+        let manifest = read_manifest(&pack).unwrap().unwrap();
+        let half = manifest.settings.expect("a server pack syncs its config");
+        assert_eq!(half.overrides.len(), 1);
+        assert_eq!(half.overrides[0].path, "config/a.properties");
+        assert_eq!(half.overrides[0].value.as_deref(), Some("2"));
+        assert_eq!(half.overrides[0].was.as_deref(), Some("1"));
+        assert_eq!(half.at, half.overrides[0].at);
+        assert_eq!(manifest.revision.as_deref(), Some(pushed.as_str()));
+        assert_eq!(
+            server_pack_info(&paths, &server).await.unwrap().revision,
+            pushed
+        );
+
+        // A setting inside a file players are sent once reaches nobody, so it
+        // is in no revision either — the list is where it is, and that is not
+        // what the pack carries about it.
+        let mut share = crate::server::share::load(&paths, &server.id).await.unwrap().unwrap();
+        share.settings.overrides.push(Override {
+            path: "config/sent-once.properties".into(),
+            key: vec!["b".into()],
+            value: Some("2".into()),
+            was: Some("1".into()),
+            at: share.settings.at,
+        });
+        crate::server::share::save(&paths, &server.id, &share).await.unwrap();
+        assert_eq!(revision_of(&paths, &server).await, pushed);
     }
 
     /// A new version of a server's mod usually has a new file name. The player

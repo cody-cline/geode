@@ -296,6 +296,20 @@ pub struct PackInfo {
     /// this reads as.
     #[serde(default)]
     pub config_kept: bool,
+    /// Whether the admin can push an individual setting into those files
+    /// afterwards.
+    ///
+    /// A second bool rather than the behaviour's name, for the reason
+    /// `config_kept` is one: a name a newer Geode invented would stop an older
+    /// one reading the description at all. Together they say which of the
+    /// three a player is getting, and both are false from a Geode older than
+    /// this — which is what sending a config folder has always been.
+    ///
+    /// Only ever true with `config_kept`. The files are the player's, and what
+    /// the admin changes later reaches them one setting at a time instead of
+    /// as a file that replaces theirs.
+    #[serde(default)]
+    pub config_pushed: bool,
     /// Changes exactly when what a player receives changes, so a joined
     /// instance can tell whether it is behind. Empty from a Geode older than
     /// this.
@@ -2258,6 +2272,7 @@ pub(super) mod tests {
             server_kind: "fabric".into(),
             config_files: 0,
             config_kept: false,
+            config_pushed: false,
             revision: "r".into(),
             server_id: "survival".into(),
             listing: None,

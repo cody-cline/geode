@@ -30,23 +30,29 @@ import {
   linksPointAtOldAddress,
   listenLine,
   localAddressHint,
+  lastSyncLine,
   listingLine,
+  movedSetting,
   nextJoin,
   nextPack,
+  nothingToPushHint,
   outcomeLine,
   packShareMessage,
   packStep,
   publicLinkLine,
   publishSummary,
+  pushingHint,
   parsePort,
   readOutHint,
   replacedPasswordBody,
   routerLine,
+  serverSettingsHint,
   settingsFact,
   settingsLine,
   stoppedLine,
   verificationLine,
   whenPlayersGetChanges,
+  yourSetting,
 } from "./share.ts";
 
 function status(mapping, extra = {}) {
@@ -1020,7 +1026,13 @@ test("the Drive line tells not configured, not connected and reconnect apart", (
   assert.match(driveLine(driveStatus({ account: null })).title, /^Connected$/);
 });
 
-function described(listing, mcVersion = "1.21.1", configFiles = 0, configKept = false) {
+function described(
+  listing,
+  mcVersion = "1.21.1",
+  configFiles = 0,
+  configKept = false,
+  configPushed = false,
+) {
   return {
     name: "Survival",
     mcVersion,
@@ -1031,6 +1043,7 @@ function described(listing, mcVersion = "1.21.1", configFiles = 0, configKept = 
     serverKind: "fabric",
     configFiles,
     configKept,
+    configPushed,
     revision: "r1",
     serverId: "survival",
     listing,
@@ -1162,10 +1175,24 @@ test("a server that lets players keep their settings is not described as replaci
   assert.equal(settingsFact(described(null, "1.21.1", 14, true)), "14 files");
 });
 
+test("a server that pushes settings afterwards is described as doing that", () => {
+  const pushed = settingsLine(described(null, "1.21.1", 14, true, true));
+  // Theirs to keep, like Send once — and the part Send once cannot promise:
+  // the admin's later change arrives, as that setting and nothing else.
+  assert.match(pushed.detail, /yours from then on/);
+  assert.match(pushed.detail, /stays tuned/);
+  assert.match(pushed.detail, /nothing else in the file/);
+  assert.match(pushed.detail, /change it straight back/);
+  // And neither of the two sentences that are untrue of it: their work is not
+  // replaced, and the admin's later changes do reach them.
+  assert.doesNotMatch(pushed.detail, /replaces them again each time it updates/);
+  assert.doesNotMatch(pushed.detail, /nothing the admin changes later replaces them/);
+});
+
 test("the behaviours offered for the config folder say who ends up with what", () => {
   assert.deepEqual(
     configChoices.map((choice) => choice.policy),
-    ["ship-once", "enforce"],
+    ["ship-once", "merge", "enforce"],
     "gentlest first",
   );
   const detail = (policy) =>
@@ -1178,18 +1205,19 @@ test("the behaviours offered for the config folder say who ends up with what", (
   assert.match(detail("enforce"), /each time they press Play/);
   assert.match(detail("enforce"), /is lost/);
 
-  // Not offered, because nothing splices a setting into a player's file yet:
-  // an admin who picked it would be told their later edits travel, and none
-  // of them would.
-  assert.ok(
-    !configChoices.some((choice) => choice.policy === "merge"),
-    "a behaviour nothing implements is offered to admins",
-  );
+  // Keep in sync is the one with something for the admin to do, so it says so
+  // — an admin who edits a file and waits for it to travel by itself will
+  // think sharing is broken — and it says which files Geode can do it for,
+  // because a file it cannot read setting by setting is sent once instead.
+  assert.match(detail("merge"), /press Review/);
+  assert.match(detail("merge"), /everything else they had tuned stays tuned/);
+  assert.match(detail("merge"), /\.properties/);
+  assert.match(detail("merge"), /sent once instead/);
 
   // Named for what happens, not for the word the code uses.
   assert.deepEqual(
     configChoices.map((choice) => choice.label),
-    ["Send once", "Always replace"],
+    ["Send once", "Keep in sync", "Always replace"],
   );
 });
 
@@ -1208,13 +1236,120 @@ test("the admin is told when a config change reaches players, per behaviour", ()
   // under Send once and waiting for it to travel.
   assert.match(whenPlayersGetChanges("ship-once"), /does not/);
   assert.match(whenPlayersGetChanges("ship-once"), /theirs now/);
-  // A share that already holds the behaviour nothing implements is described
-  // by what it does, which is what Send once does.
-  assert.equal(
-    whenPlayersGetChanges("merge"),
-    whenPlayersGetChanges("ship-once"),
+  // And the same mistake under Keep in sync, where the remedy is different:
+  // the file does not travel, the settings the admin sends do.
+  assert.match(whenPlayersGetChanges("merge"), /players keep their own/);
+  assert.match(whenPlayersGetChanges("merge"), /the settings you send below/);
+});
+
+test("the admin is told that a push is deliberate and cannot be recalled", () => {
+  // Both halves, because each is a mistake an admin makes exactly once: an
+  // edit nobody sent reaches nobody, and a push cannot be taken back.
+  assert.match(pushingHint(), /reach nobody until you send them/);
+  assert.match(pushingHint(), /next time they press Play/);
+  assert.match(pushingHint(), /no undo/);
+  assert.match(pushingHint(), /change the setting again/);
+
+  // A Review that found nothing names the reason an admin is most likely to
+  // be looking at it, rather than leaving an empty screen to be read as a
+  // broken feature.
+  assert.match(nothingToPushHint(), /changed and then changed back/);
+  assert.match(nothingToPushHint(), /compares the settings rather than the file/);
+  assert.match(nothingToPushHint(), /send it again/);
+});
+
+test("a setting on the review screen reads as what it was and what it becomes", () => {
+  const moved = (was, now) => ({ path: "config/a.properties", key: ["fov"], was, now });
+  assert.match(movedSetting(moved("70", "90")), /fov — 70 becomes 90/);
+  // A setting that is new since the last push: nobody has been sent it.
+  assert.match(movedSetting(moved(null, "90")), /new setting, 90/);
+  // And the one change that cannot be undone by changing a value back, said
+  // as a removal rather than left to be inferred from an empty value.
+  assert.match(movedSetting(moved("70", null)), /remove this setting from players' files/);
+  assert.match(movedSetting(moved("70", null)), /you had 70/);
+  // A nested setting is named by its parts rather than by a dotted string,
+  // because a real table name can hold dots of its own.
+  assert.match(
+    movedSetting({ path: "config/a.toml", key: ["general", "fov"], was: "70", now: "90" }),
+    /general → fov/,
   );
-  assert.doesNotMatch(whenPlayersGetChanges("merge"), /the settings you change/);
+});
+
+test("a player is told what the server changed, and only interrupted by their own", () => {
+  const sync = (yours, rest, skipped = []) => ({
+    at: 4,
+    when: 0,
+    yours,
+    rest,
+    skipped,
+  });
+  const mine = {
+    path: "config/sodium.properties",
+    key: ["renderDistance"],
+    had: "24",
+    now: "12",
+  };
+
+  // The promise is in every one of these, because it is the only reason a
+  // player should be relaxed about any of it.
+  const both = lastSyncLine(sync([mine], 7));
+  assert.equal(both.tone, "info");
+  assert.match(both.title, /changed 8 settings/);
+  assert.match(both.detail, /Nothing else in these files was changed/);
+  assert.match(both.detail, /And 7 you had not changed/);
+
+  // Nothing of theirs moved: a count, and no row to read.
+  const theirs = lastSyncLine(sync([], 1));
+  assert.match(theirs.title, /changed 1 setting\b/);
+  assert.match(theirs.detail, /It was a setting you had not changed/);
+
+  // A file that could not be written is a warning, and names itself.
+  const skipped = lastSyncLine(sync([], 1, ["config/a.properties — this file is read-only"]));
+  assert.equal(skipped.tone, "warn");
+  assert.match(skipped.detail, /could not be written/);
+  assert.match(skipped.detail, /read-only/);
+
+  // And an update where nothing landed at all changed nothing: a heading
+  // reading "changed 0 settings" is a count, which is read and believed, so
+  // the panel says what could not be written instead.
+  const none = lastSyncLine(sync([], 0, ["config/a.properties — this is not an ordinary file"]));
+  assert.equal(none.tone, "warn");
+  assert.doesNotMatch(none.title, /0 settings/);
+  assert.match(none.title, /A settings file could not be written/);
+  assert.match(none.detail, /Nothing in them was changed/);
+  assert.match(none.detail, /not an ordinary file/);
+  assert.match(
+    lastSyncLine(sync([], 0, ["config/a.properties", "config/b.properties"])).title,
+    /2 settings files could not be written/,
+  );
+
+  // The row carries their own value, because that is where they decide
+  // whether to put it back and a value tuned weeks ago is not remembered.
+  assert.match(yourSetting(mine), /config\/sodium\.properties/);
+  assert.match(yourSetting(mine), /the server set 12 \(you had 24\)/);
+  assert.match(
+    yourSetting({ ...mine, had: null }),
+    /you had no such setting/,
+  );
+  assert.match(
+    yourSetting({ ...mine, now: null }),
+    /the server removed it \(you had 24\)/,
+  );
+});
+
+test("the switch that stops a server's settings says what turning it off costs", () => {
+  // Off: the cost is named, because a mod refusing to let them join is not
+  // something a player would guess at — and so is the thing that makes it
+  // safe to flip back.
+  assert.match(serverSettingsHint(true), /including files it would otherwise replace/);
+  assert.match(serverSettingsHint(true), /will not let you join/);
+  assert.match(serverSettingsHint(true), /arrives at once/);
+  assert.doesNotMatch(serverSettingsHint(true), /deleted/);
+
+  // On: what it actually does, including that a later change arrives as the
+  // one setting rather than as the whole file.
+  assert.match(serverSettingsHint(false), /yours to change/);
+  assert.match(serverSettingsHint(false), /nothing else in the file/);
 });
 
 // ---------------------------------------------------------------------------

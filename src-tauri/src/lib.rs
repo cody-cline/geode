@@ -19,6 +19,7 @@ pub mod paths;
 pub mod plan;
 pub mod providers;
 pub mod server;
+pub mod settings;
 pub mod share;
 pub mod state;
 
@@ -132,6 +133,9 @@ pub fn run() {
             commands::list_content,
             commands::set_content_enabled,
             commands::set_server_side_mods,
+            commands::set_server_settings_allowed,
+            commands::last_server_sync,
+            commands::change_setting_back,
             commands::remove_content,
             commands::add_local_content,
             commands::install_content,
@@ -237,6 +241,8 @@ pub fn run() {
             commands::share_server,
             commands::unshare_server,
             commands::set_server_share_config,
+            commands::review_server_settings,
+            commands::push_server_settings,
             commands::share_link_copied,
             commands::set_server_listing,
             commands::set_server_forbidden,

@@ -6,6 +6,8 @@
 import type {
   Account,
   ConfigPolicy,
+  LastServerSync,
+  MovedSetting,
   DriveStatus,
   ExistingInstance,
   ExportReport,
@@ -24,6 +26,7 @@ import type {
   Why,
   ServerShareView,
   ShareStatus,
+  YourSetting,
 } from "./types";
 
 /**
@@ -189,23 +192,34 @@ export function settingsFact(info: PackInfo): string {
  * them is the only one that costs the player their work, and a server that
  * sends them once should not be described as if it did.
  *
- * `configKept` is one bool over every behaviour that is not "always replace",
- * so the sentence it picks has to be true of all of them — today that is
- * "sent once, and nothing later replaces them", which is what both of them do
- * (`share::pack::landings` has one arm for the pair). A behaviour that pushed
- * individual settings afterwards could not be described by this bool, and
- * would need the description to carry which one it is.
+ * Two bools rather than the behaviour's name, because a name a newer Geode
+ * invented would stop an older one reading the description at all — and two
+ * is what it takes, since "the files are yours" is true of two different
+ * behaviours and only one of them sends the admin's later changes.
+ * `configPushed` is that one, and it is never true without `configKept`
+ * (`share::pack::server_pack_info`).
  */
 export function settingsLine(info: PackInfo): StatusLine | null {
   if (info.configFiles === 0) return null;
   const files =
     info.configFiles === 1 ? "1 settings file" : `${info.configFiles} settings files`;
+  const theirs =
+    "These are the admin's own mod settings, and they arrive in place of yours.";
+  const look =
+    "Worth a look once you have joined: a settings file decides what the server's mods do on your machine.";
+  if (info.configPushed) {
+    return {
+      tone: "info",
+      title: `This server sends ${files}`,
+      detail: `${theirs} They are yours from then on, and anything you tune afterwards stays tuned. When the admin changes one of these settings later, that setting — and nothing else in the file — arrives the next time you press Play, and you can change it straight back. ${look}`,
+    };
+  }
   return {
     tone: "info",
     title: `This server sends ${files}`,
     detail: info.configKept
-      ? "These are the admin's own mod settings, and they arrive in place of yours. They are yours from then on: the server sends them once, and nothing the admin changes later replaces them — so anything you tune afterwards stays tuned. Worth a look once you have joined — a settings file decides what the server's mods do on your machine."
-      : "These are the admin's own mod settings, and they arrive in place of yours. You can change them afterwards, but this server replaces them again each time it updates — so keep a copy of anything you tune. Worth a look once you have joined: a settings file decides what the server's mods do on your machine.",
+      ? `${theirs} They are yours from then on: the server sends them once, and nothing the admin changes later replaces them — so anything you tune afterwards stays tuned. ${look}`
+      : `${theirs} You can change them afterwards, but this server replaces them again each time it updates — so keep a copy of anything you tune. ${look}`,
   };
 }
 
@@ -223,11 +237,12 @@ export function settingsLine(info: PackInfo): StatusLine | null {
  * turning the folder on sends no choice at all, and the behaviour already in
  * force answers (`ServerShare::send_config`).
  *
- * `merge` is a third behaviour the wire names and nothing yet implements — a
- * pack carries the admin's choice, and the splicing that would make it mean
- * anything is not written, so `share::pack::landings` handles it exactly as
- * ship-once. It is not offered: an admin told their later edits would reach
- * players would be told something no code does.
+ * "Keep in sync" has the longest description of the three on purpose: it is
+ * the only one where the admin has something to do afterwards, and an admin
+ * who edits a file and waits for it to travel by itself will think sharing is
+ * broken. It also says which files Geode can do it for, because `config/` is
+ * not a format — a file Geode cannot read one setting at a time falls back to
+ * being sent once, and Review names which ones those are.
  */
 export const configChoices: readonly {
   policy: ConfigPolicy;
@@ -241,12 +256,59 @@ export const configChoices: readonly {
       "Players get these files the first time they join and never again. Whatever they change afterwards is theirs to keep, and nothing you change later reaches them.",
   },
   {
+    policy: "merge",
+    label: "Keep in sync",
+    detail:
+      "Players get these files the first time they join, and keep their own changes. When you change a setting here, press Review below and send it: that setting arrives in every player's copy the next time they press Play, and everything else they had tuned stays tuned. Geode can do this for files of plain settings — .properties, .cfg, options.txt; one it cannot read setting by setting is sent once instead, and Review names it.",
+  },
+  {
     policy: "enforce",
     label: "Always replace",
     detail:
       "Your copy replaces every player's each time they press Play, and anything they had changed in these files is lost. For a config that has to match this server exactly.",
   },
 ];
+
+/**
+ * What the admin reads beside the Review button, where it stays rather than
+ * appearing as a dialog once.
+ *
+ * Two things, and both of them are things an admin gets wrong exactly once.
+ * An edit on this machine reaches nobody until it is sent, because mods
+ * rewrite their own config files on boot and Java stamps a timestamp into a
+ * `.properties`, so a file whose settings never moved still has new bytes —
+ * sending that by itself would push noise to every player. And a push cannot
+ * be recalled: there is no channel back from a player, so the remedy is to
+ * change the setting again and send that.
+ */
+export function pushingHint(): string {
+  return "Your edits here reach nobody until you send them. Players get what you send the next time they press Play. There is no undo: if you change your mind, change the setting again and send that.";
+}
+
+/**
+ * The one line under a Review screen that found nothing.
+ *
+ * The admin who sees this most often is the one who changed a setting and
+ * changed it back, because the comparison is per setting and that setting did
+ * not move. Saying so is the difference between an empty screen and a bug
+ * report — and the list of what this server already sends, with its Send again
+ * button, is right underneath.
+ */
+export function nothingToPushHint(): string {
+  return "Nothing has moved since you last sent settings from these files. A setting you changed and then changed back reads as unmoved, because Geode compares the settings rather than the file — send it again from the list below if you want every player to have it.";
+}
+
+/** How one setting reads on the Review screen: what it was, and what it is now. */
+export function movedSetting(moved: MovedSetting): string {
+  const key = moved.key.join(" → ");
+  if (moved.now === null) {
+    return `${key} — remove this setting from players' files (you had ${moved.was ?? "nothing"})`;
+  }
+  if (moved.was === null) {
+    return `${key} — new setting, ${moved.now}`;
+  }
+  return `${key} — ${moved.was} becomes ${moved.now}`;
+}
 
 /**
  * What the admin is told about when their changes reach the people who joined.
@@ -257,10 +319,9 @@ export const configChoices: readonly {
  * expects "Always replace" to spare their players' work will find out from
  * the players.
  *
- * `merge` reads the same as "Send once" because that is what it does — see
- * `configChoices`, and `share::pack::landings`, which has one arm for the
- * pair. It is not offered, but a share that already holds it is still
- * described.
+ * Under "Keep in sync" it has to say the part that is not automatic, because
+ * that is the one way this screen can mislead: the config folder travels as
+ * the settings the admin *sends*, and an edit nobody sent reaches nobody.
  */
 export function whenPlayersGetChanges(policy: ConfigPolicy | null): string {
   const config =
@@ -268,7 +329,9 @@ export function whenPlayersGetChanges(policy: ConfigPolicy | null): string {
       ? ""
       : policy === "enforce"
         ? " The config folder goes with them, replacing their copies."
-        : " The config folder does not: they were sent it once and it is theirs now.";
+        : policy === "merge"
+          ? " Config files do not go with them: players keep their own, and the settings you send below reach them the same way."
+          : " The config folder does not: they were sent it once and it is theirs now.";
   return `Players who joined get your changes to mods and client mods the next time they press Play.${config} Their Geode checks with this computer first, so keep Geode open and this server shared.`;
 }
 
@@ -340,6 +403,82 @@ export function forbiddenRuleHint(): string {
  */
 export function forbiddenPlayerHint(): string {
   return "A server can turn off mods of your own it does not allow. Geode turns them off and tells you the server's reason — it never deletes them, and the file stays in your mods folder. Turning one back on does not last while you play here: it goes off again the next time the server's pack updates.";
+}
+
+/**
+ * What a joined instance's Settings say about the settings the server sends,
+ * beside the switch that stops them.
+ *
+ * The cost of turning it off is named, because it is not obvious: some mods
+ * refuse to let a client join a server whose settings differ from the
+ * server's, so this is not a free way to keep your own.
+ */
+export function serverSettingsHint(off: boolean): string {
+  if (off) {
+    return "Off: nothing the server changes in these files reaches this instance, including files it would otherwise replace every time. Nothing here was changed when you turned it off. Some mods will not let you join a server whose settings differ from theirs. Turn it back on and everything the server changed in the meantime arrives at once, the next time you press Play.";
+  }
+  return "On: this server's own mod settings arrive the first time you join, and are yours to change. When the admin changes one of them later, that setting — and nothing else in the file — arrives the next time you press Play, and Geode tells you below what moved.";
+}
+
+/**
+ * The panel's own heading line: what the last update changed, and the promise
+ * that goes with it.
+ *
+ * The promise is stated every time rather than once in a doc, because it is
+ * the only reason a player should be relaxed about any of this: the settings
+ * named are the only things in those files that moved.
+ */
+export function lastSyncLine(sync: LastServerSync): StatusLine {
+  const moved = sync.yours.length + sync.rest;
+  // Nothing moved, which for a report saved at all means every change was
+  // skipped: the server tried to change a setting and could not. A heading
+  // reading "changed 0 settings" is a count, and a count is read and
+  // believed — so it heads the panel with the opposite of what happened.
+  if (moved === 0) {
+    return {
+      tone: "warn",
+      title:
+        sync.skipped.length === 1
+          ? "A settings file could not be written"
+          : `${sync.skipped.length} settings files could not be written`,
+      detail: `Nothing in them was changed, so what you had is still there: ${sync.skipped.join(", ")}.`,
+    };
+  }
+  const rest =
+    sync.rest === 0
+      ? ""
+      : sync.yours.length === 0
+        ? ` ${sync.rest === 1 ? "It was a setting" : `They were ${sync.rest} settings`} you had not changed.`
+        : ` And ${sync.rest} you had not changed.`;
+  const skipped =
+    sync.skipped.length === 0
+      ? ""
+      : ` ${sync.skipped.length} file(s) could not be written, so what you had is still there: ${sync.skipped.join(", ")}.`;
+  return {
+    tone: sync.skipped.length > 0 ? "warn" : "info",
+    title:
+      moved === 1
+        ? "The server changed 1 setting"
+        : `The server changed ${moved} settings`,
+    detail: `Nothing else in these files was changed.${rest}${skipped}`,
+  };
+}
+
+/**
+ * One row: the setting the server changed, what it set it to, and what this
+ * instance had.
+ *
+ * Their own value is in the row and not only in the file, because the row is
+ * where they decide whether to put it back — and because a value they tuned
+ * weeks ago is not something they remember.
+ */
+export function yourSetting(one: YourSetting): string {
+  const key = one.key.join(" → ");
+  const mine = one.had === null ? "you had no such setting" : `you had ${one.had}`;
+  if (one.now === null) {
+    return `${one.path} — ${key}: the server removed it (${mine})`;
+  }
+  return `${one.path} — ${key}: the server set ${one.now} (${mine})`;
 }
 
 /**
