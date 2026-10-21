@@ -688,6 +688,7 @@ pub async fn import_into(
     import_into_at(
         client,
         crate::providers::curseforge::API,
+        crate::providers::modrinth::API,
         paths,
         instance,
         archive,
@@ -697,17 +698,24 @@ pub async fn import_into(
     .await
 }
 
-/// The same, with the CurseForge API base injectable.
+/// The same, with both API bases injectable.
 ///
 /// Injectable for the reason `curseforge::check_key_at` and
 /// `curseforge::match_fingerprints_at` are: what a CurseForge import does is
-/// decided entirely by what it asks CurseForge and what it makes of the
-/// answer, so a test serves those answers itself rather than reaching the real
-/// API with a key no test has. A `.mrpack` fetches only the URLs its own index
-/// names, so the base does not reach that arm.
+/// decided entirely by what it asks and what it makes of the answer, so a test
+/// serves those answers itself rather than reaching the real APIs with a key
+/// no test has. A `.mrpack` fetches only the URLs its own index names, so
+/// neither base reaches that arm.
+///
+/// Modrinth is asked one thing and only in one case: a file whose CurseForge
+/// author switched third-party downloads off is looked for among that author's
+/// own Modrinth releases, by the sha1 CurseForge published for it. See
+/// [`crate::install::blocked`].
+#[allow(clippy::too_many_arguments)] // two bases and one instance's coordinates
 pub async fn import_into_at(
     client: &reqwest::Client,
     base: &str,
+    modrinth_base: &str,
     paths: &Paths,
     instance: &mut Instance,
     archive: &Path,
@@ -911,23 +919,45 @@ pub async fn import_into_at(
                     }
                 };
 
-                let Some(file) = version.primary_file() else {
-                    // The author turned third-party downloads off. Nothing
-                    // here goes looking for another source: a copy from
-                    // anywhere but the author is a mirror, and Geode does not
-                    // route around this.
-                    let by_hand = match placement {
-                        CfPlacement::Saves => {
-                            "unpack it into the instance's saves folder".to_string()
+                // The author turned third-party downloads off. Exactly one
+                // thing is tried instead, and only the hashes can authorise
+                // it: that same author's own Modrinth release of the
+                // identical bytes. No mirror, no guessed address — see
+                // `install::blocked`.
+                let mut version = version;
+                let file = match version.primary_file().cloned() {
+                    Some(file) => file,
+                    None => {
+                        let by_hand = match placement {
+                            CfPlacement::Saves => {
+                                "unpack it into the instance's saves folder".to_string()
+                            }
+                            _ => format!("drop it into the instance's {folder} folder"),
+                        };
+                        match crate::install::blocked::instead_of(
+                            client,
+                            &version,
+                            &by_hand,
+                            crate::install::blocked::Fallback::at(modrinth_base, progress),
+                        )
+                        .await
+                        {
+                            // Installed from Modrinth's own URL, and recorded
+                            // below as Modrinth, because every field of the
+                            // record is read off the version being installed.
+                            crate::install::blocked::Instead::Modrinth {
+                                version: authors_own,
+                                file,
+                            } => {
+                                version = authors_own;
+                                file
+                            }
+                            crate::install::blocked::Instead::Refused(because) => {
+                                left_out.push(format!("{} ({because})", version.name));
+                                continue;
+                            }
                         }
-                        _ => format!("drop it into the instance's {folder} folder"),
-                    };
-                    left_out.push(format!(
-                        "{} (its author disabled third-party downloads — download it from \
-                         CurseForge and {by_hand})",
-                        version.name
-                    ));
-                    continue;
+                    }
                 };
 
                 // `required: false` is this format saying the user may do
@@ -984,7 +1014,12 @@ pub async fn import_into_at(
                     records.push(ContentRecord {
                         file_name: file.filename.clone(),
                         kind,
-                        provider: "curseforge".into(),
+                        // Whichever platform the bytes came from. For nearly
+                        // every file that is CurseForge; for one whose author
+                        // blocked it there and published it on Modrinth
+                        // themselves, it is Modrinth, because that is where
+                        // Geode fetched it from.
+                        provider: version.provider.as_str().to_string(),
                         project_id: version.project_id.clone(),
                         version_id: version.id.clone(),
                         name: version.name.clone(),

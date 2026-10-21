@@ -877,6 +877,7 @@ mod tests {
             }],
             dependencies: vec![],
             blocked_reason: None,
+            blocked_sha1: None,
         };
         assert!(!Support::from_versions(&[version.clone()]).is_empty());
 

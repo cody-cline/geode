@@ -19,6 +19,12 @@
 //! serves the bytes at the URL it gave. That is the only way to see the
 //! request count, the folder each file lands in and what happens to a file
 //! nobody is allowed to fetch.
+//!
+//! The same stub answers as Modrinth, because a file whose CurseForge author
+//! switched third-party downloads off is looked for among that author's own
+//! Modrinth releases by the sha1 CurseForge published for it. Whether it is
+//! found there is the difference between installing and refusing, so both
+//! answers are served here and neither is guessed.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
@@ -317,6 +323,12 @@ impl Api {
         }
     }
 
+    /// The same stub, in the `.../v2` shape Modrinth's own `API` constant
+    /// has. One listener because one import talks to both.
+    fn modrinth(&self) -> String {
+        format!("http://{}/v2", self.addr)
+    }
+
     fn paths(&self) -> Vec<String> {
         self.asked
             .lock()
@@ -414,6 +426,10 @@ struct Held {
     /// False for a file whose author turned third-party downloads off, which
     /// CurseForge answers for with a null `downloadUrl`.
     downloadable: bool,
+    /// Whether that same author published the identical bytes on Modrinth,
+    /// where there is no third-party opt-out to express. The sha1 is the only
+    /// thing that can prove it, and it comes from CurseForge's own `hashes`.
+    on_modrinth: bool,
 }
 
 impl Held {
@@ -425,7 +441,22 @@ impl Held {
             class_id: 6,
             file_name: format!("mod-{file_id}.jar"),
             downloadable: true,
+            on_modrinth: false,
         }
+    }
+
+    /// The sha1 CurseForge publishes for this file in its `hashes` array, and
+    /// the only thing the Modrinth lookup has to go on.
+    ///
+    /// The real sha1 of the bytes this stub serves for every file, because
+    /// both platforms' answers are checked against the bytes that arrive: a
+    /// made-up hash would fail the download rather than the thing under test.
+    /// One body for every file means one hash for every file, which these
+    /// tests never need to tell apart — that a hit is tied to the hash that
+    /// asked for it is pinned where the hashes differ, in
+    /// `providers::modrinth` and `install::blocked`.
+    fn sha1(&self) -> String {
+        "a7a941dea93a9fd0d1a0a8980df11d40b2cf576c".to_string()
     }
 
     fn named(mut self, file_name: &str) -> Self {
@@ -443,6 +474,19 @@ impl Held {
         self.downloadable = false;
         self
     }
+
+    /// Its author also published these exact bytes on Modrinth.
+    fn also_on_modrinth(mut self) -> Self {
+        self.on_modrinth = true;
+        self
+    }
+
+    /// What Modrinth calls its own upload of the same bytes. Deliberately not
+    /// CurseForge's name for the file: the file that installs is Modrinth's,
+    /// under the name Modrinth has for it.
+    fn modrinth_file_name(&self) -> String {
+        format!("mr-{}", self.file_name)
+    }
 }
 
 /// A CurseForge that holds exactly these files, answers both batch endpoints
@@ -455,7 +499,9 @@ fn curseforge_holding(held: Vec<Held>) -> Api {
         move |asked: &Asked| match asked.path.as_str() {
             "/v1/mods/files" => (200, files_answer(&held, &asked.body, &origin)),
             "/v1/mods" => (200, projects_answer(&held, &asked.body)),
+            "/v2/version_files" => (200, hashes_answer(&held, &asked.body, &origin)),
             path if path.starts_with("/cdn/") => (200, b"JAR".to_vec()),
+            path if path.starts_with("/mr/") => (200, b"JAR".to_vec()),
             _ => (404, b"{}".to_vec()),
         }
     })
@@ -486,12 +532,63 @@ fn files_answer(held: &[Held], body: &str, origin: &str) -> Vec<u8> {
             };
             format!(
                 r#"{{"id":{},"modId":{},"displayName":"{}","fileName":"{}","downloadUrl":{url},
+                   "hashes":[{{"value":"{}","algo":1}},{{"value":"deadbeef","algo":2}}],
                    "gameVersions":["1.21.1","Fabric"]}}"#,
-                h.file_id, h.project_id, h.file_name, h.file_name
+                h.file_id,
+                h.project_id,
+                h.file_name,
+                h.file_name,
+                h.sha1()
             )
         })
         .collect();
     format!(r#"{{"data":[{}]}}"#, files.join(",")).into_bytes()
+}
+
+/// Modrinth's bulk hash endpoint, answering out of the same held files: a hit
+/// for each one whose author published the identical bytes there.
+///
+/// The matching jar is listed second and not marked primary, so an import that
+/// took the version's primary file would install a sources jar instead of the
+/// bytes CurseForge named.
+fn hashes_answer(held: &[Held], body: &str, origin: &str) -> Vec<u8> {
+    let json: serde_json::Value = serde_json::from_str(body).expect("a JSON body");
+    assert_eq!(
+        json["algorithm"], "sha1",
+        "the hash CurseForge publishes is a sha1, so that is what may be asked about"
+    );
+    let wanted: Vec<String> = json["hashes"]
+        .as_array()
+        .expect("hashes")
+        .iter()
+        .map(|v| v.as_str().expect("a hash").to_string())
+        .collect();
+
+    let hits: Vec<String> = held
+        .iter()
+        .filter(|h| h.on_modrinth && wanted.contains(&h.sha1()))
+        .map(|h| {
+            format!(
+                r#""{}":{{"id":"MR{}","project_id":"MRP{}","name":"{} on Modrinth",
+                   "version_number":"1.0.0","version_type":"release",
+                   "game_versions":["1.21.1"],"loaders":["fabric"],"downloads":9,"files":[
+                     {{"url":"{origin}/mr/sources.jar","filename":"sources.jar",
+                       "hashes":{{"sha1":"0000000000000000000000000000000000000000"}},
+                       "size":1,"primary":true}},
+                     {{"url":"{origin}/mr/{}","filename":"{}",
+                       "hashes":{{"sha1":"{}","sha512":"ff"}},"size":3,"primary":false}}
+                   ]}}"#,
+                h.sha1(),
+                h.file_id,
+                h.project_id,
+                h.file_name,
+                h.modrinth_file_name(),
+                h.modrinth_file_name(),
+                h.sha1(),
+            )
+        })
+        .collect();
+    format!("{{{}}}", hits.join(",")).into_bytes()
 }
 
 fn projects_answer(held: &[Held], body: &str) -> Vec<u8> {
@@ -568,6 +665,7 @@ async fn import(
     geode_lib::instance::modpack::import_into_at(
         &geode_lib::net::client(),
         &api.base,
+        &api.modrinth(),
         paths,
         instance,
         archive,
@@ -861,10 +959,11 @@ async fn a_manifest_that_is_not_a_modpack_is_refused() {
     assert!(err.to_string().contains("manifestType"), "{err}");
 }
 
-/// An author who turned third-party downloads off is not routed around: the
-/// import ends naming the file, and nothing goes looking for another source.
+/// A file whose author turned third-party downloads off and who published it
+/// nowhere else is still refused: the import ends naming it, and the only
+/// place that was looked is Modrinth's hash lookup.
 #[tokio::test]
-async fn an_author_blocked_file_is_still_reported_and_never_routed_around() {
+async fn an_author_blocked_file_nobody_else_published_is_still_reported() {
     let api = curseforge_holding(vec![
         Held::a_mod(1000, 2000).named("fetchable.jar"),
         Held::a_mod(1001, 2001).named("locked.jar").blocked(),
@@ -886,6 +985,10 @@ async fn an_author_blocked_file_is_still_reported_and_never_routed_around() {
         "and the reason has to be the author's, not a vague failure: {problems:?}"
     );
     assert!(
+        problems[0].contains("no file with the same bytes"),
+        "and why there was nothing of the author's own to install instead: {problems:?}"
+    );
+    assert!(
         !game.join("mods/locked.jar").exists(),
         "the blocked file was fetched anyway"
     );
@@ -894,14 +997,127 @@ async fn an_author_blocked_file_is_still_reported_and_never_routed_around() {
         "the rest of the pack should still install"
     );
 
-    // Nothing looked anywhere else for it: the two batch endpoints, and one
-    // download for the one file that may be downloaded.
+    // The two batch endpoints, one download for the one file that may be
+    // downloaded, and one hash lookup — the author's own Modrinth releases
+    // and nowhere else. No mirror, no guessed CDN address.
     let mut asked = api.paths();
     asked.sort();
     assert_eq!(
         asked,
-        vec!["/cdn/fetchable.jar", "/v1/mods", "/v1/mods/files"],
-        "a second source was tried for a file the author withheld"
+        vec![
+            "/cdn/fetchable.jar",
+            "/v1/mods",
+            "/v1/mods/files",
+            "/v2/version_files"
+        ],
+        "a second source other than the author's own Modrinth release was tried"
+    );
+}
+
+/// The owner's decision: a CurseForge file the author will not let anyone else
+/// serve may be taken from Modrinth when the hashes prove it is the same file.
+/// A hash match means that author published those exact bytes there
+/// themselves, where there is no third-party opt-out — so this is the author's
+/// own release, not a mirror.
+#[tokio::test]
+async fn a_blocked_file_the_author_also_published_on_modrinth_comes_from_there() {
+    let held = Held::a_mod(1001, 2001)
+        .named("locked.jar")
+        .blocked()
+        .also_on_modrinth();
+    let api = curseforge_holding(vec![held.clone()]);
+    let (paths, mut instance, game) = importing("substituted");
+    let archive = pack_with(&paths.root, &manifest(&[(1001, 2001, true)]));
+
+    let problems = import(&api, &paths, &mut instance, &archive)
+        .await
+        .expect("the pack installs");
+
+    assert!(
+        problems.is_empty(),
+        "the file installed, so there is nothing left for the user to do: {problems:?}"
+    );
+    // Modrinth's own upload, under Modrinth's own name for it, and the file
+    // whose hash matched rather than the version's primary one.
+    assert!(
+        game.join("mods").join(held.modrinth_file_name()).is_file(),
+        "the author's own Modrinth release did not arrive"
+    );
+    assert!(
+        !game.join("mods/sources.jar").exists(),
+        "the version's primary file was installed instead of the one that matched"
+    );
+
+    // Modrinth, because that is where the bytes came from.
+    let record = instance
+        .content
+        .iter()
+        .find(|r| r.file_name == held.modrinth_file_name())
+        .unwrap_or_else(|| panic!("nothing was recorded: {:?}", instance.content));
+    assert_eq!(
+        record.provider, "modrinth",
+        "the provenance has to say where the bytes came from: {record:?}"
+    );
+    assert_eq!(record.project_id, "MRP1001");
+    assert_eq!(record.version_id, "MR2001");
+    assert_eq!(record.kind, ContentKind::Mod);
+
+    // Asked by the sha1 CurseForge published for its own file, and fetched
+    // from Modrinth's URL. Nothing reached CurseForge's CDN.
+    let bodies = api.bodies_for("/v2/version_files");
+    assert_eq!(bodies.len(), 1, "{bodies:?}");
+    assert!(
+        bodies[0].contains(&held.sha1()),
+        "the hash asked about has to be the one CurseForge gave: {bodies:?}"
+    );
+    let fetched: Vec<String> = api
+        .paths()
+        .into_iter()
+        .filter(|p| p.starts_with("/cdn/") || p.starts_with("/mr/"))
+        .collect();
+    assert_eq!(
+        fetched,
+        vec![format!("/mr/{}", held.modrinth_file_name())],
+        "the bytes came from somewhere other than the author's Modrinth release"
+    );
+}
+
+/// A rate limit is not the author's decision. Read as "they never published it
+/// there" it would refuse a file that installs perfectly well a minute later,
+/// in words that blame somebody who did nothing.
+#[tokio::test]
+async fn a_modrinth_lookup_that_fails_is_reported_as_one() {
+    let api = Api::new(|origin| {
+        let held = vec![Held::a_mod(1001, 2001)
+            .named("locked.jar")
+            .blocked()
+            .also_on_modrinth()];
+        move |asked: &Asked| match asked.path.as_str() {
+            "/v1/mods/files" => (200, files_answer(&held, &asked.body, &origin)),
+            "/v1/mods" => (200, projects_answer(&held, &asked.body)),
+            "/v2/version_files" => (429, br#"{"error":"slow down"}"#.to_vec()),
+            _ => (404, b"{}".to_vec()),
+        }
+    });
+    let (paths, mut instance, game) = importing("ratelimited");
+    let archive = pack_with(&paths.root, &manifest(&[(1001, 2001, true)]));
+
+    let problems = import(&api, &paths, &mut instance, &archive)
+        .await
+        .expect("a lookup nobody answered is one file's problem, not the import's");
+
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        problems[0].contains("could not be asked"),
+        "a refused lookup has to read as one: {problems:?}"
+    );
+    assert!(
+        !problems[0].contains("no file with the same bytes"),
+        "a refused lookup was reported as Modrinth not having the file: {problems:?}"
+    );
+    assert!(
+        !game.join("mods").join("mr-locked.jar").exists(),
+        "something was installed on the strength of an answer nobody gave"
     );
 }
 

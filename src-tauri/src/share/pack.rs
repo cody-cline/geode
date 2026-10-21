@@ -691,8 +691,17 @@ pub async fn update(
         )
         .await?;
         missing.extend(
-            resolve_references(client, paths, instance, &manifest, curseforge_key, progress)
-                .await?,
+            resolve_references(
+                client,
+                crate::providers::curseforge::API,
+                crate::providers::modrinth::API,
+                paths,
+                instance,
+                &manifest,
+                curseforge_key,
+                progress,
+            )
+            .await?,
         );
         Ok::<_, Error>(missing)
     }
@@ -1248,8 +1257,17 @@ async fn apply_pack(
     apply(manifest, instance);
     extract_media(paths, instance, archive, manifest).await?;
     add_to_the_multiplayer_list(paths, instance, manifest).await;
-    let missing =
-        resolve_references(client, paths, instance, manifest, curseforge_key, progress).await?;
+    let missing = resolve_references(
+        client,
+        crate::providers::curseforge::API,
+        crate::providers::modrinth::API,
+        paths,
+        instance,
+        manifest,
+        curseforge_key,
+        progress,
+    )
+    .await?;
     switch_off_what_the_notes_say(paths, instance, manifest).await?;
     Ok(missing)
 }
@@ -1421,8 +1439,17 @@ async fn extract_media(
 /// Each reference is resolved live through the recipient's own credentials, so
 /// an author who has since turned third-party downloads off is respected rather
 /// than worked around — which is the whole reason these are ids and not URLs.
+///
+/// Both API bases are parameters for the reason `curseforge::check_key_at` is
+/// one: what this does is decided entirely by what CurseForge answers about a
+/// reference and, for one its author has blocked, what Modrinth answers about
+/// the same bytes. A test serves both itself rather than reaching the real
+/// APIs with a key no test has.
+#[allow(clippy::too_many_arguments)] // two bases and one import's coordinates
 async fn resolve_references(
     client: &reqwest::Client,
+    cf_base: &str,
+    modrinth_base: &str,
     paths: &Paths,
     instance: &mut Instance,
     manifest: &Manifest,
@@ -1481,18 +1508,51 @@ async fn resolve_references(
             continue;
         };
 
-        let version = match crate::providers::curseforge::file(client, project, file_id, key).await {
-            Ok(v) => v,
-            Err(e) => {
-                missing.push(format!("{} ({e})", note.path));
-                continue;
+        let version =
+            match crate::providers::curseforge::file_at(client, cf_base, project, file_id, key)
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    missing.push(format!("{} ({e})", note.path));
+                    continue;
+                }
+            };
+        // The author turned third-party downloads off. Exactly one thing is
+        // tried instead, and only the hashes can authorise it: that same
+        // author's own Modrinth release of the identical bytes. The reference
+        // itself is still resolved through the recipient's own key, which is
+        // why these are ids and not URLs. See `install::blocked`.
+        let mut version = version;
+        let file = match version
+            .primary_file()
+            .filter(|_| version.blocked_reason.is_none())
+            .cloned()
+        {
+            Some(file) => file,
+            None => {
+                let by_hand = format!("drop it into the instance's {} folder", kind.folder());
+                match crate::install::blocked::instead_of(
+                    client,
+                    &version,
+                    &by_hand,
+                    crate::install::blocked::Fallback::at(modrinth_base, progress),
+                )
+                .await
+                {
+                    crate::install::blocked::Instead::Modrinth {
+                        version: authors_own,
+                        file,
+                    } => {
+                        version = authors_own;
+                        file
+                    }
+                    crate::install::blocked::Instead::Refused(because) => {
+                        missing.push(format!("{} — {} ({because})", note.path, version.name));
+                        continue;
+                    }
+                }
             }
-        };
-        let Some(file) = version.primary_file().filter(|_| version.blocked_reason.is_none()) else {
-            // The author turned third-party downloads off. That is a decision
-            // to respect and report, not to route around.
-            missing.push(format!("{} — {} (the author disabled third-party downloads)", note.path, version.name));
-            continue;
         };
 
         // Arrives in whichever state the sharer had it. The record stays on the
@@ -1517,7 +1577,10 @@ async fn resolve_references(
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| note.path.clone()),
             kind,
-            provider: "curseforge".into(),
+            // Whichever platform the bytes came from. For nearly every
+            // reference that is CurseForge; for one whose author blocked it
+            // there and published it on Modrinth themselves, Modrinth.
+            provider: version.provider.as_str().to_string(),
             project_id: version.project_id.clone(),
             version_id: version.id.clone(),
             name: version.name.clone(),
@@ -5243,6 +5306,129 @@ mod tests {
         assert_eq!(create.len(), 1, "{content:?}");
         assert_eq!(create[0].version_id, "new");
         assert_eq!(content.len(), 3, "{content:?}");
+    }
+
+    /// The bytes the stub below serves, and the sha1 CurseForge publishes about
+    /// its own copy of them. Real, because a download checks it.
+    const A_JAR: &[u8] = b"JAR";
+    const A_JARS_SHA1: &str = "a7a941dea93a9fd0d1a0a8980df11d40b2cf576c";
+
+    /// A CurseForge and a Modrinth of our own on one listener: file `2001` of
+    /// project `1001` with third-party downloads switched off, and the author's
+    /// own Modrinth release of the identical bytes.
+    ///
+    /// Both bases are served because what a reference does is decided entirely
+    /// by what the two APIs answer about the one file. The matching file is
+    /// listed second and not primary, and the primary one names a hash the
+    /// bytes do not have — so a resolve that took the version's primary file
+    /// fails its own checksum rather than quietly fetching a sources jar.
+    async fn blocked_on_curseforge_and_published_on_modrinth() -> String {
+        use http_body_util::Full;
+        use hyper::body::{Bytes, Incoming};
+        use hyper::service::service_fn;
+        use hyper::{Request, Response};
+        use hyper_util::rt::TokioIo;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let curseforge = format!(
+            r#"{{"data":{{"id":2001,"modId":1001,"displayName":"Cool Mod 1.2.3",
+               "fileName":"locked.jar","downloadUrl":null,
+               "hashes":[{{"value":"{A_JARS_SHA1}","algo":1}}],
+               "gameVersions":["1.21.1","Fabric"]}}}}"#
+        );
+        let modrinth = format!(
+            r#"{{"{A_JARS_SHA1}":{{"id":"MRVER","project_id":"MRPROJ",
+               "name":"Cool Mod on Modrinth","version_number":"1.2.3",
+               "version_type":"release","game_versions":["1.21.1"],
+               "loaders":["fabric"],"downloads":9,"files":[
+                 {{"url":"{base}/mr/sources.jar","filename":"sources.jar",
+                   "hashes":{{"sha1":"0000000000000000000000000000000000000000"}},
+                   "size":1,"primary":true}},
+                 {{"url":"{base}/mr/cool-1.2.3.jar","filename":"cool-1.2.3.jar",
+                   "hashes":{{"sha1":"{A_JARS_SHA1}"}},"size":3,"primary":false}}
+               ]}}}}"#
+        );
+
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                let (curseforge, modrinth) = (curseforge.clone(), modrinth.clone());
+                tokio::spawn(async move {
+                    let service = service_fn(move |r: Request<Incoming>| {
+                        let (curseforge, modrinth) = (curseforge.clone(), modrinth.clone());
+                        async move {
+                            let body = match r.uri().path() {
+                                "/v1/mods/1001/files/2001" => Bytes::from(curseforge),
+                                path if path.ends_with("/version_files") => Bytes::from(modrinth),
+                                _ => Bytes::from_static(A_JAR),
+                            };
+                            Ok::<_, std::convert::Infallible>(Response::new(Full::new(body)))
+                        }
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(TokioIo::new(tcp), service)
+                        .await;
+                });
+            }
+        });
+        base
+    }
+
+    fn a_note_sourced_from_curseforge(path: &str) -> FileNote {
+        FileNote {
+            path: path.into(),
+            side: None,
+            source: Some(SourceRef {
+                provider: "curseforge".into(),
+                project_id: "1001".into(),
+                version_id: "2001".into(),
+            }),
+            disabled: false,
+        }
+    }
+
+    /// A shared pack's end of the rule. A reference whose author has since
+    /// turned third-party downloads off used to be reported as missing, which
+    /// for a pack with one such mod in it is a pack that will not install. When
+    /// that same author published the identical bytes on Modrinth it arrives
+    /// from their own release instead, and the record says where it came from.
+    ///
+    /// The file still lands under the path the pack named: a reference says
+    /// where a file goes, and that is the sharer's business, not Modrinth's.
+    #[tokio::test]
+    async fn a_blocked_reference_comes_from_the_authors_own_modrinth_release() {
+        let scratch = Scratch::new("ref-blocked");
+        let base = blocked_on_curseforge_and_published_on_modrinth().await;
+        let mut inst = instance();
+        let mut m = manifest();
+        m.files.push(a_note_sourced_from_curseforge("mods/locked.jar"));
+
+        let missing = resolve_references(
+            &crate::net::client(),
+            &format!("{base}/v1"),
+            &format!("{base}/v2"),
+            &scratch.paths,
+            &mut inst,
+            &m,
+            Some("a key"),
+            &Progress::silent("t"),
+        )
+        .await
+        .expect("the pack's one reference resolved");
+
+        assert!(
+            missing.is_empty(),
+            "the file installed, so there is nothing left for the user to do: {missing:?}"
+        );
+        let landed = scratch.paths.game_dir(&inst.id).join("mods/locked.jar");
+        assert_eq!(std::fs::read(&landed).unwrap(), A_JAR);
+
+        // Modrinth, because that is where the bytes came from.
+        assert_eq!(inst.content.len(), 1, "{:?}", inst.content);
+        assert_eq!(inst.content[0].file_name, "locked.jar");
+        assert_eq!(inst.content[0].provider, "modrinth");
+        assert_eq!(inst.content[0].project_id, "MRPROJ");
+        assert_eq!(inst.content[0].version_id, "MRVER");
     }
 
     /// The server's pack as it is now.

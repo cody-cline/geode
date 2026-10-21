@@ -1969,6 +1969,7 @@ pub async fn add_cardboard(
             Some(project.slug.clone()),
             false,
             project.listed_side(),
+            crate::install::blocked::Fallback::live(&progress),
         )
         .await?;
 

@@ -235,6 +235,9 @@ pub async fn versions(client: &reqwest::Client, id: &str) -> Result<Vec<Version>
         files,
         dependencies: Vec::new(),
         blocked_reason: blocked,
+        // Nothing to look up: a premium resource is paid content, not bytes
+        // somebody published for free somewhere else.
+        blocked_sha1: None,
     }])
 }
 

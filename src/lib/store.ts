@@ -10,6 +10,7 @@ import type {
   ExitEvent,
   Instance,
   LogEntry,
+  Notice,
   ProgressEvent,
   Server,
   ServerExit,
@@ -298,6 +299,18 @@ export const useStore = create<State>((set, get) => ({
           });
         }, payload.error ? 6000 : 1200);
       }
+    });
+
+    // A job's own result says whether it worked; this is for what the user has
+    // to be told along the way, and it is told once per thing that happened.
+    // The sentence is written in the core because three install shapes owe the
+    // same one, so there is nothing to phrase here.
+    await listen<Notice>("geode://notice", ({ payload }) => {
+      get().toast({
+        kind: "info",
+        title: payload.title,
+        body: payload.body,
+      });
     });
 
     await listen<LogEntry>("geode://log", ({ payload }) => {

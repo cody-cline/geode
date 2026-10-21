@@ -237,6 +237,20 @@ pub struct Version {
     /// the user to the project page.
     #[serde(default)]
     pub blocked_reason: Option<String>,
+    /// The sha1 the platform published for a file it will not serve.
+    ///
+    /// A blocked file carries no [`VersionFile`]: there is no URL to put in
+    /// one, and an empty URL would be read as somewhere to fetch from. So the
+    /// hash the platform published for it lives here instead, and it is the
+    /// only input [`crate::install::blocked`] has — the author's own release
+    /// of those exact bytes elsewhere is found by this hash and by nothing
+    /// else, since the file itself cannot be fetched to hash.
+    ///
+    /// `None` unless a file is blocked and its platform said what its bytes
+    /// are. A file that is not blocked carries its hashes on its
+    /// [`VersionFile`], where every other caller already reads them.
+    #[serde(default)]
+    pub blocked_sha1: Option<String>,
 }
 
 impl Version {

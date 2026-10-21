@@ -64,11 +64,14 @@ this list to stay complete.
 - **Cancellation** rides the same id: `Progress::cancel_flag()` is registered in
   `AppState` (`register_cancel`), the `cancel_task` command flips it, and long
   loops call `check_cancelled()`, which returns `Error::Cancelled`.
-- Nine topics are in use: `geode://progress`, `geode://log`, `geode://exit`,
+- Ten topics are in use: `geode://progress`, `geode://log`, `geode://exit`,
   `geode://server-log`, `geode://server-exit`, `geode://share-status`,
-  `geode://share-listen`, `geode://share-pack-failed`, and `geode://join-link`.
-  The last is only a nudge — the link itself is parked in `AppState`, because a
-  link that starts the app arrives before any webview exists to hear an event.
+  `geode://share-listen`, `geode://share-pack-failed`, `geode://notice`, and
+  `geode://join-link`. The last is only a nudge — the link itself is parked in
+  `AppState`, because a link that starts the app arrives before any webview
+  exists to hear an event. Every one of them has a subscriber in
+  `src/lib/store.ts`: a topic nothing listens for is a payload the webview
+  drops.
 
 One wrinkle to know before you copy anything: the `EventSink` migration is
 incomplete. The server side emits through `events::emit`, but `launch/mod.rs`

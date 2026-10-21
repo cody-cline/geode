@@ -336,10 +336,16 @@ export default function ProjectPanel({
                     {isModpack && installedInstance ? (
                       <span className={styles.installedTag}>Installed</span>
                     ) : planMode ? null : ( // A plan takes the mod, not one of its builds.
+                      // A file whose author turned third-party downloads off is
+                      // still worth offering: the core looks for that author's
+                      // own Modrinth release of the identical bytes, installs
+                      // it when the hashes match, and says why not when there
+                      // is none. A pack is the exception — it is fetched as a
+                      // file rather than found by hash.
                       <button
                         className="btn btn-sm"
                         onClick={() => onRequestInstall(project, version.id)}
-                        disabled={Boolean(version.blockedReason)}
+                        disabled={isModpack && Boolean(version.blockedReason)}
                       >
                         {isModpack
                           ? "Use this"

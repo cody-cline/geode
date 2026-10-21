@@ -9,6 +9,7 @@ use serde::Serialize;
 use crate::error::{Error, Result};
 use crate::instance::content::{disabled_name, ContentKind, ContentRecord};
 use crate::instance::Instance;
+use crate::install::blocked;
 use crate::net::{Download, Progress};
 use crate::paths::Paths;
 use crate::providers::{self, DependencyKind, Project, Provider, Version};
@@ -29,6 +30,7 @@ pub async fn install(
     icon_url: Option<String>,
     slug: Option<String>,
     as_dependency: bool,
+    fallback: blocked::Fallback<'_>,
 ) -> Result<String> {
     let dir = crate::instance::content::content_dir(paths, &instance.id, kind);
     install_into(
@@ -42,6 +44,7 @@ pub async fn install(
         slug,
         as_dependency,
         None,
+        fallback,
     )
     .await
 }
@@ -62,40 +65,83 @@ pub async fn install_into(
     slug: Option<String>,
     as_dependency: bool,
     side: Option<crate::instance::jar::Side>,
+    fallback: blocked::Fallback<'_>,
 ) -> Result<String> {
-    if let Some(reason) = &version.blocked_reason {
-        return Err(Error::msg(reason.clone()));
-    }
-    let file = version
-        .primary_file()
-        .ok_or_else(|| Error::msg(format!("{display_name} has no downloadable file")))?;
+    // Asked of the mod the user asked for, before anything is downloaded and
+    // before Modrinth is asked anything: a refusal arriving after the notice
+    // that says the file came from the author's own Modrinth release would
+    // contradict it.
+    refuse_a_servers_mod(
+        records,
+        kind,
+        version.provider,
+        &version.project_id,
+        version.primary_file().map(|f| f.filename.as_str()),
+    )?;
 
-    // Installing over a server's mod replaces it — a new version, or a second
-    // copy under the same name — and the version a server's mod runs at is the
-    // server's to choose. A player on a different build of a mod both sides
-    // load cannot join, and sharing runs one way, so the next sync would only
-    // put the server's back. Refused before anything is downloaded or deleted.
-    if let Some(owned) = records.iter().find(|r| {
-        r.origin == crate::instance::content::Origin::Server
-            && r.kind == kind
-            && (r.file_name == file.filename
-                || (r.provider == version.provider.as_str() && r.project_id == version.project_id))
-    }) {
-        return Err(Error::msg(format!(
-            "{} came from the server's pack, so the server decides which version it runs",
-            owned.name
-        )));
-    }
+    // What the user asked for, kept because a substitution answers in another
+    // platform's names and two places below have to know both: the copy
+    // already on disk was recorded under the name the user asked by.
+    let asked = (version.provider, version.project_id.clone());
+
+    // A CurseForge author who switched third-party downloads off used to end
+    // this here. It still does unless the hashes prove that same author
+    // published the identical bytes on Modrinth, in which case their own
+    // release is what installs — provenance and all, because every field
+    // below is read off the version actually being installed. The file comes
+    // with it rather than from `primary_file`: a version answered by a hash
+    // lookup can list a sources jar as its primary one, and the file that
+    // matters is the one whose hash CurseForge published. See
+    // `install::blocked`.
+    let substituted;
+    let (version, file) = if version.blocked_reason.is_some() {
+        // Where the file would go if the user fetched it themselves. The
+        // folder, not the full path: `dir` can be inside a server's run tree
+        // or an instance, and the folder is the part that tells them where to
+        // look.
+        let by_hand = format!("drop it into the {} folder", kind.folder());
+        match blocked::instead_of(client, version, &by_hand, fallback).await {
+            blocked::Instead::Modrinth { version, file } => {
+                substituted = (version, file);
+                (&substituted.0, &substituted.1)
+            }
+            blocked::Instead::Refused(because) => return Err(Error::msg(because)),
+        }
+    } else {
+        let file = version
+            .primary_file()
+            .ok_or_else(|| Error::msg(format!("{display_name} has no downloadable file")))?;
+        (version, file)
+    };
+
+    // And asked again about the name and the provenance that would actually be
+    // written. A substitution answers with Modrinth's ids and Modrinth's name
+    // for the same mod, and the server's own record holds whichever of the two
+    // its pack resolved — so one of the two asks catches it and neither alone
+    // does.
+    refuse_a_servers_mod(
+        records,
+        kind,
+        version.provider,
+        &version.project_id,
+        Some(&file.filename),
+    )?;
 
     tokio::fs::create_dir_all(dir).await?;
 
-    // Remove the previous file for this project before writing the new one.
+    // Remove the previous file for this project before writing the new one —
+    // under either name this mod goes by. A substitution writes Modrinth's
+    // ids, while the copy the user already had was recorded from CurseForge,
+    // and matching only the new ones leaves both jars in the folder: two
+    // builds of one mod, which plenty of mods refuse to load and no player
+    // asked for.
     let previous: Vec<String> = records
         .iter()
         .filter(|r| {
-            r.provider == version.provider.as_str()
-                && r.project_id == version.project_id
-                && r.kind == kind
+            r.kind == kind
+                && ((r.provider == version.provider.as_str()
+                    && r.project_id == version.project_id)
+                    || (r.provider == asked.0.as_str() && r.project_id == asked.1))
         })
         .map(|r| r.file_name.clone())
         .collect();
@@ -137,6 +183,39 @@ pub async fn install_into(
     });
 
     Ok(file.filename.clone())
+}
+
+/// Refuse an install that would replace a mod the server's pack owns.
+///
+/// Installing over a server's mod replaces it — a new version, or a second copy
+/// under the same name — and the version a server's mod runs at is the server's
+/// to choose. A player on a different build of a mod both sides load cannot
+/// join, and sharing runs one way, so the next sync would only put the server's
+/// back.
+///
+/// The mod is named twice over, by file name and by provenance, because a
+/// substitution makes those two different answers: `file_name` is `None` for a
+/// blocked version, which carries no file of its own to name.
+fn refuse_a_servers_mod(
+    records: &[ContentRecord],
+    kind: ContentKind,
+    provider: Provider,
+    project_id: &str,
+    file_name: Option<&str>,
+) -> Result<()> {
+    let owned = records.iter().find(|r| {
+        r.origin == crate::instance::content::Origin::Server
+            && r.kind == kind
+            && (file_name.is_some_and(|name| r.file_name == name)
+                || (r.provider == provider.as_str() && r.project_id == project_id))
+    });
+    match owned {
+        Some(owned) => Err(Error::msg(format!(
+            "{} came from the server's pack, so the server decides which version it runs",
+            owned.name
+        ))),
+        None => Ok(()),
+    }
 }
 
 /// The provider's view of what a version requires, kept as a fallback for jars
@@ -245,6 +324,7 @@ pub async fn install_with_dependencies_into(
         Some(project.slug.clone()),
         false,
         project.listed_side(),
+        blocked::Fallback::live(progress),
     )
     .await?;
     report.installed.push(file);
@@ -295,6 +375,7 @@ pub async fn install_with_dependencies_into(
             dep_game_version,
             dep_loader,
             curseforge_key,
+            blocked::Fallback::live(progress),
         )
         .await
         {
@@ -330,6 +411,7 @@ async fn resolve_dependency(
     game_version: &str,
     loader: &str,
     curseforge_key: Option<&str>,
+    fallback: blocked::Fallback<'_>,
 ) -> Result<Option<(String, Version)>> {
     let project = providers::project(client, provider, project_id, curseforge_key).await?;
     let versions = providers::versions(
@@ -357,6 +439,7 @@ async fn resolve_dependency(
         Some(project.slug.clone()),
         true,
         project.listed_side(),
+        fallback,
     )
     .await?;
     Ok(Some((filename, best.clone())))
@@ -518,6 +601,7 @@ mod tests {
             },
             dependencies: vec![],
             blocked_reason: None,
+            blocked_sha1: None,
         }
     }
 
@@ -567,6 +651,7 @@ mod tests {
             None,
             false,
             None,
+            blocked::Fallback::live(&Progress::silent("t")),
         )
         .await
         .expect_err("an update must not replace the server's mod");
@@ -591,9 +676,263 @@ mod tests {
             None,
             false,
             None,
+            blocked::Fallback::live(&Progress::silent("t")),
         )
         .await
         .expect_err("a same-named file must not overwrite the server's");
+    }
+
+    /// The bytes every stub below serves, and the sha1 CurseForge publishes
+    /// about its own copy of them. Real, because the download checks it: a
+    /// made-up hash would fail the fetch rather than the thing under test.
+    const JAR: &[u8] = b"JAR";
+    const JAR_SHA1: &str = "a7a941dea93a9fd0d1a0a8980df11d40b2cf576c";
+
+    /// A CurseForge file whose author switched third-party downloads off: no
+    /// `VersionFile` at all, because there is no URL to put in one, and the
+    /// sha1 CurseForge published for it instead.
+    fn a_blocked_curseforge_file() -> Version {
+        Version {
+            provider: Provider::CurseForge,
+            project_id: "CF-5001".into(),
+            blocked_reason: Some(
+                "The author has disabled third-party downloads for this file.".into(),
+            ),
+            blocked_sha1: Some(JAR_SHA1.into()),
+            ..version("6001", "release", false)
+        }
+    }
+
+    /// A Modrinth that answers the hash lookup with the author's own release of
+    /// those bytes, and serves the jar it names.
+    ///
+    /// The matching file is listed second and not primary, so an install that
+    /// took the version's primary file would write a sources jar instead of the
+    /// bytes CurseForge named. Returned in the `.../v2` shape the real `API`
+    /// constant has.
+    async fn modrinth_holding(filename: &str) -> String {
+        use http_body_util::Full;
+        use hyper::body::{Bytes, Incoming};
+        use hyper::service::service_fn;
+        use hyper::{Request, Response};
+        use hyper_util::rt::TokioIo;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v2", listener.local_addr().unwrap());
+        let answer = format!(
+            r#"{{"{JAR_SHA1}":{{"id":"MRVER","project_id":"MRPROJ","name":"Cool Mod on Modrinth",
+               "version_number":"1.2.3","version_type":"release","game_versions":["1.21.1"],
+               "loaders":["fabric"],"downloads":9,"files":[
+                 {{"url":"{base}/sources.jar","filename":"sources.jar",
+                   "hashes":{{"sha1":"0000000000000000000000000000000000000000"}},
+                   "size":1,"primary":true}},
+                 {{"url":"{base}/{filename}","filename":"{filename}",
+                   "hashes":{{"sha1":"{JAR_SHA1}"}},"size":3,"primary":false}}
+               ]}}}}"#
+        );
+
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                let answer = answer.clone();
+                tokio::spawn(async move {
+                    let service = service_fn(move |r: Request<Incoming>| {
+                        let answer = answer.clone();
+                        async move {
+                            let body = if r.uri().path().ends_with("/version_files") {
+                                Bytes::from(answer)
+                            } else {
+                                Bytes::from_static(JAR)
+                            };
+                            Ok::<_, std::convert::Infallible>(Response::new(Full::new(body)))
+                        }
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(TokioIo::new(tcp), service)
+                        .await;
+                });
+            }
+        });
+        base
+    }
+
+    /// The ordinary install's end of the rule, which a pack import and a shared
+    /// pack's reference have their own tests for: a file CurseForge will not
+    /// serve arrives from its author's own Modrinth release, under Modrinth's
+    /// name for it, recorded as having come from there — because that is where
+    /// the bytes came from.
+    #[tokio::test]
+    async fn an_ordinary_install_takes_a_blocked_file_from_the_authors_own_release() {
+        let scratch = Scratch::new("blocked-install");
+        let dir = scratch.paths.root.join("mods");
+        let base = modrinth_holding("mr-cool-1.2.3.jar").await;
+        let recorder = std::sync::Arc::new(crate::events::Recorder::default());
+        let progress = Progress::new(recorder.clone(), "t");
+
+        let mut records = Vec::new();
+        let landed = install_into(
+            &crate::net::client(),
+            &dir,
+            &mut records,
+            &a_blocked_curseforge_file(),
+            ContentKind::Mod,
+            "Cool Mod",
+            None,
+            None,
+            false,
+            None,
+            blocked::Fallback::at(&base, &progress),
+        )
+        .await
+        .expect("the author published the same bytes on Modrinth themselves");
+
+        assert_eq!(landed, "mr-cool-1.2.3.jar");
+        assert_eq!(tokio::fs::read(dir.join(&landed)).await.unwrap(), JAR);
+        assert!(
+            !dir.join("sources.jar").exists(),
+            "the version's primary file was installed instead of the one whose hash matched"
+        );
+
+        // Modrinth, because that is where the bytes came from. Nobody has to
+        // remember to write it: every field is read off the version installed.
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].provider, "modrinth");
+        assert_eq!(records[0].project_id, "MRPROJ");
+        assert_eq!(records[0].version_id, "MRVER");
+
+        // And the sentence that explains the swap left through the handle this
+        // caller passed in.
+        assert_eq!(recorder.topics(), vec!["geode://notice"]);
+    }
+
+    /// A user who already had this mod from CurseForge, updating to a build
+    /// whose author has since switched third-party downloads off. The jar that
+    /// replaces it is Modrinth's, so the record written names Modrinth — and
+    /// the copy being replaced was recorded from CurseForge, which is the one
+    /// name the lookup for "the previous file for this project" would miss.
+    /// Missing it leaves both jars in the folder, and two builds of one mod is
+    /// a game that often will not start.
+    #[tokio::test]
+    async fn a_substitution_still_replaces_the_copy_the_user_already_had() {
+        let scratch = Scratch::new("blocked-replaces");
+        let dir = scratch.paths.root.join("mods");
+        let base = modrinth_holding("mr-cool-1.2.3.jar").await;
+        let recorder = std::sync::Arc::new(crate::events::Recorder::default());
+        let progress = Progress::new(recorder.clone(), "t");
+
+        // What the user has now: the older build, fetched from CurseForge back
+        // when its author still allowed it.
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("cool-1.2.2.jar"), b"the older build")
+            .await
+            .unwrap();
+        let mut had = server_record("cool-1.2.2.jar", "CF-5001");
+        had.provider = "curseforge".into();
+        had.origin = crate::instance::content::Origin::User;
+        let mut records = vec![had];
+
+        let landed = install_into(
+            &crate::net::client(),
+            &dir,
+            &mut records,
+            &a_blocked_curseforge_file(),
+            ContentKind::Mod,
+            "Cool Mod",
+            None,
+            None,
+            false,
+            None,
+            blocked::Fallback::at(&base, &progress),
+        )
+        .await
+        .expect("the author published the same bytes on Modrinth themselves");
+
+        assert_eq!(landed, "mr-cool-1.2.3.jar");
+        assert!(
+            !dir.join("cool-1.2.2.jar").exists(),
+            "the build being replaced is still in the folder beside its replacement"
+        );
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].file_name, "mr-cool-1.2.3.jar");
+    }
+
+    /// The server's mod stays the server's through a substitution, which names
+    /// the same mod twice over: Modrinth's ids and Modrinth's file name for a
+    /// mod the server's pack recorded from CurseForge, or the other way round
+    /// once the server's own pack has been substituted too. A rule that knew
+    /// only one of those names let a second copy of the server's mod in beside
+    /// it, and a player on two builds of one mod cannot join.
+    #[tokio::test]
+    async fn a_servers_mod_is_refused_whichever_name_a_substitution_knows_it_by() {
+        let scratch = Scratch::new("srv-blocked");
+        let dir = scratch.paths.root.clone();
+
+        // The pack resolved this mod while it could still be fetched from
+        // CurseForge, so that is the provenance on the server's record.
+        let mut from_curseforge = server_record("cool-1.2.2.jar", "CF-5001");
+        from_curseforge.provider = "curseforge".into();
+        let mut records = vec![from_curseforge];
+
+        // Nothing here can reach Modrinth, so a refusal phrased as the
+        // server's rule can only have been decided before Modrinth was asked —
+        // which is the point: the user is not told the file came from the
+        // author's Modrinth release and then refused it.
+        let recorder = std::sync::Arc::new(crate::events::Recorder::default());
+        let progress = Progress::new(recorder.clone(), "t");
+        let offline = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:9").unwrap())
+            .build()
+            .unwrap();
+        let err = install_into(
+            &offline,
+            &dir,
+            &mut records,
+            &a_blocked_curseforge_file(),
+            ContentKind::Mod,
+            "Cool Mod",
+            None,
+            None,
+            false,
+            None,
+            blocked::Fallback::at("http://127.0.0.1:9/v2", &progress),
+        )
+        .await
+        .expect_err("the server decides which version of its own mod it runs");
+        assert!(err.to_string().contains("server decides"), "{err}");
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert!(
+            recorder.events().is_empty(),
+            "a swap was announced for a file that was then refused: {:?}",
+            recorder.events()
+        );
+
+        // The other way round: the server's own pack met the same blocked file
+        // and recorded the author's Modrinth release, so the ids the user asked
+        // for match nothing and only the substituted ones do.
+        let base = modrinth_holding("mr-cool-1.2.3.jar").await;
+        let mut from_modrinth = server_record("mr-cool-1.2.3.jar", "MRPROJ");
+        from_modrinth.provider = "modrinth".into();
+        let mut records = vec![from_modrinth];
+        let err = install_into(
+            &crate::net::client(),
+            &dir,
+            &mut records,
+            &a_blocked_curseforge_file(),
+            ContentKind::Mod,
+            "Cool Mod",
+            None,
+            None,
+            false,
+            None,
+            blocked::Fallback::at(&base, &Progress::silent("t")),
+        )
+        .await
+        .expect_err("the server's own mod, under the name its pack recorded");
+        assert!(err.to_string().contains("server decides"), "{err}");
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert!(
+            !dir.join("mr-cool-1.2.3.jar").exists(),
+            "the server's file was overwritten by the substitute"
+        );
     }
 
     /// The listing's side is kept on the record at install time, because it is
@@ -628,6 +967,7 @@ mod tests {
             None,
             false,
             Some(Side::Client),
+            blocked::Fallback::live(&Progress::silent("t")),
         )
         .await
         .unwrap();

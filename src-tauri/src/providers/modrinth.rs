@@ -10,7 +10,7 @@ use super::{
     VersionFile,
 };
 
-const API: &str = "https://api.modrinth.com/v2";
+pub(crate) const API: &str = "https://api.modrinth.com/v2";
 
 fn kind_facet(kind: ProjectKind) -> &'static str {
     match kind {
@@ -345,6 +345,7 @@ fn to_version(v: VersionResponse) -> Version {
             })
             .collect(),
         blocked_reason: None,
+        blocked_sha1: None,
     }
 }
 
@@ -492,7 +493,17 @@ pub async fn files_by_hashes(
     hashes: &[String],
     algorithm: HashAlgorithm,
 ) -> Result<Answered> {
-    hashes_against(&format!("{API}/version_files"), client, hashes, algorithm).await
+    files_by_hashes_at(client, API, hashes, algorithm).await
+}
+
+/// The same, against a given base URL.
+pub async fn files_by_hashes_at(
+    client: &reqwest::Client,
+    base: &str,
+    hashes: &[String],
+    algorithm: HashAlgorithm,
+) -> Result<Answered> {
+    hashes_against(&format!("{base}/version_files"), client, hashes, algorithm).await
 }
 
 /// The same, against a given endpoint.

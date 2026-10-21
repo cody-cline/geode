@@ -238,6 +238,7 @@ pub async fn ensure_stack(
             // Marked as a dependency: these came along with a Fabric mod
             // rather than being chosen directly.
             true,
+            crate::install::blocked::Fallback::live(progress),
         )
         .await?;
 

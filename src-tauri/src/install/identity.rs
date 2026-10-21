@@ -1523,6 +1523,7 @@ mod tests {
             files: Vec::new(),
             dependencies: Vec::new(),
             blocked_reason: blocked.then(|| "the author has disabled it".to_string()),
+            blocked_sha1: None,
         }
     }
 

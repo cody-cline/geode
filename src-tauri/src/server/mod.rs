@@ -713,6 +713,7 @@ pub(crate) async fn install_one(
     loader: &str,
     game_version: &str,
     curseforge_key: Option<&str>,
+    fallback: crate::install::blocked::Fallback<'_>,
 ) -> Result<String> {
     use crate::providers::{self, Provider};
 
@@ -743,6 +744,7 @@ pub(crate) async fn install_one(
         Some(project.slug.clone()),
         false,
         project.listed_side(),
+        fallback,
     )
     .await
 }

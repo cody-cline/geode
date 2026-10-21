@@ -93,6 +93,7 @@ pub async fn from_modpack(
             loader,
             &contents.mc_version,
             curseforge_key,
+            crate::install::blocked::Fallback::live(progress),
         )
         .await
         {

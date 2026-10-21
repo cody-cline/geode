@@ -114,6 +114,7 @@ pub async fn from_plan(
             &target.loader,
             game,
             curseforge_key,
+            crate::install::blocked::Fallback::live(progress),
         )
         .await
         {

@@ -640,24 +640,25 @@ fn to_version(f: CfFile) -> Version {
         None
     };
 
-    // A blocked file carries no `VersionFile` at all, which also throws away
-    // the sha1 CurseForge published for it in `hashes`. That hash is the one
-    // input the owner's substitution rule names — look the blocked file up on
-    // Modrinth by the sha1 CurseForge itself gave, and install the author's own
-    // Modrinth release rather than refusing — so whichever stage builds that
-    // (the CurseForge pack import, a `.geodepack` reference and an ordinary
-    // install all reach it) has to keep the hash here. An empty `url` is not
-    // the way: `install::content` would read it as somewhere to fetch from.
+    // CurseForge publishes sha1 (algo 1) and md5 (algo 2), nothing else.
+    let sha1 = f
+        .hashes
+        .iter()
+        .find(|h| h.algo == 1)
+        .map(|h| h.value.clone());
+
+    // A blocked file carries no `VersionFile` at all — there is no URL to put
+    // in one, and an empty `url` would be read by `install::content` as
+    // somewhere to fetch from. So the sha1 goes on the version itself, which
+    // is where `install::blocked` looks for it: that hash, published by
+    // CurseForge about its own file, is the only way to find the author's own
+    // release of those exact bytes on Modrinth, since the file cannot be
+    // fetched to hash it here.
     let files = match f.download_url {
         Some(url) => vec![VersionFile {
             url,
             filename: f.file_name,
-            sha1: f
-                .hashes
-                .iter()
-                .find(|h| h.algo == 1)
-                .map(|h| h.value.clone()),
-            // CurseForge publishes sha1 (algo 1) and md5 (algo 2), nothing else.
+            sha1: sha1.clone(),
             sha512: None,
             size: f.file_length,
             primary: true,
@@ -696,6 +697,10 @@ fn to_version(f: CfFile) -> Version {
                 })
             })
             .collect(),
+        // Only where it is the one thing left to go on. For a fetchable file
+        // the same hash is already on its `VersionFile`, and two homes for one
+        // fact is two places to read it from.
+        blocked_sha1: blocked_reason.as_ref().and(sha1),
         blocked_reason,
     }
 }
@@ -727,9 +732,20 @@ pub async fn file(
     file_id: u32,
     api_key: &str,
 ) -> Result<Version> {
+    file_at(client, API, project_id, file_id, api_key).await
+}
+
+/// The same, against a given base URL.
+pub async fn file_at(
+    client: &reqwest::Client,
+    base: &str,
+    project_id: u32,
+    file_id: u32,
+    api_key: &str,
+) -> Result<Version> {
     let resp: Envelope<CfFile> = get(
         client,
-        &format!("{API}/mods/{project_id}/files/{file_id}"),
+        &format!("{base}/mods/{project_id}/files/{file_id}"),
         api_key,
     )
     .await?;

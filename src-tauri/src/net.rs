@@ -52,6 +52,27 @@ pub struct ProgressEvent {
     pub error: Option<String>,
 }
 
+/// Something the user has to be told that is neither progress nor a failure.
+///
+/// A job's outcome already travels back to whoever called the command, in
+/// whatever shape that command returns — a list of problems, an install
+/// report, a filename. This is for a fact that has to be said *the same way*
+/// from several of those shapes at once, which threading it through all of
+/// them would mean writing three times.
+///
+/// One sender today: [`crate::install::blocked`] says, in one sentence written
+/// in one place, that a CurseForge author's copy of a file is not
+/// distributable so Geode installed that author's own Modrinth release
+/// instead. It is said from a pack import, a shared pack's reference and an
+/// ordinary install, which report in three different shapes and none of which
+/// should be able to forget it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Notice {
+    pub title: String,
+    pub body: String,
+}
+
 /// A throttled progress channel tied to one long-running job (an install, an
 /// import, a Java download). The frontend keys off `id`.
 ///
@@ -141,6 +162,20 @@ impl Progress {
     pub async fn fail(&self, err: &str) {
         self.emit("Failed".into(), true, Some(err.to_string()))
             .await;
+    }
+
+    /// Tell the user a [`Notice`]. Not throttled and not tied to a stage: it
+    /// is said once per thing that happened, and a job that said one still
+    /// finishes or fails as it would have.
+    pub fn notice(&self, title: impl Into<String>, body: impl Into<String>) {
+        crate::events::emit(
+            &self.sink,
+            "geode://notice",
+            &Notice {
+                title: title.into(),
+                body: body.into(),
+            },
+        );
     }
 
     async fn emit(&self, detail: String, done: bool, error: Option<String>) {

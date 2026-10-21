@@ -807,6 +807,20 @@ export interface ProgressEvent {
   error: string | null;
 }
 
+/**
+ * Something the core has to say that is neither progress nor a failure.
+ *
+ * Today there is one: a CurseForge author's copy of a file is not
+ * distributable, so Geode installed that author's own Modrinth release of the
+ * identical file instead. It arrives on its own topic because a pack import, a
+ * shared pack's reference and an ordinary install all say it, and their own
+ * results come back in three different shapes.
+ */
+export interface Notice {
+  title: string;
+  body: string;
+}
+
 export interface LogEntry {
   instanceId: string;
   level: string;
