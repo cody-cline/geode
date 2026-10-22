@@ -10,7 +10,7 @@ the authority — when this document and a module disagree, the module is right.
 
 ```
 React in the OS webview          src/
-    │  invoke("command_name", args)          131 #[tauri::command] fns
+    │  invoke("command_name", args)          162 #[tauri::command] fns
     │  listen("topic", handler)              events pushed the other way
     ▼
 Rust core                        src-tauri/src/
@@ -44,6 +44,7 @@ Everything else is built on these, so read them before anything else.
 | `state.rs` | `AppState`: `Paths`, the HTTP client, the running-game and running-server registries, and the caches (version manifests, Connector support, jar metadata, plan support tables, plan twins). |
 | `config.rs` | `config.json` — global defaults, API keys, settings. |
 | `drive/` | Sharing a pack through the user's **own** Google Drive: the desktop OAuth flow with PKCE on a loopback redirect (`oauth.rs`), the connection in `google.json` (`tokens.rs`), and the Drive calls a share is made of (`api.rs`). Every endpoint is injectable, because there is no account here to test against and must never be one. |
+| `remote.rs` | The `geoded` hosts this copy can reach: the list and token in `hosts.json` (owner-only, and `HostView` has no token field, so nothing crosses the IPC boundary), the address normaliser, and the thin client for the routes a transfer uses. Not to be confused with `share/host.rs`, which is the listener *players* reach. |
 | `logs.rs` | Minecraft's own log files (`logs/latest.log`, gzipped archives) listed, read back and pruned. Deliberately ignorant of whether it is looking at a server or an instance: the caller supplies the directory. |
 | `diagnostics.rs` | Bundling "here is what went wrong" — context first, log second, because a crash in `rendering` means nothing until you know the pack is Fabric 1.21 with Sodium and Iris in it. |
 
@@ -186,6 +187,7 @@ belongs to.
 | `from_pack.rs`, `from_plan.rs` | Making a server out of a published modpack or a Geode plan. `kinds_for(loader)` lists the software that can run a given loader's mods, plain loader first, hybrids after. |
 | `logs.rs` | The server's view onto the shared log reader. |
 | `share.rs` | A server's share state in `servers/<id>/share.json`, kept out of `server.json` on purpose: long jobs load that file, work for minutes and save what they loaded, which would quietly undo a replaced password. Stopping renames it to `share.stopped.json`. |
+| `transfer.rs` | Moving or copying a whole server to another machine. A tar stream built as it is sent, whose **last** entry is a per-file digest list — so a transfer cut short has nothing to vouch for it and can never be committed. The receiver hashes what it writes, compares both lists both ways, and only then renames `transfers/<id>/` into `servers/`. A move's delete is the mover's own second step, after that. Both sides refuse while the server runs; an id already taken is refused rather than merged or renamed. A copy arrives with no sharing at all, a move carries the password as `share.stopped.json`, and the receiver never accepts a `share.json`. |
 
 ## Sharing: `share/`
 
@@ -358,9 +360,13 @@ Five frontend traps, each a comment in place:
   toolchain out of the image: Tauri is behind the `desktop` feature, so the
   headless crate is the library plus `src/bin/geoded.rs` and `src/daemon/`.
   `GEODE_TOKEN` is read by `daemon::Settings`, every route is behind it, and a
-  container stop stops the servers rather than killing them. What remains is
-  moving a server from the app to a host — `daemon/mod.rs` writes down what
-  that needs and why it is a decision rather than a detail.
+  container stop stops the servers rather than killing them. A whole server
+  moves or copies between the app and a host over two routes of their own
+  (`daemon/api.rs`, with `server/transfer.rs` and the app-side `remote.rs`):
+  the app drives both directions, because a host cannot reach a desktop
+  machine behind NAT; an upload is bounded by one staging directory at a time
+  under a 64 GiB ceiling, counted as it lands; and the host never deletes a
+  server because somebody downloaded it.
 
 A `rendezvous/` Cloudflare Worker used to sit here, resolving share codes to a
 ticket. It was retired once servers could serve their own packs directly — a

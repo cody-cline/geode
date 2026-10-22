@@ -24,6 +24,7 @@ pub mod properties;
 pub mod run;
 pub mod schedule;
 pub mod share;
+pub mod transfer;
 
 use serde::{Deserialize, Serialize};
 

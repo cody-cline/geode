@@ -14,6 +14,7 @@ import {
   Loader2,
   Palette,
   RefreshCw,
+  Server as ServerIcon,
   Share2,
   Trash2,
   Unplug,
@@ -30,6 +31,7 @@ import StatusNote from "../components/StatusNote";
 import type {
   AppInfo,
   DriveStatus,
+  RemoteHost,
   JavaInstall,
   KeyCheck,
   ShareSettings,
@@ -44,6 +46,7 @@ const TABS = [
   { id: "accounts", label: "Accounts", icon: UserRound },
   { id: "sources", label: "Mod sources", icon: KeyRound },
   { id: "sharing", label: "Server sharing", icon: Share2 },
+  { id: "hosts", label: "Server hosts", icon: ServerIcon },
   { id: "drive", label: "Google Drive", icon: Cloud },
   { id: "about", label: "About", icon: Info },
 ] as const;
@@ -110,6 +113,7 @@ export default function Settings() {
           {tab === "accounts" && <AccountsSettings update={update} />}
           {tab === "sources" && <Sources />}
           {tab === "sharing" && <SharingSettings />}
+          {tab === "hosts" && <HostSettings />}
           {tab === "drive" && <DriveSettings update={update} />}
           {tab === "about" && <About />}
         </div>
@@ -532,6 +536,185 @@ function AccountsSettings({ update }: { update: Updater }) {
       </section>
 
       {managing && <AccountsModal onClose={() => setManaging(false)} />}
+    </div>
+  );
+}
+
+/**
+ * The machines running Geode headless that this copy can reach.
+ *
+ * One token per host and no accounts at all, which is `daemon/token.rs`'s
+ * decision rather than this panel's: whoever holds a host's token can do
+ * everything on it. So the panel says that, says plainly that a plain `http://`
+ * address carries the token in the clear, and never shows a token back — not
+ * even a masked one, because what is kept is on disk and what crosses the IPC
+ * boundary has no token field at all.
+ */
+function HostSettings() {
+  const toast = useStore((s) => s.toast);
+  const reportError = useStore((s) => s.reportError);
+
+  const [hosts, setHosts] = useState<RemoteHost[] | null>(null);
+  const [name, setName] = useState("");
+  const [address, setAddress] = useState("");
+  const [token, setToken] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api
+      .remoteHosts()
+      .then(setHosts)
+      .catch((e) => {
+        setHosts([]);
+        reportError("Could not read your list of hosts", e);
+      });
+  }, [reportError]);
+
+  async function add() {
+    setBusy(true);
+    try {
+      setHosts(await api.addRemoteHost(name, address, token));
+      // Cleared the moment it is saved: nothing here ever reads a token back,
+      // and a field still holding one is a field that can be read over a
+      // shoulder.
+      setName("");
+      setAddress("");
+      setToken("");
+      toast({ kind: "success", title: "Host saved" });
+    } catch (e) {
+      reportError("Could not save that host", e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function forget(host: RemoteHost) {
+    setBusy(true);
+    try {
+      setHosts(await api.forgetRemoteHost(host.id));
+      toast({
+        kind: "info",
+        title: `Forgot ${host.name}`,
+        body: "Nothing on the host itself was touched — only this machine's note of how to reach it.",
+      });
+    } catch (e) {
+      reportError("Could not forget that host", e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className={styles.form}>
+      <section className={styles.section}>
+        <h2 className={styles.sectionTitle}>Hosts you can send a server to</h2>
+
+        {hosts === null ? (
+          <div className={styles.loading}>
+            <Loader2 size={16} className="spin" />
+          </div>
+        ) : hosts.length === 0 ? (
+          <p className={styles.calloutNote}>
+            None yet. A host is a machine running Geode with no window —{" "}
+            <code>geoded</code>, from the container files — and it is where a
+            server can keep running when this computer is off.
+          </p>
+        ) : (
+          <div className={styles.accountList}>
+            {hosts.map((host) => (
+              <div key={host.id} className={styles.accountRow}>
+                <ServerIcon size={16} />
+                <span className={styles.accountText}>
+                  {host.name}
+                  <span className={styles.accountKind}>
+                    {host.address}
+                    {host.plainHttp && " · the token crosses in the clear"}
+                  </span>
+                </span>
+                <button
+                  className="btn btn-sm"
+                  onClick={() => void forget(host)}
+                  disabled={busy}
+                >
+                  <Unplug size={13} />
+                  Forget
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className={styles.section}>
+        <h2 className={styles.sectionTitle}>Add a host</h2>
+        <div className={styles.field}>
+          <label className="label" htmlFor="host-name">
+            Name
+          </label>
+          <input
+            id="host-name"
+            className="input"
+            value={name}
+            placeholder="The box in the cupboard"
+            onChange={(e) => setName(e.target.value)}
+          />
+        </div>
+        <div className={styles.field}>
+          <label className="label" htmlFor="host-address">
+            Address
+          </label>
+          <input
+            id="host-address"
+            className="input"
+            value={address}
+            placeholder="box.example:9090"
+            onChange={(e) => setAddress(e.target.value)}
+          />
+        </div>
+        <div className={styles.field}>
+          <label className="label" htmlFor="host-token">
+            Token
+          </label>
+          <input
+            id="host-token"
+            className="input"
+            type="password"
+            value={token}
+            placeholder="the GEODE_TOKEN its compose file was given"
+            onChange={(e) => setToken(e.target.value)}
+          />
+        </div>
+        <div className={styles.inlineRow}>
+          <button
+            className="btn btn-primary"
+            onClick={() => void add()}
+            disabled={busy || !name.trim() || !address.trim() || !token.trim()}
+          >
+            {busy && <Loader2 size={13} className="spin" />}
+            Save host
+          </button>
+        </div>
+
+        <div className={styles.callout}>
+          <p>
+            <strong>One token, and it can do everything.</strong> A host has no
+            accounts and no roles: whoever holds its token can start, stop,
+            reconfigure and delete every server on it. Keep it as you would an
+            API key, and generate a new one on the host if it ever leaks.
+          </p>
+          <p>
+            A host serves plain HTTP and expects a tunnel, a VPN or a reverse
+            proxy with TLS in front of it. Over a bare <code>http://</code>{" "}
+            address the token is readable by anything between here and there —
+            so on anything but your own network, put something in front of it
+            and give Geode the <code>https://</code> address instead.
+          </p>
+          <p className={styles.calloutNote}>
+            Forgetting a host removes nothing but this machine&apos;s note of how
+            to reach it. The servers on it keep running.
+          </p>
+        </div>
+      </section>
     </div>
   );
 }

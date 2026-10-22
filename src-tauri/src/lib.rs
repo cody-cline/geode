@@ -32,6 +32,8 @@ pub mod net;
 pub mod paths;
 pub mod plan;
 pub mod providers;
+/// The `geoded` hosts this app can send a server to, or bring one back from.
+pub mod remote;
 pub mod rt;
 pub mod server;
 pub mod settings;
@@ -247,6 +249,13 @@ pub fn run() {
             commands::create_server_backup,
             commands::delete_server_backup,
             commands::restore_server_backup,
+            commands::remote_hosts,
+            commands::add_remote_host,
+            commands::forget_remote_host,
+            commands::remote_host_servers,
+            commands::transfer_size,
+            commands::send_server_to_host,
+            commands::bring_server_from_host,
             commands::read_server_properties,
             commands::write_server_properties,
             commands::server_player_lists,

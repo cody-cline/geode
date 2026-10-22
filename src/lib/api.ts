@@ -55,6 +55,8 @@ import type {
   ProjectKind,
   ProjectVersion,
   Provider,
+  RemoteHost,
+  RemoteServer,
   Schedule,
   SearchQuery,
   SearchResults,
@@ -70,6 +72,9 @@ import type {
   ShareSettings,
   ShareStatus,
   StagedPack,
+  TransferArrived,
+  TransferMeasure,
+  TransferMode,
   UpdateCandidate,
   UpdateStatus,
   WantedSetting,
@@ -661,6 +666,27 @@ export const api = {
    */
   exportPrismInstance: (id: string, dest: string, groups: Group[]) =>
     invoke<ExportReport>("export_prism_instance", { id, dest, groups }),
+
+  // Moving or copying a whole server between this machine and a `geoded`
+  // host. Both directions are cancelled with
+  // cancelTask(`server-transfer:${serverId}`).
+  remoteHosts: () => invoke<RemoteHost[]>("remote_hosts"),
+  /** Remembers the host and its token; an address already listed is replaced. */
+  addRemoteHost: (name: string, address: string, token: string) =>
+    invoke<RemoteHost[]>("add_remote_host", { name, address, token }),
+  /** Forgets how to reach a host. Nothing on it is touched. */
+  forgetRemoteHost: (id: string) => invoke<RemoteHost[]>("forget_remote_host", { id }),
+  remoteHostServers: (host: string) =>
+    invoke<RemoteServer[]>("remote_host_servers", { host }),
+  /** How big a transfer would be. `host` is null for a server on this machine. */
+  transferSize: (host: string | null, id: string, mode: TransferMode) =>
+    invoke<TransferMeasure>("transfer_size", { host, id, mode }),
+  /** A move deletes this machine's copy, and only after the host verified every file. */
+  sendServerToHost: (host: string, id: string, mode: TransferMode) =>
+    invoke<TransferArrived>("send_server_to_host", { host, id, mode }),
+  /** A move deletes the host's copy, and only after this machine verified every file. */
+  bringServerFromHost: (host: string, id: string, mode: TransferMode) =>
+    invoke<TransferArrived>("bring_server_from_host", { host, id, mode }),
 
   // Google Drive. Connecting opens the user's browser and blocks until they
   // come back, the way completeMicrosoftLogin does; cancel it with

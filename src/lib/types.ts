@@ -1400,6 +1400,49 @@ export interface ExportReport {
 }
 
 // ---------------------------------------------------------------------------
+// Moving and copying a server between machines
+// ---------------------------------------------------------------------------
+
+/** What a transfer does to the server it came from. */
+export type TransferMode = "copy" | "move";
+
+/** A `geoded` host this machine knows how to reach. Never its token. */
+export interface RemoteHost {
+  id: string;
+  name: string;
+  /** Normalised when it was added: a scheme, a host and a port, nothing else. */
+  address: string;
+  /** True when the token travels in the clear to reach it, so the UI can say so. */
+  plainHttp: boolean;
+}
+
+/** A server on one of those hosts. */
+export interface RemoteServer {
+  id: string;
+  name: string;
+  kindName: string;
+  mcVersion: string;
+  running: boolean;
+  installed: boolean;
+}
+
+/** How big a transfer would be, before anybody commits to it. */
+export interface TransferMeasure {
+  files: number;
+  bytes: number;
+  /** What of the above is `backups/`, which is usually most of it. */
+  backupFiles: number;
+  backupBytes: number;
+}
+
+/** A server that arrived and was proved whole, file by file. */
+export interface TransferArrived {
+  id: string;
+  files: number;
+  bytes: number;
+}
+
+// ---------------------------------------------------------------------------
 // Sharing a pack through Google Drive
 // ---------------------------------------------------------------------------
 

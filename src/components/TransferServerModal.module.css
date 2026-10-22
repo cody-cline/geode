@@ -1,0 +1,234 @@
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.loading {
+  display: flex;
+  justify-content: center;
+  padding: 18px 0;
+  color: var(--text-faint);
+}
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+  padding: 10px 6px 4px;
+}
+
+.emptyIcon {
+  color: var(--text-faint);
+}
+
+.empty p,
+.note {
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.6;
+}
+
+.link {
+  color: var(--accent);
+  font: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* The host's own servers, laid out as `ServerTargetModal` lays out this
+   machine's — the same choice in the same shape. */
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  padding: 9px 11px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  text-align: left;
+  transition:
+    border-color 0.12s var(--ease),
+    background 0.12s var(--ease);
+}
+
+.row:hover {
+  border-color: var(--border-strong);
+}
+
+.selected,
+.selected:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
+
+/* Shown rather than hidden: a server missing from the list reads as a bug,
+   while one that says why explains the rule. */
+.unusable {
+  opacity: 0.55;
+}
+
+.icon {
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+
+.meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.35;
+}
+
+.name {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detail {
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.warn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--warn);
+  flex-shrink: 0;
+}
+
+.check {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.modes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.mode {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 10px 11px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  text-align: left;
+  transition:
+    border-color 0.12s var(--ease),
+    background 0.12s var(--ease);
+}
+
+.mode:hover {
+  border-color: var(--border-strong);
+}
+
+.mode > :global(svg) {
+  color: var(--text-faint);
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.mode span {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.mode strong {
+  font-size: 12.5px;
+}
+
+.modeOn,
+.modeOn:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
+
+.modeOn > :global(svg) {
+  color: var(--accent);
+}
+
+.modeWhy {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  line-height: 1.5;
+}
+
+.size {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 11px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  font-size: 12.5px;
+}
+
+.sizing {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-faint);
+}
+
+.sizeWhy {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  line-height: 1.55;
+}
+
+/* What happens to the server's sharing, said before it happens rather than
+   discovered afterwards by the players. */
+.sharing {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.6;
+  padding-left: 10px;
+  border-left: 2px solid var(--border-strong);
+}
+
+.blocked {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--warn);
+  line-height: 1.55;
+}
+
+.blocked > :global(svg) {
+  flex-shrink: 0;
+  margin-top: 2px;
+}

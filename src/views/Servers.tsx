@@ -10,10 +10,12 @@ import {
   Server as ServerIcon,
   Search,
   Square,
+  Download,
 } from "lucide-react";
 
 import InstanceIcon from "../components/InstanceIcon";
 import NewServerModal from "../components/NewServerModal";
+import TransferServerModal from "../components/TransferServerModal";
 import { api } from "../lib/api";
 import { hashHue, relativeTime } from "../lib/format";
 import { OLD_ADDRESS_LABEL, linksPointAtOldAddress } from "../lib/share";
@@ -35,6 +37,7 @@ export default function Servers() {
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<Sort>("recent");
   const [creating, setCreating] = useState(false);
+  const [bringing, setBringing] = useState(false);
 
   useEffect(() => {
     void refreshServers();
@@ -89,6 +92,17 @@ export default function Servers() {
             <option value="name">Name</option>
             <option value="kind">Software</option>
           </select>
+          {/* Beside New server rather than buried in Settings: bringing a
+              server back from a host is one of the two ways a server appears
+              in this list. */}
+          <button
+            className="btn"
+            onClick={() => setBringing(true)}
+            title="Move or copy a server from a machine running Geode headless"
+          >
+            <Download size={14} />
+            From a host
+          </button>
           <button className="btn btn-primary" onClick={() => setCreating(true)}>
             New server
           </button>
@@ -138,6 +152,10 @@ export default function Servers() {
             navigate({ view: "server", id: server.id });
           }}
         />
+      )}
+
+      {bringing && (
+        <TransferServerModal direction="pull" onClose={() => setBringing(false)} />
       )}
     </>
   );

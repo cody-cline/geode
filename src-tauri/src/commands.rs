@@ -2973,6 +2973,171 @@ pub async fn restore_server_backup(
     crate::server::backup::restore(&state.paths, &id, &name).await
 }
 
+// ---------------------------------------------------------------------------
+// Moving and copying a server between machines
+// ---------------------------------------------------------------------------
+
+/// The hosts this machine knows how to reach. Never their tokens: see
+/// [`crate::remote`].
+#[tauri::command]
+pub async fn remote_hosts(state: State<'_, AppState>) -> Result<Vec<crate::remote::HostView>> {
+    Ok(crate::remote::Hosts::load(&state.paths).await?.views())
+}
+
+#[tauri::command]
+pub async fn add_remote_host(
+    state: State<'_, AppState>,
+    name: String,
+    address: String,
+    token: String,
+) -> Result<Vec<crate::remote::HostView>> {
+    crate::remote::add(&state.paths, name, address, token).await
+}
+
+/// Forget how to reach a host. Nothing on it is touched.
+#[tauri::command]
+pub async fn forget_remote_host(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<crate::remote::HostView>> {
+    crate::remote::forget(&state.paths, &id).await
+}
+
+/// Every server on one of those hosts, for picking one to bring back.
+#[tauri::command]
+pub async fn remote_host_servers(
+    state: State<'_, AppState>,
+    host: String,
+) -> Result<Vec<crate::remote::RemoteServer>> {
+    let hosts = crate::remote::Hosts::load(&state.paths).await?;
+    crate::remote::servers(hosts.get(&host)?).await
+}
+
+/// How big a transfer would be, before anybody commits to it.
+///
+/// `host` is which machine the server is on now: `None` for this one, which is
+/// a push, or a host's id, which is a pull. One command for both so the figure
+/// the dialog shows is worked out the same way whichever direction it is going.
+#[tauri::command]
+pub async fn transfer_size(
+    state: State<'_, AppState>,
+    host: Option<String>,
+    id: String,
+    mode: crate::server::transfer::Mode,
+) -> Result<crate::server::transfer::Measure> {
+    match host {
+        None => crate::server::transfer::measure(&state.paths, &id, mode).await,
+        Some(host) => {
+            let hosts = crate::remote::Hosts::load(&state.paths).await?;
+            crate::remote::measure(hosts.get(&host)?, &id, mode).await
+        }
+    }
+}
+
+/// Send one of this machine's servers to a host.
+///
+/// A move deletes the local server, and only after the host has verified every
+/// file it received. Nothing in between: a half-transferred world whose
+/// original has already gone is the worst thing this feature could do, so the
+/// delete is the last statement in the function and reachable only through a
+/// host that answered with a complete arrival.
+#[tauri::command]
+pub async fn send_server_to_host(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    host: String,
+    id: String,
+    mode: crate::server::transfer::Mode,
+) -> Result<crate::server::transfer::Arrived> {
+    if state.servers.is_running(&id) {
+        return Err(Error::msg(
+            "stop the server before transferring it — a world that is being written cannot be copied",
+        ));
+    }
+    let hosts = crate::remote::Hosts::load(&state.paths).await?;
+    let host = hosts.get(&host)?;
+
+    let progress = Progress::new(crate::desktop::sink(app.clone()), format!("server-transfer:{id}"));
+    state.register_cancel(progress.id(), progress.cancel_flag());
+    let sent = crate::remote::push(&state.paths, host, &id, mode, &progress).await;
+    state.clear_cancel(progress.id());
+
+    let arrived = match sent {
+        Ok(arrived) => arrived,
+        Err(e) => {
+            progress.fail(&e.to_string()).await;
+            return Err(e);
+        }
+    };
+
+    if mode == crate::server::transfer::Mode::Move {
+        // Running again, somehow, between the check above and here: it would
+        // be a server deleted out from under its own process. Reported rather
+        // than forced, and the host has the copy either way.
+        if state.servers.is_running(&id) {
+            progress.finish().await;
+            return Err(Error::msg(format!(
+                "{} has the server, but this one started up again in the meantime, so it was \
+                 left here — stop it and delete it yourself",
+                host.name
+            )));
+        }
+        crate::server::delete(&state.paths, &id).await?;
+        // Whichever way the delete went, as a delete from the Servers list
+        // does: if that was the last shared server, the pack listener and the
+        // router's port go with it.
+        reconcile_sharing(&app, &state).await;
+    }
+    progress.finish().await;
+    Ok(arrived)
+}
+
+/// Bring one of a host's servers here.
+///
+/// The mirror of the above, with the two sides swapped: this machine verifies
+/// what arrives, and only then asks the host to delete its copy.
+#[tauri::command]
+pub async fn bring_server_from_host(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    host: String,
+    id: String,
+    mode: crate::server::transfer::Mode,
+) -> Result<crate::server::transfer::Arrived> {
+    let hosts = crate::remote::Hosts::load(&state.paths).await?;
+    let host = hosts.get(&host)?;
+
+    let progress = Progress::new(crate::desktop::sink(app), format!("server-transfer:{id}"));
+    state.register_cancel(progress.id(), progress.cancel_flag());
+    let brought = crate::remote::pull(&state.paths, host, &id, mode, &progress).await;
+    state.clear_cancel(progress.id());
+
+    let arrived = match brought {
+        Ok(arrived) => arrived,
+        Err(e) => {
+            progress.fail(&e.to_string()).await;
+            return Err(e);
+        }
+    };
+
+    if mode == crate::server::transfer::Mode::Move {
+        // The server is here and proved whole. If the host will not delete its
+        // copy — it was started there while this ran, say — that is worth
+        // saying rather than swallowing: two copies of one server, both
+        // startable, is exactly what a move is for avoiding.
+        if let Err(e) = crate::remote::delete_server(host, &id).await {
+            progress.finish().await;
+            return Err(Error::msg(format!(
+                "the server is here and complete, but {} still has its copy ({e}) — delete it \
+                 there before starting either one",
+                host.name
+            )));
+        }
+    }
+    progress.finish().await;
+    Ok(arrived)
+}
+
 /// The server's own `server.properties`. Empty until it has been started once,
 /// because the server writes that file rather than us.
 #[tauri::command]

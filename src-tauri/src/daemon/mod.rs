@@ -30,45 +30,33 @@
 //! * **No instances.** The app launches the game; a host runs servers. Nothing
 //!   here exposes `instance::` or `launch::`, and a machine in a cupboard has
 //!   no screen to render one on.
-//! * **No local-to-remote transfer yet.** Moving a server from the desktop app
-//!   to a host is the feature this is ultimately for, and it is not here.
 //!
-//! # What transfer would need
+//! # Moving a server here, and taking one away
 //!
-//! Written down because the shape is a decision, not a detail, and it should
-//! be the owner's:
+//! Built: [`crate::server::transfer`] is the format and both halves of the
+//! work, two routes in [`api`] are this side of it, and `crate::remote` is the
+//! app's. The decisions the owner made, and what each one rests on, are in
+//! `server/transfer.rs`'s own header; the four worth knowing from here are:
 //!
-//! * **What moves.** A server is `server.json`, `run/` (the world,
-//!   `server.properties`, `eula.txt`, mods and plugins), `media/` and
-//!   `share.json`. `backups/` is the one part nobody wants to send over a
-//!   domestic uplink, and `share.json` is the one part that must *not* arrive
-//!   unchanged — it names a code and an address belonging to the machine that
-//!   had the server, and see `server/share.rs` for why it is a separate file.
-//! * **References, not bytes, where there is a reference.** The pack format
-//!   already carries provider content by project and version and fetches it
-//!   with the recipient's credentials — a transfer that zipped `mods/` would
-//!   throw that away, and docs/sharing-and-hosting.md says why that matters
-//!   beyond size. A world has no reference and must travel as bytes.
-//! * **Which direction drives it.** Either the app uploads to the host, or the
-//!   host fetches from the app. Uploading needs a route here that accepts a
-//!   large body — [`api::MAX_BODY`] is sized for settings, not worlds, so it
-//!   would be a route of its own with a ceiling of its own — a resume story
-//!   for a connection that drops partway through a 10 GB world, and somewhere
-//!   to put it that is not the live server directory. Fetching needs the host
-//!   to reach the app, which is a listener on a desktop machine and the thing
-//!   `share/host.rs` already is.
-//! * **What happens to the original.** Moved or copied, and if moved, when the
-//!   local copy goes — before the first successful start on the host, or
-//!   after. A server that exists in two places and is started in both will
-//!   have two divergent worlds within a minute.
-//! * **What the player sees.** A moved server is at a new address. Players who
-//!   joined it have the old one pinned in their server list, and the listing in
-//!   `share/manifest.rs` is what keeps that row in step.
-//!
-//! None of the above is built. What is built does not foreclose it: the list
-//! route reads `servers/` from disk every time, so a server that arrives needs
-//! no cache invalidated, and every route is shaped per server rather than as
-//! one document a transfer would have to merge into.
+//! * **Everything in the server travels** — `server.json`, the whole of
+//!   `run/`, `media/` and `backups/` — as bytes. That is not a reversal of the
+//!   pack format's references-over-bytes rule: a transfer is one person's own
+//!   files moving between two of their own machines, with nothing
+//!   redistributed, and a host re-fetching the mods would need that person's
+//!   CurseForge key and would lose any version since taken down.
+//! * **The app drives both directions**, because a host cannot reach a desktop
+//!   machine behind NAT — the thing `share/host.rs` already is. So the routes
+//!   are an upload and a download, with ceilings of their own rather than
+//!   [`api::MAX_BODY`], which is sized for settings.
+//! * **Nothing is deleted until the other side is proved complete.** Verified
+//!   by a per-file digest list, not by a byte count, and the delete is the
+//!   mover's own second request — this host never removes a server because
+//!   somebody downloaded it.
+//! * **A copy arrives unshared; a move carries the password, stopped.** Two
+//!   machines serving one pack under one password is two servers players
+//!   cannot tell apart, and a moved server's certificate is the new machine's,
+//!   so every link already handed out has to be taken again. The Share tab
+//!   already knows how to say that, which is why `share.link.json` travels.
 
 pub mod api;
 pub mod console;
@@ -107,6 +95,12 @@ pub struct Host {
     pub max_heap_mb: Option<u32>,
     /// Console sockets left, of [`console::MAX_SOCKETS`].
     pub sockets: Arc<Semaphore>,
+    /// The one transfer this host will take at a time.
+    ///
+    /// A staging directory is the largest thing the holder of the token can
+    /// make this host allocate, so the ceiling on one arriving server is only
+    /// a ceiling if there is one of them: see [`api`]'s header.
+    pub transfers: Arc<Semaphore>,
 }
 
 impl Host {
@@ -119,6 +113,7 @@ impl Host {
             token,
             max_heap_mb,
             sockets: Arc::new(Semaphore::new(console::MAX_SOCKETS)),
+            transfers: Arc::new(Semaphore::new(1)),
         }
     }
 }
@@ -131,6 +126,11 @@ pub async fn run() -> Result<()> {
         .ensure_all()
         .await
         .ctx(format!("preparing {}", paths.root.display()))?;
+    // Nothing can be arriving yet, so anything in `transfers/` is an upload
+    // this host dropped when it was last restarted — up to 64 GiB of a disk it
+    // also runs servers from, that nothing reads and nothing else would ever
+    // remove. See [`crate::server::transfer::sweep`].
+    crate::server::transfer::sweep(&paths).await;
 
     let config = crate::config::Config::load(&paths).await.unwrap_or_default();
     let host = Arc::new(Host::new(

@@ -80,7 +80,7 @@ reads Sinytra Connector's real files for exactly this reason. The same trap in
 reverse: a server kind's mod loader is a fact about that software, not a guess
 (Banner is Fabric-based, not NeoForge — `ServerKind::mod_loader`).
 
-**`commands.rs` stays thin: validate, delegate, return.** 154 of the 155
+**`commands.rs` stays thin: validate, delegate, return.** 161 of the 162
 `#[tauri::command]` functions live there (the odd one out is
 `deeplink::take_pending_join`), and logic belongs in the module that owns it so
 the headless path can reach it too. A new command must be added in **two**
@@ -155,6 +155,16 @@ guessed when neither can answer.
 **Unit tests stay offline.** Anything needing the network is an `#[ignore]`d
 test in `src-tauri/tests/`.
 
+**A transfer deletes nothing until the other side is proved complete.** Moving
+a server (`server/transfer.rs`) is a copy that is verified *by content* — a
+per-file digest list written as the bundle's last entry, checked against what
+landed — and only then takes the source away. Both sides refuse while the
+server runs, every failure leaves the destination absent rather than plausible,
+and an id already taken is refused rather than merged or renamed. A copy
+arrives with no sharing at all; a move carries the server's password, stopped.
+If you change any of that, the comments saying why are the first thing to
+read.
+
 **Bytes are a last resort when sharing.** A mod that exists on a provider
 travels as a reference (project, version, hashes) fetched with the recipient's
 own credentials. Files are embedded only when there is no link to give. This is
@@ -196,14 +206,24 @@ shared across instances, so a second 1.21 instance costs megabytes, not
 hundreds.
 
 ```
-config.json  accounts.json
+config.json  accounts.json  hosts.json
 instances/<id>/         instance.json, media/, .minecraft/
 servers/<id>/           server.json, share.json, media/, run/, backups/
 plans/<id>.json         versionless mod lists
 versions/<id>/          merged (mc + loader) manifest and jar
+transfers/<id>/         a server arriving from another machine, not yet whole
 libraries/  assets/  natives/<id>/  java/  cache/icons/  logs/
 tools/                  geode-probe.jar, and a portable git for BuildTools
 ```
+
+`hosts.json` holds the `geoded` hosts this copy can reach and the token for
+each, written owner-only like `accounts.json`; `remote.rs` is the only thing
+that reads it, and no token ever crosses the IPC boundary.
+`transfers/<id>/` is deliberately *not* under `servers/`: `server::list` reads
+every directory there, so a half-arrived server in it would show in the app as
+a real one the moment its `server.json` landed. A folder in `transfers/` is a
+transfer whose process died — nothing reads it, and the next attempt at that
+server clears it.
 
 A server's `run/` holds the world, `server.properties`, `eula.txt` and
 Minecraft's own `whitelist.json`, `ops.json`, `banned-players.json` and
@@ -244,9 +264,11 @@ to ship `ops.json`.
   exits without being asked to is started again here exactly as in the app
   (`server/run.rs`), which is why that shutdown marks the registry closing
   before it asks anything to stop: a restart that raced a `docker stop` would
-  bring a server back with nothing left to watch it. What is *not*
-  there is moving a server from the app to a host: see the "what transfer would
-  need" notes at the top of `daemon/mod.rs` before building it.
+  bring a server back with nothing left to watch it. Moving or copying a whole
+  server between the app and a host is `server/transfer.rs` with two routes in
+  `daemon/api.rs`; its rules — verify by digest, delete nothing until the other
+  side is proved complete, and what happens to the server's sharing — are at
+  the top of that file.
 
 There was also a `rendezvous/` Cloudflare Worker for resolving share codes. It
 is **gone** — retired in favour of sharing directly between the server and its

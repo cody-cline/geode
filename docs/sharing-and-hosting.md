@@ -954,19 +954,55 @@ go, because a SIGKILL partway through writing a chunk is how a world is
 corrupted. The compose file's `stop_grace_period` is longer than that limit on
 purpose, so the host decides and not Docker.
 
+Local ⇄ remote server transfer is **done**, in both directions, as a move or a
+copy. `server/transfer.rs` is the format and both halves of the work, two routes
+of their own in `daemon/api.rs` are the host's side, and `remote.rs` is the
+app's. The decisions, all of which the owner made:
+
+- **Everything in the server travels** — `server.json`, the whole of `run/`,
+  `media/` and `backups/` — as bytes, which is *not* a reversal of this
+  document's references-over-bytes position. That position is about handing
+  content to other people. A transfer is one person's own files moving between
+  two of their own machines: nothing is redistributed, and a host re-fetching
+  the mods would need that person's CurseForge key and would silently lose any
+  version since taken down. A move that loses mods is not a move. Backups are
+  usually most of the bytes, so the dialog says how much of the total they are
+  before anybody starts; leaving them out would be two lines in `CARRIED`.
+- **Nothing is deleted until the other side is proved complete**, and proved by
+  content rather than by a byte count: the sender hashes every file as it sends
+  it and writes the digest list as the bundle's *last* entry, so a transfer cut
+  short has nothing to vouch for it. The receiver hashes what it writes,
+  compares both lists both ways, and renames its staging directory into
+  `servers/` only then. The delete is the mover's own second request after
+  that, so a host never removes a server because somebody downloaded it.
+- **A failure leaves both sides consistent.** The destination assembles in
+  `transfers/<id>/` — outside `servers/`, because `server::list` reads every
+  directory in there — and anything that goes wrong removes it, so the
+  destination is absent rather than plausible. A cancel is a failure by the
+  same path.
+- **An id already taken is refused**, by name, before a byte is written.
+  Unpacking a second `survival` over the first would interleave two worlds, and
+  renaming it to `survival-2` would leave two servers with one name.
+- **A copy arrives with no sharing at all; a move carries the password,
+  stopped.** Two machines serving one pack under one password is two servers
+  players cannot tell apart, and the certificate they pin belongs to the
+  machine, so the copy could not serve that pack anyway. A move keeps the
+  password because players hold links built from it, and arrives as
+  `share.stopped.json` so nothing serves itself on a new certificate
+  unannounced — the receiver never accepts a `share.json` at all.
+  `share.link.json` travels with a move, which is what makes the Share tab say,
+  in words it already had, that the links handed out point at an address that
+  has moved on.
+- **Streamed, not staged, on the sending side.** A tar built as it is sent, so
+  no machine needs room for a second copy of its own world. There is no resume:
+  a dropped connection is a transfer to start again, which is the honest
+  version of what `MAX_BODY` could never have carried. What bounds an upload is
+  one staging directory at a time per host, under a 64 GiB ceiling counted as
+  the bytes land rather than as the sender declared them.
+
 What remains:
 
-- Local ⇄ remote server transfer: world, config, content records and Geode's own
-  `server.json`, with the server stopped first so a world is never copied
-  mid-write — and `share.json` deliberately *not* carried over, since it names
-  a code and an address belonging to the machine the server left. The shape is
-  a decision rather than a detail, and the notes at the top of
-  `src-tauri/src/daemon/mod.rs` set out what it needs: what moves, references
-  rather than bytes where there is a reference, which side drives it, what
-  happens to the original, and what the player who already joined sees.
-- Resumable upload for multi-gigabyte directories, which that transfer needs
-  and which `api::MAX_BODY` is deliberately far too small for — it is sized for
-  settings, so a transfer is a route of its own with a ceiling of its own.
+- Resumable upload, so a 10 GB world that drops at 90% does not start again.
 - File management (list/upload/download/delete/rename/mkdir). Crafty
   Controller's route list is good prior art.
 

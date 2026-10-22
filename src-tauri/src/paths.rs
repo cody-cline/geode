@@ -112,6 +112,25 @@ impl Paths {
     pub fn server_published(&self, id: &str) -> PathBuf {
         self.server(id).join("published")
     }
+    /// Where a server arriving from another machine is assembled.
+    ///
+    /// Outside `servers/` on purpose. [`crate::server::list`] reads every
+    /// directory under `servers/`, so a half-arrived server there would show
+    /// in the app as a real one the moment its `server.json` landed. A folder
+    /// here is a transfer whose process died: nothing reads it, and the next
+    /// attempt at that server clears it.
+    pub fn transfers(&self) -> PathBuf {
+        self.root.join("transfers")
+    }
+    pub fn transfer(&self, id: &str) -> PathBuf {
+        self.transfers().join(id)
+    }
+    /// The `geoded` hosts this copy of Geode can reach, and the token for
+    /// each. Beside `accounts.json` and `google.json`, written the same way,
+    /// because it holds the same kind of thing.
+    pub fn hosts_file(&self) -> PathBuf {
+        self.root.join("hosts.json")
+    }
     /// The game's working directory — what vanilla calls `.minecraft`.
     pub fn game_dir(&self, id: &str) -> PathBuf {
         self.instance(id).join(".minecraft")

@@ -22,6 +22,7 @@ import {
   Plus,
   Square,
   Trash2,
+  Upload,
 } from "lucide-react";
 
 import ImageField from "../components/ImageField";
@@ -29,6 +30,7 @@ import LogFilesPanel from "../components/LogFilesPanel";
 import type { LogSource } from "../components/LogFilesPanel";
 import InstanceIcon from "../components/InstanceIcon";
 import Modal from "../components/Modal";
+import TransferServerModal from "../components/TransferServerModal";
 import Browse from "./Browse";
 import GraphTab from "./instance/GraphTab";
 import ServerContentTab from "./server/ContentTab";
@@ -1070,6 +1072,7 @@ function SettingsTab({ server }: { server: Server }) {
   const [draft, setDraft] = useState<ServerSettings>(server.settings);
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [transferring, setTransferring] = useState(false);
 
   // Images and properties save themselves, so the bar is only ever about the
   // Java and Running settings above it.
@@ -1241,7 +1244,27 @@ function SettingsTab({ server }: { server: Server }) {
           it by a slip of the mouse. */}
       <section className={styles.section}>
         <h2 className={styles.sectionTitle}>Manage</h2>
+        {/* Sending it somewhere else before the part about destroying it: they
+            are both "this server leaves this machine", and one of them is
+            recoverable. */}
         <p className={styles.pending}>
+          A server can be moved or copied to a machine running Geode headless.
+          Everything goes: its world, its settings, its content, its artwork and
+          its backups. A move deletes this copy only once the other side has
+          checked every file it received.
+        </p>
+        <button
+          className="btn"
+          style={{ marginTop: 12 }}
+          onClick={() => setTransferring(true)}
+          disabled={server.running}
+          title={server.running ? "Stop it before transferring it" : undefined}
+        >
+          <Upload size={14} />
+          Move or copy to a host
+        </button>
+
+        <p className={styles.pending} style={{ marginTop: 20 }}>
           Deleting a server removes its folder — its world, its configuration
           and its backups — and cannot be undone.
         </p>
@@ -1256,6 +1279,14 @@ function SettingsTab({ server }: { server: Server }) {
           Delete this server
         </button>
       </section>
+
+      {transferring && (
+        <TransferServerModal
+          direction="push"
+          server={server}
+          onClose={() => setTransferring(false)}
+        />
+      )}
 
       {dirty && (
         <div className={styles.saveBar}>

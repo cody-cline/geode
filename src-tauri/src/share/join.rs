@@ -427,7 +427,7 @@ async fn read_reply(response: reqwest::Response, progress: &Progress) -> Result<
 /// chunk arrives would leave a cancel waiting on the server too — for as long
 /// as the read timeout while it is quiet, and indefinitely against one that
 /// sends a byte just often enough to stay inside it.
-pub(super) async fn unless_cancelled<T>(
+pub(crate) async fn unless_cancelled<T>(
     progress: &Progress,
     work: impl std::future::Future<Output = T>,
 ) -> Result<T> {

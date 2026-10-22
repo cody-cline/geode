@@ -24,6 +24,10 @@
 //! DELETE /v1/servers/{id}/backups/{name}
 //! POST   /v1/servers/{id}/backups/{name}/restore
 //! GET    /v1/servers/{id}/console                  the WebSocket; see `console`
+//!
+//! GET    /v1/servers/{id}/transfer/size            how big a transfer would be
+//! GET    /v1/servers/{id}/transfer[?mode=move]     stream the whole server out
+//! POST   /v1/servers/{id}/transfer                 a whole server arrives here
 //! ```
 //!
 //! # Nothing here reimplements a command
@@ -59,28 +63,53 @@
 //! person to read. Hiding it from them would only mean reading container logs
 //! to find out why a button did nothing.
 //!
-//! # What a transfer would need
+//! # The transfer routes
 //!
-//! Not built, and [`super`] says why and what the decision is. Nothing here
-//! forecloses it: a server arriving would be a new id under `servers/`, which
-//! the list reads from disk every time and so cannot be stale, and the routes
-//! are shaped per server rather than as one document to replace.
+//! [`crate::server::transfer`] holds the format and both halves of the work;
+//! these two routes are the envelope, like every other. They are the only ones
+//! that do not go through [`MAX_BODY`], because a server is as big as its
+//! world — so what bounds them is stated rather than inherited:
+//!
+//! * **One at a time.** A staging directory is the largest thing the holder of
+//!   this token can make the host allocate, and [`Host::transfers`] is one
+//!   permit. A second upload is refused outright rather than queued, so the
+//!   ceiling below is the whole of what an upload can cost.
+//! * **A ceiling, counted as it lands.**
+//!   [`transfer::MAX_BUNDLE_BYTES`](crate::server::transfer::MAX_BUNDLE_BYTES),
+//!   checked against the bytes actually written and not against what the
+//!   sender said. [`transfer::DECLARED_BYTES`](crate::server::transfer::DECLARED_BYTES)
+//!   is the sender saying so up front, which only buys a refusal in one round
+//!   trip instead of after 64 GiB.
+//! * **Nothing in memory.** The body is streamed to disk as it arrives and the
+//!   archive is built as it is sent; neither side ever holds more than a chunk.
+//! * **Nowhere a half server can be mistaken for one.** It assembles in
+//!   `transfers/<id>/`, and anything that goes wrong removes it. The list route
+//!   reads `servers/` from disk every time, so a server that arrives needs no
+//!   cache invalidated and one that did not arrive was never there.
+//!
+//! A running server is refused on both routes, as a delete and a restore are:
+//! a world being read while it is written arrives torn.
 
 use std::sync::Arc;
 
-use http_body_util::{BodyExt, Full, Limited};
-use hyper::body::{Bytes, Incoming};
+use futures::TryStreamExt;
+use http_body_util::{combinators::BoxBody, BodyExt, Full, Limited, StreamBody};
+use hyper::body::{Bytes, Frame, Incoming};
 use hyper::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE};
 use hyper::{Method, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 
 use crate::instance::content::ContentKind;
 use crate::net::Progress;
+use crate::server::transfer::{self, Mode};
 use crate::server::{self, ServerKind};
 
 use super::{console, Host};
 
-pub type Body = Full<Bytes>;
+/// Boxed rather than [`Full`], because one route streams a whole server out and
+/// cannot hold it in memory to do so. Everything else here is still one buffer
+/// of JSON, wrapped by [`json`].
+pub type Body = BoxBody<Bytes, std::io::Error>;
 
 /// The most a request body may be.
 ///
@@ -163,6 +192,10 @@ struct ConsoleCommand {
 pub async fn respond(host: &Arc<Host>, mut request: Request<Incoming>) -> Response<Body> {
     let method = request.method().clone();
     let path = request.uri().path().to_string();
+    // The one thing any route takes from the query string: see [`Mode`].
+    let moving = request.uri().query().is_some_and(|q| {
+        q.split('&').any(|pair| pair == "mode=move")
+    });
 
     // The one route with no token, because `docker-compose.yml`'s healthcheck
     // calls it with no credentials. Safe to leave open because it reads
@@ -197,6 +230,13 @@ pub async fn respond(host: &Arc<Host>, mut request: Request<Incoming>) -> Respon
     // needs the connection itself rather than what was sent on it.
     if method == Method::GET && matches!(segments.as_slice(), ["v1", "servers", _, "console"]) {
         return console::open(host, id, &mut request);
+    }
+
+    // Also before the body is taken, and for the opposite reason: a whole
+    // server is far past [`MAX_BODY`] and is written to disk as it arrives
+    // rather than collected. Its own ceilings are in the module header.
+    if method == Method::POST && matches!(segments.as_slice(), ["v1", "servers", _, "transfer"]) {
+        return arriving(host, id, request).await;
     }
 
     // Read once, under one ceiling, rather than per route — a route that
@@ -241,6 +281,13 @@ pub async fn respond(host: &Arc<Host>, mut request: Request<Incoming>) -> Respon
         }
         (&Method::POST, ["v1", "servers", _, "backups", name, "restore"]) => {
             restore(host, &id, name).await
+        }
+
+        (&Method::GET, ["v1", "servers", _, "transfer", "size"]) => {
+            transfer_size(host, &id, mode(moving)).await
+        }
+        (&Method::GET, ["v1", "servers", _, "transfer"]) => {
+            leaving(host, &id, mode(moving)).await
         }
 
         // One refusal for everything else, so a route that never existed, one
@@ -629,6 +676,116 @@ async fn restore(host: &Arc<Host>, id: &str, name: &str) -> Response<Body> {
     answer(server::backup::restore(&host.state.paths, id, name).await)
 }
 
+/// Which of the two a caller asked for.
+///
+/// The mode is the *sender's* business and decides one thing: whether the
+/// server's sharing travels with it. What happens to the original afterwards is
+/// not this host's to do — the side that asked for the move deletes it, once
+/// this side has said the arrival is complete.
+fn mode(moving: bool) -> Mode {
+    if moving {
+        Mode::Move
+    } else {
+        Mode::Copy
+    }
+}
+
+/// How big a transfer of this server would be, asked before one starts.
+async fn transfer_size(host: &Arc<Host>, id: &str, mode: Mode) -> Response<Body> {
+    if let Err(e) = server::load(&host.state.paths, id).await {
+        return refused(e);
+    }
+    match transfer::measure(&host.state.paths, id, mode).await {
+        Ok(measure) => json(StatusCode::OK, &measure),
+        Err(e) => refused(e),
+    }
+}
+
+/// Stream the whole server out, for somebody taking it away.
+///
+/// Refused while it runs, like a backup restore and for the same reason: a
+/// world read while it is being written arrives torn. Nothing here deletes
+/// anything — a move's delete is a `DELETE /v1/servers/{id}` the mover sends
+/// once it has verified what arrived, which is the only order that cannot lose
+/// a world.
+async fn leaving(host: &Arc<Host>, id: &str, mode: Mode) -> Response<Body> {
+    if host.state.servers.is_running(id) {
+        return message(
+            StatusCode::BAD_REQUEST,
+            "stop the server before transferring it — a world that is being written cannot be copied",
+        );
+    }
+    if let Err(e) = server::load(&host.state.paths, id).await {
+        return refused(e);
+    }
+
+    // The admin watching this host sees the same progress the other end does.
+    let progress = Progress::new(host.sink.clone(), format!("server-transfer:{id}"));
+    let measured = transfer::measure(&host.state.paths, id, mode)
+        .await
+        .map(|m| m.bytes)
+        .unwrap_or(0);
+    progress.stage("Sending the server", measured).await;
+
+    let bundle = transfer::bundle(&host.state.paths, id, mode, progress);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "application/x-tar")
+        .header(CACHE_CONTROL, "no-store")
+        .header(transfer::DECLARED_BYTES, measured.to_string())
+        .body(StreamBody::new(bundle.map_ok(Frame::data)).boxed())
+        .expect("a response built from fixed, valid parts")
+}
+
+/// Take a whole server that is arriving here.
+///
+/// The ceilings are the module header's. The id is the one in the path, which
+/// has already been re-parsed, and what arrives must agree with it:
+/// [`transfer::receive`] refuses a bundle made for another server.
+async fn arriving(host: &Arc<Host>, id: String, request: Request<Incoming>) -> Response<Body> {
+    // One at a time, so the ceiling on one transfer is the ceiling on all of
+    // them. Refused rather than queued: a client waiting behind a 10 GB upload
+    // for an hour is a client that has timed out anyway, and holding the
+    // connection costs the host the very thing it is protecting.
+    let Ok(_place) = host.transfers.clone().try_acquire_owned() else {
+        return message(
+            StatusCode::CONFLICT,
+            "another server is already being transferred onto this host — wait for it to finish",
+        );
+    };
+    // A clash that is running. `receive` refuses any clash; this says the more
+    // useful thing when the server in the way cannot even be deleted yet.
+    if host.state.servers.is_running(&id) {
+        return message(
+            StatusCode::BAD_REQUEST,
+            &format!("a server called '{id}' is already running here — stop it and delete it first"),
+        );
+    }
+
+    let declared = request
+        .headers()
+        .get(transfer::DECLARED_BYTES)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0);
+    if declared > transfer::MAX_BUNDLE_BYTES {
+        return too_large();
+    }
+
+    let progress = Progress::new(host.sink.clone(), format!("server-transfer:{id}"));
+    let body = request.into_body().into_data_stream();
+    match transfer::receive(&host.state.paths, &id, body, declared, &progress).await {
+        Ok(arrived) => {
+            progress.finish().await;
+            json(StatusCode::CREATED, &arrived)
+        }
+        Err(e) => {
+            progress.fail(&e.to_string()).await;
+            refused(e)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Answers
 // ---------------------------------------------------------------------------
@@ -680,8 +837,15 @@ pub fn json<T: Serialize>(status: StatusCode, value: &T) -> Response<Body> {
         .status(status)
         .header(CONTENT_TYPE, "application/json")
         .header(CACHE_CONTROL, "no-store")
-        .body(Full::new(Bytes::from(bytes)))
+        .body(whole(bytes))
         .expect("a response built from fixed, valid parts")
+}
+
+/// One buffer of bytes, as the boxed body everything here returns.
+fn whole(bytes: Vec<u8>) -> Body {
+    Full::new(Bytes::from(bytes))
+        .map_err(|never| match never {})
+        .boxed()
 }
 
 pub fn message(status: StatusCode, text: &str) -> Response<Body> {
@@ -784,6 +948,9 @@ mod tests {
         ("DELETE", "/v1/servers/survival/backups/old.zip"),
         ("POST", "/v1/servers/survival/backups/old.zip/restore"),
         ("GET", "/v1/servers/survival/console"),
+        ("GET", "/v1/servers/survival/transfer/size"),
+        ("GET", "/v1/servers/survival/transfer"),
+        ("POST", "/v1/servers/survival/transfer"),
     ];
 
     /// A server on disk, so a refusal has something it could have reached.
@@ -1167,5 +1334,173 @@ mod tests {
             "{answer}"
         );
         listening.stop().await;
+    }
+
+    /// The whole feature, over a real socket: a server pushed from one machine
+    /// to a host, and then brought back onto a third that has never seen it.
+    ///
+    /// Here rather than beside `remote`'s own tests because this is the only
+    /// place both halves exist — these routes are this module's, and the
+    /// listener the test needs is `serve`'s.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_server_pushed_to_a_host_arrives_whole_and_can_be_brought_back() {
+        let here = Scratch::new("daemon-push-from");
+        let there = Scratch::new("daemon-push-to");
+        let back = Scratch::new("daemon-push-back");
+
+        let server = with_a_server(&here).await;
+        tokio::fs::write(
+            here.paths.server_run(&server.id).join("world.dat"),
+            b"a world",
+        )
+        .await
+        .unwrap();
+
+        let listening = started(host(&there)).await;
+        let cupboard = a_host(listening.local_addr);
+
+        let arrived = crate::remote::push(
+            &here.paths,
+            &cupboard,
+            &server.id,
+            Mode::Copy,
+            &Progress::silent("t"),
+        )
+        .await
+        .expect("the host takes it");
+        assert!(arrived.files >= 2, "server.json and the world at least");
+        assert_eq!(
+            tokio::fs::read(there.paths.server_run(&server.id).join("world.dat")).await.unwrap(),
+            b"a world"
+        );
+        // Listed with nothing told to invalidate a cache: the list route reads
+        // `servers/` from disk every time, which is why a server can arrive at
+        // all.
+        let listed = crate::remote::servers(&cupboard).await.unwrap();
+        assert!(listed.iter().any(|one| one.id == server.id), "{listed:?}");
+
+        // And off it again, onto a machine that has never seen it.
+        crate::remote::pull(
+            &back.paths,
+            &cupboard,
+            &server.id,
+            Mode::Copy,
+            &Progress::silent("t"),
+        )
+        .await
+        .expect("the host sends it back");
+        assert_eq!(
+            tokio::fs::read(back.paths.server_run(&server.id).join("world.dat")).await.unwrap(),
+            b"a world"
+        );
+
+        // A second push of the same server is refused by name rather than
+        // unpacked over the top of the first.
+        let refused = crate::remote::push(
+            &here.paths,
+            &cupboard,
+            &server.id,
+            Mode::Copy,
+            &Progress::silent("t"),
+        )
+        .await
+        .expect_err("the host already has it");
+        assert!(refused.to_string().contains("already there"), "{refused}");
+        assert_eq!(
+            tokio::fs::read(there.paths.server_run(&server.id).join("world.dat")).await.unwrap(),
+            b"a world",
+            "the refused transfer must not have touched what was there"
+        );
+
+        listening.stop().await;
+    }
+
+    /// How big it would be, asked before anybody commits an uplink to it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_host_says_how_big_a_transfer_would_be_before_it_starts() {
+        let scratch = Scratch::new("daemon-transfer-size");
+        let server = with_a_server(&scratch).await;
+        tokio::fs::create_dir_all(scratch.paths.server_backups(&server.id)).await.unwrap();
+        tokio::fs::write(
+            scratch.paths.server_backups(&server.id).join("old.zip"),
+            vec![3u8; 1024],
+        )
+        .await
+        .unwrap();
+
+        let listening = started(host(&scratch)).await;
+        let measured = crate::remote::measure(&a_host(listening.local_addr), &server.id, Mode::Copy)
+            .await
+            .expect("the size route answers");
+        assert_eq!(measured.backup_files, 1);
+        assert_eq!(measured.backup_bytes, 1024);
+        assert!(measured.bytes > 1024, "the total is more than the backups");
+        listening.stop().await;
+    }
+
+    /// Neither direction while a process has the world open. Said rather than
+    /// done, because the alternative is a world copied while it is being
+    /// written — which arrives looking fine.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_running_server_is_not_transferred_either_way() {
+        let scratch = Scratch::new("daemon-transfer-running");
+        let server = with_a_server(&scratch).await;
+        let host = host(&scratch);
+        let (_typed, _console) = host
+            .state
+            .servers
+            .fake_start(&server.id, crate::server::ServerKind::Paper);
+        let listening = started(host.clone()).await;
+        let addr = listening.local_addr;
+
+        let out = signed(addr, "GET", &format!("/v1/servers/{}/transfer", server.id), None);
+        assert!(out.starts_with("HTTP/1.1 400 "), "{out}");
+        assert!(body_of(&out).contains("stop the server"), "{out}");
+
+        let in_ = signed(addr, "POST", &format!("/v1/servers/{}/transfer", server.id), Some(""));
+        assert!(in_.starts_with("HTTP/1.1 400 "), "{in_}");
+        assert!(body_of(&in_).contains("already running"), "{in_}");
+
+        listening.stop().await;
+    }
+
+    /// One at a time. A staging directory is the largest thing the holder of
+    /// the token can make this host allocate, so the ceiling on one transfer
+    /// is only a ceiling if there is one of them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_one_server_is_taken_at_a_time() {
+        let scratch = Scratch::new("daemon-transfer-one");
+        let host = host(&scratch);
+        // Held as a transfer in flight would hold it.
+        let held = host.transfers.clone().try_acquire_owned().expect("the only place");
+        let listening = started(host.clone()).await;
+        let addr = listening.local_addr;
+
+        let refused = signed(addr, "POST", "/v1/servers/other/transfer", Some(""));
+        assert!(refused.starts_with("HTTP/1.1 409 "), "{refused}");
+        assert!(
+            body_of(&refused).contains("already being transferred"),
+            "the refusal should say to wait: {refused}"
+        );
+
+        // And the next one is taken, once the place is free.
+        drop(held);
+        let after = signed(addr, "POST", "/v1/servers/other/transfer", Some(""));
+        assert!(
+            !after.starts_with("HTTP/1.1 409 "),
+            "the cap is on transfers at once, not transfers ever: {after}"
+        );
+
+        listening.stop().await;
+    }
+
+    /// A host, as the app would hold one, pointed at a listener in this test.
+    fn a_host(addr: std::net::SocketAddr) -> crate::remote::Host {
+        crate::remote::Host {
+            id: "cupboard".into(),
+            name: "the cupboard".into(),
+            address: format!("http://{addr}"),
+            token: TOKEN.into(),
+        }
     }
 }
