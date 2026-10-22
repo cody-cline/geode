@@ -1475,14 +1475,20 @@ export interface AppInfo {
 export interface UpdateStatus {
   /** The version running right now. */
   current: string;
-  /** False in a build compiled without the public key that verifies an update. Nothing was checked. */
+  /**
+   * Whether this build can install an update, which is whether it was compiled
+   * with the public key that verifies one. False still means a check ran — off
+   * the public releases API rather than the signed manifest — so `available`
+   * is as meaningful either way; what it means is that Geode will not fetch or
+   * replace anything, and the releases page is offered instead of Install.
+   */
   configured: boolean;
   /** The newer version waiting. Null covers "nothing newer" and every reason Geode declined to offer one. */
   available: string | null;
-  /** Its release notes, as the manifest gave them. */
+  /** Its release notes, as the manifest or the release gave them. */
   notes: string | null;
-  /** The version being skipped, while that skip still means anything. */
+  /** The version being skipped, while that skip still means anything. One setting for both modes. */
   skipped: string | null;
-  /** Why Install cannot be pressed this minute — a game or a server is running. */
+  /** Why Install cannot be pressed this minute — a game or a server is running. Always null when `configured` is false, because nothing is going to restart. */
   blocked: string | null;
 }

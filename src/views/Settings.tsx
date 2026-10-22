@@ -24,7 +24,7 @@ import AccountsModal from "../components/AccountsModal";
 import { api, errorMessage } from "../lib/api";
 import { hashHue, initials } from "../lib/format";
 import { DEFAULT_SHARE_PORT, driveLine, parsePort } from "../lib/share";
-import { RELEASES_URL, checkFailedLine, putOffLine, updateLine } from "../lib/update";
+import { RELEASES_URL, panelHint, panelLine } from "../lib/update";
 import { useStore } from "../lib/store";
 import StatusNote from "../components/StatusNote";
 import type {
@@ -1185,6 +1185,15 @@ function SharingSettings() {
  * backend turns Install away anyway while a game or a server is running, which
  * is what `blocked` carries up here to say before the button is pressed rather
  * than after.
+ *
+ * `status.configured` splits the panel in two, and it is the only thing that
+ * does. False means this build was compiled without the key an update is
+ * verified against: the check still ran and the version comparison still
+ * happened, off the public releases API instead of the signed manifest, so
+ * there is just as much to say — but Install is not on the screen at all,
+ * because there would be nothing to check a download against. In its place is
+ * the releases page, and the copy says plainly that downloading and running it
+ * is the person's own job.
  */
 function Updates() {
   const reportError = useStore((s) => s.reportError);
@@ -1261,26 +1270,16 @@ function Updates() {
     }
   }
 
+  /** Whether the offer on screen is itself a link to the releases page. */
+  const offeredAsALink = status?.configured === false && Boolean(status.available) && !putOff;
+
+  const hint = panelHint(status);
+
   return (
     <section className={styles.section}>
       <h2 className={styles.sectionTitle}>Updates</h2>
 
-      <StatusNote
-        line={
-          status
-            ? status.available && putOff
-              ? putOffLine(status.available)
-              : updateLine(status)
-            : failure
-              ? checkFailedLine(failure)
-              : {
-                  tone: "info",
-                  title: "Looking for a newer Geode",
-                  detail: "Reading the release manifest from GitHub.",
-                }
-        }
-        busy={checking || installing}
-      />
+      <StatusNote line={panelLine({ status, failure, putOff })} busy={checking || installing} />
 
       {status?.available && status.notes && (
         <details className={styles.details}>
@@ -1294,14 +1293,28 @@ function Updates() {
       <div className={styles.inlineRow}>
         {status?.available && !putOff && (
           <>
-            <button
-              className="btn btn-primary"
-              disabled={installing || Boolean(status.blocked)}
-              onClick={() => void install()}
-            >
-              {installing ? <Loader2 size={13} className="spin" /> : <Download size={13} />}
-              Install {status.available}
-            </button>
+            {/*
+              Install exists only in a build that can verify what it would
+              install. Without the key there is nothing to check a download
+              against, so the offer is a link and the person downloads and runs
+              the installer themselves — which is also the one thing this
+              button has to make obvious.
+            */}
+            {status.configured ? (
+              <button
+                className="btn btn-primary"
+                disabled={installing || Boolean(status.blocked)}
+                onClick={() => void install()}
+              >
+                {installing ? <Loader2 size={13} className="spin" /> : <Download size={13} />}
+                Install {status.available}
+              </button>
+            ) : (
+              <button className="btn btn-primary" onClick={() => void openUrl(RELEASES_URL)}>
+                <ExternalLink size={13} />
+                Get {status.available} from the releases page
+              </button>
+            )}
             <button className="btn" disabled={installing} onClick={() => setPutOff(true)}>
               Not now
             </button>
@@ -1336,9 +1349,11 @@ function Updates() {
           Both of these also appear when the check failed, which is when they
           are needed most: a failure leaves no status, so gating them on one
           left the row empty on the screen that was still saying "Looking for
-          a newer Geode".
+          a newer Geode". Check again is offered to a build with no key too,
+          because such a build does check — it reads the public releases API,
+          which needs no key — and only stops short of installing.
         */}
-        {(status?.configured || (!status && failure)) && (
+        {(status || failure) && (
           <button
             className="btn"
             disabled={checking || installing}
@@ -1349,7 +1364,13 @@ function Updates() {
           </button>
         )}
 
-        {((status && !status.configured) || (!status && failure)) && (
+        {/*
+          For a build that cannot install — where this page is the only way to
+          get a new version — and after a check that failed, which says to take
+          one by hand and needs somewhere to do it. Not beside the offer's own
+          button, which is already this link under another name.
+        */}
+        {(failure || status?.configured === false) && !offeredAsALink && (
           <button className="btn" onClick={() => void openUrl(RELEASES_URL)}>
             <ExternalLink size={13} />
             Open the releases page
@@ -1357,16 +1378,12 @@ function Updates() {
         )}
       </div>
 
-      <p className="hint">
-        Geode never updates itself behind your back: it looks once each time it
-        starts, when this screen opens, and when you ask &mdash; and replaces
-        nothing until you press Install. Leaving an offer alone is &ldquo;not
-        now&rdquo; &mdash; it comes back next time Geode starts. Installing
-        replaces this copy and restarts, so it waits until no game and no
-        server is running. On Linux it replaces the AppImage you are running;
-        if you installed the .deb or .rpm, take the new package from the
-        releases page instead.
-      </p>
+      {/*
+        Which of the two paragraphs this is, or neither, is `panelHint`'s to
+        decide: a check that failed leaves no status, and so leaves nobody
+        able to say which half of the feature this build is.
+      */}
+      {hint && <p className="hint">{hint}</p>}
     </section>
   );
 }

@@ -208,22 +208,31 @@ pub async fn app_info(state: State<'_, AppState>) -> Result<AppInfo> {
 pub struct UpdateStatus {
     /// The version running right now.
     pub current: String,
-    /// False in a build compiled without a public key. Nothing was checked and
-    /// nothing can be, which Settings says plainly rather than offering a
-    /// button that could only fail.
+    /// Whether this build can install an update, which is whether it was
+    /// compiled with a public key to verify one against. False does not mean
+    /// nothing was checked: the version comparison runs either way, read from
+    /// the signed manifest with a key and from the public releases API
+    /// without one. What it means is that Geode will not fetch or replace
+    /// anything, and Settings offers the releases page instead of Install.
     pub configured: bool,
     /// The newer version waiting, once it has passed [`crate::update::offer`].
     /// `None` covers every quiet no as much as it covers "nothing is newer".
     pub available: Option<String>,
-    /// Its release notes, as the manifest gave them.
+    /// Its release notes, as the manifest or the release gave them.
     pub notes: Option<String>,
     /// The version the person chose to skip, while that skip still means
-    /// anything, so Settings can say so and offer to stop skipping it.
+    /// anything, so Settings can say so and offer to stop skipping it. One
+    /// setting for both modes, so a release skipped in either stays skipped.
     pub skipped: Option<String>,
     /// Why Install cannot be pressed this minute, from
     /// [`crate::update::restart_would_interrupt`]. The install command asks
     /// again for itself; this is only so the reason is on screen before
     /// somebody presses a button that would be turned away.
+    ///
+    /// Always `None` when `configured` is false: nothing is going to be
+    /// installed and nothing is going to restart, so a running game is not in
+    /// anybody's way and saying it was would be a warning about an event that
+    /// cannot happen.
     pub blocked: Option<String>,
 }
 
@@ -250,9 +259,23 @@ fn updater(app: &AppHandle) -> Result<Option<tauri_plugin_updater::Updater>> {
 ///
 /// Run when Settings opens, when the person presses Check again, and once at
 /// start — never on a timer, and it installs nothing of its own accord. A
-/// manifest that is missing, unreachable or not valid JSON comes back as an
-/// error for the caller to show or swallow; what it never comes back as is an
-/// update.
+/// manifest or a release that is missing, unreachable or not valid JSON comes
+/// back as an error for the caller to show or swallow; what it never comes back
+/// as is an update, and what it must never come back as is "up to date".
+///
+/// Where it looks depends on what this build can do with the answer, and the
+/// two are mutually exclusive by construction — one `match` with no way
+/// through both arms:
+///
+/// * compiled with a public key: the signed manifest, through the updater
+///   plugin, and [`install_update`] can install what it names;
+/// * compiled without one: the public releases API, read directly. Nothing can
+///   be installed from it — there is no signature to check and no plugin to
+///   check one with — so the version is reported and the person fetches it
+///   from the releases page themselves. Saying nothing at all would be the
+///   worse answer: reading that API needs no key, and somebody running an old
+///   Geode is better served by being told than by being protected from the
+///   news.
 #[tauri::command]
 pub async fn check_for_update(app: AppHandle, state: State<'_, AppState>) -> Result<UpdateStatus> {
     let current = env!("CARGO_PKG_VERSION").to_string();
@@ -267,21 +290,37 @@ pub async fn check_for_update(app: AppHandle, state: State<'_, AppState>) -> Res
             // A skip this build has since moved past is spent: telling
             // somebody running 0.3.0 that they skipped 0.2.0 is noise.
             .filter(|skipped| crate::update::offer(&current, skipped, None).is_ok()),
-        blocked: crate::update::restart_would_interrupt(&state),
+        blocked: None,
         current: current.clone(),
     };
 
-    let Some(updater) = updater(&app)? else {
-        return Ok(status);
+    let named = match updater(&app)? {
+        Some(updater) => {
+            status.configured = true;
+            // Only this arm leads to an install, so only this arm has a
+            // restart to warn about.
+            status.blocked = crate::update::restart_would_interrupt(&state);
+            updater
+                .check()
+                .await
+                .ctx("checking for a newer Geode")?
+                .map(|found| crate::update::Announced {
+                    version: found.version.clone(),
+                    notes: found.body.clone(),
+                })
+        }
+        None => Some(crate::update::latest_release(&state.http).await?.announced()),
     };
-    status.configured = true;
 
-    let Some(found) = updater.check().await.ctx("checking for a newer Geode")? else {
-        return Ok(status);
-    };
-    if crate::update::offer(&current, &found.version, config.skipped_update.as_deref()).is_ok() {
-        status.notes = found.body.clone();
-        status.available = Some(found.version.clone());
+    // One comparison for both, so the version already running, a downgrade, a
+    // version that will not parse and a skipped one are refused the same way
+    // whichever source named it — and a skip made in either mode is honoured
+    // by the other, because it is one stored setting read in one place.
+    if let Some(announced) =
+        named.and_then(|named| named.worth_mentioning(&current, config.skipped_update.as_deref()))
+    {
+        status.notes = announced.notes;
+        status.available = Some(announced.version);
     }
     Ok(status)
 }
@@ -5071,6 +5110,75 @@ mod tests {
             unreachable.is_empty(),
             "these commands are not in generate_handler! in lib.rs, so calling one \
              fails at runtime: {unreachable:?}"
+        );
+    }
+
+    /// The text of one function in this file, for the two tests below.
+    ///
+    /// They hold a shape rather than a value, the way
+    /// `every_command_in_this_file_is_reachable_from_the_handler_list` does
+    /// and for the same reason: both update commands take an `AppHandle`, a
+    /// unit test has no window to hand them, and what they must not do is
+    /// worth more than nothing being able to check it. The first definition
+    /// wins, so these read the real function rather than the literal in the
+    /// test that asks for it.
+    fn body_of(signature: &str) -> &'static str {
+        let here = include_str!("commands.rs");
+        let after = here
+            .split(signature)
+            .nth(1)
+            .unwrap_or_else(|| panic!("{signature} is not in commands.rs"));
+        &after[..after.find("\n}\n").unwrap_or(after.len())]
+    }
+
+    /// A version this build cannot verify is a version it must not fetch, and
+    /// the keyless half of the check is the half with nothing to verify: the
+    /// releases API hands over a tag and some notes, and nobody signs either
+    /// of them. So an install establishes that this build has a key before it
+    /// reaches anything that downloads, writes or restarts — and the release
+    /// read from that API is never in a position to name what gets installed.
+    #[test]
+    fn nothing_is_downloaded_or_installed_without_the_key_that_verifies_it() {
+        let install = body_of("pub async fn install_update");
+
+        let gate = install.find("updater(&app)?").expect(
+            "install_update no longer asks for an updater, which is the only thing here \
+             that establishes a public key was compiled in",
+        );
+        for reached in [".download(", ".install(", "app.restart()"] {
+            let at = install
+                .find(reached)
+                .unwrap_or_else(|| panic!("install_update no longer reaches {reached}"));
+            assert!(
+                gate < at,
+                "install_update reaches {reached} before it has established that this \
+                 build has a key to verify a download against"
+            );
+        }
+        assert!(
+            !install.contains("latest_release"),
+            "install_update reads the public releases API, which nobody signs: a release \
+             from there must never be able to name what gets installed"
+        );
+    }
+
+    /// A lookup that failed is not a lookup that found nothing. Swallowed, the
+    /// status this command returns carries `available: null`, which Settings
+    /// reads as "up to date" — so a rate-limited API, a 404 before the first
+    /// release exists or no network at all would each come out as a green tick
+    /// over an old build. This repository has fixed that mistake three times
+    /// and this is the fourth place it could happen.
+    #[test]
+    fn a_release_lookup_that_fails_leaves_the_check_an_error() {
+        let check = body_of("pub async fn check_for_update");
+        let call = &check[check
+            .find("latest_release")
+            .expect("check_for_update no longer reads the public releases API")..];
+        let call = &call[..call.find(';').unwrap_or(call.len())];
+        assert!(
+            call.contains("await?"),
+            "the releases lookup's failure does not leave check_for_update, so Settings \
+             will be told there is nothing newer: {call}"
         );
     }
 

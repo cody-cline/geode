@@ -12,11 +12,22 @@
 //! signed by the key this binary was compiled with. A build compiled without a
 //! key has no updater at all — `lib.rs` never registers the plugin — so there
 //! is no path through this code that downloads something and hopes.
+//!
+//! That rule leaves a build with no key unable to *install* anything, which is
+//! not the same as having nothing to say. Reading the public releases API needs
+//! no key, no token and no signature, so such a build still looks, still says
+//! which version is out, and sends the person to fetch it themselves — see
+//! [`latest_release`]. Both halves name their version through one
+//! [`Announced`] and one [`offer`], so a skip, a downgrade, a version that will
+//! not parse and the version already running are refused identically whichever
+//! source named it.
 
 use std::time::Duration;
 
 use semver::Version;
+use serde::Deserialize;
 
+use crate::error::{Context, Result};
 use crate::state::AppState;
 
 /// How long the manifest fetch may take before the person is told instead of
@@ -67,6 +78,97 @@ fn usable_key(from_env: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|key| !key.is_empty())
         .map(str::to_string)
+}
+
+/// Where a build with no key asks what the current release is.
+///
+/// The public releases API: an ordinary GET with nothing in it but the user
+/// agent every other request here carries. No token, no credentials, nothing
+/// about the person and no query string for any of that to ride along in — a
+/// build that cannot install an update has no business identifying itself to
+/// find out there is one.
+///
+/// `releases/latest` resolves the way the signed endpoint's
+/// `releases/latest/download` does: the most recent published release that is
+/// neither a draft nor a prerelease. The two modes are therefore talking about
+/// the same release rather than two ideas of "latest", and
+/// `both_modes_look_at_the_same_repository` holds them to the same repository
+/// as well.
+pub const RELEASES_API: &str = "https://api.github.com/repos/littlesquirt1/geode/releases/latest";
+
+/// The one release a keyless build asks about, as the API gives it. Every other
+/// field in that response — the assets, the draft and prerelease flags, who cut
+/// it — is something this mode cannot act on, so none of it is read.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Release {
+    /// The tag, which is `vX.Y.Z` rather than a bare version. See
+    /// [`Release::version`].
+    pub tag_name: String,
+    /// The release notes, which GitHub gives as the empty string when a
+    /// release has none.
+    pub body: Option<String>,
+}
+
+impl Release {
+    /// The version the tag names.
+    ///
+    /// Releases are tagged `vX.Y.Z` (see docs/releasing.md) and
+    /// `Version::parse` reads no leading `v`, so a tag handed straight to
+    /// [`offer`] would be [`Ignored::Unreadable`] every time and this mode
+    /// would never offer anything at all. Exactly one `v` comes off and
+    /// nothing else is repaired: the signed manifest's own `version` field
+    /// carries no `v`, and anything else a tag might say has to reach `offer`
+    /// unchanged so both modes refuse the same strings.
+    pub fn version(&self) -> &str {
+        let tag = self.tag_name.trim();
+        tag.strip_prefix('v').unwrap_or(tag)
+    }
+
+    /// This release as something a source has named.
+    pub fn announced(self) -> Announced {
+        Announced {
+            version: self.version().to_string(),
+            // A release with no notes comes back as `""`, and an empty "What
+            // changed" to open is worse than no disclosure at all.
+            notes: self.body.filter(|notes| !notes.trim().is_empty()),
+        }
+    }
+}
+
+/// Ask GitHub what the current release is.
+///
+/// Errors are the caller's to report rather than to read as "nothing newer":
+/// the API is rate-limited by IP, answers 404 until the first release exists,
+/// and is a host on the internet like any other. A build that cannot say
+/// whether there is an update must say that, because "up to date" is a claim
+/// and a failed lookup does not support it.
+pub async fn latest_release(client: &reqwest::Client) -> Result<Release> {
+    crate::net::get_json(client, RELEASES_API)
+        .await
+        .ctx("asking GitHub which Geode is the latest")
+}
+
+/// A version some source has named, before anything has decided whether to say
+/// so.
+///
+/// Two sources name one: the signed manifest a build with a key reads through
+/// `tauri-plugin-updater`, and the releases API a build without one reads
+/// itself. What may then be done about it differs — only the first can be
+/// installed — and nothing else does, which is why there is one type here and
+/// one [`Announced::worth_mentioning`] between them instead of a second set of
+/// rules that could drift from the first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Announced {
+    pub version: String,
+    pub notes: Option<String>,
+}
+
+impl Announced {
+    /// The same offer back when it is one worth putting in front of somebody,
+    /// and `None` for every quiet no [`Ignored`] lists.
+    pub fn worth_mentioning(self, current: &str, skipped: Option<&str>) -> Option<Self> {
+        offer(current, &self.version, skipped).is_ok().then_some(self)
+    }
 }
 
 /// Why Geode is saying nothing about a version it just heard about.
@@ -214,6 +316,133 @@ mod tests {
         assert_eq!(offer("0.1.0", "0.3.0", Some("0.2.0")), Ok(()));
         // A skip nobody can parse suppresses nothing, rather than everything.
         assert_eq!(offer("0.1.0", "0.2.0", Some("whatever")), Ok(()));
+    }
+
+    /// The tag is the only thing the releases API offers that names a version,
+    /// and it is not spelled the way a version is. Left alone, every release
+    /// this mode ever sees is `Ignored::Unreadable` and a keyless build is
+    /// back to saying nothing — the exact failure this half exists to fix,
+    /// only quieter, because an unreadable version is deliberately
+    /// indistinguishable from "nothing newer".
+    #[test]
+    fn a_release_tag_names_a_version_once_the_v_releases_are_tagged_with_is_off() {
+        let tagged = |tag: &str| Release {
+            tag_name: tag.to_string(),
+            body: None,
+        };
+        assert_eq!(tagged("v0.2.0").version(), "0.2.0");
+        assert_eq!(offer("0.1.0", tagged("v0.2.0").version(), None), Ok(()));
+        // A tag without one, since nothing makes a release carry it.
+        assert_eq!(tagged("0.2.0").version(), "0.2.0");
+        assert_eq!(tagged(" v0.2.0\n").version(), "0.2.0");
+        // One `v`, and no other repair: a tag that is not a version has to
+        // reach `offer` as unreadable rather than be guessed at here, so both
+        // modes refuse the same strings.
+        assert_eq!(tagged("vv0.2.0").version(), "v0.2.0");
+        assert_eq!(tagged("latest").version(), "latest");
+        assert_eq!(
+            offer("0.1.0", tagged("release-7").version(), None),
+            Err(Ignored::Unreadable)
+        );
+    }
+
+    /// Pinned against the shape GitHub actually returns, trimmed of the fields
+    /// this mode cannot act on. A rename on either side — `tag_name` to
+    /// something else, or serde asked for camelCase — is a lookup that fails
+    /// to parse for everybody at once, and the only thing that would notice is
+    /// a release nobody is offered.
+    #[test]
+    fn the_releases_api_response_is_read_for_the_tag_and_the_notes() {
+        let release: Release = serde_json::from_str(
+            r#"{
+                "url": "https://api.github.com/repos/littlesquirt1/geode/releases/1",
+                "html_url": "https://github.com/littlesquirt1/geode/releases/tag/v0.2.0",
+                "id": 1,
+                "tag_name": "v0.2.0",
+                "name": "Geode 0.2.0",
+                "draft": false,
+                "prerelease": false,
+                "body": "Servers can be run headless.",
+                "assets": [{ "name": "geode_0.2.0_amd64.AppImage", "size": 94371840 }]
+            }"#,
+        )
+        .expect("the releases API response");
+        assert_eq!(release.version(), "0.2.0");
+        let announced = release.announced();
+        assert_eq!(announced.version, "0.2.0");
+        assert_eq!(announced.notes.as_deref(), Some("Servers can be run headless."));
+
+        // A release with no notes, which is what `""` means here.
+        let bare: Release =
+            serde_json::from_str(r#"{"tag_name": "v0.3.0", "body": ""}"#).expect("no notes");
+        assert_eq!(bare.announced().notes, None);
+    }
+
+    /// The decision is one function for both halves, so this is the whole of
+    /// what either of them may offer. A version skipped while reading the
+    /// signed manifest is skipped while reading the releases API and the other
+    /// way round, because there is no second place for either to disagree in.
+    #[test]
+    fn a_named_version_is_judged_the_same_whichever_source_named_it() {
+        let named = |version: &str| Announced {
+            version: version.to_string(),
+            notes: Some("notes".to_string()),
+        };
+        assert_eq!(
+            named("0.2.0").worth_mentioning("0.1.0", None),
+            Some(named("0.2.0"))
+        );
+        // Every quiet no `offer` knows, reached through this one call: the
+        // version already running, a downgrade, one that will not parse, and
+        // the one the person pressed Skip this one for.
+        assert_eq!(named("0.1.0").worth_mentioning("0.1.0", None), None);
+        assert_eq!(named("0.0.9").worth_mentioning("0.1.0", None), None);
+        assert_eq!(named("v0.2.0").worth_mentioning("0.1.0", None), None);
+        assert_eq!(named("0.2.0").worth_mentioning("0.1.0", Some("0.2.0")), None);
+        // And a skip is for one release, not for updating.
+        assert_eq!(
+            named("0.3.0").worth_mentioning("0.1.0", Some("0.2.0")),
+            Some(named("0.3.0"))
+        );
+    }
+
+    /// Two endpoints name the repository Geode updates from — the signed
+    /// manifest in `tauri.conf.json` and the releases API above — and a build
+    /// reads exactly one of them depending on whether it has a key. Pointed at
+    /// different repositories they would describe different software to the
+    /// same person, so they are held together here.
+    ///
+    /// The API url is also checked for having nothing in it but a path: a
+    /// query string is where a token or anything else about the person would
+    /// have to go, and this request carries neither.
+    #[test]
+    fn both_modes_look_at_the_same_repository() {
+        assert!(
+            RELEASES_API.starts_with("https://api.github.com/repos/"),
+            "the releases lookup is not the public GitHub API over TLS: {RELEASES_API}"
+        );
+        assert!(
+            !RELEASES_API.contains('?'),
+            "the releases lookup carries query parameters, and it has nothing to say \
+             about who is asking: {RELEASES_API}"
+        );
+
+        let repo_of = |url: &str, after: &str| {
+            let rest = url.split(after).nth(1).expect("a github url");
+            rest.split('/').take(2).collect::<Vec<_>>().join("/")
+        };
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json");
+        let manifest = config["plugins"]["updater"]["endpoints"][0]
+            .as_str()
+            .expect("plugins.updater.endpoints[0]");
+
+        assert_eq!(
+            repo_of(RELEASES_API, "https://api.github.com/repos/"),
+            repo_of(manifest, "https://github.com/"),
+            "a build with a key reads {manifest} and a build without one reads \
+             {RELEASES_API}, which are different repositories"
+        );
     }
 
     #[test]

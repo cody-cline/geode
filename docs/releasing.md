@@ -69,7 +69,10 @@ two of which nobody has launched, go out under a version number.
 Updating in place is a sixth column nobody can fill in yet: it is wired on all
 three (see [the updater](#the-updater-and-the-keypair-only-you-can-make)) and
 has been performed on none, including Linux, because there is no signed release
-to update from.
+to update from. Being *told* a newer version exists is a separate claim with a
+separate answer: it needs no key and no signature, so it works in any build,
+and it has been seen on none of the three either, because there is as yet no
+release to be told about.
 
 "Built by CI" is not "works on Windows". Nothing in this repository has
 opened an `Info.plist`, read a registry key, launched the app, signed into
@@ -151,13 +154,46 @@ holds either half of that key, and nothing here generated one — a keypair in
 a repository is a keypair anybody can sign with, and a convincing placeholder
 would be worse than none, because it would look real.
 
-Until you make one the feature is off end to end, and says so rather than
+Until you make one, **installing** is off end to end and says so rather than
 pretending. There is no `createUpdaterArtifacts` in the committed config,
-`plugins > updater > pubkey` is deliberately the empty string,
+`plugins > updater > pubkey` is deliberately the empty string, and
 `GEODE_UPDATER_PUBKEY` is unset so `lib.rs` registers no updater plugin at
-all, and Settings → About reads *"This build cannot update itself"* beside a
-link to this page. A release cut today carries no manifest, and no Geode goes
-looking for one.
+all. A release cut today carries no manifest, and no Geode goes looking for
+one.
+
+**Telling somebody is not installing, and a build with no key still tells
+them.** Reading the public releases API needs no key, no token and no
+signature:
+
+```
+https://api.github.com/repos/littlesquirt1/geode/releases/latest
+```
+
+So such a build asks that, compares the tag against its own version through
+the same `update::offer` the signed path uses, and Settings → About says
+*"Geode 0.2.0 is out, and this build cannot install it"* beside a button that
+opens the releases page. It downloads nothing, writes nothing and restarts
+nothing: the person takes the installer and runs it the way they ran the last
+one. Which mode a build is in is one `match` in `check_for_update` with no way
+through both arms, so the two never offer at once, and
+`nothing_is_downloaded_or_installed_without_the_key_that_verifies_it` holds
+`install_update` to demanding a key before it reaches a download, a write or a
+restart.
+
+Everything else is shared on purpose. One comparison, so a downgrade, a
+version that will not parse and the version already running are refused
+identically in both modes; one stored `skippedUpdate`, so a release skipped in
+either stays skipped in the other; one "not now", which lasts the sitting.
+`Release::version` takes the `v` off the tag before the comparison, because
+releases are tagged `vX.Y.Z` while the signed manifest's `version` field is
+not, and `offer` reads no leading `v`.
+
+A lookup that fails is **not** read as "nothing newer". The API is
+rate-limited by IP, answers 404 until the first release exists, and is a host
+on the internet like any other, so a failure leaves `check_for_update` as an
+error and Settings says *"Could not check for a newer Geode"* with the reason
+and two ways on. "Up to date" is a claim, and a failed lookup does not support
+it.
 
 **Switching it on, once.**
 
@@ -220,20 +256,23 @@ https://github.com/littlesquirt1/geode/releases/latest/download/latest.json
 release — so a draft nobody has published is invisible to every installed
 Geode, which is the behaviour you want from a draft.
 
-**A local build still has no updater** unless you give it one. Put the public
-half in `.env` as `GEODE_UPDATER_PUBKEY` and a build from your desk will check
-these releases like any other; leave it out and it will not. Either way a
-local build can only ever install what CI signed, which is the point. Worth
-knowing before you set it: in `tauri dev` the thing an install would replace
-is the debug binary under `target/`, not an installed Geode, so set it on a
-real bundle rather than on the dev run.
+**A local build still cannot install an update** unless you give it a key. Put
+the public half in `.env` as `GEODE_UPDATER_PUBKEY` and a build from your desk
+will read the signed manifest like any other; leave it out and it reads the
+releases API and only says what is out. Either way a local build can only ever
+install what CI signed, which is the point. Worth knowing before you set it:
+in `tauri dev` the thing an install would replace is the debug binary under
+`target/`, not an installed Geode, so set it on a real bundle rather than on
+the dev run.
 
 **What refuses, and refuses quietly.** Each of these does nothing rather than
 offering something unverified, because this is the one feature here that can
 do real harm:
 
 - no public key compiled in — no plugin is registered, so there is nothing to
-  ask and nothing to download;
+  download and no way to install anything. The version is still compared and
+  still reported, from a source that needs no key; what is refused is the
+  install, which is the half that can do harm;
 - a manifest endpoint that is not `https` — the plugin refuses it in a release
   build, and a unit test refuses it in the repository
   (`the_committed_config_names_an_https_endpoint_and_no_key`);
@@ -241,10 +280,13 @@ do real harm:
   somebody backwards;
 - a version string that will not parse, which is never read as "newer".
 
-None of the four is reported as a reason. They are deliberately
+None of the last three is reported as a reason. They are deliberately
 indistinguishable from "nothing newer", because the only honest thing to do
 with a manifest that does not make sense is to carry on with the build already
-installed.
+installed. The first is the exception, and that is the point of it: having no
+key is said out loud, because unlike a stale manifest it is something the
+person can do something about, and a version they have to fetch by hand is no
+use to them unsaid.
 
 **What refuses loudly, because it cannot do otherwise.** A signature is not
 one of the four above, however much it belongs with them. There is no
@@ -286,8 +328,9 @@ a chunk, so there is no byte count to refuse at.
 **It asks, and it waits.** Geode checks once at start and whenever somebody
 opens Settings → About or presses Check again — never on a timer, and it
 installs nothing on its own. The offer carries Install, Not now and Skip this
-one, and a skip is for that single version: the next release is offered as
-usual. Installing ends in a restart, and Geode runs Minecraft and servers as
+one — or, in a build with no key, the releases page in Install's place — and a
+skip is for that single version: the next release is offered as usual.
+Installing ends in a restart, and Geode runs Minecraft and servers as
 child processes of itself, so an install is **refused while any game or server
 is running** — a restart either kills a game outright or leaves it playing
 with no launcher attached to its log, its console or its Stop button. A launch
@@ -312,8 +355,11 @@ is most of the decisions — the version comparison, the downgrade and
 unparseable refusals, a skip and its expiry and the patch that clears one, the
 refusal under a running game and under a launch or install still in flight,
 the committed endpoint, the absence of a committed key, the signed-version
-flag against the signer the lockfile pins, and the states of the copy Settings
-shows. What they cannot reach is the part that only a real release exercises:
+flag against the signer the lockfile pins, the tag the releases API hands back
+and the shape it arrives in, the two endpoints naming one repository, that an
+install cannot be reached or a button drawn without a key, and the states of
+the copy Settings shows. What they cannot reach is the part that only a real
+release exercises:
 
 - the signature check itself, against a real key and a real bundle, and with
   it `requireSignedVersion`: that the CLI really does write `version:` into
@@ -326,6 +372,10 @@ shows. What they cannot reach is the part that only a real release exercises:
   download and an install that no offline test can reach;
 - `latest.json` having the shape the plugin expects, and
   `releases/latest/download` resolving to it;
+- the releases API answering at all: no test here has made that request, so
+  what a keyless build really gets back — the tag, the notes, the rate limit
+  an unauthenticated IP is allowed — is pinned against the documented shape
+  and nothing more;
 - an AppImage replacing itself on disk and the restart coming back up on the
   new build;
 - Windows, where the NSIS installer closes Geode and relaunches it, and macOS,

@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { api, errorMessage } from "./api";
 import { linkKind, nextJoin, nextPack, sentence } from "./share";
 import type { JoinRequest, PackRequest } from "./share";
+import { availableToast } from "./update";
 import type {
   Account,
   Config,
@@ -293,16 +294,14 @@ export const useStore = create<State>((set, get) => ({
     // own update server on every cold start is a launcher people learn to
     // ignore. A version that is waiting is mentioned and never installed:
     // Settings → About holds Install, Not now and Skip this one, and is
-    // where somebody looking for their version number already is.
+    // where somebody looking for their version number already is. A build
+    // with no key gets the same mention and a different sentence, which is
+    // `availableToast`'s to write.
     api
       .checkForUpdate()
       .then((status) => {
         if (!status.available) return;
-        get().toast({
-          kind: "info",
-          title: `Geode ${status.available} is available`,
-          body: `You have ${status.current}. Settings → About says what installing it would do.`,
-        });
+        get().toast({ kind: "info", ...availableToast(status) });
       })
       .catch(() => {});
 
