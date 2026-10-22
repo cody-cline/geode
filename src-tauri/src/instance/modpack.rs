@@ -1938,14 +1938,20 @@ pub enum Walk {
     /// files that must never leave the machine, where a list of what to keep
     /// out is only ever one forgotten name from shipping a secret.
     ///
-    /// A link is refused wherever it sits, because an allowlist of folders
-    /// says nothing about where a link inside one of them points: a
-    /// `mods/backup` linked to the directory above would carry
-    /// `server.properties` under an allowed name. Nobody looks at this pack
-    /// before it goes, either — it is built for whoever presents the code.
+    /// A link is refused wherever it sits, because an allowlist says nothing
+    /// about where a link inside it points: a `mods/backup` linked to the
+    /// directory above would carry `server.properties` under an allowed name.
+    /// Nobody looks at this pack before it goes, either — it is built for
+    /// whoever presents the code.
+    ///
+    /// Every entry is a file and not a folder, so what the pack carries is
+    /// the list its caller worked out rather than whatever the folders held at
+    /// the moment the zip was written. That is what lets one function answer
+    /// "what travels" for the admin looking at the picker, for the revision
+    /// players check against, and for this walk — three answers that must
+    /// never disagree, since a second walk that drifted would tell a player a
+    /// number the pack does not carry.
     Only {
-        /// Folders carried whole, at any depth.
-        trees: Vec<&'static str>,
         /// Single files, by path from the root as they are named on disk.
         /// Carried only while each is still a regular file.
         files: std::collections::HashSet<PathBuf>,
@@ -1976,23 +1982,20 @@ impl Walk {
                     Step::Carry
                 }
             }
-            Walk::Only { trees, files } => {
+            Walk::Only { files } => {
                 // The entry's own type, which is the link itself rather than
                 // what it points at. `Path::is_dir` and `File::open` both
                 // follow, and are how a link would get through.
                 let Ok(kind) = entry.file_type() else {
                     return Step::Skip;
                 };
-                let in_tree = top.is_some_and(|t| trees.contains(&t));
                 if kind.is_dir() {
-                    if in_tree || files.iter().any(|f| f.starts_with(rel)) {
+                    if files.iter().any(|f| f.starts_with(rel)) {
                         Step::Descend
                     } else {
                         Step::Skip
                     }
-                } else if kind.is_file()
-                    && ((in_tree && rel.components().count() > 1) || files.contains(rel))
-                {
+                } else if kind.is_file() && files.contains(rel) {
                     Step::Carry
                 } else {
                     Step::Skip
@@ -2036,18 +2039,34 @@ impl PackInput<'_> {
     }
 }
 
+/// The folder a server keeps its players' own files in, beside the one it
+/// keeps their mods in.
+///
+/// No loader reads either, which is the whole point of both: a client mod in
+/// `client-mods/` cannot slow the server down or crash it on boot, and a copy
+/// of `options.txt` in here is not a file the server has any use for. It is
+/// the only way Minecraft's own settings can travel at all — they are the
+/// player's files and exist nowhere on a server's disk — and like client mods
+/// it goes under `client-overrides/`, so a launcher installing this pack on a
+/// server leaves it out.
+pub(crate) const CLIENT_FILES: &str = "client-files";
+
 /// Where a file on a server's disk goes in the pack its players get.
 ///
 /// A server keeps client mods in `client-mods/`, which no loader reads, and a
 /// player's game has no such folder: there they are ordinary mods. So
-/// `client-mods/x.jar` is written as `mods/x.jar`, and everything else keeps
-/// its path.
-fn pack_rel(rel: &Path) -> PathBuf {
+/// `client-mods/x.jar` is written as `mods/x.jar`. [`CLIENT_FILES`] is the
+/// same idea for a file that is not a mod, and a player's game has no folder
+/// for those either — `client-files/options.txt` is written as `options.txt`,
+/// at the top of the game directory, which is where Minecraft keeps it.
+/// Everything else keeps its path.
+pub(crate) fn pack_rel(rel: &Path) -> PathBuf {
     let mut parts = rel.components();
     match parts.next() {
         Some(first) if first.as_os_str() == ContentKind::ClientMod.folder() => {
             Path::new(ContentKind::Mod.folder()).join(parts.as_path())
         }
+        Some(first) if first.as_os_str() == CLIENT_FILES => parts.as_path().to_path_buf(),
         _ => rel.to_path_buf(),
     }
 }
@@ -2308,7 +2327,14 @@ pub(super) fn lay_out(
             if carried.contains(rel) || carried_by_reference(&referenced, &shown) {
                 continue;
             }
-            let root = if players_pack && rel.starts_with(ContentKind::ClientMod.folder()) {
+            // Both of a server's client-side folders, for the same reason: a
+            // launcher installing this pack on a server has to leave them out,
+            // and `client-overrides/` is the one thing in the format that says
+            // so.
+            let root = if players_pack
+                && (rel.starts_with(ContentKind::ClientMod.folder())
+                    || rel.starts_with(CLIENT_FILES))
+            {
                 "client-overrides"
             } else {
                 tree

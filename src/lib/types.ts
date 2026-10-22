@@ -941,6 +941,55 @@ export interface ServerShareView {
  */
 export type ConfigPolicy = "ship-once" | "merge" | "enforce";
 
+/** One settings file a server has, and what sending it would do. */
+export interface SettingsChoice {
+  /** Where it is, from the server's run folder. */
+  path: string;
+  /**
+   * Where it lands in a player's instance. The same path, except for a file
+   * under `client-files/` — a folder no loader reads, and the only way
+   * Minecraft's own `options.txt` can travel, since no server has one. There
+   * it is `options.txt`, at the top of the game directory.
+   */
+  lands: string;
+  size: number;
+  /** Whether this server's pack carries it today. */
+  sent: boolean;
+  /**
+   * What happens to a player's own changes to it — as it would actually be
+   * applied, not as it is stored. A file kept in sync whose format Geode
+   * cannot read one setting at a time reads as `"ship-once"`, because that is
+   * what it will do.
+   */
+  policy: ConfigPolicy;
+  /** Whether keeping this file in sync is something it can honour. */
+  canSync: boolean;
+}
+
+/** A path the admin picked that no pack of this server's will carry. */
+export interface RefusedSetting {
+  path: string;
+  /** What to tell the admin about it, in a sentence. */
+  why: string;
+}
+
+/** What the admin picks from: every settings file this server has. */
+export interface SettingsPicker {
+  files: SettingsChoice[];
+  refused: RefusedSetting[];
+  /**
+   * Whether the whole config folder travels, a file a mod writes for the first
+   * time next week included. True until the admin picks anything.
+   */
+  wholeConfig: boolean;
+}
+
+/** One settings file the admin chose to send, and what it should do. */
+export interface SettingsPick {
+  path: string;
+  policy: ConfigPolicy;
+}
+
 /**
  * One setting that has moved in a server's own config file since it last
  * published, as the Review screen lists it.

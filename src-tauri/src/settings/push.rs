@@ -100,19 +100,29 @@ pub struct Wanted {
 /// `from` jumps, so nobody is caught up with it — so the files on disk now are
 /// exactly what players have, which is what a baseline means.
 ///
-/// Not called when the admin picks the behaviour that is already in force:
-/// re-taking the snapshot then would make their unpushed edits the baseline
-/// and lose them silently.
+/// Which files those are is read off the behaviour's own push number: a path
+/// whose choice was stamped with the push this share is at is a path that
+/// became [`Policy::Merge`] in the change just saved, and nothing else is
+/// touched. That is what keeps the one hazard away — re-taking the snapshot of
+/// a file the admin has unpushed edits in would make those edits the baseline
+/// and lose them without a word — while still letting one call cover a folder
+/// chosen whole and a single file picked out of it.
+///
+/// Only the files this server's pack actually carries, because those are the
+/// only ones players have: a settings file nobody is sent is a file nothing
+/// can be pushed out of, and a baseline for it would be a comparison against
+/// a copy that reached nobody.
 pub async fn publish_all(paths: &Paths, id: &str) -> Result<()> {
-    let share = match crate::server::share::load(paths, id).await? {
-        Some(share) => share,
-        None => return Ok(()),
+    let Some(share) = crate::server::share::load(paths, id).await? else {
+        return Ok(());
     };
-    let run = paths.server_run(id);
-    for full in crate::share::pack::config_files(&run).await? {
-        let rel = full.strip_prefix(&run).unwrap_or(&full);
-        if share.settings.policy_for(rel) == Policy::Merge {
-            snapshot(paths, id, rel).await?;
+    for row in crate::share::pack::settings_sent(paths, id).await?.files {
+        let just_chosen = share
+            .settings
+            .covering(&row.rel)
+            .is_some_and(|named| named.from == share.settings.at);
+        if row.sent && row.policy == Policy::Merge && just_chosen {
+            snapshot(paths, id, &row.rel).await?;
         }
     }
     Ok(())
@@ -135,17 +145,19 @@ pub async fn review(paths: &Paths, id: &str) -> Result<Review> {
         return Ok(review);
     }
 
+    // The files the pack carries and nothing else — the admin's picks, held
+    // to the folders a pack may name by the one function that decides what
+    // travels. A setting inside a file nobody is sent is a setting nobody
+    // applies, so offering it would be offering a change that reaches no one.
     let run = paths.server_run(id);
-    let mut files = crate::share::pack::config_files(&run).await?;
-    files.sort();
-    for full in files {
-        let rel = full.strip_prefix(&run).unwrap_or(&full).to_path_buf();
-        if share.settings.policy_for(&rel) != Policy::Merge {
+    for row in crate::share::pack::settings_sent(paths, id).await?.files {
+        if !row.sent || row.policy != Policy::Merge {
             continue;
         }
+        let rel = row.rel;
         let shown = shown(&rel);
         let published = paths.server_published(id).join(&rel);
-        let now = tokio::fs::read(&full).await?;
+        let now = tokio::fs::read(run.join(&rel)).await?;
         // Named with the reason, and before anything else is tried: a file
         // Geode cannot read one setting at a time is one it can push nothing
         // from, and the admin has to be told which files those are rather than
@@ -199,6 +211,10 @@ pub async fn push(paths: &Paths, id: &str, wanted: &[Wanted]) -> Result<u32> {
     }
 
     let run = paths.server_run(id);
+    // What this server's pack carries, worked out by the one function that
+    // decides it rather than read off the list of picks — a setting inside a
+    // file the pack leaves behind is one nobody could ever apply.
+    let sent = crate::share::pack::settings_sent(paths, id).await?;
     let at = share.settings.at.saturating_add(1);
     for one in wanted {
         let rel = PathBuf::from(&one.path);
@@ -219,6 +235,16 @@ pub async fn push(paths: &Paths, id: &str, wanted: &[Wanted]) -> Result<u32> {
         {
             return Err(Error::msg(format!(
                 "{} is not a file in this server's folder",
+                one.path
+            )));
+        }
+        // And a file this server's pack carries, which is not the same
+        // question: the admin picks what travels, so a file kept in sync that
+        // nobody picked is one no player has a copy of to splice into.
+        if !sent.files.iter().any(|row| row.sent && row.rel == rel) {
+            return Err(Error::msg(format!(
+                "{} is not a file this server sends its players, so a setting inside it would \
+                 reach nobody",
                 one.path
             )));
         }
@@ -351,6 +377,7 @@ mod tests {
             code: crate::share::code::Code::generate(),
             include_config: true,
             settings: Default::default(),
+            picked: Vec::new(),
             listing: None,
             shared: true,
             forbidden: Vec::new(),
@@ -514,23 +541,35 @@ mod tests {
 
     /// A file Geode cannot read one setting at a time is named with the
     /// reason, and is not quietly left out of the screen.
+    ///
+    /// Both of the real ones: Axiom's window layout, which is a `config/` file
+    /// that is not configuration at all, and a `.json5` using syntax no
+    /// `.json` needs — 8 of the 2208 JSON-family files measured here do, and
+    /// nothing reads those per setting.
     #[tokio::test]
     async fn a_file_that_cannot_be_read_per_setting_is_named() {
         let (scratch, server) = kept_in_sync(
             "unreadable",
-            &[("config/b.json", "{\"renderDistance\": 8}")],
+            &[
+                ("config/imgui.ini", "[Window][###Tools]\nPos=0,22\n"),
+                ("config/yacl.json5", "{\n  renderDistance: 8,\n}"),
+                ("config/a.properties", "renderDistance=8\n"),
+            ],
         )
         .await;
         let paths = scratch.paths.clone();
         let review = review(&paths, &server.id).await.unwrap();
         assert!(review.moved.is_empty());
-        assert_eq!(review.unreadable.len(), 1, "{:?}", review.unreadable);
-        assert_eq!(review.unreadable[0].path, "config/b.json");
-        assert!(
-            review.unreadable[0].why.contains("sent it once"),
-            "{}",
-            review.unreadable[0].why
-        );
+        let mut named: Vec<&str> = review
+            .unreadable
+            .iter()
+            .map(|one| one.path.as_str())
+            .collect();
+        named.sort();
+        assert_eq!(named, vec!["config/imgui.ini", "config/yacl.json5"]);
+        for one in &review.unreadable {
+            assert!(one.why.contains("sent it once"), "{}: {}", one.path, one.why);
+        }
     }
 
     /// A push may only name a file this server keeps in sync, and only a file
@@ -570,5 +609,124 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("not a file in this server's folder"), "{err}");
+    }
+
+    /// Pick which of this server's settings files travel, the way the admin's
+    /// picker does.
+    async fn pick(paths: &Paths, id: &str, picks: &[(&str, Policy)]) {
+        let mut share = crate::server::share::load(paths, id)
+            .await
+            .unwrap()
+            .expect("a shared server");
+        share
+            .pick(
+                &picks
+                    .iter()
+                    .map(|(path, policy)| crate::share::pack::Pick {
+                        path: (*path).to_string(),
+                        policy: *policy,
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        crate::server::share::save(paths, id, &share).await.unwrap();
+    }
+
+    /// A setting can only be pushed out of a file this server sends. The admin
+    /// picks what travels, so a file kept in sync that they did not pick
+    /// reaches nobody — and a push from it would be a change no player could
+    /// ever apply, written into a list that rides every pack from then on.
+    #[tokio::test]
+    async fn nothing_is_pushed_from_a_file_this_server_does_not_send() {
+        let (scratch, server) = kept_in_sync(
+            "unsent",
+            &[
+                ("config/a.properties", "renderDistance=8\n"),
+                ("config/b.properties", "fov=70\n"),
+            ],
+        )
+        .await;
+        let paths = scratch.paths.clone();
+        pick(&paths, &server.id, &[("config/a.properties", Policy::Merge)]).await;
+
+        let run = paths.server_run(&server.id);
+        tokio::fs::write(run.join("config/a.properties"), "renderDistance=12\n")
+            .await
+            .unwrap();
+        tokio::fs::write(run.join("config/b.properties"), "fov=90\n")
+            .await
+            .unwrap();
+
+        // Only the file that travels is offered.
+        let moved = review(&paths, &server.id).await.unwrap().moved;
+        assert_eq!(moved.len(), 1, "{moved:?}");
+        assert_eq!(moved[0].path, "config/a.properties");
+
+        let sending = |path: &str, key: &str, value: &str| Wanted {
+            path: path.into(),
+            key: vec![key.into()],
+            value: Some(value.into()),
+            was: None,
+        };
+        let err = push(
+            &paths,
+            &server.id,
+            &[sending("config/b.properties", "fov", "90")],
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("sends its players"), "{err}");
+
+        // And the one that travels pushes as it always did.
+        push(
+            &paths,
+            &server.id,
+            &[sending("config/a.properties", "renderDistance", "12")],
+        )
+        .await
+        .unwrap();
+        assert!(review(&paths, &server.id).await.unwrap().moved.is_empty());
+    }
+
+    /// Choosing a behaviour for one file takes that file's baseline and leaves
+    /// every other baseline where it was. An edit the admin has not pushed yet
+    /// is still an edit to push: a snapshot re-taken over it would make it the
+    /// published value, so Review would never offer it again and players would
+    /// keep the old value for ever with nothing said to anybody.
+    #[tokio::test]
+    async fn choosing_a_behaviour_for_one_file_keeps_anothers_unpushed_edit() {
+        let (scratch, server) = kept_in_sync(
+            "baseline",
+            &[
+                ("config/a.properties", "renderDistance=8\n"),
+                ("config/c.properties", "fov=70\n"),
+            ],
+        )
+        .await;
+        let paths = scratch.paths.clone();
+        let run = paths.server_run(&server.id);
+        tokio::fs::write(run.join("config/a.properties"), "renderDistance=12\n")
+            .await
+            .unwrap();
+
+        // A fresh choice for the second file, which moves the push counter —
+        // and so is the moment every baseline just chosen is taken.
+        pick(
+            &paths,
+            &server.id,
+            &[
+                ("config/a.properties", Policy::Merge),
+                ("config/c.properties", Policy::Enforce),
+            ],
+        )
+        .await;
+        publish_all(&paths, &server.id).await.unwrap();
+
+        let moved = review(&paths, &server.id).await.unwrap().moved;
+        assert_eq!(moved.len(), 1, "{moved:?}");
+        assert_eq!(moved[0].path, "config/a.properties");
+        assert_eq!(moved[0].was.as_deref(), Some("8"));
+        assert_eq!(moved[0].now.as_deref(), Some("12"));
     }
 }

@@ -3,6 +3,7 @@ import clsx from "clsx";
 import {
   Check,
   Copy,
+  ListTree,
   Loader2,
   RefreshCw,
   Settings as SettingsIcon,
@@ -14,8 +15,10 @@ import {
 import Modal from "../../components/Modal";
 import StatusNote from "../../components/StatusNote";
 import { api, errorMessage } from "../../lib/api";
+import { fileSize } from "../../lib/format";
 import {
   addressChangedLine,
+  clientFilesHint,
   configChoices,
   forbiddenAsTyped,
   forbiddenLabel,
@@ -26,12 +29,16 @@ import {
   localAddressHint,
   movedSetting,
   nothingToPushHint,
+  pickingSettingsHint,
   pushingHint,
   readOutHint,
+  refusedSettingLine,
   replacedPasswordBody,
   routerLine,
+  settingsRowNote,
   stoppedLine,
   whenPlayersGetChanges,
+  wholeConfigHint,
 } from "../../lib/share";
 import { useStore } from "../../lib/store";
 import type {
@@ -40,6 +47,7 @@ import type {
   PushedSetting,
   Server,
   ServerShareView,
+  SettingsPicker,
   SettingsReview,
   WantedSetting,
 } from "../../lib/types";
@@ -144,6 +152,8 @@ export default function ShareTab({ server }: { server: Server }) {
     | "stop"
     | "review"
     | "push"
+    | "picker"
+    | "picks"
     | null
   >(null);
   /**
@@ -154,6 +164,19 @@ export default function ShareTab({ server }: { server: Server }) {
   const [review, setReview] = useState<SettingsReview | null>(null);
   /** Which of those settings are ticked, by [`settingId`]. */
   const [chosen, setChosen] = useState<Set<string>>(new Set());
+  /**
+   * Every settings file this server has, while the admin is picking from them.
+   * `null` when the list is closed — it reads each file to say whether that
+   * file can be kept in sync, so it is read when it is asked for and not with
+   * the rest of the tab.
+   */
+  const [picker, setPicker] = useState<SettingsPicker | null>(null);
+  /**
+   * The picks the admin is making, by path. A path in here travels; one that
+   * is not does not. Kept beside `picker` rather than in it so nothing is
+   * saved until they press Save.
+   */
+  const [picks, setPicks] = useState<Map<string, ConfigPolicy>>(new Map());
   /** The rule the admin is typing, before it is added to the list. */
   const [rule, setRule] = useState<Forbidden>(NO_RULE);
   const [confirming, setConfirming] = useState<"rotate" | "stop" | null>(null);
@@ -296,6 +319,62 @@ export default function ShareTab({ server }: { server: Server }) {
       api.setServerShareConfig(server.id, include, policy),
     );
     if (view) setShare(view);
+  }
+
+  /**
+   * Open the list of settings files, reading each one so the rows can say
+   * which of them can be kept in sync. Closed again by pressing the same
+   * button, which throws the unsaved picks away.
+   */
+  async function togglePicker() {
+    if (picker) {
+      setPicker(null);
+      return;
+    }
+    const found = await run("picker", "Could not read this server's settings files", () =>
+      api.getServerSettingsPicker(server.id),
+    );
+    if (!found) return;
+    setPicks(
+      new Map(found.files.filter((row) => row.sent).map((row) => [row.path, row.policy])),
+    );
+    setPicker(found);
+  }
+
+  /** Tick a file to send, or untick it. */
+  function pickFile(path: string, policy: ConfigPolicy, sent: boolean) {
+    setPicks((was) => {
+      const next = new Map(was);
+      if (sent) next.set(path, policy);
+      else next.delete(path);
+      return next;
+    });
+  }
+
+  /**
+   * Save the whole list of picks, which is what the backend takes. An empty
+   * list goes back to sending the config folder whole — including files a mod
+   * writes later — so the button says which of the two it will do.
+   */
+  async function savePicks() {
+    const view = await run("picks", "Could not change which settings files are sent", () =>
+      api.setServerSettingsPicks(
+        server.id,
+        [...picks].map(([path, policy]) => ({ path, policy })),
+      ),
+    );
+    if (!view) return;
+    setShare(view);
+    // Read back rather than kept: a pick can change what another row would do
+    // — the behaviour chosen for one file, and whether a path is refused — and
+    // the backend is the only thing that decides either.
+    const found = await api.getServerSettingsPicker(server.id).catch(() => null);
+    if (found) {
+      setPicks(
+        new Map(found.files.filter((row) => row.sent).map((row) => [row.path, row.policy])),
+      );
+      setPicker(found);
+    }
   }
 
   /**
@@ -775,6 +854,122 @@ export default function ShareTab({ server }: { server: Server }) {
                         Review settings changes
                       </button>
                       <p className="hint">{pushingHint()}</p>
+                    </div>
+                  )}
+
+                  {/* Picking files is a refinement of the choice above, so it
+                      sits under it: the behaviour is what happens to a file,
+                      and this is which files there are. */}
+                  <div className={styles.push}>
+                    <button
+                      className="btn"
+                      onClick={() => void togglePicker()}
+                      disabled={busy !== null}
+                    >
+                      {busy === "picker" ? (
+                        <Loader2 size={14} className="spin" />
+                      ) : (
+                        <ListTree size={14} />
+                      )}
+                      {picker ? "Hide the file list" : "Choose which files travel"}
+                    </button>
+                    {!picker && <p className="hint">{pickingSettingsHint()}</p>}
+                  </div>
+
+                  {picker && (
+                    <div className={styles.picker}>
+                      <p className="hint">{pickingSettingsHint()}</p>
+                      {picker.wholeConfig && (
+                        <StatusNote
+                          line={{
+                            tone: "info",
+                            title: "Sending the whole folder",
+                            detail: wholeConfigHint(),
+                          }}
+                        />
+                      )}
+                      {picker.files.length === 0 ? (
+                        <p className="hint">
+                          This server has no settings files yet. One appears here
+                          once a mod writes its config, or once you put a copy of
+                          a client file in its client-files folder.
+                        </p>
+                      ) : (
+                        <ul className={styles.files}>
+                          {picker.files.map((row) => {
+                            const chosenPolicy = picks.get(row.path);
+                            const sent = chosenPolicy !== undefined;
+                            const policy = chosenPolicy ?? row.policy;
+                            return (
+                              <li className={styles.file} key={row.path}>
+                                <label className={styles.fileWhat}>
+                                  <input
+                                    type="checkbox"
+                                    checked={sent}
+                                    disabled={busy !== null}
+                                    onChange={(e) =>
+                                      pickFile(row.path, policy, e.target.checked)
+                                    }
+                                  />
+                                  <span className={styles.fileName}>
+                                    <strong className={styles.mono}>{row.path}</strong>
+                                    <span className={viewStyles.settingWhy}>
+                                      {fileSize(row.size)} ·{" "}
+                                      {settingsRowNote({ ...row, policy })}
+                                    </span>
+                                  </span>
+                                </label>
+                                <select
+                                  className="input"
+                                  aria-label={`What happens to a player's own changes to ${row.path}`}
+                                  value={policy}
+                                  disabled={busy !== null || !sent}
+                                  onChange={(e) =>
+                                    pickFile(row.path, e.target.value as ConfigPolicy, true)
+                                  }
+                                >
+                                  {configChoices.map((choice) => (
+                                    <option
+                                      key={choice.policy}
+                                      value={choice.policy}
+                                      // Nothing can be pushed out of a file no
+                                      // setting can be found inside, so it is
+                                      // not offered — the row says why.
+                                      disabled={choice.policy === "merge" && !row.canSync}
+                                    >
+                                      {choice.label}
+                                    </option>
+                                  ))}
+                                </select>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      )}
+
+                      {picker.refused.length > 0 && (
+                        <ul className={styles.refused}>
+                          {picker.refused.map((row) => (
+                            <li key={row.path}>{refusedSettingLine(row)}</li>
+                          ))}
+                        </ul>
+                      )}
+
+                      <p className="hint">{clientFilesHint()}</p>
+                      <div className={styles.actions}>
+                        <button
+                          className="btn btn-primary"
+                          onClick={() => void savePicks()}
+                          disabled={busy !== null}
+                        >
+                          {busy === "picks" && <Loader2 size={14} className="spin" />}
+                          {picks.size === 0
+                            ? "Send the whole folder"
+                            : picks.size === 1
+                              ? "Send this 1 file"
+                              : `Send these ${picks.size} files`}
+                        </button>
+                      </div>
                     </div>
                   )}
                 </div>

@@ -48,6 +48,29 @@ pub struct ServerShare {
     /// an older count back.
     #[serde(default)]
     pub settings: crate::share::manifest::Settings,
+    /// The settings files and folders the admin picked, by path from the
+    /// server's run directory.
+    ///
+    /// Empty means this server's `config/` folder whole — what sending a
+    /// config folder has always meant, and what every share made before there
+    /// was anything to pick with goes on doing. A list that names anything
+    /// sends exactly what it names.
+    ///
+    /// An allowlist, like the walk that carries it, and for the same reason:
+    /// `config/` is not a kind of file, it is a folder mods write whatever
+    /// they like into. Real ones hold a window layout of pixel positions that
+    /// is per-machine state, a decompiled dev build's `.java` and `.class`
+    /// files, and mod caches, and no list of names to keep out would have
+    /// caught all three. The cost of an allowlist is stated where the picking
+    /// is done: a settings file a mod writes for the first time next week does
+    /// not travel until somebody picks it.
+    ///
+    /// `client-files/` is nameable here too, which is the only way Minecraft's
+    /// own `options.txt` can travel at all — it is not on a server's disk
+    /// otherwise. [`crate::share::pack::settings_sent`] is what holds this
+    /// list to those two folders; nothing trusts it as written.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub picked: Vec<String>,
     /// How this server should appear in its players' multiplayer list: the
     /// name they see, and the address the *game* connects to. `None` until the
     /// admin sets it, and then no row is written for anybody.
@@ -102,6 +125,44 @@ impl ServerShare {
         if let Some(policy) = policy {
             self.settings.choose("config", policy);
         }
+    }
+
+    /// Record which settings files travel and what each one does: the whole
+    /// list at once, as the Share tab holds it.
+    ///
+    /// The whole list, for the same reason the list of forbidden mods is — a
+    /// row the admin took out is a row that is gone, and there is nothing to
+    /// reconcile. An empty list goes back to this server's `config/` folder
+    /// whole, which is what sending one has always meant.
+    ///
+    /// A behaviour is chosen for every path in the list and not only for the
+    /// ones whose behaviour moved, because
+    /// [`Settings::choose`](crate::share::manifest::Settings::choose) writes
+    /// nothing when it is handed what is already in force. What that buys is
+    /// the case that matters: a file picked for the first time is stamped with
+    /// a push, so the players already joined are sent it rather than reading
+    /// as caught up with a file they have never seen.
+    ///
+    /// Held to the two rules a pick can never satisfy — see
+    /// [`crate::share::pack::never_nameable`] — so an admin is told in front
+    /// of the control rather than by a row that quietly does nothing. The
+    /// rules about the disk as it is right now are not checked here: a file
+    /// that has gone, or become a link, is a row with a reason on it and not a
+    /// reason to refuse the save.
+    pub fn pick(&mut self, picks: &[crate::share::pack::Pick]) -> crate::error::Result<()> {
+        for pick in picks {
+            if let Some(why) = crate::share::pack::never_nameable(std::path::Path::new(&pick.path))
+            {
+                return Err(crate::error::Error::msg(format!("{}: {why}", pick.path)));
+            }
+        }
+        self.picked = picks.iter().map(|pick| pick.path.clone()).collect();
+        for pick in picks {
+            self.settings.choose(&pick.path, pick.policy);
+        }
+        // The same ceilings a pack off the network is held to, so a list Geode
+        // would refuse to apply is one it refuses to make.
+        self.settings.checked()
     }
 }
 
@@ -256,6 +317,7 @@ pub async fn start(paths: &Paths, id: &str) -> Result<ServerShare> {
                 code: crate::share::code::Code::generate(),
                 include_config: false,
                 settings: Default::default(),
+                picked: Vec::new(),
                 listing: None,
                 forbidden: Vec::new(),
                 shared: true,
@@ -427,6 +489,7 @@ mod tests {
             code: Code::generate(),
             include_config: true,
             settings: Default::default(),
+            picked: Vec::new(),
             listing: None,
             shared: true,
             forbidden: Vec::new(),
@@ -478,6 +541,7 @@ mod tests {
             code: Code::generate(),
             include_config: true,
             settings: Default::default(),
+            picked: Vec::new(),
             listing: None,
             forbidden: Vec::new(),
             shared: true,
@@ -507,6 +571,7 @@ mod tests {
             code: Code::generate(),
             include_config: false,
             settings: Default::default(),
+            picked: Vec::new(),
             listing: None,
             forbidden: Vec::new(),
             shared: true,
@@ -652,6 +717,7 @@ mod tests {
             code: Code::generate(),
             include_config: true,
             settings: Default::default(),
+            picked: Vec::new(),
             listing: None,
             shared: true,
             forbidden: Vec::new(),
@@ -664,6 +730,7 @@ mod tests {
             code: Code::generate(),
             include_config: false,
             settings: Default::default(),
+            picked: Vec::new(),
             listing: None,
             shared: true,
             forbidden: Vec::new(),
@@ -778,6 +845,7 @@ mod tests {
             code: Code::generate(),
             include_config: false,
             settings: Default::default(),
+            picked: Vec::new(),
             listing: None,
             shared: true,
             forbidden: Vec::new(),
@@ -802,6 +870,7 @@ mod tests {
             code: Code::generate(),
             include_config: false,
             settings: Default::default(),
+            picked: Vec::new(),
             listing: None,
             shared: true,
             forbidden: Vec::new(),
@@ -810,6 +879,7 @@ mod tests {
             code: Code::generate(),
             include_config: true,
             settings: Default::default(),
+            picked: Vec::new(),
             listing: None,
             shared: true,
             forbidden: Vec::new(),

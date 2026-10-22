@@ -198,8 +198,22 @@ Minecraft's own `whitelist.json`, `ops.json`, `banned-players.json` and
 `banned-ips.json`; its `media/` and `backups/` sit *beside* it so a backup is
 the server's own data and never sweeps up bookkeeping or a previous backup. `run/client-mods/` is
 deliberately a folder no loader reads: a client mod there cannot slow the server
-down or crash it on boot, and is still part of the pack players get. `share.json`
-is its own file for a reason worth knowing — see `server/share.rs`.
+down or crash it on boot, and is still part of the pack players get.
+`run/client-files/` is the same idea for a file that is not a mod, and it is the
+only way Minecraft's own `options.txt` and keybinds can travel at all — they are
+the player's files and exist nowhere on a server's disk. Both go into the pack
+under `client-overrides/`, so a launcher installing it on a server leaves them
+out, and `pack_rel` in `instance/modpack.rs` is the one place that maps a
+server's path to a player's. `share.json` is its own file for a reason worth
+knowing — see `server/share.rs`.
+
+Those two folders and `config/` are the **only** places a server's pack takes a
+file from, and the admin picks the files inside them one by one —
+`share::pack::settings_sent` is the one function that decides what travels, and
+the join preview's count, the revision, the admin's picker and the zip all read
+it, so they cannot drift. The allowlist is enforced where the pack is built and
+not only where the picking is done, because a bug in a picker must not be able
+to ship `ops.json`.
 
 ## The other top-level directories
 

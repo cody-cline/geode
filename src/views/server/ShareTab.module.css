@@ -128,3 +128,69 @@
   gap: 6px;
   margin-top: 10px;
 }
+
+/* The list of settings files the admin picks from, under the behaviour that
+   says what happens to one. Indented with the behaviours above it, because it
+   is a refinement of the same choice and not a separate one. */
+.picker {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.files {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  /* A real config folder runs to about a hundred files, which is more than a
+     panel should grow by: the list scrolls and the buttons under it stay where
+     the admin left them. */
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.fileWhat {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.fileName {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  /* A path is the thing being named here, so it wraps rather than being cut
+     off: an admin cannot pick a file whose name they cannot read. */
+  overflow-wrap: anywhere;
+}
+
+/* The picks that will never travel, with the reason on each. Said rather than
+   left out: a row that silently did nothing is how an admin concludes sharing
+   is broken. */
+.refused {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0 0 0 18px;
+  color: var(--warn);
+  font-size: 12px;
+}

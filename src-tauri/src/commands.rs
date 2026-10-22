@@ -4417,6 +4417,52 @@ pub async fn set_server_share_config(
     Ok(share_view(&state, &server, &share).await)
 }
 
+/// Every settings file this server has, what each one would do, and every
+/// pick that will never travel — the listing the admin picks from.
+///
+/// Reads each file, because a format is what a file holds and never what it is
+/// called, so saying whether a row can be kept in sync means looking inside
+/// it. Asked for by the Share tab and by nothing on a player's path.
+#[tauri::command]
+pub async fn get_server_settings_picker(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<share::pack::SettingsPicker> {
+    share::pack::settings_picker(&state.paths, &id).await
+}
+
+/// Set which of this server's settings files travel and what each one does.
+///
+/// The whole list at once, because the Share tab holds it and sends what it
+/// should be — see [`crate::server::share::ServerShare::pick`]. An empty list
+/// goes back to sending the `config/` folder whole.
+///
+/// A path picked for the first time whose behaviour is to keep the player's
+/// own changes gets its baseline taken now, which is the right moment for the
+/// same reason choosing that behaviour for the folder is: this is also when
+/// every player is sent the file whole, so what it holds now is what they
+/// have.
+#[tauri::command]
+pub async fn set_server_settings_picks(
+    state: State<'_, AppState>,
+    id: String,
+    picks: Vec<share::pack::Pick>,
+) -> Result<ServerShareView> {
+    let server = crate::server::load(&state.paths, &id).await?;
+    let mut share = shared(&state, &id).await?;
+    let before = share.settings.at;
+    share.pick(&picks)?;
+    crate::server::share::save(&state.paths, &id, &share).await?;
+    if share.settings.at != before {
+        crate::settings::push::publish_all(&state.paths, &id).await?;
+    }
+    // A pack already being built or sent was built from the picks as they
+    // were, and one carrying a file this server no longer sends must not keep
+    // streaming it.
+    state.share.cut_revoked(&state.paths).await;
+    Ok(share_view(&state, &server, &share).await)
+}
+
 /// Which settings have moved in this server's own config files since it last
 /// published them, for the admin to look at before anything is sent.
 ///
@@ -4926,6 +4972,7 @@ mod tests {
             code: Code::generate(),
             include_config: false,
             settings: Default::default(),
+            picked: Vec::new(),
             listing: None,
             forbidden: Vec::new(),
             shared: true,

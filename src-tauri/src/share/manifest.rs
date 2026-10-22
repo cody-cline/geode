@@ -307,16 +307,76 @@ impl Settings {
     /// pack. A settings file that cannot be written is then one line in a
     /// report rather than a failed update and a launch the player cannot have.
     pub fn spelling_out(&self, path: &str) -> Settings {
-        if self.covering(std::path::Path::new(path)).is_some() {
-            return self.clone();
-        }
         let mut spelled = self.clone();
-        spelled.paths.push(SyncedPath {
+        spelled.spell_out(path, Policy::Enforce);
+        spelled
+    }
+
+    /// Say what happens to one path, when nothing in this list covers it
+    /// already.
+    ///
+    /// What [`Settings::spelling_out`] does for a whole folder, for a file
+    /// that has no folder to be named under. A client file lands at the top of
+    /// a player's game directory — `options.txt`, not `client-files/options.txt`
+    /// — where the only thing that can name it is its own name, so the pack
+    /// says what happens to it one file at a time.
+    ///
+    /// `from` is 0, the push before counting began, because this is the
+    /// behaviour already in force rather than a new choice: a player who has
+    /// the file keeps theirs, and one who does not is sent it.
+    pub fn spell_out(&mut self, path: &str, policy: Policy) {
+        if self.covering(std::path::Path::new(path)).is_some() {
+            return;
+        }
+        self.paths.push(SyncedPath {
             path: path.to_string(),
-            policy: Policy::Enforce,
+            policy,
             from: 0,
         });
-        spelled
+    }
+
+    /// This list with every path spelled as the recipient's own.
+    ///
+    /// A server keeps the files that are its players' and not its own in
+    /// `client-files/`, a folder no loader reads — which is the only way
+    /// Minecraft's `options.txt` can travel at all, since a server has no such
+    /// file. A player's game has no such folder either: there it is
+    /// `options.txt`, at the top of the game directory. So the pack names the
+    /// path the file lands at, through the one function that turns a server's
+    /// path into a player's, because a behaviour chosen for a path nothing
+    /// lands at would be a choice that reaches nobody.
+    ///
+    /// An entry whose new spelling is not a path a pack may name is dropped
+    /// rather than carried: the recipient would refuse the whole half over it
+    /// — see [`Settings::checked`] — and write every file it describes whole,
+    /// which is the one outcome a list of what to keep exists to avoid.
+    pub fn for_players(&self) -> Settings {
+        let shown = |path: &str| {
+            crate::instance::modpack::pack_rel(std::path::Path::new(path))
+                .to_string_lossy()
+                .replace('\\', "/")
+        };
+        Settings {
+            paths: self
+                .paths
+                .iter()
+                .map(|named| SyncedPath {
+                    path: shown(&named.path),
+                    ..named.clone()
+                })
+                .filter(|named| named.allowed())
+                .collect(),
+            overrides: self
+                .overrides
+                .iter()
+                .map(|entry| Override {
+                    path: shown(&entry.path),
+                    ..entry.clone()
+                })
+                .filter(|entry| entry.allowed())
+                .collect(),
+            at: self.at,
+        }
     }
 
     /// Choose what happens to a player's own changes to a path.
@@ -506,7 +566,12 @@ impl Settings {
 ///
 /// Compared component by component, never as text: `config` must not cover
 /// `configs/x.toml`, and a prefix match on the string would say it does.
-fn covers(tree: &std::path::Path, rel: &std::path::Path) -> bool {
+///
+/// Shared with the walk that decides which of a server's settings files
+/// travel, so the admin picking a folder and a behaviour chosen for one are
+/// the same kind of claim on the same kind of path — one matcher, for the
+/// reason [`Settings::covering`] gives.
+pub(crate) fn covers(tree: &std::path::Path, rel: &std::path::Path) -> bool {
     if tree.as_os_str().is_empty() {
         return false;
     }

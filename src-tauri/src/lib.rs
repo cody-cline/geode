@@ -264,6 +264,8 @@ pub fn run() {
             commands::share_server,
             commands::unshare_server,
             commands::set_server_share_config,
+            commands::get_server_settings_picker,
+            commands::set_server_settings_picks,
             commands::review_server_settings,
             commands::push_server_settings,
             commands::share_link_copied,

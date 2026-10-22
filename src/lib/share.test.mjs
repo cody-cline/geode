@@ -36,6 +36,11 @@ import {
   nextJoin,
   nextPack,
   nothingToPushHint,
+  pickingSettingsHint,
+  clientFilesHint,
+  refusedSettingLine,
+  settingsRowNote,
+  wholeConfigHint,
   outcomeLine,
   packShareMessage,
   packStep,
@@ -1214,7 +1219,12 @@ test("the behaviours offered for the config folder say who ends up with what", (
   // because a file it cannot read setting by setting is sent once instead.
   assert.match(detail("merge"), /press Review/);
   assert.match(detail("merge"), /everything else they had tuned stays tuned/);
+  // Which files it can do it for, named by what they are rather than by
+  // "most of them": an admin whose file is not one of these needs to know
+  // before they pick, not from Review afterwards.
   assert.match(detail("merge"), /\.properties/);
+  assert.match(detail("merge"), /\.toml/);
+  assert.match(detail("merge"), /\.json/);
   assert.match(detail("merge"), /sent once instead/);
 
   // Named for what happens, not for the word the code uses.
@@ -1243,6 +1253,75 @@ test("the admin is told when a config change reaches players, per behaviour", ()
   // the file does not travel, the settings the admin sends do.
   assert.match(whenPlayersGetChanges("merge"), /players keep their own/);
   assert.match(whenPlayersGetChanges("merge"), /the settings you send below/);
+});
+
+test("the picker says what picking files is for and what it costs", () => {
+  // Why there is a picker at all: a real config folder collects things that
+  // are not settings, and sending the folder whole cannot say no to any of
+  // them.
+  assert.match(pickingSettingsHint(), /not settings/);
+  assert.match(pickingSettingsHint(), /window layouts/);
+  // And the one drawback of an allowlist, said rather than found out from a
+  // player whose mod has the wrong settings.
+  assert.match(pickingSettingsHint(), /will not travel until you pick it/);
+
+  // Nothing picked is a behaviour and not an absence of one: an admin who
+  // read it as "nothing travels" would turn a working share off.
+  assert.match(wholeConfigHint(), /Every file in the config folder travels/);
+  assert.match(wholeConfigHint(), /ones a mod writes later/);
+
+  // The one thing the listing cannot show, because there is no row for a file
+  // nobody has put there yet.
+  assert.match(clientFilesHint(), /not on a server's disk/);
+  assert.match(clientFilesHint(), /client-files/);
+  assert.match(clientFilesHint(), /top of each player's game folder/);
+});
+
+test("a settings row says what it will do, where it lands, and what it cannot do", () => {
+  const row = (over) => ({
+    path: "config/sodium.properties",
+    lands: "config/sodium.properties",
+    size: 17,
+    sent: true,
+    policy: "merge",
+    canSync: true,
+    ...over,
+  });
+
+  // Each behaviour read as what happens to the player's copy.
+  assert.match(settingsRowNote(row({ policy: "ship-once" })), /Sent once, then theirs/);
+  assert.match(settingsRowNote(row({})), /plus the settings you send/);
+  assert.match(settingsRowNote(row({ policy: "enforce" })), /Replaced every time they press Play/);
+
+  // Where it lands, only when that is not where it sits — which is the one
+  // case an admin cannot work out: the path they picked is not the path the
+  // player gets.
+  assert.doesNotMatch(settingsRowNote(row({})), /Players get it as/);
+  const client = settingsRowNote(
+    row({ path: "client-files/options.txt", lands: "options.txt", policy: "ship-once" }),
+  );
+  assert.match(client, /Players get it as options\.txt/);
+
+  // A file no setting can be found inside says so on its own row, rather than
+  // sitting under a label reading "only the settings I change" and quietly
+  // doing something else.
+  const opaque = settingsRowNote(row({ policy: "ship-once", canSync: false }));
+  assert.match(opaque, /cannot read this one setting at a time/);
+  assert.match(opaque, /only be sent once/);
+  assert.doesNotMatch(settingsRowNote(row({})), /cannot read this/);
+});
+
+test("a pick that will never travel is a reason on its row, not a disappearance", () => {
+  // The path, then the reason, ended as a sentence however it arrived: a row
+  // that silently did nothing is how an admin concludes sharing is broken.
+  assert.equal(
+    refusedSettingLine({ path: "config/a.toml", why: "There is no such file on this server any more." }),
+    "config/a.toml — There is no such file on this server any more.",
+  );
+  assert.equal(
+    refusedSettingLine({ path: "ops.json", why: "Not a settings file" }),
+    "ops.json — Not a settings file.",
+  );
 });
 
 test("the admin is told that a push is deliberate and cannot be recalled", () => {

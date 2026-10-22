@@ -8,6 +8,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::{Error, Result};
 use crate::install::identity::{self, travel, Ask, Carry, Catalogue, Travel};
 use crate::instance::export::Selection;
@@ -2667,15 +2669,25 @@ pub async fn server_pack_info(
     let include_config = sends_config(paths, &server.id).await?;
     let forbidden = forbidden_for(paths, &server.id).await?;
     let settings = synced_settings(paths, &server.id).await?;
-    let revision =
-        server_revision(paths, server, &mods, include_config, &forbidden, &settings).await?;
-    // The same walk the revision hashes, so the number a player is shown is
-    // the number of files the pack carries — see [`config_files`].
-    let settings_files = if include_config {
-        config_files(&run).await?.len()
+    let sent = settings_sent(paths, &server.id).await?;
+    let revision = server_revision(
+        paths, server, &mods, include_config, &forbidden, &settings, &sent.files,
+    )
+    .await?;
+    // The same list the revision describes and the pack carries, so the number
+    // a player is shown is the number of files they get — see
+    // [`settings_sent`].
+    let carried: Vec<&Sent> = if include_config {
+        sent.files.iter().filter(|row| row.sent).collect()
     } else {
-        0
+        Vec::new()
     };
+    // Off the files themselves and not off the folder's behaviour, because the
+    // admin picks per file: a share that keeps one file and replaces another
+    // cannot be summed up by what it chose for `config/`. Nothing of the
+    // player's survives unless nothing is replaced, which is the cautious
+    // reading of a mixed set and the only one that cannot overpromise.
+    let config_kept = !carried.is_empty() && carried.iter().all(|row| row.policy != Policy::Enforce);
     Ok(super::host::PackInfo {
         name: server.name.clone(),
         mc_version: server.mc_version.clone(),
@@ -2688,19 +2700,17 @@ pub async fn server_pack_info(
             .filter(|side| **side == instance::jar::Side::Server)
             .count(),
         server_kind: server.kind.as_str().to_string(),
-        config_files: settings_files,
+        config_files: carried.len(),
         // The only thing a player asks about those files, answered here
         // rather than by naming the behaviour: a bool cannot fail to read the
         // way a policy name a newer Geode invented would, and a description
         // that would not parse leaves a player unable to check for changes at
         // all.
-        config_kept: include_config
-            && settings.policy_for(Path::new("config")) != Policy::Enforce,
+        config_kept,
         // The other half of the same question, for the one behaviour a single
         // bool could not describe: the files are the player's, *and* what the
         // admin changes later arrives as the settings they changed.
-        config_pushed: include_config
-            && settings.policy_for(Path::new("config")) == Policy::Merge,
+        config_pushed: config_kept && carried.iter().any(|row| row.policy == Policy::Merge),
         revision,
         server_id: server.id.clone(),
         // Read here as well as written into the pack, and on purpose: this is
@@ -2753,46 +2763,356 @@ pub(crate) async fn listing_for(paths: &Paths, id: &str) -> Result<Option<Listin
         .and_then(|listing| listing.checked().ok()))
 }
 
-/// Every regular file a server's pack would send from `config/`, found the way
-/// the pack's own walk finds them: through no link, and nothing at all when
-/// `config/` is itself one.
+/// The two folders a server's settings files can live in, and the only two a
+/// pack carries one out of.
 ///
-/// One function because three things count on this set and must never
-/// disagree. [`server_revision`] hashes these files, so they are what a
-/// player's update is triggered by; [`server_pack_info`] counts them, so they
-/// are what the join preview promises is coming; and `settings::push` reviews
-/// them, so they are what the admin can push a setting out of. A second walk
-/// that drifted would tell a player a number the pack does not carry, or offer
-/// the admin a setting inside a file nobody is sent.
+/// An allowlist rather than a list of what to keep out, for the reason
+/// [`instance::modpack::Walk::Only`] gives: the rest of a server's run
+/// directory is `server.properties` with its RCON password in it, the lists of
+/// who may play and who is banned, other people's names and addresses in
+/// `usercache.json`, the logs, the worlds and the plugins, and a list of names
+/// to keep out is only ever one forgotten name from shipping one of them.
+/// Nobody looks at this pack before it goes.
+const SETTINGS_FOLDERS: [&str; 2] = ["config", instance::modpack::CLIENT_FILES];
+
+/// One settings file on a server's disk, and what its pack does with it.
+#[derive(Debug, Clone)]
+pub(crate) struct Sent {
+    /// Where it is, from the server's run directory.
+    pub rel: PathBuf,
+    /// Where it lands in a player's instance: the same path, except for a
+    /// client file, which has no folder of its own there — see
+    /// [`instance::modpack::pack_rel`].
+    pub lands: PathBuf,
+    pub size: u64,
+    /// Whether this server's pack carries it at all.
+    pub sent: bool,
+    /// What happens to a player's own changes to it, as chosen for it or for a
+    /// folder above it — or [`default_policy`] when nobody has chosen.
+    pub policy: Policy,
+}
+
+/// One path as every list a player or an admin reads spells it: forward
+/// slashes, whatever this machine uses.
 ///
-/// The caller decides whether config is sent at all — [`sends_config`] — so
-/// this answers only "which files", never "whether".
-pub(crate) async fn config_files(run: &Path) -> Result<Vec<PathBuf>> {
-    let config = run.join("config");
+/// One function because a path is matched by text on the other side — in a
+/// revision line, against a pack's settings half, against a row the admin
+/// ticked — so two spellings of one file are two files.
+fn shown(rel: &Path) -> String {
+    rel.to_string_lossy().replace('\\', "/")
+}
+
+/// What a settings file nobody chose a behaviour for does.
+///
+/// [`Policy::Enforce`] under `config/`, which is what sending a config folder
+/// has always done and what every share made before there was anything to
+/// choose goes on doing.
+///
+/// [`Policy::ShipOnce`] for a client file, and that is not a matter of taste.
+/// Minecraft rewrites `options.txt` in full on every exit, in its own key
+/// order, so a copy replaced on every update would move a player's keybinds
+/// under them between one session and the next — the worst thing this feature
+/// could do to somebody. A client file nobody chose for is sent to a player
+/// who has none and is theirs from then on.
+fn default_policy(rel: &Path) -> Policy {
+    if rel.starts_with(instance::modpack::CLIENT_FILES) {
+        Policy::ShipOnce
+    } else {
+        Policy::Enforce
+    }
+}
+
+/// One path the admin picked that no pack of this server's will carry, and
+/// what to tell them about it.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Refused {
+    pub path: String,
+    pub why: String,
+}
+
+/// Every settings file a server has, and every pick that will never be one.
+pub(crate) struct Sends {
+    pub files: Vec<Sent>,
+    pub refused: Vec<Refused>,
+    /// Whether the admin has picked anything at all. False means this server's
+    /// `config/` folder whole, a file a mod writes for the first time next
+    /// week included — what sending a config folder has always meant.
+    pub whole_config: bool,
+}
+
+/// Which of a server's own settings files its pack carries, and which of the
+/// admin's picks it will not.
+///
+/// One function because four things count on this set and must never disagree.
+/// [`server_revision`] describes these files, so they are what a player's
+/// update is triggered by; [`server_pack_info`] counts them, so they are what
+/// the join preview promises is coming; `settings::push` reviews them, so they
+/// are what the admin can push a setting out of; and [`export_server`] walks
+/// exactly this list, so they are what the pack holds. A second walk that
+/// drifted would tell a player a number the pack does not carry, or offer the
+/// admin a setting inside a file nobody is sent.
+///
+/// What the admin picked is held to [`SETTINGS_FOLDERS`] here and not where it
+/// was written, because a bug in a picker must not be able to ship
+/// `ops.json`. The picks are a list in a file on disk; this is the code that
+/// decides, and it is the same code for the listing the admin reads and the
+/// pack a stranger downloads.
+///
+/// The caller decides whether settings files are sent at all —
+/// [`sends_config`] — so this answers only "which files", never "whether".
+pub(crate) async fn settings_sent(paths: &Paths, id: &str) -> Result<Sends> {
+    let (picked, settings) = match crate::server::share::load(paths, id).await? {
+        Some(share) => (share.picked, share.settings),
+        None => (Vec::new(), Settings::default()),
+    };
+    let run = paths.server_run(id);
+
+    let mut files = Vec::new();
+    for (rel, size) in settings_candidates(&run).await? {
+        files.push(Sent {
+            sent: picked_out(&picked, &rel),
+            policy: settings
+                .covering(&rel)
+                .map_or_else(|| default_policy(&rel), |named| named.policy),
+            lands: instance::modpack::pack_rel(&rel),
+            rel,
+            size,
+        });
+    }
+
+    let mut refused = Vec::new();
+    for path in &picked {
+        if let Some(why) = refusal(&run, Path::new(path)).await {
+            refused.push(Refused {
+                path: path.clone(),
+                why,
+            });
+        }
+    }
+    Ok(Sends {
+        files,
+        refused,
+        whole_config: picked.is_empty(),
+    })
+}
+
+/// Whether the admin's picks carry this file.
+///
+/// No picks means the whole `config/` folder, which is what sending a config
+/// folder has always meant and what every share made before there was a
+/// picker goes on doing — files a mod writes for the first time next week
+/// included. A pick names a file or a folder above one, matched the way a
+/// behaviour chosen for a folder is matched, because they are the same kind of
+/// claim on the same kind of path.
+fn picked_out(picked: &[String], rel: &Path) -> bool {
+    use super::manifest::covers;
+
+    if picked.is_empty() {
+        return covers(Path::new("config"), rel);
+    }
+    picked
+        .iter()
+        .any(|path| covers(Path::new(path), rel) && in_settings_folder(Path::new(path)))
+}
+
+fn in_settings_folder(rel: &Path) -> bool {
+    rel.components()
+        .next()
+        .and_then(|part| part.as_os_str().to_str())
+        .is_some_and(|top| SETTINGS_FOLDERS.contains(&top))
+}
+
+/// Why a path can never be a settings file of this server's, however the disk
+/// looks — or `None` when it could be.
+///
+/// The two rules that can never come true, kept apart from the rest because
+/// they are the two worth refusing at the moment the admin asks for them:
+/// [`crate::commands::set_server_settings_picks`] turns these into the error
+/// on their screen, so a path the pack could never name is never written down
+/// as a pick at all. The others are facts about the disk right now, and belong
+/// on a row rather than in a refusal to save.
+pub(crate) fn never_nameable(rel: &Path) -> Option<String> {
+    if !crate::paths::is_safe_relative(rel) {
+        return Some("That is not a path inside this server's own folder.".to_string());
+    }
+    if !in_settings_folder(rel) {
+        return Some(format!(
+            "Players are sent this server's {} folder and the {} folder beside it, and nothing \
+             else — the rest of a server's folder holds its own password, the lists of who may \
+             play, and its worlds.",
+            SETTINGS_FOLDERS[0], SETTINGS_FOLDERS[1]
+        ));
+    }
+    None
+}
+
+/// Why a path the admin picked will never travel, or `None` when it can.
+///
+/// Said as a reason rather than left out of a listing, because a row that
+/// silently does nothing is how an admin concludes sharing is broken — and
+/// because two of these are worth knowing: a pick is refused for what it is,
+/// not for where it sits, so a file that was a settings file last week and is
+/// a link today stops travelling and says so.
+async fn refusal(run: &Path, rel: &Path) -> Option<String> {
+    if let Some(why) = never_nameable(rel) {
+        return Some(why);
+    }
+    // Every step of the way, because an allowlist of folders says nothing
+    // about where a link inside one of them points — the same reason the pack's
+    // own walk refuses one wherever it sits. `symlink_metadata` is the link
+    // itself rather than what it points at, which is what makes that check the
+    // one that holds.
+    let steps = rel.components().count();
+    let mut so_far = run.to_path_buf();
+    for (nth, part) in rel.components().enumerate() {
+        so_far.push(part);
+        let Ok(meta) = tokio::fs::symlink_metadata(&so_far).await else {
+            return Some("There is no such file on this server any more.".to_string());
+        };
+        if meta.is_symlink() {
+            return Some(
+                "Geode sends nothing through a link: a link inside a folder it sends says \
+                 nothing about where it points."
+                    .to_string(),
+            );
+        }
+        if nth + 1 == steps {
+            if !meta.is_file() && !meta.is_dir() {
+                return Some("That is not an ordinary file, so nothing of it travels.".to_string());
+            }
+        } else if !meta.is_dir() {
+            return Some("There is no such folder on this server any more.".to_string());
+        }
+    }
+    None
+}
+
+/// Every regular file in the folders a server's settings files live in, with
+/// its size, found the way the pack's own walk finds them: through no link,
+/// and nothing at all from a folder that is itself one.
+async fn settings_candidates(run: &Path) -> Result<Vec<(PathBuf, u64)>> {
+    let run = run.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let mut files = Vec::new();
-        // A `config/` that is itself a link is not sent, so it is nothing
-        // here either.
-        if !std::fs::symlink_metadata(&config).is_ok_and(|meta| meta.is_dir()) {
-            return files;
-        }
-        let mut stack = vec![config];
-        while let Some(dir) = stack.pop() {
-            let Ok(entries) = std::fs::read_dir(&dir) else {
+        for folder in SETTINGS_FOLDERS {
+            let top = run.join(folder);
+            // A folder that is itself a link is not sent, so it is nothing
+            // here either.
+            if !std::fs::symlink_metadata(&top).is_ok_and(|meta| meta.is_dir()) {
                 continue;
-            };
-            for entry in entries.flatten() {
-                match entry.file_type() {
-                    Ok(kind) if kind.is_dir() => stack.push(entry.path()),
-                    Ok(kind) if kind.is_file() => files.push(entry.path()),
-                    _ => {}
+            }
+            let mut stack = vec![top];
+            while let Some(dir) = stack.pop() {
+                let Ok(entries) = std::fs::read_dir(&dir) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    match entry.file_type() {
+                        Ok(kind) if kind.is_dir() => stack.push(entry.path()),
+                        Ok(kind) if kind.is_file() => {
+                            let Ok(rel) = entry.path().strip_prefix(&run).map(Path::to_path_buf)
+                            else {
+                                continue;
+                            };
+                            let size = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+                            files.push((rel, size));
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
+        files.sort();
         files
     })
     .await
-    .map_err(|e| Error::msg(format!("reading the server's config panicked: {e}")))
+    .map_err(|e| Error::msg(format!("reading the server's settings files panicked: {e}")))
+}
+
+/// One row of the picker: a settings file, what it would do, and whether it
+/// can do the one thing a format has to be readable for.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsChoice {
+    /// Where it is, from the server's run directory.
+    pub path: String,
+    /// Where it lands in a player's instance.
+    pub lands: String,
+    pub size: u64,
+    pub sent: bool,
+    /// What happens to a player's own changes to it — **as it would actually
+    /// be applied**, which for a file kept in sync whose format Geode cannot
+    /// read one setting at a time is that it is sent once.
+    ///
+    /// Not the choice as stored, on purpose. Keeping a file in sync is
+    /// splicing in the settings the admin pushes, and nothing can be pushed
+    /// out of a file no setting can be found inside — so a row under a label
+    /// reading "only the settings I change" that quietly did something else is
+    /// the one thing this listing must not show.
+    pub policy: Policy,
+    /// Whether keeping this file in sync is a behaviour it can honour.
+    pub can_sync: bool,
+}
+
+/// What the admin picks from: every settings file this server has, and every
+/// pick it will not carry.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsPicker {
+    pub files: Vec<SettingsChoice>,
+    pub refused: Vec<Refused>,
+    /// Whether the whole `config/` folder travels, a file a mod writes for the
+    /// first time next week included. True until the admin picks anything.
+    pub whole_config: bool,
+}
+
+/// The listing the admin picks from, which is the same set of files the pack
+/// carries — [`settings_sent`] decides both.
+///
+/// This reads each file, which the pack's own walk does not have to: a format
+/// is what a file holds and never what it is called, so saying whether a row
+/// can be kept in sync means looking inside it. That is work for a listing
+/// somebody asked for and not for a pack a stranger downloads, which is why it
+/// is here and not in [`settings_sent`].
+pub(crate) async fn settings_picker(paths: &Paths, id: &str) -> Result<SettingsPicker> {
+    let sends = settings_sent(paths, id).await?;
+    let run = paths.server_run(id);
+
+    let mut files = Vec::new();
+    for row in sends.files {
+        let can_sync = match tokio::fs::read(run.join(&row.rel)).await {
+            Ok(bytes) => crate::settings::sniff(&bytes).is_some(),
+            Err(_) => false,
+        };
+        files.push(SettingsChoice {
+            path: shown(&row.rel),
+            lands: shown(&row.lands),
+            size: row.size,
+            sent: row.sent,
+            policy: match row.policy {
+                Policy::Merge if !can_sync => Policy::ShipOnce,
+                policy => policy,
+            },
+            can_sync,
+        });
+    }
+    Ok(SettingsPicker {
+        files,
+        refused: sends.refused,
+        whole_config: sends.whole_config,
+    })
+}
+
+/// One row of the picker as the admin's choice comes back: a settings file,
+/// and what they chose to happen to a player's own changes to it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Pick {
+    /// The file or folder, from the server's run directory, spelled as
+    /// [`SettingsChoice::path`] spelled it.
+    pub path: String,
+    pub policy: Policy,
 }
 
 /// The mods this server does not allow its players to run, if the admin has
@@ -2870,13 +3190,13 @@ async fn server_revision(
     include_config: bool,
     forbidden: &[Forbidden],
     settings: &Settings,
+    sent: &[Sent],
 ) -> Result<String> {
     use instance::jar::Side;
     use sha2::{Digest, Sha256};
 
     let (loader, loader_version) = client_loader(server)?;
     let run = paths.server_run(&server.id);
-    let shown = |rel: &Path| rel.to_string_lossy().replace('\\', "/");
 
     let mut lines = Vec::new();
     for rel in &mods.carried {
@@ -2952,9 +3272,14 @@ async fn server_revision(
                 entry.path, entry.at, entry.key
             ));
         }
-        for full in config_files(&run).await? {
-            let rel = full.strip_prefix(&run).unwrap_or(&full);
-            if settings.policy_for(rel) != Policy::Enforce {
+        // Only the files the pack carries. A settings file on disk the admin
+        // did not pick reaches nobody, so a revision that moved for it would
+        // send every player a pack over a file none of them will ever see —
+        // and a file that stops being picked loses its line here, which is
+        // how they are told it has stopped coming.
+        for row in sent.iter().filter(|row| row.sent) {
+            let rel = row.rel.as_path();
+            if row.policy != Policy::Enforce {
                 // Its bytes are not what a player receives, so they are not
                 // here — but *that it exists* is: a player with no copy of it
                 // is sent one, and nothing else in this walk would ever say it
@@ -2964,7 +3289,7 @@ async fn server_revision(
                 lines.push(format!("config-file {} sent", shown(rel)));
                 continue;
             }
-            let Some(hash) = sha1_if_there(&full).await? else {
+            let Some(hash) = sha1_if_there(&run.join(rel)).await? else {
                 continue;
             };
             lines.push(format!("config-file {} sha1:{hash}", shown(rel)));
@@ -3016,12 +3341,15 @@ pub async fn export_server(
     let include_config = sends_config(paths, &server.id).await?;
     let forbidden = forbidden_for(paths, &server.id).await?;
     let settings = synced_settings(paths, &server.id).await?;
+    let sent = settings_sent(paths, &server.id).await?;
     // Worked out from the very files this pack is about to be written from,
     // and before it is written: a file that changes while the pack is built
     // makes the revision it carries the older of the two, which the next check
     // finds changed. The other way round would be a change nobody ever sees.
-    let revision =
-        server_revision(paths, server, &mods, include_config, &forbidden, &settings).await?;
+    let revision = server_revision(
+        paths, server, &mods, include_config, &forbidden, &settings, &sent.files,
+    )
+    .await?;
 
     // Records only, and so no client and no network. This runs inside the share
     // host's download handler under `MAX_BUILDS`, and `server_revision` is
@@ -3068,7 +3396,21 @@ pub async fn export_server(
         // apart from every other file in the pack, which is what makes one
         // that cannot be written a line in a report instead of a failed
         // update.
-        settings: include_config.then(|| settings.spelling_out("config")),
+        // Spelled as the paths the files land at, because that is what the
+        // player's Geode matches against their own disk: a server's
+        // `client-files/options.txt` is their `options.txt`, at the top of
+        // the game directory. See [`Settings::for_players`].
+        settings: include_config.then(|| {
+            let mut half = settings.spelling_out("config").for_players();
+            // And every file this pack carries that the half still says
+            // nothing about — a client file, which lands where no folder can
+            // name it. Left unsaid it would be written whole on every update,
+            // which is the one thing `options.txt` must never be.
+            for row in sent.files.iter().filter(|row| row.sent) {
+                half.spell_out(&shown(&row.lands), row.policy);
+            }
+            half
+        }),
         forbidden,
     };
     let extras = extras_from(
@@ -3080,10 +3422,18 @@ pub async fn export_server(
     .await?;
 
     // Mods and client mods by name, exactly the files `server_mods` read and
-    // counted, and `config/` whole when asked for. Neither follows a link.
-    let mut trees = Vec::new();
+    // counted, and the settings files the admin picked when the share says to
+    // send any — exactly the list `settings_sent` named, so what this pack
+    // holds is what the revision described and what the admin was shown.
+    // Nothing follows a link.
+    let mut carried = mods.carried;
     if include_config {
-        trees.push("config");
+        carried.extend(
+            sent.files
+                .into_iter()
+                .filter(|row| row.sent)
+                .map(|row| row.rel),
+        );
     }
 
     let input = instance::modpack::PackInput {
@@ -3098,10 +3448,7 @@ pub async fn export_server(
         mc_version: &server.mc_version,
         loader,
         loader_version: &loader_version,
-        walk: instance::modpack::Walk::Only {
-            trees,
-            files: mods.carried,
-        },
+        walk: instance::modpack::Walk::Only { files: carried },
     };
     let half = instance::modpack::GeodeHalf {
         extras,
@@ -4720,6 +5067,7 @@ mod tests {
                 code: crate::share::code::Code::generate(),
                 include_config,
                 settings: Default::default(),
+                picked: Vec::new(),
                 listing: None,
                 shared: true,
                 forbidden: Vec::new(),
@@ -5698,6 +6046,483 @@ mod tests {
         assert_eq!(info.config_files, 2);
     }
 
+    /// Pick which of a server's settings files travel, the way the admin's
+    /// picker does: these paths, each with the behaviour chosen for it.
+    async fn pick(paths: &Paths, id: &str, picks: &[(&str, Policy)]) {
+        let mut share = crate::server::share::load(paths, id)
+            .await
+            .unwrap()
+            .expect("a shared server");
+        share.include_config = true;
+        let picks: Vec<Pick> = picks
+            .iter()
+            .map(|(path, policy)| Pick {
+                path: (*path).to_string(),
+                policy: *policy,
+            })
+            .collect();
+        share.pick(&picks).unwrap();
+        crate::server::share::save(paths, id, &share).await.unwrap();
+    }
+
+    /// The settings files a pack carries, by the path each one lands at in a
+    /// player's game directory — which for a client file is not the path the
+    /// server keeps it under.
+    fn settings_in(archive: &Path) -> Vec<String> {
+        sorted(
+            entries(archive)
+                .iter()
+                .filter_map(|name| {
+                    name.strip_prefix("overrides/")
+                        .or_else(|| name.strip_prefix("client-overrides/"))
+                        .filter(|rel| !rel.starts_with("mods/"))
+                        .map(str::to_string)
+                })
+                .collect(),
+        )
+    }
+
+    /// The admin picks the files and the folder stops going whole, which is
+    /// the only way the things in a real `config/` that are not configuration
+    /// stay out of a pack: a window layout of pixel positions that is this
+    /// machine's and nobody else's, and the `.java` and `.class` files a
+    /// decompiled dev build dumped there.
+    ///
+    /// A picked file travels on its own, without any folder being named, and
+    /// stops travelling the moment it is not there to send — so the listing
+    /// the admin reads, the count a player is shown, the revision and the zip
+    /// are one answer and cannot drift.
+    #[tokio::test]
+    async fn a_server_sends_the_settings_files_its_admin_picked_and_no_others() {
+        let (scratch, server) = small_server(
+            "picked",
+            &[
+                ("mods/a.jar", b"a".to_vec()),
+                ("config/sodium.properties", b"renderDistance=8\n".to_vec()),
+                (
+                    "config/axiom/imgui.ini",
+                    b"[Window][###Tools]\nPos=0,22\n".to_vec(),
+                ),
+                (
+                    "config/create/AllConfigs.java",
+                    b"class AllConfigs {}\n".to_vec(),
+                ),
+            ],
+            true,
+        )
+        .await;
+        let paths = scratch.paths.clone();
+        let run = paths.server_run(&server.id);
+
+        // Nothing picked is the folder whole, which is what sending a config
+        // folder has always meant — the window layout and the decompiled
+        // source along with it.
+        let whole = pack_now(&paths, &server, "whole").await;
+        assert_eq!(
+            settings_in(&whole),
+            vec![
+                "config/axiom/imgui.ini",
+                "config/create/AllConfigs.java",
+                "config/sodium.properties",
+            ],
+        );
+        assert!(settings_picker(&paths, &server.id).await.unwrap().whole_config);
+
+        pick(
+            &paths,
+            &server.id,
+            &[("config/sodium.properties", Policy::Merge)],
+        )
+        .await;
+        let picked = pack_now(&paths, &server, "picked").await;
+        assert_eq!(settings_in(&picked), vec!["config/sodium.properties"]);
+        let picker = settings_picker(&paths, &server.id).await.unwrap();
+        assert!(!picker.whole_config);
+        assert!(picker.refused.is_empty(), "{:?}", picker.refused);
+        // Every file the server has is still a row — the admin cannot pick
+        // what they were never shown — and exactly one of them is going.
+        assert_eq!(picker.files.len(), 3, "{:?}", picker.files);
+        assert_eq!(
+            picker
+                .files
+                .iter()
+                .filter(|row| row.sent)
+                .map(|row| row.path.clone())
+                .collect::<Vec<_>>(),
+            vec!["config/sodium.properties"],
+        );
+
+        // The count the join preview promises is the number of files in the
+        // zip, because one function answered both.
+        let info = server_pack_info(&paths, &server).await.unwrap();
+        assert_eq!(info.config_files, 1);
+        assert_eq!(info.config_files, settings_in(&picked).len());
+        let before = info.revision;
+
+        // And a picked file that is no longer there to send stops travelling,
+        // says so on its row, and moves the revision — a player holding a
+        // copy of a file the server has stopped sending is told by the only
+        // thing that tells them anything.
+        tokio::fs::remove_file(run.join("config/sodium.properties"))
+            .await
+            .unwrap();
+        let gone = pack_now(&paths, &server, "gone").await;
+        assert_eq!(settings_in(&gone), Vec::<String>::new());
+        let picker = settings_picker(&paths, &server.id).await.unwrap();
+        assert_eq!(picker.refused.len(), 1, "{:?}", picker.refused);
+        assert_eq!(picker.refused[0].path, "config/sodium.properties");
+        assert!(
+            picker.refused[0].why.contains("no such file"),
+            "{}",
+            picker.refused[0].why
+        );
+        let info = server_pack_info(&paths, &server).await.unwrap();
+        assert_eq!(info.config_files, 0);
+        assert_ne!(info.revision, before);
+    }
+
+    /// The paths a pack may never carry are refused where the pack is built
+    /// and not only where the picking is done, because a bug in a picker must
+    /// not be able to ship `ops.json` — and each is a reason on its row
+    /// rather than a row that silently does nothing, because an admin whose
+    /// pick quietly vanished concludes sharing is broken.
+    #[tokio::test]
+    async fn a_pick_outside_the_two_settings_folders_ships_nothing_and_says_why() {
+        let (scratch, server) = server_fixture("refused", true).await;
+        let paths = scratch.paths.clone();
+        let never = [
+            "server.properties",
+            "ops.json",
+            "whitelist.json",
+            "banned-players.json",
+            "banned-ips.json",
+            "usercache.json",
+            "eula.txt",
+            "logs/latest.log",
+            "crash-reports",
+            "world/level.dat",
+            "plugins/p.jar",
+            "share.json",
+            "../elsewhere/secret.txt",
+            "config/../ops.json",
+        ];
+
+        // Refused in front of the admin, so none of them is ever written down
+        // as a pick in the first place.
+        let mut share = crate::server::share::load(&paths, &server.id)
+            .await
+            .unwrap()
+            .expect("a shared server");
+        for path in never {
+            let err = share
+                .pick(&[Pick {
+                    path: path.to_string(),
+                    policy: Policy::Enforce,
+                }])
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(path), "{path}: {err}");
+        }
+
+        // And refused again where the pack is built, so a hand-edited
+        // `share.json` naming every one of them ships none of them.
+        share.include_config = true;
+        share.picked = never.iter().map(|path| path.to_string()).collect();
+        crate::server::share::save(&paths, &server.id, &share)
+            .await
+            .unwrap();
+        let dest = pack_now(&paths, &server, "refused").await;
+        assert_eq!(settings_in(&dest), Vec::<String>::new());
+        assert_eq!(
+            sorted(entries(&dest)),
+            vec![
+                "geode/manifest.json",
+                "geode/media/icon.png",
+                "modrinth.index.json",
+                "overrides/mods/homemade.jar",
+                "overrides/mods/private-tools.jar.disabled",
+                "overrides/mods/server-side.jar",
+            ],
+        );
+        assert_eq!(server_pack_info(&paths, &server).await.unwrap().config_files, 0);
+
+        let picker = settings_picker(&paths, &server.id).await.unwrap();
+        assert_eq!(
+            sorted(picker.refused.iter().map(|row| row.path.clone()).collect()),
+            sorted(never.iter().map(|path| path.to_string()).collect()),
+        );
+        for row in &picker.refused {
+            assert!(!row.why.trim().is_empty(), "{} has no reason", row.path);
+        }
+        let ops = picker
+            .refused
+            .iter()
+            .find(|row| row.path == "ops.json")
+            .expect("the player list is a row with a reason on it");
+        assert!(
+            ops.why.contains("config") && ops.why.contains("client-files"),
+            "{}",
+            ops.why
+        );
+
+        // And the folders are an allowlist in their own right, not only
+        // because the walk that looks for settings files never offers
+        // anything else: a pick outside them carries nothing even when it is
+        // handed the path of a file that is really there.
+        assert!(!picked_out(
+            &["ops.json".to_string()],
+            Path::new("ops.json")
+        ));
+        assert!(picked_out(
+            &["config".to_string()],
+            Path::new("config/secret.toml")
+        ));
+        assert!(picked_out(
+            &[format!("{}/options.txt", instance::modpack::CLIENT_FILES)],
+            Path::new("client-files/options.txt")
+        ));
+    }
+
+    /// A link anywhere along a picked path is refused, because an allowlist of
+    /// folders says nothing about where a link inside one of them points: a
+    /// `config/linked` pointing at the directory above would carry
+    /// `server.properties` under an allowed name, and nobody looks at this
+    /// pack before it goes.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_link_anywhere_along_a_picked_settings_path_is_refused() {
+        use std::os::unix::fs::symlink;
+
+        let (scratch, server) = small_server(
+            "picked-link",
+            &[
+                ("mods/a.jar", b"a".to_vec()),
+                ("config/real/ok.properties", b"a=1\n".to_vec()),
+            ],
+            true,
+        )
+        .await;
+        let paths = scratch.paths.clone();
+        let run = paths.server_run(&server.id);
+        let elsewhere = paths.root.join("elsewhere");
+        tokio::fs::create_dir_all(&elsewhere).await.unwrap();
+        tokio::fs::write(elsewhere.join("secret.properties"), b"token=hunter2\n")
+            .await
+            .unwrap();
+        // A folder along the way that is a link, and the file itself.
+        symlink(&elsewhere, run.join("config/linked")).unwrap();
+        symlink(
+            elsewhere.join("secret.properties"),
+            run.join("config/real/linked.properties"),
+        )
+        .unwrap();
+
+        pick(
+            &paths,
+            &server.id,
+            &[
+                ("config/linked/secret.properties", Policy::Enforce),
+                ("config/real/linked.properties", Policy::Enforce),
+                ("config/real/ok.properties", Policy::Enforce),
+            ],
+        )
+        .await;
+
+        let dest = pack_now(&paths, &server, "picked-link").await;
+        assert_eq!(settings_in(&dest), vec!["config/real/ok.properties"]);
+        let picker = settings_picker(&paths, &server.id).await.unwrap();
+        assert_eq!(
+            sorted(picker.refused.iter().map(|row| row.path.clone()).collect()),
+            vec![
+                "config/linked/secret.properties",
+                "config/real/linked.properties",
+            ],
+        );
+        for row in &picker.refused {
+            assert!(row.why.contains("link"), "{}: {}", row.path, row.why);
+        }
+    }
+
+    /// Minecraft's own settings are the player's files and exist nowhere on a
+    /// server's disk, so a server keeps a copy in `client-files/` — a folder
+    /// no loader reads, like the one beside it for client mods. The pack
+    /// carries it under `client-overrides/`, so a launcher installing this
+    /// pack on a server leaves it out, and it lands at the top of a player's
+    /// game directory, which is where Minecraft keeps it.
+    ///
+    /// Sent once, and that is not a matter of taste: the game rewrites the
+    /// whole file in its own key order on every exit, so a copy replaced on
+    /// every update would move a player's keybinds under them between one
+    /// session and the next.
+    #[tokio::test]
+    async fn minecrafts_own_settings_travel_in_the_folder_no_loader_reads() {
+        // A real one's shape: the first colon is the separator and the values
+        // have colons of their own.
+        let theirs = "version:3955\nfov:70.0\nkey_iris.keybind.reload:key.keyboard.r:CONTROL\n";
+        let (scratch, server) = small_server(
+            "client-files",
+            &[
+                ("mods/a.jar", b"a".to_vec()),
+                ("client-files/options.txt", theirs.as_bytes().to_vec()),
+            ],
+            true,
+        )
+        .await;
+        let paths = scratch.paths.clone();
+        let run = paths.server_run(&server.id);
+        pick(
+            &paths,
+            &server.id,
+            &[("client-files/options.txt", Policy::ShipOnce)],
+        )
+        .await;
+
+        let dest = pack_now(&paths, &server, "client-files").await;
+        assert!(
+            entries(&dest).contains(&"client-overrides/options.txt".to_string()),
+            "{:?}",
+            entries(&dest)
+        );
+        assert_eq!(settings_in(&dest), vec!["options.txt"]);
+        // The pack says what happens to it by the path it lands at, because
+        // on a player's disk there is no folder above it to name.
+        let half = read_manifest(&dest)
+            .unwrap()
+            .unwrap()
+            .settings
+            .expect("a settings half");
+        let named = half
+            .paths
+            .iter()
+            .find(|named| named.path == "options.txt")
+            .expect("the pack says what happens to the file it sends");
+        assert_eq!(named.policy, Policy::ShipOnce);
+        // Stamped with the push the admin picked it at, which is what sends it
+        // to the players already joined: a behaviour in force since before
+        // counting began would leave every one of them reading as caught up
+        // with a file they have never seen.
+        assert!(half.at > 0);
+        assert_eq!(named.from, half.at);
+        // And the picker tells the admin where it lands, since the path they
+        // picked is not the path the player gets.
+        let row = settings_picker(&paths, &server.id)
+            .await
+            .unwrap()
+            .files
+            .into_iter()
+            .find(|row| row.path == "client-files/options.txt")
+            .expect("the client file is a row");
+        assert_eq!(row.lands, "options.txt");
+        assert_eq!(row.size, theirs.len() as u64);
+
+        let mut player = join_now(&paths, &server, "client-files-player", &[]).await;
+        let mine = paths.game_dir(&player.id).join("options.txt");
+        assert_eq!(std::fs::read_to_string(&mine).unwrap(), theirs);
+
+        // Theirs from then on, however the server's own copy moves.
+        tokio::fs::write(&mine, "version:3955\nfov:90.0\n").await.unwrap();
+        tokio::fs::write(
+            run.join("client-files/options.txt"),
+            "version:3955\nfov:30.0\n",
+        )
+        .await
+        .unwrap();
+        let pack = pack_now(&paths, &server, "client-files-again").await;
+        update_offline(&paths, &mut player, &pack).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&mine).unwrap(),
+            "version:3955\nfov:90.0\n",
+            "the server replaced a client file it had already sent once"
+        );
+
+        // And a pack never leaves a client file unsaid, whatever the share
+        // file holds: one named as travelling with no behaviour chosen for it
+        // still arrives as sent once. Unsaid means written whole on every
+        // update, which is the one thing this file must never be.
+        let mut share = crate::server::share::load(&paths, &server.id)
+            .await
+            .unwrap()
+            .expect("a shared server");
+        share.settings = Default::default();
+        share.picked = vec!["client-files/options.txt".to_string()];
+        crate::server::share::save(&paths, &server.id, &share)
+            .await
+            .unwrap();
+        let dest = pack_now(&paths, &server, "client-files-unsaid").await;
+        let half = read_manifest(&dest)
+            .unwrap()
+            .unwrap()
+            .settings
+            .expect("a settings half");
+        let named = half
+            .paths
+            .iter()
+            .find(|named| named.path == "options.txt")
+            .expect("the pack says what happens to the file it sends");
+        assert_eq!((named.policy, named.from), (Policy::ShipOnce, 0));
+    }
+
+    /// Keeping a file in sync means splicing in the settings the admin pushes,
+    /// and nothing can be pushed out of a file no setting can be found inside.
+    /// So the listing says which rows can do it, and a file in a folder kept
+    /// in sync whose format Geode cannot read one setting at a time is shown
+    /// as what it will actually do — sent once. A row under a label reading
+    /// "only the settings I change" that quietly did something else is the one
+    /// thing this listing must not show.
+    #[tokio::test]
+    async fn a_file_no_setting_can_be_found_in_is_not_offered_keep_in_sync() {
+        let (scratch, server) = small_server(
+            "sniff",
+            &[
+                ("mods/a.jar", b"a".to_vec()),
+                ("config/sodium.properties", b"renderDistance=8\n".to_vec()),
+                // A window layout: sections no reader of this takes, and
+                // per-machine state nobody else wants anyway.
+                (
+                    "config/axiom/imgui.ini",
+                    b"[Window][###Tools]\nPos=0,22\n".to_vec(),
+                ),
+                // Not text at all.
+                ("config/icon.png", vec![0x89, b'P', b'N', b'G', 0x00, 0xff]),
+            ],
+            true,
+        )
+        .await;
+        let paths = scratch.paths.clone();
+        choose_config(&paths, &server.id, Policy::Merge).await;
+
+        let picker = settings_picker(&paths, &server.id).await.unwrap();
+        let row = |path: &str| {
+            picker
+                .files
+                .iter()
+                .find(|row| row.path == path)
+                .unwrap_or_else(|| panic!("{path} is not in the listing"))
+        };
+        assert!(row("config/sodium.properties").can_sync);
+        assert_eq!(row("config/sodium.properties").policy, Policy::Merge);
+        assert_eq!(row("config/sodium.properties").size, 17);
+        for path in ["config/axiom/imgui.ini", "config/icon.png"] {
+            assert!(!row(path).can_sync, "{path} was offered keeping in sync");
+            assert_eq!(
+                row(path).policy,
+                Policy::ShipOnce,
+                "{path} was shown as something it cannot do"
+            );
+        }
+
+        // And there is nothing to push out of either of them, said with the
+        // reason rather than left out of the admin's screen.
+        let review = crate::settings::push::review(&paths, &server.id)
+            .await
+            .unwrap();
+        assert!(review.moved.is_empty(), "{:?}", review.moved);
+        assert_eq!(
+            sorted(review.unreadable.iter().map(|one| one.path.clone()).collect()),
+            vec!["config/axiom/imgui.ini", "config/icon.png"],
+        );
+    }
+
     /// A link named like a record, beside a real turned-off copy of that mod:
     /// the pack carries the copy, and says nothing about where the link goes —
     /// not its hash, not its size, not that the mod is on.
@@ -6419,6 +7244,7 @@ mod tests {
             code: crate::share::code::Code::generate(),
             include_config,
             settings: Default::default(),
+            picked: Vec::new(),
             listing: None,
             shared: true,
             forbidden: Vec::new(),
@@ -6630,7 +7456,8 @@ mod tests {
         let paths = scratch.paths.clone();
         let run = paths.server_run(&server.id);
         let present = server_mods(&run, &server.content).await.unwrap();
-        let steady = server_revision(&paths, &server, &present, false, &[], &Settings::default())
+        let steady =
+            server_revision(&paths, &server, &present, false, &[], &Settings::default(), &[])
             .await
             .unwrap();
 
@@ -6655,7 +7482,7 @@ mod tests {
             sides: present.sides.clone(),
         };
         assert_eq!(
-            server_revision(&paths, &server, &gone, false, &[], &Settings::default())
+            server_revision(&paths, &server, &gone, false, &[], &Settings::default(), &[])
                 .await
                 .unwrap(),
             steady,

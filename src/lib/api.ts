@@ -62,6 +62,8 @@ import type {
   ServerProperty,
   ServerSettings,
   ServerShareView,
+  SettingsPick,
+  SettingsPicker,
   SettingsReview,
   ShareSettings,
   ShareStatus,
@@ -691,6 +693,12 @@ export const api = {
     policy: ConfigPolicy | null,
   ) =>
     invoke<ServerShareView>("set_server_share_config", { id, include, policy }),
+  /** Every settings file this server has, what each one would do, and every pick that will never travel. */
+  getServerSettingsPicker: (id: string) =>
+    invoke<SettingsPicker>("get_server_settings_picker", { id }),
+  /** Which of this server's settings files travel, and what each one does: the whole list, replacing what was there. An empty list sends the config folder whole. */
+  setServerSettingsPicks: (id: string, picks: SettingsPick[]) =>
+    invoke<ServerShareView>("set_server_settings_picks", { id, picks }),
   /** Which settings have moved in this server's own config files since it last published them. */
   reviewServerSettings: (id: string) =>
     invoke<SettingsReview>("review_server_settings", { id }),

@@ -24,13 +24,16 @@
 //! - [`apply`] — put those values where the old ones were, and leave every
 //!   other byte alone.
 //!
-//! Today that is two families, each with a locator of its own: the
+//! Today that is three families, each with a locator of its own: the
 //! key-and-value one — `.properties`, flat `.cfg` and `options.txt`, every
-//! file a player would call "settings" — and Forge and NeoForge TOML, which is
-//! the biggest group of config files on disk by far. The JSON family is a
-//! locator of its own and comes next; until it lands those files sniff as
-//! unknown, which is the honest answer and not a wrong one.
+//! file a player would call "settings" — Forge and NeoForge TOML, which is the
+//! biggest group of config files on disk by far, and the JSON family a Fabric
+//! mod writes, which is the next biggest. What is left sniffs as unknown,
+//! which is the honest answer and not a wrong one: Axiom's window layout, a
+//! `.json5` using syntax no `.json` needs, SNBT, YAML and anything that is not
+//! text are all sent once instead, and the admin is told which.
 
+pub mod json_keys;
 pub mod kv;
 pub mod push;
 pub mod report;
@@ -50,6 +53,9 @@ pub enum Format {
     /// Sections and settings, located by asking a TOML parser where each
     /// value is.
     Toml,
+    /// Groups and settings, located by a scanner of this codebase's own —
+    /// there being no format-preserving JSON writer in Rust to lean on.
+    Json,
 }
 
 /// What moved between two copies of one settings file.
@@ -100,6 +106,13 @@ pub fn sniff(bytes: &[u8]) -> Option<Format> {
     if toml_keys::is_toml(text) {
         return Some(Format::Toml);
     }
+    // Last, because it is the one format whose reader is written here rather
+    // than proven by a parser or by a line at a time — and because nothing
+    // else starts with a `{`, so there is nothing for it to take from the two
+    // above.
+    if json_keys::is_json(text) {
+        return Some(Format::Json);
+    }
     None
 }
 
@@ -130,6 +143,7 @@ pub fn diff(published: &[u8], now: &[u8]) -> Result<Vec<Moved>> {
             one_deep(kv::values(text, sep)),
         ),
         Format::Toml => (toml_keys::values(was_text), toml_keys::values(text)),
+        Format::Json => (json_keys::values(was_text), json_keys::values(text)),
     };
 
     let mut moved = Vec::new();
@@ -177,6 +191,7 @@ pub fn apply(bytes: &[u8], overrides: &[Override]) -> Result<(Vec<u8>, Vec<Appli
     let held = match format {
         Format::KeyValue(sep) => one_deep(kv::values(text, sep)),
         Format::Toml => toml_keys::values(text),
+        Format::Json => json_keys::values(text),
     };
 
     let mut wanted: Vec<&Override> = Vec::new();
@@ -229,6 +244,16 @@ pub fn apply(bytes: &[u8], overrides: &[Override]) -> Result<(Vec<u8>, Vec<Appli
                 })
                 .collect();
             toml_keys::splice(text, &edits)?
+        }
+        Format::Json => {
+            let edits: Vec<json_keys::Edit> = wanted
+                .iter()
+                .map(|entry| json_keys::Edit {
+                    key: &entry.key,
+                    value: entry.value.as_deref(),
+                })
+                .collect();
+            json_keys::splice(text, &edits)?
         }
     };
     Ok((next.into_bytes(), applied))
@@ -343,9 +368,68 @@ mod tests {
         // A file with sections in it is read as TOML, because nothing can
         // read it a line at a time.
         assert_eq!(sniff(b"[general]\na = 1\n"), Some(Format::Toml));
-        // Not yet read per key: the JSON family, and bytes.
-        assert_eq!(sniff(b"{\"renderDistance\": 8}"), None);
+        // A file of groups and settings is read as JSON, and the extension it
+        // would have had decides nothing: a real `polylib.json` holds `//`
+        // comments and a real `ad_astra.jsonc` holds block comments.
+        assert_eq!(sniff(b"{\"renderDistance\": 8}"), Some(Format::Json));
+        assert_eq!(
+            sniff(b"{\n  // why\n  \"renderDistance\": 8\n}"),
+            Some(Format::Json)
+        );
+        assert_eq!(
+            sniff(b"{\n  /* why */\n  \"renderDistance\": 8\n}"),
+            Some(Format::Json)
+        );
+        // Still not read per key: a `.json5` using syntax no `.json` needs, a
+        // file that is a list rather than a thing with names in it, and bytes.
+        assert_eq!(sniff(b"{\n  renderDistance: 8,\n}"), None);
+        assert_eq!(sniff(b"[\"a\", \"b\"]"), None);
         assert_eq!(sniff(&[0x00, 0xff, 0xfe]), None);
+    }
+
+    /// The third format, reached through the same three questions as the other
+    /// two: a Fabric mod's config sniffs as itself, a diff names the setting
+    /// by its group and its own name, and a push lands on that one setting and
+    /// leaves the comment above it — and the missing final newline GSON wrote
+    /// — exactly as they were.
+    #[test]
+    fn a_json_config_is_sniffed_diffed_and_spliced_by_group_and_name() {
+        let published = b"{\n  // how far to draw\n  \"quality\": {\n    \"renderDistance\": 8\n  }\n}";
+        let now = b"{\n  // how far to draw\n  \"quality\": {\n    \"renderDistance\": 4\n  }\n}";
+        assert_eq!(sniff(published), Some(Format::Json));
+        assert_eq!(
+            diff(published, now).unwrap(),
+            vec![Moved {
+                key: vec!["quality".into(), "renderDistance".into()],
+                was: Some("8".into()),
+                now: Some("4".into()),
+            }]
+        );
+
+        // The player's own copy, where they had already set it to something
+        // of their own — so the push moves it and says it was theirs.
+        let mine = b"{\n  // how far to draw\n  \"quality\": {\n    \"renderDistance\": 32\n  }\n}";
+        let (next, applied) = apply(
+            mine,
+            &[Override {
+                path: "config/sodium.json".into(),
+                key: vec!["quality".into(), "renderDistance".into()],
+                value: Some("4".into()),
+                was: Some("8".into()),
+                at: 3,
+            }],
+        )
+        .unwrap();
+        assert_eq!(next, now);
+        assert_eq!(
+            applied,
+            vec![Applied {
+                key: vec!["quality".into(), "renderDistance".into()],
+                had: Some("32".into()),
+                now: Some("4".into()),
+                theirs: true,
+            }]
+        );
     }
 
     /// What the admin presses Review for: the keys that moved, and nothing

@@ -24,7 +24,9 @@ import type {
   PublicCheck,
   PackInfo,
   Why,
+  RefusedSetting,
   ServerShareView,
+  SettingsChoice,
   ShareStatus,
   YourSetting,
 } from "./types";
@@ -259,7 +261,7 @@ export const configChoices: readonly {
     policy: "merge",
     label: "Keep in sync",
     detail:
-      "Players get these files the first time they join, and keep their own changes. When you change a setting here, press Review below and send it: that setting arrives in every player's copy the next time they press Play, and everything else they had tuned stays tuned. Geode can do this for files of plain settings — .properties, .cfg, options.txt; one it cannot read setting by setting is sent once instead, and Review names it.",
+      "Players get these files the first time they join, and keep their own changes. When you change a setting here, press Review below and send it: that setting arrives in every player's copy the next time they press Play, and everything else they had tuned stays tuned. Geode can do this for files of plain settings (.properties, .cfg, options.txt), for Forge and NeoForge .toml, and for the .json a Fabric mod writes, comments and all; one it cannot read setting by setting is sent once instead, and Review names it.",
   },
   {
     policy: "enforce",
@@ -268,6 +270,99 @@ export const configChoices: readonly {
       "Your copy replaces every player's each time they press Play, and anything they had changed in these files is lost. For a config that has to match this server exactly.",
   },
 ];
+
+/**
+ * What the admin reads above the list of settings files they can pick from.
+ *
+ * It states the cost of picking rather than hiding it. Picking is an
+ * allowlist, and an allowlist has one real drawback: a settings file a mod
+ * writes for the first time next week does not travel until somebody picks it.
+ * An admin who is not told that will find out from a player whose mod has the
+ * wrong settings, which is the worst way to learn it.
+ *
+ * It also says what picking is *for*, because the reason is not obvious from
+ * the control: a real `config/` folder holds things that are not
+ * configuration — a window layout of pixel positions that belongs to this
+ * machine, a mod's cache, the `.java` files a decompiled dev build dumped
+ * there — and sending the folder whole cannot say no to any of them.
+ */
+export function pickingSettingsHint(): string {
+  return "Pick the files players get instead of sending the folder whole. A config folder collects things that are not settings — window layouts that belong to this computer, caches, files a mod left behind — and nothing here has to travel. The cost is that a file a mod writes for the first time later will not travel until you pick it.";
+}
+
+/**
+ * How the whole-folder choice reads once there is something else to compare it
+ * with.
+ *
+ * Said as what it does rather than as a default, because it is the behaviour
+ * every share made before there was a picker still has, and an admin reading
+ * "nothing picked" as "nothing travels" would turn a working share off.
+ */
+export function wholeConfigHint(): string {
+  return "Every file in the config folder travels, including ones a mod writes later. Pick files below to send only those.";
+}
+
+/**
+ * Where a server keeps a copy of the files that are its players' and not its
+ * own.
+ *
+ * Needed because it is the one thing an admin cannot work out from the
+ * listing: `options.txt` is not on a server's disk at all, so there is no row
+ * for it until they put one there. The folder is a sibling of the one for
+ * client mods and no loader reads either, which is why a copy of a client's
+ * settings file can sit in a server's folder at all.
+ */
+export function clientFilesHint(): string {
+  return "Minecraft's own settings — options.txt, your keybinds — are not on a server's disk. Put a copy in the server's client-files folder and it appears here, and it lands at the top of each player's game folder. No loader reads that folder, so nothing in it can slow this server down.";
+}
+
+/**
+ * One row of the picker: where the file lands, and what it will actually do.
+ *
+ * Where it lands is only worth saying when it is not where the file sits,
+ * which is exactly the client-files case — the path the admin picked is not
+ * the path the player gets, and a row that did not say so would read as
+ * sending a folder players have no use for.
+ *
+ * A file that cannot be kept in sync says so on its own row rather than
+ * letting the choice above it speak for it. Keeping a file in sync means
+ * splicing in the settings the admin sends, and nothing can be sent out of a
+ * file no setting can be found inside — so a row sitting under "Keep in sync"
+ * that quietly does something else is the one thing this listing must not
+ * show.
+ */
+export function settingsRowNote(row: SettingsChoice): string {
+  const lands =
+    row.lands === row.path ? "" : ` Players get it as ${row.lands}.`;
+  const sync = row.canSync
+    ? ""
+    : " Geode cannot read this one setting at a time, so it can only be sent once.";
+  return `${policyAction(row.policy)}${lands}${sync}`;
+}
+
+/** What one behaviour does to a player's copy, in a sentence. */
+function policyAction(policy: ConfigPolicy): string {
+  switch (policy) {
+    case "ship-once":
+      return "Sent once, then theirs.";
+    case "merge":
+      return "Theirs, plus the settings you send.";
+    case "enforce":
+      return "Replaced every time they press Play.";
+  }
+}
+
+/**
+ * One path the admin picked that will never travel, with the reason.
+ *
+ * A reason and not a disappearance: a row that silently does nothing is how
+ * an admin concludes sharing is broken, and two of these are worth knowing
+ * about — a file that has gone, and one that has become a link since it was
+ * picked.
+ */
+export function refusedSettingLine(row: RefusedSetting): string {
+  return `${row.path} — ${sentence(row.why)}`;
+}
 
 /**
  * What the admin reads beside the Review button, where it stays rather than

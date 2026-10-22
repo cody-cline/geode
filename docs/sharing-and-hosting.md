@@ -329,11 +329,52 @@ connects straight to the admin's machine. Nothing sits in the middle.
   under the folder it left gives way, rather than tracking the mod in both.
   Any other field saved meanwhile is overwritten.
 - What a server sends is an **allowlist**: the mod jars directly in `mods/`
-  and `client-mods/` (item 7), and `config/` only when the admin asks. No
-  subfolder of either, no backup or other stray file, and no symbolic link
+  and `client-mods/` (item 7), and settings files out of `config/` and
+  `client-files/` only when the admin asks. No
+  subfolder of either mods folder, no backup or other stray file, and no symbolic link
   anywhere — a link in `mods/` pointing at the admin's home would otherwise
   have been followed. Never `server.properties`, ops, whitelist, bans, worlds,
   logs, libraries or plugins.
+- **The admin picks which settings files travel, one by one.** Nothing picked
+  means the `config/` folder whole, which is what sending a config folder has
+  always meant and what every share made before there was a picker goes on
+  doing. A list that names anything sends exactly what it names, with a
+  behaviour chosen per file.
+
+  Picking is the only way to keep out the things a real `config/` folder
+  collects that are not configuration: measured on a developer's machine here,
+  Axiom writes an imgui window layout of pixel positions that is per-machine
+  state, and one instance had a decompiled dev build dumping `.java` and
+  `.class` files into `config/`. A whole-folder switch cannot say no to any of
+  it. The cost of an allowlist is real and the picker says so on screen: a
+  settings file a mod writes for the first time next week does not travel
+  until somebody picks it.
+
+  `share::pack::settings_sent` is the one function that decides what travels.
+  The join preview's count, the revision's lines, the admin's picker and the
+  zip's entries all read it, and `settings::push` reviews only what it says is
+  sent — so a setting cannot be pushed out of a file nobody receives, and a
+  second walk cannot tell a player a number the pack does not carry. The two
+  folders are enforced there and not only where the picking is done, because a
+  bug in a picker must not be able to ship `ops.json`: a path outside them, one
+  reaching out of the server's folder, one that has gone, and one with a
+  symbolic link anywhere along it are each a refusal with a reason on the
+  admin's row rather than a row that silently does nothing.
+- **Minecraft's own settings travel out of `run/client-files/`.** `options.txt`
+  and the keybinds in it are the player's files and are on no server's disk, so
+  a server keeps a copy in `client-files/` — a sibling of `client-mods/`, and
+  like it a folder no loader reads, so nothing in it can slow the server down
+  or crash it on boot. It goes into the pack under `client-overrides/`, so a
+  launcher installing the pack on a server leaves it out, and `pack_rel` maps
+  `client-files/options.txt` to `options.txt` at the top of a player's game
+  directory, which is where Minecraft keeps it. The pack states the behaviour
+  of each such file by the path it lands at, since on a player's disk there is
+  no folder above it to name.
+
+  A client file nobody chose a behaviour for is **sent once**, and that is not
+  a matter of taste: the game rewrites the whole file on every exit in its own
+  key order, so a copy replaced on every update would move a player's keybinds
+  under them between one session and the next.
   Every regular jar directly in `mods/` travels to players, turned off or not:
   one with a Modrinth or CurseForge record as a reference, and every other one
   as a copy — jars added by hand with no record, jars whose CurseForge author
@@ -519,8 +560,28 @@ connects straight to the admin's machine. Nothing sits in the middle.
   later diff or hash can tell. It is deliberately not
   `server::properties::apply`, which rewrites the changed line as `{key}=
   {value}` and normalises CRLF and the final newline across the whole file:
-  seven tests pin that, and `server.properties` wants it. TOML and the JSON
-  family are each a locator of their own and sniff as unknown until they land.
+  seven tests pin that, and `server.properties` wants it.
+  `settings::toml_keys` is the Forge and NeoForge one, where the `#Default:`
+  and `#Range:` comments beside each setting are the only documentation it
+  has: `toml_edit` is asked where each value *is* and the span is spliced,
+  because editing the document and writing it back moves the key to the top of
+  its table and drops the comment block above it.
+  `settings::json_keys` is the Fabric one, and the only locator here with no
+  library to lean on — nothing in Rust is a format-preserving JSON writer, and
+  `serde_json`'s map is a `BTreeMap`, so a file read and written back comes
+  back alphabetised. So it is a scanner of this codebase's own, reporting the
+  byte span of each value. Measured against the 2441 JSON-family files under
+  the `config/` folders of ten instances here: 2283 are readable per
+  setting, the scanner agrees with a real parser on every one of their 55,716
+  settings, and all but one round-trip byte for byte when each setting is
+  spliced back to the value it already holds. Comments are handled, because 56
+  of them carry `//` or `/* */` and the extension says nothing about which —
+  but not JSON5 proper: 8 files use unquoted keys or trailing commas and those
+  are refused with a reason rather than guessed at. What is refused besides:
+  129 files that are groups of empty groups, 21 that are a list at the top
+  (an index is not a name, so a player who reordered an element would get the
+  sender's value in a different one), and any object written inside an array,
+  whose members are not settings for the same reason.
   The splice runs at Play time, inside `pack::update`, and never while the game
   is up: Minecraft and mods both rewrite their config from memory on exit, over
   anything written under them.
@@ -1186,6 +1247,11 @@ boot, and it is still part of the server's pack. The Content tab shows it as a
 **Client mods** folder beside Mods, with its own install, add-file, identify,
 update and delete, and a row in Mods says `client` or `server` when its mod
 belongs on one side only.
+
+**`run/client-files/` is the same idea for a file that is not a mod**, and the
+only way Minecraft's own `options.txt` and keybinds can travel at all — see
+item 3. Nothing puts a file there by itself: the admin drops a copy in, and it
+appears in the settings picker on the Share tab.
 
 **What goes there by itself.** A server ignores client mods, so:
 
