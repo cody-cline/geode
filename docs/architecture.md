@@ -64,11 +64,12 @@ this list to stay complete.
 - **Cancellation** rides the same id: `Progress::cancel_flag()` is registered in
   `AppState` (`register_cancel`), the `cancel_task` command flips it, and long
   loops call `check_cancelled()`, which returns `Error::Cancelled`.
-- Ten topics are in use: `geode://progress`, `geode://log`, `geode://exit`,
-  `geode://server-log`, `geode://server-exit`, `geode://share-status`,
-  `geode://share-listen`, `geode://share-pack-failed`, `geode://notice`, and
-  `geode://join-link`. The last is only a nudge — the link itself is parked in
-  `AppState`, because a link that starts the app arrives before any webview
+- Eleven topics are in use: `geode://progress`, `geode://log`, `geode://exit`,
+  `geode://server-log`, `geode://server-started`, `geode://server-exit`,
+  `geode://share-status`, `geode://share-listen`, `geode://share-pack-failed`,
+  `geode://notice`, and `geode://join-link`. The last is only a nudge — the
+  link itself is parked in `AppState`, because a link that starts the app
+  arrives before any webview
   exists to hear an event. Every one of them has a subscriber in
   `src/lib/store.ts`: a topic nothing listens for is a payload the webview
   drops.
@@ -174,7 +175,7 @@ belongs to.
 |---|---|
 | `meta.rs` | Where a server's jar comes from. Ten publishers — PaperMC, Purpur, FabricMC, QuiltMC, Forge, NeoForged, MohistMC, Arclight, SpigotMC, Mojang — each with its own shape, normalised to one. Spigot says plainly that it cannot be fetched, because it may not legally be redistributed as a jar. |
 | `install.rs`, `installer.rs` | Fetching and running what a kind needs. `LaunchKind::ArgFile` exists because from 1.17 a Forge/NeoForge server has no jar at all — its installer leaves an argument file. |
-| `run.rs` | Running a server and its console. The difference from launching the game: stdin stays open, and that pipe *is* the console — how `stop` is sent, and why stopping can be graceful. Holds `ServerRegistry`. |
+| `run.rs` | Running a server and its console. The difference from launching the game: stdin stays open, and that pipe *is* the console — how `stop` is sent, and why stopping can be graceful. Holds `ServerRegistry`, and the one public way to start a server: `start` does everything a click on Start does, so the automatic restart is the same act rather than a thinner one. An exit nobody asked for is restarted when `settings.auto_restart` is on, which is why the registry records *who asked* — a `stop` typed into the console is indistinguishable from a crash by the time the process is gone. |
 | `properties.rs` | `server.properties`, described in terms of what each setting means rather than its key. |
 | `players.rs` | The whitelist, the operators and both ban lists — Minecraft's own `whitelist.json`, `ops.json`, `banned-players.json` and `banned-ips.json`. A running server owns those files, so a change goes through its console and the reply is reported as the server gave it; a stopped server's files are Geode's to write, which is also the only way to set an operator's level. What may be asked of the console comes off `probe.rs`'s tree, never off the server kind. |
 | `backup.rs` | A zip of the run directory, kept beside the server, never swept into the next backup. Logs and crash reports are left out. |

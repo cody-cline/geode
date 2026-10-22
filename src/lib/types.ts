@@ -438,6 +438,27 @@ export interface ServerExit {
   code: number | null;
   success: boolean;
   ranSeconds: number;
+  /**
+   * Seconds until Geode starts it again, or `null` when it is not going to —
+   * somebody asked for this exit, automatic restarts are off, or Geode has
+   * given up on it.
+   */
+  restartInSeconds: number | null;
+  /**
+   * Which restart this exit causes, or how many were tried before Geode gave
+   * up. Zero when automatic restarting is not in play.
+   */
+  restarts: number;
+  /** Set when automatic restarts are on and Geode has stopped trying. */
+  gaveUp: boolean;
+}
+
+/** A server that is running again, whoever or whatever started it. */
+export interface ServerStarted {
+  serverId: string;
+  pid: number;
+  /** Which restart this was, or zero when a person pressed Start. */
+  restarts: number;
 }
 
 /** One of the four lists Minecraft keeps beside a world. */

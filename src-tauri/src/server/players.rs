@@ -1523,7 +1523,8 @@ mod tests {
                 "the change should be waiting on the file read"
             );
 
-            let (_typed, _console) = servers.fake_start("survival");
+            let (_typed, _console) =
+                servers.fake_start("survival", crate::server::ServerKind::Vanilla);
             release.send(()).unwrap();
             holding.await.unwrap();
 

@@ -1072,7 +1072,7 @@ function SettingsTab({ server }: { server: Server }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   // Images and properties save themselves, so the bar is only ever about the
-  // Java settings above it.
+  // Java and Running settings above it.
   const dirty = JSON.stringify(draft) !== JSON.stringify(server.settings);
 
   async function destroy() {
@@ -1201,6 +1201,31 @@ function SettingsTab({ server }: { server: Server }) {
               console can complete commands that mods and plugins added. Turn it
               off and the console falls back to no suggestions. Takes effect
               next start.
+            </span>
+          </span>
+        </label>
+      </section>
+
+      <section className={styles.section}>
+        <h2 className={styles.sectionTitle}>Running</h2>
+        {/* Only an exit nobody asked for: Stop, Kill and a `stop` typed into
+            the console all leave it stopped. */}
+        <label className={styles.settingToggle}>
+          <input
+            type="checkbox"
+            checked={draft.autoRestart}
+            onChange={(e) =>
+              setDraft({ ...draft, autoRestart: e.target.checked })
+            }
+          />
+          <span>
+            <strong>Restart it when it exits on its own</strong>
+            <span className={styles.settingWhy}>
+              A crash, or a server stopped by something other than you, brings
+              it straight back. Pressing Stop, pressing Kill and typing{" "}
+              <code>stop</code> in the console all leave it stopped. A server
+              that keeps exiting without staying up is given up on after five
+              tries, and the console says so.
             </span>
           </span>
         </label>

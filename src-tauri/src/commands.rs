@@ -2243,88 +2243,26 @@ pub async fn add_cardboard(
     Ok(server_view(server, &state).await)
 }
 
-/// A server that started, and the mods moved out of its Mods first.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ServerStart {
-    pub pid: u32,
-    /// File names moved to Client mods, so the app can say so on whichever
-    /// tab the admin pressed Start from.
-    pub moved: Vec<String>,
-}
-
 #[tauri::command]
 pub async fn start_server(
     app: AppHandle,
     state: State<'_, AppState>,
     id: String,
-) -> Result<ServerStart> {
-    if state.servers.is_running(&id) {
-        return Err(Error::msg("that server is already running"));
-    }
-    let mut server = crate::server::load(&state.paths, &id).await?;
-
-    // While nothing is running, so the server never loads a mod that only
-    // runs in players' games. Saved straight away, so the moves stay recorded
-    // even if the start fails, and said in the console too, which is the only
-    // place a start that fails later still says it.
-    let moved = crate::server::move_client_only_mods(&state.paths, &mut server).await;
-    if !moved.is_empty() {
-        server.save_if_present(&state.paths).await?;
-        let sink = crate::desktop::sink(app.clone());
-        for name in &moved {
-            crate::server::schedule::announce(
-                &sink,
-                &id,
-                format!("Moved {name} to Client mods: it only runs in players' games"),
-            );
-        }
-    }
-
-    // The server rotates its own log as it starts, so this is the moment the
-    // oldest archive becomes one too many.
-    if let Some(keep) = server.settings.keep_logs {
-        let _ = crate::server::logs::prune(&state.paths, &id, keep as usize).await;
-    }
-
-    let progress = Progress::new(crate::desktop::sink(app.clone()), format!("server:{id}"));
-    let java = match server.settings.java_path.clone() {
-        Some(path) => PathBuf::from(path),
-        None => match server.java_major {
-            Some(major) => {
-                crate::java::ensure(&state.http, &state.paths, major, None, &progress).await?
-            }
-            // Nothing told us which Java this wants — a proxy, or a jar
-            // installed before we started asking. The newest one is the best
-            // guess available.
-            None => crate::java::detect(&state.paths)
-                .await
-                .into_iter()
-                .next()
-                .map(|j| j.path)
-                .ok_or_else(|| Error::msg("no Java runtime was found on this system"))?,
-        },
-    };
-
-    let pid = crate::server::run::start(
-        &crate::desktop::sink(app.clone()),
+) -> Result<crate::server::run::ServerStart> {
+    crate::server::run::start(
+        &crate::desktop::sink(app),
         &state.paths,
-        &server,
-        java,
-        state.servers.clone(),
+        &state.http,
+        &state.servers,
+        &id,
     )
-    .await?;
-
-    server.last_started = Some(chrono::Utc::now().timestamp());
-    server.save_if_present(&state.paths).await?;
-    Ok(ServerStart { pid, moved })
+    .await
 }
 
 /// Ask the server to stop the way an operator would, so it saves first.
 #[tauri::command]
 pub async fn stop_server(state: State<'_, AppState>, id: String) -> Result<bool> {
-    let server = crate::server::load(&state.paths, &id).await?;
-    Ok(state.servers.stop(&id, server.kind))
+    Ok(state.servers.stop(&id))
 }
 
 #[tauri::command]

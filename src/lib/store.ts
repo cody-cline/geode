@@ -15,6 +15,7 @@ import type {
   Server,
   ServerExit,
   ServerLine,
+  ServerStarted,
   ShareListenNotice,
   SharePackFailed,
   ShareStatus,
@@ -360,6 +361,24 @@ export const useStore = create<State>((set, get) => ({
       const name =
         get().servers.find((s) => s.id === payload.serverId)?.name ??
         payload.serverId;
+      // An exit Geode is about to answer is a different thing to be told from
+      // one it is leaving alone, and giving up is a third.
+      if (payload.gaveUp) {
+        get().toast({
+          kind: "error",
+          title: `${name} will not stay up`,
+          body: `Geode started it again ${payload.restarts} times and it exited every time, so it has stopped restarting it. The console says how each try ended.`,
+        });
+        return;
+      }
+      if (payload.restartInSeconds !== null) {
+        get().toast({
+          kind: "info",
+          title: `${name} exited — starting it again`,
+          body: `Ran for ${formatDuration(payload.ranSeconds)}. Restart ${payload.restarts}, in ${payload.restartInSeconds}s.`,
+        });
+        return;
+      }
       get().toast({
         kind: payload.success ? "info" : "error",
         title: payload.success ? `${name} stopped` : `${name} exited`,
@@ -368,6 +387,25 @@ export const useStore = create<State>((set, get) => ({
           : payload.code === null
             ? "The process was stopped."
             : `Exit code ${payload.code}. Check the console for the cause.`,
+      });
+    });
+
+    // Whoever started it. A server Geode started again on its own would
+    // otherwise still look stopped on every screen, with its Start button and
+    // its players list talking about a process that is long gone.
+    await listen<ServerStarted>("geode://server-started", ({ payload }) => {
+      get().refreshServers();
+      if (payload.restarts === 0) return;
+      const name =
+        get().servers.find((s) => s.id === payload.serverId)?.name ??
+        payload.serverId;
+      get().toast({
+        kind: "success",
+        title: `${name} is running again`,
+        body:
+          payload.restarts === 1
+            ? "It exited without being asked to, so Geode started it again."
+            : `It exited without being asked to again — this is restart ${payload.restarts}.`,
       });
     });
 
