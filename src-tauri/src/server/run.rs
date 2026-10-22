@@ -5,7 +5,7 @@
 //! operator runs a command, and why stopping can be graceful instead of a kill
 //! that loses whatever had not been saved.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -282,6 +282,13 @@ impl RunningServer {
 #[derive(Clone, Default)]
 pub struct ServerRegistry {
     inner: Arc<Mutex<HashMap<String, RunningServer>>>,
+    /// Servers whose start has begun and has not yet spawned a process.
+    ///
+    /// The map above only knows a server once there is a process, and a start
+    /// spends the time before that moving mods, pruning logs and fetching a
+    /// JDK — so without this a second start passes [`Self::is_running`] and
+    /// spawns a second JVM on the same world. See [`Self::claim_start`].
+    starting: Arc<Mutex<HashSet<String>>>,
     /// Set once Geode is going away, and never cleared.
     ///
     /// A server Geode stopped on its way out asked for nothing and must stay
@@ -291,6 +298,24 @@ pub struct ServerRegistry {
 }
 
 impl ServerRegistry {
+    /// Take the start of `id`, or `None` when one is already under way.
+    ///
+    /// The claim lasts as long as the returned guard, which the start holds
+    /// until the process is in the registry or it has given up. The same shape
+    /// as [`crate::state::AppState::claim_launch`], and for the same reason:
+    /// two of these at once rewrite the very files the other is reading, and
+    /// then both spawn.
+    pub fn claim_start(&self, id: &str) -> Option<StartClaim> {
+        let mut starting = self.starting.lock().ok()?;
+        if !starting.insert(id.to_string()) {
+            return None;
+        }
+        Some(StartClaim {
+            starting: self.starting.clone(),
+            id: id.to_string(),
+        })
+    }
+
     pub fn insert(&self, id: String, running: RunningServer) {
         if let Ok(mut map) = self.inner.lock() {
             map.insert(id, running);
@@ -380,13 +405,7 @@ impl ServerRegistry {
     /// that had to look it up could pass one the running process disagrees
     /// with, and the stop would go out in a word it does not understand.
     pub fn stop(&self, id: &str) -> bool {
-        let asked = self
-            .inner
-            .lock()
-            .ok()
-            .and_then(|m| m.get(id).map(|s| s.ask_to_stop()))
-            .unwrap_or(false);
-        if !asked {
+        if !self.ask_to_stop(id) {
             return false;
         }
         let registry = self.clone();
@@ -409,6 +428,30 @@ impl ServerRegistry {
     /// Whether Geode is shutting down, and so should start nothing again.
     pub fn is_closing(&self) -> bool {
         self.closing.load(Ordering::Relaxed)
+    }
+
+    /// Record that we are going away, so nothing is started again from here on.
+    ///
+    /// [`Self::stop_all`] is the app's whole closing sequence; the host stops
+    /// its servers with a grace period of its own ([`crate::daemon::shutdown`])
+    /// and needs this half by itself. Never cleared: a process that has begun
+    /// exiting does not change its mind.
+    pub fn close(&self) {
+        self.closing.store(true, Ordering::Relaxed);
+    }
+
+    /// Ask one server to shut down the way an operator would, and leave the
+    /// killing to the caller. Returns false when nothing is running.
+    ///
+    /// [`Self::stop`] with the 120-second kill attached is what a Stop button
+    /// wants; a host stopping every server at once waits on all of them
+    /// together and kills what is left itself, so it asks through this.
+    pub fn ask_to_stop(&self, id: &str) -> bool {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|m| m.get(id).map(|s| s.ask_to_stop()))
+            .unwrap_or(false)
     }
 
     /// A registry holding one server whose console a test drives instead of a
@@ -464,7 +507,7 @@ impl ServerRegistry {
     pub fn stop_all(&self) {
         // First, so an exit that lands while this runs is never read as a
         // crash worth restarting.
-        self.closing.store(true, Ordering::Relaxed);
+        self.close();
         if let Ok(map) = self.inner.lock() {
             for running in map.values() {
                 // No grace here: the app is going away, and a half-written
@@ -472,6 +515,23 @@ impl ServerRegistry {
                 running.ask_to_stop();
                 running.force_kill();
             }
+        }
+    }
+}
+
+/// One server's start, held from [`ServerRegistry::claim_start`] until dropped.
+///
+/// A guard rather than a pair of calls, so a start that returns early — no
+/// jar, no Java, an EULA nobody accepted — still frees the server.
+pub struct StartClaim {
+    starting: Arc<Mutex<HashSet<String>>>,
+    id: String,
+}
+
+impl Drop for StartClaim {
+    fn drop(&mut self) {
+        if let Ok(mut starting) = self.starting.lock() {
+            starting.remove(&self.id);
         }
     }
 }
@@ -555,27 +615,56 @@ pub struct ServerStarted {
 /// way, the oldest log pruned, the Java runtime found, the console, the command
 /// probe and the scheduled tasks wired to a live process — so a restart Geode
 /// decides on for itself is the same act as a click rather than a second,
-/// thinner one.
+/// thinner one. The desktop app is not the only caller: `daemon::api` presses
+/// the same Start, and a second copy of this would be a second set of answers
+/// to drift apart.
+///
+/// `heap_ceiling_mb` is the host's limit on one server, not the server's own:
+/// `None` starts it with whatever it asks for, which is what the app does.
 pub async fn start(
     sink: &EventSink,
     paths: &Paths,
     http: &reqwest::Client,
     registry: &ServerRegistry,
     id: &str,
+    heap_ceiling_mb: Option<u32>,
 ) -> Result<ServerStart> {
-    start_again(sink, paths, http, registry, id, 0).await
+    start_again(sink, paths, http, registry, id, heap_ceiling_mb, 0).await
 }
 
 /// The same start, carrying how many restarts it took to get here so the exit
-/// after it knows whether to keep trying.
+/// after it knows whether to keep trying, and the ceiling it was started
+/// under so a restart does not quietly ask for more memory than the host
+/// allows.
 async fn start_again(
     sink: &EventSink,
     paths: &Paths,
     http: &reqwest::Client,
     registry: &ServerRegistry,
     id: &str,
+    heap_ceiling_mb: Option<u32>,
     restarts: u32,
 ) -> Result<ServerStart> {
+    // Asked at the one place every start goes through, rather than only of the
+    // restarter: whether it is a click, a route or a restart, a JVM that comes
+    // up after Geode has begun going away has nothing left watching it and a
+    // kill coming. Both closing paths set this before they stop anything.
+    if registry.is_closing() {
+        return Err(Error::msg(
+            "Geode is stopping, so it is not starting anything new",
+        ));
+    }
+    // One start of a server at a time, whoever asked for it: a click, a route
+    // on the host, or the restarter below. Everything after this happens
+    // before there is anything in the registry, so without it a second start
+    // passes the check beneath and spawns a second JVM on the same world —
+    // whose registry entry then replaces the first's, dropping the kill
+    // channel the first's exit task is watching and so killing it outright,
+    // and that task then deregisters the second, leaving a live server nothing
+    // can stop.
+    let _claim = registry
+        .claim_start(id)
+        .ok_or_else(|| Error::msg("that server is already starting"))?;
     if registry.is_running(id) {
         return Err(Error::msg("that server is already running"));
     }
@@ -603,6 +692,23 @@ async fn start_again(
         let _ = super::logs::prune(paths, id, keep as usize).await;
     }
 
+    // Lowered for this start only, and never saved: the ceiling is a fact
+    // about the machine, so a server moved back to a roomier one should still
+    // ask for what its owner configured.
+    if let Some(ceiling) = heap_ceiling_mb {
+        if server.settings.memory_mb > ceiling {
+            super::schedule::announce(
+                sink,
+                id,
+                format!(
+                    "Starting with {ceiling} MB rather than {} MB: this host allows no more",
+                    server.settings.memory_mb
+                ),
+            );
+            server.settings.memory_mb = ceiling;
+        }
+    }
+
     let progress = Progress::new(sink.clone(), format!("server:{id}"));
     let java = match server.settings.java_path.clone() {
         Some(path) => PathBuf::from(path),
@@ -620,7 +726,17 @@ async fn start_again(
         },
     };
 
-    let pid = spawn(sink, paths, http, &server, java, registry, restarts).await?;
+    let pid = spawn(
+        sink,
+        paths,
+        http,
+        &server,
+        java,
+        registry,
+        heap_ceiling_mb,
+        restarts,
+    )
+    .await?;
 
     // Before the save, and not for tidiness: from here on there is a process,
     // and anything that went wrong afterwards must not leave a screen showing
@@ -646,6 +762,10 @@ async fn start_again(
 /// process behind a server by a path that skips what a start owes everything
 /// else. Returns once the process exists; how it ended arrives as
 /// `geode://server-exit`.
+// The ceiling and the restart count travel together with everything else a
+// start needs, because the exit this watches for has to start the server again
+// on the same terms.
+#[allow(clippy::too_many_arguments)]
 async fn spawn(
     sink: &EventSink,
     paths: &Paths,
@@ -653,6 +773,7 @@ async fn spawn(
     server: &Server,
     java: PathBuf,
     registry: &ServerRegistry,
+    heap_ceiling_mb: Option<u32>,
     restarts: u32,
 ) -> Result<u32> {
     if matches!(server.launch, LaunchKind::Jar) && server.jar.is_empty() {
@@ -800,6 +921,7 @@ async fn spawn(
             &http_for_wait,
             &registry,
             &id,
+            heap_ceiling_mb,
         )
         .await;
     });
@@ -821,6 +943,7 @@ fn carry_out<'a>(
     http: &'a reqwest::Client,
     registry: &'a ServerRegistry,
     id: &'a str,
+    heap_ceiling_mb: Option<u32>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
     Box::pin(async move {
         let (attempt, wait) = match after {
@@ -858,7 +981,9 @@ fn carry_out<'a>(
             return;
         }
 
-        if let Err(e) = start_again(sink, paths, http, registry, id, attempt).await {
+        if let Err(e) =
+            start_again(sink, paths, http, registry, id, heap_ceiling_mb, attempt).await
+        {
             super::schedule::announce(sink, id, format!("could not start it again: {e}"));
         }
     })
@@ -1073,6 +1198,187 @@ mod tests {
         // These two would not recognise `stop`.
         assert_eq!(stop_command(ServerKind::Velocity), "shutdown");
         assert_eq!(stop_command(ServerKind::Waterfall), "end");
+    }
+
+    /// Two starts of one server would move its mods and fetch its Java twice
+    /// over each other and then both spawn a JVM on the same world. The second
+    /// is turned away until the first has a process, or has given up.
+    #[test]
+    fn a_second_start_of_one_server_waits_for_the_first() {
+        let registry = ServerRegistry::default();
+
+        let first = registry.claim_start("survival").expect("nothing holds it");
+        assert!(registry.claim_start("survival").is_none());
+
+        // Another server is nobody else's business.
+        let other = registry.claim_start("creative").expect("a different server");
+        drop(other);
+        assert!(registry.claim_start("creative").is_some());
+
+        // And a start that gave up frees the server rather than wedging it.
+        drop(first);
+        assert!(registry.claim_start("survival").is_some());
+    }
+
+    /// The same guard from where it matters: [`start`] refuses while a start
+    /// is under way, and refuses it *before* it has touched anything —
+    /// a server with no jar otherwise gets as far as saying so, which is what
+    /// this asserts once the claim is let go.
+    #[tokio::test]
+    async fn a_start_while_one_is_under_way_is_refused_before_anything_is_touched() {
+        let scratch = crate::paths::Scratch::new("run-two-starts");
+        let server = super::super::create(
+            &scratch.paths,
+            "Survival".into(),
+            ServerKind::Paper,
+            "1.21.1".into(),
+        )
+        .await
+        .unwrap();
+
+        let registry = ServerRegistry::default();
+        let recorder = std::sync::Arc::new(crate::events::Recorder::default());
+        let sink: EventSink = recorder.clone();
+        let http = crate::net::client();
+        let start = || start(&sink, &scratch.paths, &http, &registry, &server.id, None);
+
+        let claim = registry.claim_start(&server.id).expect("nothing holds it");
+        let refused = start().await.expect_err("one start is already under way");
+        assert!(
+            refused.to_string().contains("already starting"),
+            "it should say a start is under way: {refused}"
+        );
+        assert!(
+            recorder.events().is_empty(),
+            "nothing should have happened to the server: {:?}",
+            recorder.topics()
+        );
+
+        drop(claim);
+        let refused = start().await.expect_err("a server with no jar cannot start");
+        assert!(
+            refused.to_string().contains("install one before starting it"),
+            "the claim should have been let go: {refused}"
+        );
+    }
+
+    /// Nothing starts once Geode has begun going away, by any path: both
+    /// [`ServerRegistry::stop_all`] and the host's own shutdown close the
+    /// registry before they stop a thing, and a start that slipped past that
+    /// would leave a JVM with nobody watching it and a kill on the way.
+    #[tokio::test]
+    async fn nothing_is_started_once_geode_has_begun_closing() {
+        let scratch = crate::paths::Scratch::new("run-closing");
+        let server = super::super::create(
+            &scratch.paths,
+            "Survival".into(),
+            ServerKind::Paper,
+            "1.21.1".into(),
+        )
+        .await
+        .unwrap();
+
+        let registry = ServerRegistry::default();
+        registry.close();
+
+        let recorder = std::sync::Arc::new(crate::events::Recorder::default());
+        let sink: EventSink = recorder.clone();
+        let refused = start(
+            &sink,
+            &scratch.paths,
+            &crate::net::client(),
+            &registry,
+            &server.id,
+            None,
+        )
+        .await
+        .expect_err("Geode is on its way out");
+        assert!(refused.to_string().contains("stopping"), "{refused}");
+        assert!(
+            recorder.events().is_empty(),
+            "it should refuse before touching the server: {:?}",
+            recorder.topics()
+        );
+    }
+
+    /// [`start`] against a server with no software, which is how this is
+    /// offline: the heap is decided before any Java is looked for, and
+    /// the start then refuses at the missing jar without a process ever
+    /// existing. What is asserted is what it did on the way there.
+    async fn heap_announcements(asked_mb: u32, ceiling: Option<u32>) -> (Vec<String>, u32) {
+        let scratch = crate::paths::Scratch::new("run-heap");
+        let mut server = super::super::create(
+            &scratch.paths,
+            "Survival".into(),
+            ServerKind::Paper,
+            "1.21.1".into(),
+        )
+        .await
+        .unwrap();
+        server.settings.memory_mb = asked_mb;
+        server.save(&scratch.paths).await.unwrap();
+
+        let recorder = std::sync::Arc::new(crate::events::Recorder::default());
+        let sink: EventSink = recorder.clone();
+        let refused = start(
+            &sink,
+            &scratch.paths,
+            &crate::net::client(),
+            &ServerRegistry::default(),
+            &server.id,
+            ceiling,
+        )
+        .await;
+        assert!(refused.is_err(), "a server with no jar must not start");
+
+        let said = recorder
+            .events()
+            .into_iter()
+            .filter_map(|(_, payload)| {
+                payload
+                    .get("line")
+                    .and_then(|l| l.as_str())
+                    .map(str::to_string)
+            })
+            .collect();
+        let on_disk = super::super::load(&scratch.paths, &server.id)
+            .await
+            .unwrap()
+            .settings
+            .memory_mb;
+        (said, on_disk)
+    }
+
+    /// A modpack configured for 16 GB on somebody's desktop must not take down
+    /// a host with 8. Said in the console, because a server quietly given less
+    /// memory than it asked for is a server nobody can explain the lag of.
+    #[tokio::test]
+    async fn a_hosts_heap_ceiling_lowers_what_a_server_asks_for_and_says_so() {
+        let (said, on_disk) = heap_announcements(16384, Some(8192)).await;
+        assert!(
+            said.iter()
+                .any(|line| line.contains("8192 MB rather than 16384 MB")),
+            "it should say what it did and why: {said:?}"
+        );
+        // The ceiling is the machine's, not the server's: moved to a roomier
+        // host, this server should still ask for what its owner configured.
+        assert_eq!(on_disk, 16384, "the server's own setting was overwritten");
+    }
+
+    /// And a server content with less than the ceiling is left alone — no
+    /// console line, because nothing happened to it.
+    #[tokio::test]
+    async fn a_server_asking_for_less_than_the_ceiling_is_not_touched() {
+        let (said, on_disk) = heap_announcements(2048, Some(8192)).await;
+        assert!(
+            !said.iter().any(|line| line.contains("rather than")),
+            "nothing was lowered, so nothing should be announced: {said:?}"
+        );
+        assert_eq!(on_disk, 2048);
+
+        // And the app's case, which passes no ceiling at all.
+        let (said, _) = heap_announcements(16384, None).await;
+        assert!(!said.iter().any(|line| line.contains("rather than")), "{said:?}");
     }
 
     // -----------------------------------------------------------------
@@ -1322,6 +1628,7 @@ mod tests {
             &crate::net::client(),
             &ServerRegistry::default(),
             "survival",
+            None,
         )
         .await;
 
@@ -1371,6 +1678,7 @@ mod tests {
             &crate::net::client(),
             &ServerRegistry::default(),
             &server.id,
+            None,
         )
         .await;
 
@@ -1395,6 +1703,44 @@ mod tests {
             said.iter()
                 .any(|line| line.contains("could not start it again") && line.contains("no jar")),
             "a restart that failed must say so in the console: {said:?}"
+        );
+    }
+
+    /// And it is a start on the same terms: a host that lowers a server's heap
+    /// to what the machine allows must go on doing it after the server has
+    /// restarted itself, or the ceiling holds only until the first crash.
+    #[tokio::test(start_paused = true)]
+    async fn a_restart_is_started_under_the_hosts_heap_ceiling_too() {
+        let scratch = Scratch::new("server-restart-ceiling");
+
+        let mut server = Server::new("Survival".into(), ServerKind::Paper, "1.21.1".into());
+        server.settings.java_path = Some("/nonexistent/java".into());
+        server.settings.memory_mb = 16384;
+        server.settings.auto_restart = true;
+        server.save(&scratch.paths).await.unwrap();
+
+        let recorder = std::sync::Arc::new(crate::events::Recorder::default());
+        let sink: EventSink = recorder.clone();
+
+        carry_out(
+            AfterExit::Restart {
+                attempt: 1,
+                wait: RESTART_WAIT,
+            },
+            &sink,
+            &scratch.paths,
+            &crate::net::client(),
+            &ServerRegistry::default(),
+            &server.id,
+            Some(8192),
+        )
+        .await;
+
+        let said = console_lines(&recorder);
+        assert!(
+            said.iter()
+                .any(|line| line.contains("8192 MB rather than 16384 MB")),
+            "the restart should be held to the host's ceiling as a click is: {said:?}"
         );
     }
 }

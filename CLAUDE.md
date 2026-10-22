@@ -80,7 +80,7 @@ reads Sinytra Connector's real files for exactly this reason. The same trap in
 reverse: a server kind's mod loader is a fact about that software, not a guess
 (Banner is Fabric-based, not NeoForge — `ServerKind::mod_loader`).
 
-**`commands.rs` stays thin: validate, delegate, return.** 136 of the 137
+**`commands.rs` stays thin: validate, delegate, return.** 154 of the 155
 `#[tauri::command]` functions live there (the odd one out is
 `deeplink::take_pending_join`), and logic belongs in the module that owns it so
 the headless path can reach it too. A new command must be added in **two**
@@ -100,17 +100,28 @@ it that way when adding fields.
 **New code outside `desktop.rs` must not know a window exists.** Emit through
 the `EventSink` trait in `events.rs`, never a Tauri `AppHandle` directly — that
 is the one thing standing between this code and running headless in a container.
-The migration is real but unfinished: **`launch/mod.rs` is the holdout** —
-`spawn` still takes an `AppHandle` and emits `geode://log` and `geode://exit`
-itself. Do not copy that pattern; converting it is outstanding work. Eight files
-mention `tauri` at all, and the distinction between them matters: `lib.rs`,
-`commands.rs`, `desktop.rs` and `deeplink.rs` are the app shell and belong
-there, while `share/service.rs` and `share/portmap.rs` only reach for
-`tauri::async_runtime` to spawn a task — a lesser coupling than emitting to a
-window, but still one a headless build has to answer for. `update.rs` is the
-eighth and imports none of it: it names `tauri.conf.json` in a test and says in
-prose which of its neighbours holds the plugin, which is the shape to copy —
-the decisions on this side of the seam, the app shell on the other.
+The migration is done, and the compiler now keeps it that way: Tauri is behind
+the **`desktop` feature**, so a build with `--no-default-features` has no
+`tauri` crate at all and code that reaches for one does not compile. Six files
+mention `tauri`, and the distinction between them still matters: `lib.rs`,
+`commands.rs`, `desktop.rs` and `deeplink.rs` are the app shell, every one of
+them `#[cfg(feature = "desktop")]`; `rt.rs` is in both builds and names Tauri in
+a single `cfg`'d line, because spawning a background task from a plain function
+goes through it — which is what `share/portmap.rs` and `share/service.rs` used
+`tauri::async_runtime` for; and `update.rs` imports none of it, naming
+`tauri.conf.json` in a test and saying in prose which of its neighbours holds
+the updater plugin, which is the shape to copy — the decisions on this side of
+the seam, the app shell on the other.
+
+**Check both builds.** `cargo test --lib` and `cargo clippy --all-targets`
+compile the desktop app, and a change can be clean there and still break the
+host — `geoded` is the target that finds a missing Cargo feature, since the
+desktop build gets several for free from Tauri. Run
+`cargo clippy --all-targets --no-default-features` as well. CI runs that one
+step on Linux only, and
+`daemon::tests::ci_compiles_the_headless_build_and_not_only_the_app` reads
+`build.yml` to keep it there — a rule nothing enforces is a rule a tired
+afternoon skips.
 
 **Paths come from `paths.rs`,** which is the only place that knows the layout.
 `GEODE_HOME` overrides the root, which is what lets a test run against a scratch
@@ -225,11 +236,17 @@ to ship `ops.json`.
   and `python3`. The Rust side is `server/probe.rs`. See
   [agent/README.md](agent/README.md); it is dense with hard-won constraints
   (ASM must stay shaded, `-javaagent:` must precede `@argfile`).
-- **`container/`** — a Dockerfile and compose file for headless hosting.
-  Written but never built: the image runs a `geoded` binary that does not exist
-  yet, and no Rust code reads `GEODE_TOKEN` or `GEODE_MAX_HEAP_MB`. The enabling
-  refactor (`events.rs`) is done; a binary target, REST plus a WebSocket, and
-  token auth are not.
+- **`container/`** — a Dockerfile and compose file for headless hosting. Both
+  build and run the `geoded` binary (`src-tauri/src/bin/geoded.rs`, with
+  `src-tauri/src/daemon/`), which reads `GEODE_TOKEN`, `GEODE_LISTEN`,
+  `GEODE_MAX_HEAP_MB` and `GEODE_HOME` from the environment, serves REST plus a
+  console WebSocket, and stops its servers properly on SIGTERM. A server that
+  exits without being asked to is started again here exactly as in the app
+  (`server/run.rs`), which is why that shutdown marks the registry closing
+  before it asks anything to stop: a restart that raced a `docker stop` would
+  bring a server back with nothing left to watch it. What is *not*
+  there is moving a server from the app to a host: see the "what transfer would
+  need" notes at the top of `daemon/mod.rs` before building it.
 
 There was also a `rendezvous/` Cloudflare Worker for resolving share codes. It
 is **gone** — retired in favour of sharing directly between the server and its

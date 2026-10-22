@@ -25,6 +25,10 @@ fn main() {
         apply_env_file(&env_file);
     }
 
+    // Only the desktop app has a `tauri.conf.json` to generate from. A
+    // headless build has no window, no bundle and no webview, and asking
+    // tauri-build for one is how a container build fails before it starts.
+    #[cfg(feature = "desktop")]
     tauri_build::build()
 }
 

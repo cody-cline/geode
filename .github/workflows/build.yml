@@ -104,6 +104,20 @@ jobs:
       # changed in; that is the cost of the rule, not a reason to drop it.
       - run: cargo clippy --all-targets -- -D warnings
         working-directory: src-tauri
+      # And the other build. Everything above compiles the desktop app, which
+      # gets several Cargo features for free from Tauri — so a dependency the
+      # host needs spelled out can go missing and every step above still pass.
+      # `toml`'s `serde` and `std` did exactly that. This is the only thing
+      # here that compiles `geoded`, `src/daemon/` and the container image's
+      # half of the crate at all.
+      #
+      # Linux only, because a missing Cargo feature is not a platform
+      # difference and the host is a Linux container; the three-platform
+      # matrix above is what covers the paths that do differ.
+      - name: Check the headless host, which the desktop build does not cover
+        if: runner.os == 'Linux'
+        run: cargo clippy --all-targets --no-default-features -- -D warnings
+        working-directory: src-tauri
 
   bundle:
     name: bundle (${{ matrix.name }})

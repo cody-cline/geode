@@ -74,10 +74,11 @@ this list to stay complete.
   `src/lib/store.ts`: a topic nothing listens for is a payload the webview
   drops.
 
-One wrinkle to know before you copy anything: the `EventSink` migration is
-incomplete. The server side emits through `events::emit`, but `launch/mod.rs`
-still holds a Tauri `AppHandle` and emits `geode://log` and `geode://exit`
-itself. New code should take an `EventSink`.
+The `EventSink` migration is finished, and the headless host is what finished
+it: `launch/mod.rs` was the last holdout and now takes an `EventSink` like
+everything else, so no code outside the app shell knows a window exists. New
+code takes an `EventSink` too — that rule is what lets `geoded` run the same
+library with no webview in its dependency tree at all.
 
 ## Instances: install and launch
 
@@ -352,10 +353,14 @@ Five frontend traps, each a comment in place:
   reads the tree back from `commands.json` beside the server's own record. The
   user can switch it off (`ServerSettings.readCommands`): it is the one place
   Geode runs its own code inside somebody's server, so it says so plainly.
-- **`container/`** — Dockerfile and compose for headless hosting. Never built:
-  it runs a `geoded` binary that does not exist yet, and nothing in Rust reads
-  the `GEODE_TOKEN` its compose file demands. The enabling refactor (`events.rs`)
-  is done; what remains is a binary target, REST + a WebSocket, and token auth.
+- **`container/`** — Dockerfile and compose for headless hosting. Builds
+  `geoded` with `--no-default-features`, which is what keeps a webview
+  toolchain out of the image: Tauri is behind the `desktop` feature, so the
+  headless crate is the library plus `src/bin/geoded.rs` and `src/daemon/`.
+  `GEODE_TOKEN` is read by `daemon::Settings`, every route is behind it, and a
+  container stop stops the servers rather than killing them. What remains is
+  moving a server from the app to a host — `daemon/mod.rs` writes down what
+  that needs and why it is a decision rather than a detail.
 
 A `rendezvous/` Cloudflare Worker used to sit here, resolving share codes to a
 ticket. It was retired once servers could serve their own packs directly — a

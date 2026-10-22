@@ -13,6 +13,13 @@ services:
     image: geode/host
     restart: unless-stopped
 
+    # `docker compose stop` sends SIGTERM and then, ten seconds later, SIGKILL.
+    # Ten seconds is not enough: the host asks each server to shut down and
+    # gives it up to two minutes to save, and a SIGKILL partway through writing
+    # a chunk is how a world is corrupted. Slightly longer than the host's own
+    # limit, so the host is what decides, not Docker.
+    stop_grace_period: 125s
+
     environment:
       # REQUIRED. Generate one and keep it secret — it is the only thing
       # standing between the internet and your worlds:

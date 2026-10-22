@@ -9,30 +9,64 @@ rust-version = "1.77"
 name = "geode_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# The desktop app. Everything Tauri is behind the `desktop` feature, so this
+# target is the one that needs a webview toolchain to build.
+[[bin]]
+name = "geode"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+# The server host, for a machine with no desktop at all. Built with
+# `--no-default-features` and so with no Tauri, no wry and no WebKitGTK — which
+# is the whole point of it: a container image that needs a webview to compile
+# is not a headless anything.
+[[bin]]
+name = "geoded"
+path = "src/bin/geoded.rs"
+
+[features]
+default = ["desktop"]
+desktop = [
+    "dep:tauri",
+    "dep:tauri-build",
+    "dep:tauri-plugin-dialog",
+    "dep:tauri-plugin-opener",
+    "dep:tauri-plugin-deep-link",
+    "dep:tauri-plugin-single-instance",
+    "dep:tauri-plugin-updater",
+]
+
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+# Optional for the same reason as `tauri` itself: a headless build has no
+# `tauri.conf.json` to read and nothing to generate from it.
+tauri-build = { version = "2", features = [], optional = true }
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset"] }
-tauri-plugin-dialog = "2"
-tauri-plugin-opener = "2"
+tauri = { version = "2", features = ["protocol-asset"], optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
+tauri-plugin-opener = { version = "2", optional = true }
 # `geode://` links. Single-instance must be registered first, and its
 # `deep-link` feature is what hands a link to the copy already running.
-tauri-plugin-deep-link = "2"
-tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+tauri-plugin-deep-link = { version = "2", optional = true }
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"], optional = true }
 # Replacing Geode with a newer build off GitHub releases. Registered only in a
 # build that was compiled with a public key to verify against — see
 # `update.rs`. It asks `rustls` for `ring` only and installs that provider
 # itself, so it does not reopen the choice the comment below warns about;
 # `rustls` stays on one version. It does bring its own reqwest 0.13 alongside
 # the 0.12 here, which is a second client over the same hyper rather than a
-# second HTTP stack.
-tauri-plugin-updater = "2"
+# second HTTP stack. Optional like the rest of Tauri: a host nobody sits at
+# replaces itself the way everything else on it is replaced, by whoever pulls
+# the image.
+tauri-plugin-updater = { version = "2", optional = true }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process", "sync", "time", "io-util", "net"] }
+# `signal` is what lets the server host hear a container stop: `docker stop`
+# sends SIGTERM, and a Minecraft server killed instead of asked to stop loses
+# whatever it had not saved.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process", "sync", "time", "io-util", "net", "signal"] }
 futures = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "gzip"] }
 url = "2"
@@ -51,6 +85,13 @@ socket2 = "0.6"
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 tokio-util = { version = "0.7", features = ["io"] }
+# The console WebSocket `geoded` serves. Default features off: those are the
+# *client* handshake, and this only ever takes over a connection hyper has
+# already upgraded — `from_raw_socket` needs none of them. The server side of
+# the handshake is three lines in `daemon/console.rs`, over the sha1 and base64
+# already here, rather than another crate's worth of HTTP parsing.
+tokio-tungstenite = { version = "0.30", default-features = false }
+base64 = "0.22"
 
 # Opening the pack port on the router over UPnP-IGD, so an admin never has to.
 igd-next = { version = "0.17", default-features = false, features = ["aio_tokio"] }
@@ -63,7 +104,12 @@ sha1 = "0.10"
 sha2 = "0.10"
 hex = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
-toml = { version = "1", default-features = false, features = ["parse", "display"] }
+# `serde` and `std` are what `toml::Table` and `toml::to_string` are behind,
+# and both are used — `instance/jar.rs` reads a mod's `fabric.mod.json`
+# neighbour and `instance/prism.rs` writes Prism's `instance.cfg`. The desktop
+# build compiled without asking for them because Tauri asks for them too; the
+# headless build has no Tauri, and that is where the omission showed.
+toml = { version = "1", default-features = false, features = ["parse", "display", "serde", "std"] }
 # Finding one setting inside a Forge or NeoForge config and nothing else. The
 # 145 TOML files measured under the `config/` folders on a real machine are the
 # single biggest group, and the comments beside each setting are the only

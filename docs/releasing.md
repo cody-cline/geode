@@ -21,6 +21,20 @@ plus the three files in `src-tauri/tests/` that need no network —
 `backup_roundtrip` (5 tests), `curseforge_fingerprints` (24) and
 `header_wire_format` (1). A warning is a failure, in CI as on a desk.
 
+Everything above compiles the desktop app, so Linux runs one step more:
+
+```
+cargo clippy --all-targets --no-default-features -- -D warnings
+```
+
+That is the only thing here that compiles `geoded` and `src/daemon/` — the
+desktop build is handed several Cargo features for free by Tauri, so a
+dependency the host needs spelled out can go missing while every step above
+stays green. Linux alone, because a missing Cargo feature is not a platform
+difference and the host is a Linux container.
+`daemon::tests::ci_compiles_the_headless_build_and_not_only_the_app` is what
+keeps this file and that step in step.
+
 What this does *not* cover: the nine `live_*` files hold 48 `#[ignore]`d
 tests that reach real upstream APIs, and CI runs none of them. Unit tests
 stay offline, so the offline ones are all any platform gets here.

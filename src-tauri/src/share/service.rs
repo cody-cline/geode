@@ -844,7 +844,7 @@ fn detect() -> (watch::Receiver<Detection>, Rouse) {
     let (publish, detected) = watch::channel(Detection::default());
     let rouse = Rouse::new();
     let mut roused = rouse.roused();
-    tauri::async_runtime::spawn(async move {
+    crate::rt::spawn(async move {
         loop {
             // Taken before the ask, so one arriving during it waits for the
             // next rather than reading this as its answer.

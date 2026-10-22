@@ -2371,6 +2371,9 @@ pub async fn start_server(
         &state.http,
         &state.servers,
         &id,
+        // The app starts a server with whatever it asks for. A heap ceiling is
+        // a shared host's concern, and `geoded` is what has one.
+        None,
     )
     .await
 }
@@ -3780,7 +3783,14 @@ pub async fn launch_instance(
     };
 
     let plan = crate::launch::build_plan(&state.paths, &config, &inst, &installed, &session)?;
-    let pid = crate::launch::spawn(&app, &state.paths, &inst, plan, state.games.clone()).await?;
+    let pid = crate::launch::spawn(
+        &crate::desktop::sink(app.clone()),
+        &state.paths,
+        &inst,
+        plan,
+        state.games.clone(),
+    )
+    .await?;
 
     // Read again, as the game's exit does, rather than saving the copy from
     // before preparing, which can take minutes: a setting changed meanwhile —

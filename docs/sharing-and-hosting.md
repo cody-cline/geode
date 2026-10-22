@@ -45,7 +45,7 @@ is more actionable than a silently incomplete instance would be.
 | Sharing a server directly with players | `src-tauri/src/share/{host,service,portmap,identity,trust,link,join}.rs` | Done, tested end to end over real TLS |
 | Updating a joined instance from its server | `src-tauri/src/share/pack.rs` (`update`), `src-tauri/src/commands.rs` (`bring_up_to_date`) | Done, tested — Play brings it up to date before the game starts |
 | `geode://join` links | `src-tauri/src/deeplink.rs`, `src-tauri/geode.desktop.hbs` | Done; delivery verified on Linux through the OS handler |
-| Container image | `container/` | Written, **not built** |
+| Container image and `geoded` | `container/`, `src-tauri/src/bin/geoded.rs`, `src-tauri/src/daemon/` | Done, image built — REST, console WebSocket, token auth, clean stop (item 13) |
 | Event decoupling | `src-tauri/src/events.rs` | Done — the server half no longer needs a window |
 
 ### The format
@@ -926,25 +926,49 @@ forwarding and made it connect, and a hostile link was dropped.
 
 ### 4. The container
 
-`container/Dockerfile` and `docker-compose.yml` are written but **neither has
-been built** — Docker is not installed on this machine, and the image runs a
-`geoded` binary that does not exist yet.
+`container/Dockerfile` and `docker-compose.yml` now build and run a real
+binary, and the image has been built.
 
-The enabling refactor is done: `src-tauri/src/events.rs` decouples the library
-from Tauri, and the server half (`server/run.rs`, `server/schedule.rs`) no
-longer mentions it. What remains:
+`geoded` is `src-tauri/src/bin/geoded.rs` over `src-tauri/src/daemon/`. Tauri
+is behind the crate's `desktop` feature, so the image is built with
+`--no-default-features` and needs no webview toolchain in either stage — which
+is the only reason a headless image is possible at all. Everything it is told
+comes from the environment the compose file already passed: `GEODE_TOKEN`
+(required; it refuses to start without one, and refuses one short enough to
+guess), `GEODE_LISTEN`, `GEODE_MAX_HEAP_MB` and `GEODE_HOME`.
 
-- A `geoded` binary target, with `tauri` made an optional dependency so the
-  library builds without it.
-- REST plus one WebSocket: servers list/create/start/stop, console stream,
-  command send, properties, content, backups, and file management
-  (list/upload/download/delete/rename/mkdir). Crafty Controller's route list is
-  good prior art here.
-- Token auth from `GEODE_TOKEN`, and a loud refusal to start without one.
-- Resumable transfer for multi-gigabyte directories.
+What it serves is in `daemon/api.rs`: REST for the list, create, install, start,
+stop, kill, command, properties, content, tasks and backups the app already
+does, and a console WebSocket per server (`daemon/console.rs`) that carries the
+server's own output out and typed commands in. Every route calls the same
+`server::` function the matching Tauri command calls — `run::start`
+is what both Start buttons press — so there is one answer rather than two that
+drift. It is held to `share/host.rs`'s rules: the token checked in constant time
+before the path is matched or a body read, one uniform 401 whatever was wrong,
+and a ceiling on connections, on request bodies, on console sockets and on one
+console message.
+
+A container stop is the part worth knowing: SIGTERM asks every running server to
+shut down in its own dialect and waits up to two minutes for the processes to
+go, because a SIGKILL partway through writing a chunk is how a world is
+corrupted. The compose file's `stop_grace_period` is longer than that limit on
+purpose, so the host decides and not Docker.
+
+What remains:
+
 - Local ⇄ remote server transfer: world, config, content records and Geode's own
   `server.json`, with the server stopped first so a world is never copied
-  mid-write.
+  mid-write — and `share.json` deliberately *not* carried over, since it names
+  a code and an address belonging to the machine the server left. The shape is
+  a decision rather than a detail, and the notes at the top of
+  `src-tauri/src/daemon/mod.rs` set out what it needs: what moves, references
+  rather than bytes where there is a reference, which side drives it, what
+  happens to the original, and what the player who already joined sees.
+- Resumable upload for multi-gigabyte directories, which that transfer needs
+  and which `api::MAX_BODY` is deliberately far too small for — it is sized for
+  settings, so a transfer is a route of its own with a ceiling of its own.
+- File management (list/upload/download/delete/rename/mkdir). Crafty
+  Controller's route list is good prior art.
 
 Pterodactyl's wings was considered and rejected: it is not standalone — the
 Panel owns the model, so using it means writing a Panel. Crafty is standalone

@@ -249,7 +249,7 @@ pub struct PortMapper {
     /// rather than stopped still removes its mapping if the runtime outlives
     /// the removal — but nobody waits to find out.
     stop: oneshot::Sender<()>,
-    task: tauri::async_runtime::JoinHandle<()>,
+    task: crate::rt::JoinHandle<()>,
 }
 
 impl PortMapper {
@@ -277,9 +277,10 @@ impl PortMapper {
         let (found, gateway) = watch::channel(None);
         let (stop, stopped) = oneshot::channel();
         let rouse = Rouse::new();
-        // Tauri's spawn, not Tokio's: this is a plain function that may be
-        // called outside any Tokio runtime context, where `tokio::spawn` panics.
-        let task = tauri::async_runtime::spawn(hold(
+        // `crate::rt`, not Tokio's own spawn: this is a plain function that
+        // may be called outside any Tokio runtime context, where
+        // `tokio::spawn` panics.
+        let task = crate::rt::spawn(hold(
             port,
             finder,
             timings,

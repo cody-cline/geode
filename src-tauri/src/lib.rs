@@ -1,10 +1,23 @@
+//! Geode's library: everything the app does, with nothing about how it is
+//! driven.
+//!
+//! Two front ends share it. The desktop app — `commands`, `desktop`,
+//! `deeplink` and [`run`] below — is behind the `desktop` feature, which is on
+//! by default and is the only thing that pulls in Tauri. The server host,
+//! [`daemon`], is built without it, so a container image compiles with no
+//! webview toolchain anywhere near it.
+
 pub mod auth;
+#[cfg(feature = "desktop")]
 pub mod commands;
 pub mod config;
 pub mod connector;
 pub mod crash;
+pub mod daemon;
+#[cfg(feature = "desktop")]
 pub mod deeplink;
 pub mod diagnostics;
+#[cfg(feature = "desktop")]
 pub mod desktop;
 pub mod drive;
 pub mod error;
@@ -19,18 +32,24 @@ pub mod net;
 pub mod paths;
 pub mod plan;
 pub mod providers;
+pub mod rt;
 pub mod server;
 pub mod settings;
 pub mod share;
 pub mod state;
 pub mod update;
 
+#[cfg(feature = "desktop")]
 use tauri::Manager;
 
+#[cfg(feature = "desktop")]
 use crate::config::Config;
+#[cfg(feature = "desktop")]
 use crate::paths::Paths;
+#[cfg(feature = "desktop")]
 use crate::state::AppState;
 
+#[cfg(feature = "desktop")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut builder = tauri::Builder::default()

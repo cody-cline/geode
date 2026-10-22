@@ -7,10 +7,10 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::auth::store::Session;
+use crate::events::{self, EventSink};
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::install::Installed;
@@ -317,8 +317,11 @@ async fn run_hook(command: &str, game_dir: &Path) -> Result<()> {
 
 /// Spawn the game and stream its output. Returns once the process has started;
 /// the caller gets an `ExitEvent` when it finishes.
+///
+/// `sink` is where the game's log lines and its exit go — a webview for the
+/// desktop app, and nothing at all for a caller that only wants the process.
 pub async fn spawn(
-    app: &AppHandle,
+    sink: &EventSink,
     paths: &Paths,
     instance: &Instance,
     plan: LaunchPlan,
@@ -363,34 +366,34 @@ pub async fn spawn(
     // stdout carries the log4j XML stream; stderr is plain text (JVM crashes,
     // native errors) and must never be parsed as XML.
     if let Some(out) = stdout {
-        let app = app.clone();
+        let sink = Some(sink.clone());
         let id = instance.id.clone();
         tokio::spawn(async move {
             let mut parser = log::Log4jParser::new();
             let mut lines = BufReader::new(out).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 for entry in parser.push(&line) {
-                    let _ = app.emit("geode://log", entry.with_instance(&id));
+                    events::emit(&sink, "geode://log", &entry.with_instance(&id));
                 }
             }
             for entry in parser.flush() {
-                let _ = app.emit("geode://log", entry.with_instance(&id));
+                events::emit(&sink, "geode://log", &entry.with_instance(&id));
             }
         });
     }
 
     if let Some(err) = stderr {
-        let app = app.clone();
+        let sink = Some(sink.clone());
         let id = instance.id.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(err).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                let _ = app.emit("geode://log", log::LogEntry::stderr(&id, line));
+                events::emit(&sink, "geode://log", &log::LogEntry::stderr(&id, line));
             }
         });
     }
 
-    let app_for_wait = app.clone();
+    let sink_for_wait = Some(sink.clone());
     let instance_id = instance.id.clone();
     let post_exit = instance.overrides.post_exit_command.clone();
     let game_dir = plan.game_dir.clone();
@@ -424,9 +427,10 @@ pub async fn spawn(
             let _ = run_hook(&hook, &game_dir).await;
         }
 
-        let _ = app_for_wait.emit(
+        events::emit(
+            &sink_for_wait,
             "geode://exit",
-            ExitEvent {
+            &ExitEvent {
                 instance_id,
                 code,
                 success,
