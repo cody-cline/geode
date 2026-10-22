@@ -1,7 +1,11 @@
 use std::path::{Path, PathBuf};
 
 /// Build-time secrets Geode can compile in, read via `option_env!`.
-const BAKED: &[&str] = &["GEODE_CLIENT_ID", "GEODE_CURSEFORGE_KEY"];
+const BAKED: &[&str] = &[
+    "GEODE_CLIENT_ID",
+    "GEODE_CURSEFORGE_KEY",
+    "GEODE_GOOGLE_CLIENT_ID",
+];
 
 fn main() {
     // `option_env!` is resolved at compile time and Cargo does not otherwise

@@ -205,6 +205,59 @@ impl Config {
 mod tests {
     use super::*;
 
+    /// Every credential compiled in with `option_env!` has to be listed in
+    /// `build.rs`'s `BAKED`, or Cargo never learns that the build depends on
+    /// it: setting the value and rebuilding then reuses the cached binary and
+    /// appears to do nothing at all, with no error anywhere.
+    ///
+    /// That is not hypothetical. `GEODE_GOOGLE_CLIENT_ID` was added with the
+    /// Drive sharing and never listed, so a private build could carry a Google
+    /// client id in `.env` and still ask the user to paste one in. This reads
+    /// both sides and makes the next omission a test failure instead.
+    #[test]
+    fn every_compiled_in_credential_is_one_cargo_watches() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let build = std::fs::read_to_string(root.join("build.rs")).expect("build.rs");
+        let baked = build
+            .split("const BAKED")
+            .nth(1)
+            .and_then(|rest| rest.split(';').next())
+            .expect("build.rs has no BAKED list");
+
+        // Every compile-time credential read anywhere under src/, which is the
+        // only way a value reaches the binary. The needle is spelled in two
+        // halves so this test does not find its own source.
+        let needle = concat!("option", "_env!(", "\"");
+        let mut used: Vec<String> = Vec::new();
+        let mut walk = vec![root.join("src")];
+        while let Some(dir) = walk.pop() {
+            for entry in std::fs::read_dir(&dir).expect("src is readable").flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|e| e != "rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).expect("a source file");
+                for after in text.split(needle).skip(1) {
+                    if let Some(name) = after.split('"').next() {
+                        used.push(name.to_string());
+                    }
+                }
+            }
+        }
+        assert!(!used.is_empty(), "found no option_env! at all, so this proves nothing");
+
+        let missing: Vec<&String> = used.iter().filter(|name| !baked.contains(*name)).collect();
+        assert!(
+            missing.is_empty(),
+            "compiled in but not in build.rs's BAKED, so Cargo will not rebuild when they \
+             change and the value silently never arrives: {missing:?}"
+        );
+    }
+
     fn with_key(key: &str) -> Config {
         Config {
             curseforge_api_key: Some(key.into()),
