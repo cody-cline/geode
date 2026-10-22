@@ -540,6 +540,31 @@ pub(crate) fn read_index(archive: &Path) -> Result<Option<MrIndex>> {
     })
 }
 
+/// The trees a `.mrpack` means for a client, in the order they land —
+/// `client-overrides` shadows `overrides`. `server-overrides/` is deliberately
+/// not one of them; see [`import_into_at`].
+const MRPACK_CLIENT_TREES: [&str; 2] = ["overrides", "client-overrides"];
+
+/// The trees inside a pack whose files a client import writes into the
+/// instance, as prefixes of the archive's own entry names.
+///
+/// Read off the pack rather than assumed. A `.mrpack`'s two client trees are
+/// fixed by that format, but a CurseForge manifest *names* its tree, and while
+/// `overrides` is both the convention and this reader's default, the field is
+/// the pack's to set and [`import_into_at`] extracts whatever it says. Anything
+/// working out what a pack carries has to look where the import will write, or
+/// it decides a file the pack still ships has departed.
+pub(crate) fn carried_trees(archive: &Path) -> Result<Vec<String>> {
+    Ok(match read_pack(archive)? {
+        PackKind::Modrinth(_) => MRPACK_CLIENT_TREES.iter().map(|t| t.to_string()).collect(),
+        PackKind::CurseForge(manifest) => vec![manifest.overrides],
+        // Not a pack at all: an instance carries its whole game directory
+        // rather than a tree to write into one, and nothing brings an instance
+        // up to a newer published version of itself.
+        PackKind::Prism(_) => Vec::new(),
+    })
+}
+
 pub async fn preview(archive: PathBuf) -> Result<PackPreview> {
     tokio::task::spawn_blocking(move || {
         let pack = read_pack(&archive)?;
@@ -795,7 +820,7 @@ pub async fn import_into_at(
                 extract_trees(
                     &archive_owned,
                     &game_dir,
-                    &[("overrides", ""), ("client-overrides", "")],
+                    &MRPACK_CLIENT_TREES.map(|tree| (tree, "")),
                     overrides,
                     progress,
                 )
@@ -1118,7 +1143,7 @@ pub async fn import_into_at(
                          there)"
                     )
                 };
-                match unpack_world(&zipped, &saves, progress).await {
+                match unpack_world(&zipped, &saves, overrides, progress).await {
                     Ok(folders) if !folders.is_empty() => {
                         // The zip has nothing left to say, and leaving it in
                         // `saves/` beside the world it became is clutter the
@@ -1280,8 +1305,10 @@ pub enum Landing {
 #[derive(Clone)]
 pub struct Overrides(std::sync::Arc<Decide>);
 
-/// Asked about one file: its path relative to the game directory, and whether
-/// the user already has a file there.
+/// Asked about one file: where it lands under the directory the tree is
+/// written into — the game directory for a pack's own override trees, `saves/`
+/// for a world arriving as a zip — and whether the user already has a file
+/// there.
 type Decide = dyn Fn(&Path, bool) -> Landing + Send + Sync;
 
 impl Overrides {
@@ -1290,7 +1317,7 @@ impl Overrides {
         Self(std::sync::Arc::new(|_, _| Landing::Replace))
     }
 
-    /// Decided per file, from its path relative to the game directory and
+    /// Decided per file, from where it lands under the destination and
     /// whether the player already has a file there.
     pub fn decided(by: impl Fn(&Path, bool) -> Landing + Send + Sync + 'static) -> Self {
         Self(std::sync::Arc::new(by))
@@ -1375,9 +1402,15 @@ async fn extract_trees(
                 if !crate::paths::is_safe_relative(rel_path) {
                     continue;
                 }
-                let dest = dest_dir.join(under).join(rel_path);
+                // Asked about where the file lands rather than about its path
+                // inside the tree, which are the same thing for a pack's own
+                // trees and are not for a world: `region/r.0.0.mca` says
+                // nothing about which world it belongs to, and `datapacks/`
+                // inside one is not the instance's own.
+                let under_dest = under.join(rel_path);
+                let dest = dest_dir.join(&under_dest);
                 let fresh = !dest.exists();
-                let landing = overrides.landing(rel_path, !fresh);
+                let landing = overrides.landing(&under_dest, !fresh);
                 if landing == Landing::Keep {
                     continue;
                 }
@@ -1510,10 +1543,21 @@ fn worlds_in(names: &[String], named_after_the_file: &str) -> Vec<(String, Strin
 /// everything a pack's overrides are *and* to one budget between them — entry
 /// names that climb out of the destination are skipped, the inflate budget
 /// stops a zip bomb, Cancel is heard between entries, and a run that does not
-/// finish takes back only what it wrote. Through [`Overrides::replace`]: a
-/// world nobody has yet is written whole, and a write that fails fails the
-/// import, since there is no copy of the player's own to leave in place.
-async fn unpack_world(archive: &Path, saves: &Path, progress: &Progress) -> Result<Vec<String>> {
+/// finish takes back only what it wrote.
+///
+/// Through the caller's own `overrides`, and that is load-bearing: an import
+/// into a new instance answers [`Landing::Replace`] for everything, because a
+/// world nobody has yet is written whole; a pack *update* answers
+/// [`Landing::Keep`] for a file the player already has, because by then they
+/// have been playing the world this zip ships and there is no getting a save
+/// back. Written whole here once, it overwrote their `level.dat` and every
+/// region they had explored.
+async fn unpack_world(
+    archive: &Path,
+    saves: &Path,
+    overrides: &Overrides,
+    progress: &Progress,
+) -> Result<Vec<String>> {
     let names = {
         let archive = archive.to_path_buf();
         tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
@@ -1539,7 +1583,7 @@ async fn unpack_world(archive: &Path, saves: &Path, progress: &Progress) -> Resu
         .iter()
         .map(|(prefix, folder)| (prefix.as_str(), folder.as_str()))
         .collect();
-    extract_trees(archive, saves, &trees, &Overrides::replace(), progress).await?;
+    extract_trees(archive, saves, &trees, overrides, progress).await?;
     Ok(worlds.into_iter().map(|(_, folder)| folder).collect())
 }
 
@@ -3606,9 +3650,14 @@ mod tests {
             ],
         );
 
-        let folders = unpack_world(&saves.join("download.zip"), &saves, &Progress::silent("t"))
-            .await
-            .expect("a world zip unpacks");
+        let folders = unpack_world(
+            &saves.join("download.zip"),
+            &saves,
+            &Overrides::replace(),
+            &Progress::silent("t"),
+        )
+        .await
+        .expect("a world zip unpacks");
 
         assert_eq!(folders, vec!["Sky Village".to_string()]);
         assert_eq!(
@@ -3628,6 +3677,76 @@ mod tests {
         assert!(
             !saves.join("Sky Village/Sky Village").exists(),
             "the wrapping folder was unpacked inside itself"
+        );
+    }
+
+    /// The world a pack bundles arrives again with every version of that pack,
+    /// and by the second one the player has been playing it. Written whole,
+    /// the pack's pristine copy went over their `level.dat` and every region
+    /// they had explored — the one thing in an instance that cannot be
+    /// downloaded again.
+    ///
+    /// Through the rule a pack update really applies, not a stand-in for it,
+    /// because that rule is the whole protection: `saves/` is not a content
+    /// folder, so a file the player already has is theirs and is kept, and
+    /// `datapacks/` *inside* a world is not the instance's own datapacks
+    /// folder either.
+    #[tokio::test]
+    async fn a_world_the_player_has_been_playing_is_not_written_over() {
+        let (_scratch, saves) = arrived_world(
+            "world-theirs",
+            "map.zip",
+            &[
+                ("Spawn Town/level.dat", b"THE PACK'S"),
+                ("Spawn Town/region/r.0.0.mca", b"PRISTINE"),
+                ("Spawn Town/region/r.0.1.mca", b"NEW THIS VERSION"),
+                ("Spawn Town/datapacks/rules.zip", b"THE PACK'S DATAPACK"),
+            ],
+        );
+        // The world as the player left it: the same folder, their own bytes,
+        // and a region they explored that the pack's copy knows nothing about.
+        let theirs = saves.join("Spawn Town");
+        std::fs::create_dir_all(theirs.join("region")).unwrap();
+        std::fs::create_dir_all(theirs.join("datapacks")).unwrap();
+        std::fs::write(theirs.join("level.dat"), b"THEIR SAVE").unwrap();
+        std::fs::write(theirs.join("region/r.0.0.mca"), b"EXPLORED").unwrap();
+        std::fs::write(theirs.join("region/r.9.9.mca"), b"THEIRS ALONE").unwrap();
+        std::fs::write(theirs.join("datapacks/rules.zip"), b"THEIR DATAPACK").unwrap();
+
+        let folders = unpack_world(
+            &saves.join("map.zip"),
+            &saves,
+            &crate::instance::pack_update::how_the_packs_files_land(),
+            &Progress::silent("t"),
+        )
+        .await
+        .expect("a world zip unpacks");
+
+        assert_eq!(folders, vec!["Spawn Town".to_string()]);
+        assert_eq!(
+            std::fs::read(theirs.join("level.dat")).unwrap(),
+            b"THEIR SAVE",
+            "their save was overwritten with the pack's pristine copy"
+        );
+        assert_eq!(
+            std::fs::read(theirs.join("region/r.0.0.mca")).unwrap(),
+            b"EXPLORED",
+            "a region they had built in was overwritten"
+        );
+        assert_eq!(
+            std::fs::read(theirs.join("region/r.9.9.mca")).unwrap(),
+            b"THEIRS ALONE"
+        );
+        assert_eq!(
+            std::fs::read(theirs.join("datapacks/rules.zip")).unwrap(),
+            b"THEIR DATAPACK",
+            "a datapack inside their world is not the instance's datapacks folder"
+        );
+        assert_eq!(
+            std::fs::read(theirs.join("region/r.0.1.mca")).unwrap(),
+            b"NEW THIS VERSION",
+            "and a file they do not have still arrives, or the new version reaches them \
+             at all"
         );
     }
 
@@ -3651,9 +3770,14 @@ mod tests {
             ],
         );
 
-        let folders = unpack_world(&saves.join("chapters.zip"), &saves, &Progress::silent("t"))
-            .await
-            .expect("a world zip unpacks");
+        let folders = unpack_world(
+            &saves.join("chapters.zip"),
+            &saves,
+            &Overrides::replace(),
+            &Progress::silent("t"),
+        )
+        .await
+        .expect("a world zip unpacks");
 
         assert_eq!(
             folders,
@@ -3689,9 +3813,14 @@ mod tests {
             ],
         );
 
-        let folders = unpack_world(&saves.join("Spawn Town.zip"), &saves, &Progress::silent("t"))
-            .await
-            .expect("a world zip unpacks");
+        let folders = unpack_world(
+            &saves.join("Spawn Town.zip"),
+            &saves,
+            &Overrides::replace(),
+            &Progress::silent("t"),
+        )
+        .await
+        .expect("a world zip unpacks");
 
         assert_eq!(folders, vec!["Spawn Town".to_string()]);
         assert_eq!(
@@ -3720,9 +3849,14 @@ mod tests {
             &[("pack.mcmeta", b"{}"), ("assets/icon.png", b"PNG")],
         );
 
-        let folders = unpack_world(&saves.join("resources.zip"), &saves, &Progress::silent("t"))
-            .await
-            .expect("a zip that is not a world is not a failure");
+        let folders = unpack_world(
+            &saves.join("resources.zip"),
+            &saves,
+            &Overrides::replace(),
+            &Progress::silent("t"),
+        )
+        .await
+        .expect("a zip that is not a world is not a failure");
 
         assert!(folders.is_empty(), "{folders:?}");
         let left: Vec<String> = std::fs::read_dir(&saves)
@@ -3748,9 +3882,14 @@ mod tests {
         );
         let root = scratch.paths.root.clone();
 
-        let folders = unpack_world(&saves.join("map.zip"), &saves, &Progress::silent("t"))
-            .await
-            .expect("the world itself still unpacks");
+        let folders = unpack_world(
+            &saves.join("map.zip"),
+            &saves,
+            &Overrides::replace(),
+            &Progress::silent("t"),
+        )
+        .await
+        .expect("the world itself still unpacks");
         assert_eq!(folders, vec!["map".to_string()]);
         assert!(saves.join("map/level.dat").exists());
         for escaped in [root.join("pwned.txt"), saves.join("pwned.txt")] {
@@ -3761,9 +3900,14 @@ mod tests {
         // otherwise be unpacked as `saves/..`.
         let (climbing, saves) = arrived_world("world-climb-root", "map.zip", &[("../level.dat", b"NBT")]);
         let root = climbing.paths.root.clone();
-        let folders = unpack_world(&saves.join("map.zip"), &saves, &Progress::silent("t"))
-            .await
-            .expect("a zip Geode will not make a folder for is not a failure");
+        let folders = unpack_world(
+            &saves.join("map.zip"),
+            &saves,
+            &Overrides::replace(),
+            &Progress::silent("t"),
+        )
+        .await
+        .expect("a zip Geode will not make a folder for is not a failure");
         assert!(
             folders.is_empty(),
             "a world said to live outside saves/ was unpacked anyway"
@@ -3791,9 +3935,14 @@ mod tests {
             "not a bomb"
         );
 
-        let err = unpack_world(&archive, &saves, &Progress::silent("t"))
-            .await
-            .expect_err("a world that unpacks past its budget must be refused");
+        let err = unpack_world(
+            &archive,
+            &saves,
+            &Overrides::replace(),
+            &Progress::silent("t"),
+        )
+        .await
+        .expect_err("a world that unpacks past its budget must be refused");
 
         assert!(err.to_string().contains("fill the disk"), "{err}");
         assert!(

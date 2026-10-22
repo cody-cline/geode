@@ -4,6 +4,7 @@ pub mod jar;
 pub mod logs;
 pub mod modpack;
 pub mod multiplayer;
+pub mod pack_update;
 pub mod prism;
 
 use serde::{Deserialize, Serialize};
@@ -69,6 +70,21 @@ pub struct Instance {
     /// Set when the instance was created from a modpack.
     #[serde(default)]
     pub pack: Option<PackSource>,
+    /// The content files the pack above brought, as it brought them.
+    ///
+    /// The one thing that tells a pack's mod from one the player added beside
+    /// it. Both are the player's to delete and both get their own update
+    /// checks — unlike a server's files, which carry a tag on their record —
+    /// so there is nothing on a record to read it off, and an update that
+    /// guessed would be guessing about whether to delete somebody's mod.
+    ///
+    /// `None` is an instance from before this was recorded, and reads as
+    /// "nobody knows", which makes an update add and replace but remove
+    /// nothing. That is the only safe answer: every file in it looks equally
+    /// like the player's. The update records the list as it goes, so the one
+    /// after it knows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pack_files: Option<Vec<PackFile>>,
     /// The server this was joined from. Read to recognise a link opened again,
     /// to hold a typed address to the certificate it had, and to bring the
     /// instance up to that server's pack whenever Play is pressed.
@@ -178,6 +194,37 @@ pub struct PackSource {
     pub version_id: Option<String>,
 }
 
+/// One content file an instance's pack brought, as the pack brought it.
+///
+/// Keyed the way a content record is — by kind and the *enabled* file name —
+/// so the player turning a mod off does not make it a different file.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PackFile {
+    pub kind: content::ContentKind,
+    pub file_name: String,
+    /// The pack itself had it turned off. A file that is off for this reason
+    /// is not off by the player's choice, and the next version of the pack
+    /// decides it again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub off: bool,
+    /// The provider and project the pack said this file is, when it said.
+    /// Empty for a jar a pack carried in its overrides with nothing to link
+    /// back to, which is matched by file name alone.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub project_id: String,
+}
+
+impl PackFile {
+    /// The provider and project this is, when it names one.
+    pub fn project(&self) -> Option<(String, String)> {
+        (!self.provider.is_empty() && !self.project_id.is_empty())
+            .then(|| (self.provider.clone(), self.project_id.clone()))
+    }
+}
+
 impl PackSource {
     /// A pack installed from a provider, keeping its artwork and blurb.
     pub fn from_project(
@@ -235,6 +282,7 @@ impl Instance {
             overrides: InstanceOverrides::default(),
             content: Vec::new(),
             pack: None,
+            pack_files: None,
             joined: None,
             server_side_mods_off: false,
             joined_revision: None,

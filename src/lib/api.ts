@@ -43,6 +43,8 @@ import type {
   PackInfo,
   PackLinkView,
   PackPreview,
+  PackUpdate,
+  PackUpdatePlan,
   Plan,
   PlanMod,
   PlanResolution,
@@ -204,6 +206,23 @@ export const api = {
       versionId: versionId ?? null,
       name: name ?? null,
     }),
+  /** Whether the platform has a newer version of the pack this instance was built from. */
+  checkPackUpdate: (id: string) =>
+    invoke<PackUpdate | null>("check_pack_update", { id }),
+  /**
+   * What updating to that version would do, before any of it is done. Downloads
+   * the pack to read it and leaves it cached, so applying does not fetch it
+   * twice. Progress id `packplan:<instance id>`.
+   */
+  planPackUpdate: (id: string, versionId: string) =>
+    invoke<PackUpdatePlan>("plan_pack_update", { id, versionId }),
+  /**
+   * Brings the instance up to that version in place. What did not land comes
+   * back beside the instance rather than instead of it, so a part-finished
+   * update still launches. Progress id `packupdate:<instance id>`.
+   */
+  applyPackUpdate: (id: string, versionId: string) =>
+    invoke<PackImport>("apply_pack_update", { id, versionId }),
   linkUntrackedContent: (id: string) =>
     invoke<LinkReport>("link_untracked_content", { id }),
   checkContentUpdates: (id: string) =>

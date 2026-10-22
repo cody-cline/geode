@@ -1255,7 +1255,7 @@ async fn remove_departed(
 /// mod. Without that second way, a hand-dropped copy of a mod the server now
 /// ships left both copies on, and the game that then would not start read to
 /// the player as the update having broken their instance.
-async fn turn_off_the_players_duplicates(
+pub(crate) async fn turn_off_the_players_duplicates(
     paths: &Paths,
     instance: &Instance,
     arrived: &HashMap<(instance::content::ContentKind, String), Arrival>,
@@ -1588,7 +1588,12 @@ async fn declared_ids(path: &Path) -> Vec<String> {
 /// is fetched. A pack that names no hash carries the bytes itself, or fetches
 /// them by id against a hash of its own, and either lands over whatever is
 /// there.
-async fn take_the_packs_name(dir: &Path, name: &str, off: bool, named: Option<&str>) -> Result<()> {
+pub(crate) async fn take_the_packs_name(
+    dir: &Path,
+    name: &str,
+    off: bool,
+    named: Option<&str>,
+) -> Result<()> {
     use instance::content::{disabled_name, is_regular_file, set_enabled_in};
 
     let disabled = disabled_name(name);
@@ -1709,7 +1714,7 @@ pub(crate) fn arrivals(
 ///
 /// Anything deeper, or anywhere else, is not a file a content folder lists,
 /// so it is nothing to claim.
-fn content_file(rel: &str) -> Option<(instance::content::ContentKind, String, bool)> {
+pub(crate) fn content_file(rel: &str) -> Option<(instance::content::ContentKind, String, bool)> {
     let path = Path::new(rel);
     if !crate::paths::is_safe_relative(path) || path.components().count() != 2 {
         return None;

@@ -67,6 +67,23 @@ export interface PackSource {
   versionId?: string | null;
 }
 
+/**
+ * One content file an instance's pack brought, as it brought it.
+ *
+ * The only thing that tells a pack's mod from one the player added beside it:
+ * both are theirs to delete and both get their own update check, so there is
+ * nothing on a record to read it off. Absent means nobody recorded it, which
+ * makes a pack update add and replace but remove nothing.
+ */
+export interface PackFile {
+  kind: ContentKind;
+  fileName: string;
+  /** The pack itself shipped it turned off, so it is not the player's choice. */
+  off?: boolean;
+  provider?: string;
+  projectId?: string;
+}
+
 export interface LinkReport {
   identified: number;
   unknown: number;
@@ -94,6 +111,8 @@ export interface Instance {
   playSeconds: number;
   overrides: InstanceOverrides;
   pack?: PackSource | null;
+  /** The content files that pack brought. Absent on an instance from before this was recorded. */
+  packFiles?: PackFile[] | null;
   /** The server this was joined from, when it was. */
   joined?: JoinLink | null;
   /** A joined instance keeps its server's server-side mods turned off. */
@@ -1209,6 +1228,51 @@ export interface UpdateCandidate {
   newVersionId: string;
   newVersionNumber: string;
   kind: ContentKind;
+}
+
+/** A newer version of the pack an instance was built from. */
+export interface PackUpdate {
+  /** What the instance records itself as being on, so the offer reads as a move. */
+  currentVersion: string;
+  versionId: string;
+  versionNumber: string;
+  /** `release`, `beta` or `alpha`, as the platform labels it. */
+  releaseType: string;
+  published: string | null;
+}
+
+/**
+ * What updating to a pack version would do, before any of it is done. Every
+ * list is names a person would recognise, not paths.
+ */
+export interface PackUpdatePlan {
+  name: string;
+  fromVersion: string;
+  toVersion: string;
+  toVersionId: string;
+  mcVersion: string;
+  loader: Loader;
+  loaderVersion: string;
+  fromMcVersion: string;
+  fromLoader: Loader;
+  /**
+   * Why Geode will not do this one in place — a pack version that moved to
+   * another Minecraft version or another loader. The whole sentence to show,
+   * and the reason not to offer the button.
+   */
+  refused: string | null;
+  arriving: string[];
+  departing: string[];
+  keeping: string[];
+  /**
+   * The player's own content this version takes over: a file at a path the
+   * pack now writes, which is replaced, and their own copy of a mod the pack
+   * now ships, which is turned off. Neither is deleted, and neither is kept.
+   */
+  takenOver: string[];
+  stayingOff: string[];
+  /** Nothing records what this instance's pack brought, so nothing is deleted. */
+  nothingRecorded: boolean;
 }
 
 export interface InstallReport {

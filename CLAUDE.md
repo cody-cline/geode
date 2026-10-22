@@ -38,10 +38,11 @@ cargo test --lib           # unit tests — offline, fast, the ones that gate a 
 cargo clippy --all-targets # expected to be clean; treat a warning as a failure
 ```
 
-`npm test` runs `node --test src/lib/*.test.mjs` — today that is two files,
-`src/lib/share.test.mjs` and `src/lib/blocked.test.mjs`. Both also check a few
-invariants by reading the `.tsx` that holds them, because there is no DOM or
-React renderer under `npm test`. Everything else on the frontend is gated by `tsc`
+`npm test` runs `node --test src/lib/*.test.mjs` — today that is three files,
+`src/lib/share.test.mjs`, `src/lib/blocked.test.mjs` and
+`src/lib/pack-update.test.mjs`. All three also check a few invariants by
+reading the `.tsx` that holds them, because there is no DOM or React renderer
+under `npm test`. Everything else on the frontend is gated by `tsc`
 alone, which is strict (`noUnusedLocals`, `verbatimModuleSyntax`); there is no
 ESLint or Prettier config. `npm run dev` on its own serves a UI with no backend
 to talk to, which is why the palette page at `?palette` exists.

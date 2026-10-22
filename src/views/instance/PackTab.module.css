@@ -97,3 +97,26 @@
   line-height: 1.6;
   padding: 12px 0;
 }
+
+/* The one thing on this page that is an offer rather than a description, so it
+   sits under the blurb and above the stats where the eye already is. */
+.update {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  font-size: 13px;
+  color: var(--text);
+}
+
+.update svg {
+  flex: none;
+  color: var(--accent);
+}
+
+.update span {
+  flex: 1;
+}

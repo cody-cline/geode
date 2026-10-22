@@ -1123,6 +1123,10 @@ pub async fn install_modpack(
         version.version_number.clone(),
         version.id.clone(),
     ));
+    // And which files are the pack's rather than the player's, which is the
+    // only thing a later update has to tell them apart by.
+    instance::pack_update::record_what_arrived(&state.paths, &mut inst, &archive, &preview.format)
+        .await;
 
     state.clear_cancel(progress.id());
     // Save regardless: a partly imported pack is more useful than a directory
@@ -1147,6 +1151,118 @@ pub async fn install_modpack(
                 ))
                 .await;
             Ok(view(inst, &state))
+        }
+        Err(e) => {
+            progress.fail(&e.to_string()).await;
+            Err(e)
+        }
+    }
+}
+
+/// Whether the platform has a newer version of the pack this instance was
+/// built from.
+///
+/// `None` is "nothing to offer", which an instance that was not built from a
+/// pack, or built from a file on disk, also answers.
+#[tauri::command]
+pub async fn check_pack_update(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Option<instance::pack_update::PackUpdate>> {
+    let inst = instance::load(&state.paths, &id).await?;
+    let cf_key = state.cf_key().await;
+    instance::pack_update::check(&state.http, &inst, cf_key.as_deref()).await
+}
+
+/// What updating this instance to a pack version would do, before any of it is
+/// done.
+///
+/// Downloads the pack to read it, which is the only way to know, and leaves it
+/// in the cache so [`apply_pack_update`] does not fetch it twice.
+#[tauri::command]
+pub async fn plan_pack_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    version_id: String,
+) -> Result<instance::pack_update::UpdatePlan> {
+    let inst = instance::load(&state.paths, &id).await?;
+    let cf_key = state.cf_key().await;
+    let progress = Progress::new(crate::desktop::sink(app), format!("packplan:{id}"));
+    state.register_cancel(progress.id(), progress.cancel_flag());
+
+    let plan = instance::pack_update::plan(
+        &state.http,
+        &state.paths,
+        &inst,
+        &version_id,
+        cf_key.as_deref(),
+        &progress,
+    )
+    .await;
+    state.clear_cancel(progress.id());
+
+    // Failed or finished explicitly, for the reason `export_plan` gives: the
+    // dock drops a job only when it hears one is done.
+    match &plan {
+        Ok(_) => progress.finish().await,
+        Err(e) => progress.fail(&e.to_string()).await,
+    }
+    plan
+}
+
+/// Bring this instance up to a newer version of its pack, in place.
+///
+/// Reports what did not land *beside* the instance rather than instead of it,
+/// the same rule [`import_modpack`] states: once the files are moving, a
+/// failure is a list to act on and the instance still launches on the version
+/// it had.
+#[tauri::command]
+pub async fn apply_pack_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    version_id: String,
+) -> Result<PackImport> {
+    let mut inst = instance::load(&state.paths, &id).await?;
+    let cf_key = state.cf_key().await;
+    let progress = Progress::new(crate::desktop::sink(app), format!("packupdate:{id}"));
+    state.register_cancel(progress.id(), progress.cancel_flag());
+
+    let result = instance::pack_update::apply(
+        &state.http,
+        &state.paths,
+        &mut inst,
+        &version_id,
+        cf_key.as_deref(),
+        &progress,
+    )
+    .await;
+    state.clear_cancel(progress.id());
+    // Saved either way: a partly applied update is what the instance now is,
+    // and a folder its manifest disagrees with is worse than a short pack.
+    inst.save(&state.paths).await?;
+
+    match result {
+        Ok(problems) if problems.is_empty() => {
+            progress.finish().await;
+            Ok(PackImport {
+                instance: view(inst, &state),
+                problems,
+            })
+        }
+        Ok(problems) => {
+            let detail = format!(
+                "{} part{} of this update need a hand: {}",
+                problems.len(),
+                if problems.len() == 1 { "" } else { "s" },
+                problems.join(", ")
+            );
+            progress.fail(&detail).await;
+            Ok(PackImport {
+                instance: view(inst, &state),
+                problems,
+            })
         }
         Err(e) => {
             progress.fail(&e.to_string()).await;
@@ -3754,6 +3870,10 @@ pub async fn cancel_task(state: State<'_, AppState>, id: String) -> Result<bool>
 /// mod this Geode cannot fetch — a CurseForge file with no key for it, or one
 /// whose author turned third-party downloads off — still makes an instance,
 /// and a list of what needs the user is beside it rather than instead of it.
+///
+/// [`apply_pack_update`] answers through this too, for the same reason: once
+/// the files are moving, what did not land is a list beside an instance that
+/// still launches.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PackImport {
@@ -3813,6 +3933,12 @@ pub async fn import_modpack(
     .await;
 
     state.clear_cancel(progress.id());
+    // Which files are the pack's rather than the player's. A `.geodepack`
+    // exported from an instance that came from a provider carries that
+    // provider's project, so a file import can produce an instance an update
+    // is noticed for too.
+    instance::pack_update::record_what_arrived(&state.paths, &mut inst, &archive, &preview.format)
+        .await;
     // Save either way: a partially imported pack is more useful than a
     // directory the launcher refuses to acknowledge.
     inst.save(&state.paths).await?;
