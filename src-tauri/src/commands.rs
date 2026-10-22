@@ -7,9 +7,10 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
+use tauri_plugin_updater::UpdaterExt;
 
 use crate::auth::store::{Account, AccountView, AccountsFile};
-use crate::error::{Error, Result};
+use crate::error::{Context, Error, Result};
 use crate::instance::content::{ContentItem, ContentKind};
 use crate::instance::{self, Instance};
 use crate::meta::Loader;
@@ -42,6 +43,28 @@ pub struct ConfigPatch {
     pub hide_on_launch: Option<bool>,
     pub concurrent_downloads: Option<usize>,
     pub show_snapshots: Option<bool>,
+    /// "Skip this one", and `Some(None)` for "stop skipping it".
+    ///
+    /// `Some(None)` needs the help: serde answers a JSON `null` on the outer
+    /// `Option` without recursing into the inner one, so `null` and a field
+    /// nobody sent both arrive as `None` and "stop skipping it" cannot be said
+    /// at all. [`double_option`] is what tells the two apart.
+    #[serde(default, deserialize_with = "double_option")]
+    pub skipped_update: Option<Option<String>>,
+}
+
+/// Read a field that distinguishes "not sent" from "sent as `null`".
+///
+/// `#[serde(default)]` covers the absent case with `None`, and this covers the
+/// present one: the inner `Option` is deserialised normally — `null` becoming
+/// `None` and a value `Some` — and then wrapped, so only a field that was
+/// actually sent ever reads as `Some`.
+fn double_option<'de, D, T>(deserializer: D) -> std::result::Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Deserialize::deserialize(deserializer).map(Some)
 }
 
 #[tauri::command]
@@ -79,6 +102,9 @@ pub async fn set_config(
     }
     if let Some(v) = patch.show_snapshots {
         config.show_snapshots = v;
+    }
+    if let Some(v) = patch.skipped_update {
+        config.skipped_update = v.filter(|s| !s.trim().is_empty());
     }
 
     config.save(&state.paths).await?;
@@ -170,6 +196,169 @@ pub async fn app_info(state: State<'_, AppState>) -> Result<AppInfo> {
         platform: crate::meta::piston::current_os().to_string(),
         has_client_id: config.client_id.is_some(),
     })
+}
+
+// ---------------------------------------------------------------------------
+// Updating Geode itself
+// ---------------------------------------------------------------------------
+
+/// What Settings shows about updating, and what pressing Install would do.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateStatus {
+    /// The version running right now.
+    pub current: String,
+    /// False in a build compiled without a public key. Nothing was checked and
+    /// nothing can be, which Settings says plainly rather than offering a
+    /// button that could only fail.
+    pub configured: bool,
+    /// The newer version waiting, once it has passed [`crate::update::offer`].
+    /// `None` covers every quiet no as much as it covers "nothing is newer".
+    pub available: Option<String>,
+    /// Its release notes, as the manifest gave them.
+    pub notes: Option<String>,
+    /// The version the person chose to skip, while that skip still means
+    /// anything, so Settings can say so and offer to stop skipping it.
+    pub skipped: Option<String>,
+    /// Why Install cannot be pressed this minute, from
+    /// [`crate::update::restart_would_interrupt`]. The install command asks
+    /// again for itself; this is only so the reason is on screen before
+    /// somebody presses a button that would be turned away.
+    pub blocked: Option<String>,
+}
+
+/// The updater, or `None` in a build with no public key to verify against.
+///
+/// Every route to the plugin goes through here. `updater_builder` reads state
+/// that exists only once the plugin is registered, and `lib.rs` registers it
+/// only when there is a key — so asking a keyless build for an updater would
+/// panic rather than politely fail, and no other code should be in a position
+/// to try.
+fn updater(app: &AppHandle) -> Result<Option<tauri_plugin_updater::Updater>> {
+    if crate::update::public_key().is_none() {
+        return Ok(None);
+    }
+    Ok(Some(
+        app.updater_builder()
+            .timeout(crate::update::MANIFEST_TIMEOUT)
+            .build()
+            .ctx("preparing the updater")?,
+    ))
+}
+
+/// Ask GitHub whether there is a newer Geode, and decide whether to mention it.
+///
+/// Run when Settings opens, when the person presses Check again, and once at
+/// start — never on a timer, and it installs nothing of its own accord. A
+/// manifest that is missing, unreachable or not valid JSON comes back as an
+/// error for the caller to show or swallow; what it never comes back as is an
+/// update.
+#[tauri::command]
+pub async fn check_for_update(app: AppHandle, state: State<'_, AppState>) -> Result<UpdateStatus> {
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let config = state.config().await;
+    let mut status = UpdateStatus {
+        configured: false,
+        available: None,
+        notes: None,
+        skipped: config
+            .skipped_update
+            .clone()
+            // A skip this build has since moved past is spent: telling
+            // somebody running 0.3.0 that they skipped 0.2.0 is noise.
+            .filter(|skipped| crate::update::offer(&current, skipped, None).is_ok()),
+        blocked: crate::update::restart_would_interrupt(&state),
+        current: current.clone(),
+    };
+
+    let Some(updater) = updater(&app)? else {
+        return Ok(status);
+    };
+    status.configured = true;
+
+    let Some(found) = updater.check().await.ctx("checking for a newer Geode")? else {
+        return Ok(status);
+    };
+    if crate::update::offer(&current, &found.version, config.skipped_update.as_deref()).is_ok() {
+        status.notes = found.body.clone();
+        status.available = Some(found.version.clone());
+    }
+    Ok(status)
+}
+
+/// Download the waiting update, verify it, replace this build and restart into
+/// it.
+///
+/// Nothing on disk is touched until the signature checks out: the plugin
+/// verifies the whole download against the public key compiled into this
+/// binary before it hands the bytes over to be installed, so an unsigned or
+/// tampered bundle fails here with the installed Geode untouched.
+#[tauri::command]
+pub async fn install_update(app: AppHandle, state: State<'_, AppState>) -> Result<()> {
+    let Some(updater) = updater(&app)? else {
+        return Err(Error::msg(
+            "This build of Geode cannot update itself — it was compiled without the key that \
+             proves an update came from the same place it did. Download the new version from \
+             the releases page instead.",
+        ));
+    };
+
+    // Asked again here, not only in the UI: the button was drawn from a status
+    // that may be minutes old, and a game can have been started since.
+    if let Some(why) = crate::update::restart_would_interrupt(&state) {
+        return Err(Error::msg(why));
+    }
+
+    let current = env!("CARGO_PKG_VERSION");
+    let Some(mut found) = updater.check().await.ctx("checking for a newer Geode")? else {
+        return Err(Error::msg("Geode is already up to date."));
+    };
+    // The safety half of the decision, made again against what the manifest
+    // says now rather than what it said when the button was drawn. A skip is
+    // deliberately not consulted: somebody who presses Install has changed
+    // their mind about this version, and that is theirs to change.
+    if crate::update::offer(current, &found.version, None).is_err() {
+        return Err(Error::msg(format!(
+            "The releases page is offering Geode {}, which is not an update to {current}, so \
+             nothing was installed.",
+            found.version
+        )));
+    }
+
+    // The `Update` the check hands back carries no timeout whatever the
+    // builder was given, so without this a mirror that accepts the connection
+    // and then stalls holds this command open for the life of the process.
+    found.timeout = Some(crate::update::DOWNLOAD_TIMEOUT);
+
+    // Downloaded and verified, but *not* installed: the two are separate calls
+    // on purpose, because what goes between them is the check below.
+    let bytes = found
+        .download(|_, _| {}, || {})
+        .await
+        .ctx("downloading and verifying the update")?;
+
+    // Asked a second time, and this is the ask that matters. The first was
+    // minutes ago, before a download of a hundred megabytes or more, and the
+    // window stayed live throughout it: `launch_instance` and the server
+    // commands hold no lock against this one, and an `invoke` promise being
+    // pending stops nobody pressing Play. A game started while those bytes
+    // were arriving is exactly the case this feature exists to refuse.
+    //
+    // Nothing is written yet, so turning away here costs only the download.
+    // The gap that is left — between this line and the restart below — is
+    // microseconds of local file work rather than minutes on the network, and
+    // closing it entirely would need a lock across every command that starts
+    // anything.
+    if let Some(why) = crate::update::restart_would_interrupt(&state) {
+        return Err(Error::msg(why));
+    }
+
+    found.install(bytes).ctx("installing the update")?;
+
+    // Windows never reaches this line: its installer closes Geode itself. On
+    // Linux and macOS the new files are in place while this process is still
+    // the old build, so it has to be replaced.
+    app.restart();
 }
 
 // ---------------------------------------------------------------------------
@@ -4673,6 +4862,41 @@ mod tests {
 
     use super::*;
     use crate::instance::jar::tests::fabric_jar;
+
+    /// "Stop skipping this one" has to arrive as `Some(None)`, which a plain
+    /// `Option<Option<String>>` never yields: serde answers a JSON `null` on
+    /// the outer `Option` without recursing, so `null` and a field nobody sent
+    /// are the same value, and the `if let Some(v)` in [`set_config`] runs for
+    /// neither. That made "Stop skipping 0.2.0" a button that saved nothing
+    /// and said nothing, with config.json the only way back out of a skip.
+    #[test]
+    fn clearing_a_skip_is_told_apart_from_not_mentioning_one() {
+        let absent: ConfigPatch = serde_json::from_str("{}").expect("an empty patch");
+        assert_eq!(
+            absent.skipped_update, None,
+            "a patch that does not mention the skip must leave it alone"
+        );
+
+        let cleared: ConfigPatch =
+            serde_json::from_str(r#"{"skippedUpdate": null}"#).expect("a null patch");
+        assert_eq!(
+            cleared.skipped_update,
+            Some(None),
+            "null is Settings asking to stop skipping, not Settings staying quiet"
+        );
+
+        let set: ConfigPatch =
+            serde_json::from_str(r#"{"skippedUpdate": "0.2.0"}"#).expect("a version patch");
+        assert_eq!(set.skipped_update, Some(Some("0.2.0".to_string())));
+
+        // The field is one of several, and widening it must not have changed
+        // how the rest of a patch reads.
+        let both: ConfigPatch =
+            serde_json::from_str(r#"{"memoryMb": 4096, "skippedUpdate": null}"#)
+                .expect("a mixed patch");
+        assert_eq!(both.memory_mb, Some(4096));
+        assert_eq!(both.skipped_update, Some(None));
+    }
 
     /// A command has to be written in two places — here, and the
     /// `generate_handler!` list in `lib.rs` — and nothing made them agree, so a

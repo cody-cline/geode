@@ -101,12 +101,15 @@ the `EventSink` trait in `events.rs`, never a Tauri `AppHandle` directly — tha
 is the one thing standing between this code and running headless in a container.
 The migration is real but unfinished: **`launch/mod.rs` is the holdout** —
 `spawn` still takes an `AppHandle` and emits `geode://log` and `geode://exit`
-itself. Do not copy that pattern; converting it is outstanding work. Seven files
+itself. Do not copy that pattern; converting it is outstanding work. Eight files
 mention `tauri` at all, and the distinction between them matters: `lib.rs`,
 `commands.rs`, `desktop.rs` and `deeplink.rs` are the app shell and belong
 there, while `share/service.rs` and `share/portmap.rs` only reach for
 `tauri::async_runtime` to spawn a task — a lesser coupling than emitting to a
-window, but still one a headless build has to answer for.
+window, but still one a headless build has to answer for. `update.rs` is the
+eighth and imports none of it: it names `tauri.conf.json` in a test and says in
+prose which of its neighbours holds the plugin, which is the shape to copy —
+the decisions on this side of the seam, the app shell on the other.
 
 **Paths come from `paths.rs`,** which is the only place that knows the layout.
 `GEODE_HOME` overrides the root, which is what lets a test run against a scratch

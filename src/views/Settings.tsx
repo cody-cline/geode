@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import clsx from "clsx";
 import {
@@ -13,6 +13,7 @@ import {
   KeyRound,
   Loader2,
   Palette,
+  RefreshCw,
   Share2,
   Trash2,
   Unplug,
@@ -20,9 +21,10 @@ import {
 } from "lucide-react";
 
 import AccountsModal from "../components/AccountsModal";
-import { api } from "../lib/api";
+import { api, errorMessage } from "../lib/api";
 import { hashHue, initials } from "../lib/format";
 import { DEFAULT_SHARE_PORT, driveLine, parsePort } from "../lib/share";
+import { RELEASES_URL, checkFailedLine, putOffLine, updateLine } from "../lib/update";
 import { useStore } from "../lib/store";
 import StatusNote from "../components/StatusNote";
 import type {
@@ -31,6 +33,7 @@ import type {
   JavaInstall,
   KeyCheck,
   ShareSettings,
+  UpdateStatus,
 } from "../lib/types";
 
 import styles from "./Settings.module.css";
@@ -1169,6 +1172,205 @@ function SharingSettings() {
   );
 }
 
+/**
+ * Updating Geode itself.
+ *
+ * In About rather than behind a tab of its own: the version somebody is
+ * running is printed two sections above this, and "what have I got, is there
+ * anything newer" is one question rather than two places to look for it.
+ *
+ * Every answer is on screen and none of them is Geode's to assume. An update
+ * that installed itself while somebody was mid-game would be worse than no
+ * updater at all, so nothing is replaced until Install is pressed — and the
+ * backend turns Install away anyway while a game or a server is running, which
+ * is what `blocked` carries up here to say before the button is pressed rather
+ * than after.
+ */
+function Updates() {
+  const reportError = useStore((s) => s.reportError);
+  const toast = useStore((s) => s.toast);
+  const patchConfig = useStore((s) => s.patchConfig);
+
+  const [status, setStatus] = useState<UpdateStatus | null>(null);
+  const [checking, setChecking] = useState(true);
+  const [installing, setInstalling] = useState(false);
+  /** "Not now": the offer is put away for this sitting, not refused. */
+  const [putOff, setPutOff] = useState(false);
+  /**
+   * Why the last check came back with nothing at all, kept because a failure
+   * leaves no status and every control here is drawn from one. Without it the
+   * panel claimed to still be looking, for ever, with no button to press.
+   */
+  const [failure, setFailure] = useState<string | null>(null);
+
+  // Quiet when the screen opens, because nobody asked and a network that is
+  // down is not worth a toast; loud when Check again is pressed, because that
+  // is somebody asking and silence would read as "nothing newer". Quiet is
+  // about the toast, though, and not about the panel: the failure is written
+  // down either way, because the panel is where somebody looks next.
+  const check = useCallback(
+    async (asked: boolean) => {
+      setChecking(true);
+      try {
+        setStatus(await api.checkForUpdate());
+        setFailure(null);
+        setPutOff(false);
+      } catch (e) {
+        setFailure(errorMessage(e));
+        if (asked) reportError("Could not check for updates", e);
+      } finally {
+        setChecking(false);
+      }
+    },
+    [reportError],
+  );
+
+  useEffect(() => {
+    void check(false);
+  }, [check]);
+
+  async function install() {
+    setInstalling(true);
+    try {
+      await api.installUpdate();
+      // Reached only if nothing restarted: on Windows the installer closes
+      // Geode itself, and everywhere else this call ends in a restart. So
+      // arriving here means the install did not happen and what is on screen
+      // is now stale.
+      await check(false);
+    } catch (e) {
+      reportError("Could not install the update", e);
+    } finally {
+      setInstalling(false);
+    }
+  }
+
+  async function setSkipped(version: string | null) {
+    try {
+      await patchConfig({ skippedUpdate: version });
+      await check(false);
+      if (version) {
+        toast({
+          kind: "info",
+          title: `Skipping Geode ${version}`,
+          body: "You will not be asked about this version again. The next release is offered as usual.",
+        });
+      }
+    } catch (e) {
+      reportError("Could not save that", e);
+    }
+  }
+
+  return (
+    <section className={styles.section}>
+      <h2 className={styles.sectionTitle}>Updates</h2>
+
+      <StatusNote
+        line={
+          status
+            ? status.available && putOff
+              ? putOffLine(status.available)
+              : updateLine(status)
+            : failure
+              ? checkFailedLine(failure)
+              : {
+                  tone: "info",
+                  title: "Looking for a newer Geode",
+                  detail: "Reading the release manifest from GitHub.",
+                }
+        }
+        busy={checking || installing}
+      />
+
+      {status?.available && status.notes && (
+        <details className={styles.details}>
+          <summary>What changed in {status.available}</summary>
+          <p className={styles.releaseNotes}>{status.notes}</p>
+        </details>
+      )}
+
+      {status?.available && status.blocked && <p className="hint">{status.blocked}</p>}
+
+      <div className={styles.inlineRow}>
+        {status?.available && !putOff && (
+          <>
+            <button
+              className="btn btn-primary"
+              disabled={installing || Boolean(status.blocked)}
+              onClick={() => void install()}
+            >
+              {installing ? <Loader2 size={13} className="spin" /> : <Download size={13} />}
+              Install {status.available}
+            </button>
+            <button className="btn" disabled={installing} onClick={() => setPutOff(true)}>
+              Not now
+            </button>
+            <button
+              className="btn"
+              disabled={installing}
+              onClick={() => void setSkipped(status.available)}
+            >
+              Skip this one
+            </button>
+          </>
+        )}
+
+        {/*
+          Putting an offer away is a local decision, so taking it back is one
+          too: without this the only route back to Install was Check again,
+          which runs a fresh network check to undo a button press.
+        */}
+        {status?.available && putOff && (
+          <button className="btn" onClick={() => setPutOff(false)}>
+            Show it again
+          </button>
+        )}
+
+        {status?.skipped && !status.available && (
+          <button className="btn" onClick={() => void setSkipped(null)}>
+            Stop skipping {status.skipped}
+          </button>
+        )}
+
+        {/*
+          Both of these also appear when the check failed, which is when they
+          are needed most: a failure leaves no status, so gating them on one
+          left the row empty on the screen that was still saying "Looking for
+          a newer Geode".
+        */}
+        {(status?.configured || (!status && failure)) && (
+          <button
+            className="btn"
+            disabled={checking || installing}
+            onClick={() => void check(true)}
+          >
+            {checking ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />}
+            Check again
+          </button>
+        )}
+
+        {((status && !status.configured) || (!status && failure)) && (
+          <button className="btn" onClick={() => void openUrl(RELEASES_URL)}>
+            <ExternalLink size={13} />
+            Open the releases page
+          </button>
+        )}
+      </div>
+
+      <p className="hint">
+        Geode never updates itself behind your back: it looks once each time it
+        starts, when this screen opens, and when you ask &mdash; and replaces
+        nothing until you press Install. Leaving an offer alone is &ldquo;not
+        now&rdquo; &mdash; it comes back next time Geode starts. Installing
+        replaces this copy and restarts, so it waits until no game and no
+        server is running. On Linux it replaces the AppImage you are running;
+        if you installed the .deb or .rpm, take the new package from the
+        releases page instead.
+      </p>
+    </section>
+  );
+}
+
 function About() {
   const reportError = useStore((s) => s.reportError);
   const [info, setInfo] = useState<AppInfo | null>(null);
@@ -1206,6 +1408,8 @@ function About() {
           Mojang, Microsoft, Modrinth or CurseForge.
         </p>
       </section>
+
+      <Updates />
 
       <section className={styles.section}>
         <h2 className={styles.sectionTitle}>Data</h2>

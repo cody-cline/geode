@@ -287,6 +287,24 @@ export const useStore = create<State>((set, get) => ({
       get().loadShareStatus().catch(() => {}),
     ]);
 
+    // Once, at start, and quietly. A check that cannot reach GitHub says
+    // nothing — nobody asked for it, and a launcher that complains about its
+    // own update server on every cold start is a launcher people learn to
+    // ignore. A version that is waiting is mentioned and never installed:
+    // Settings → About holds Install, Not now and Skip this one, and is
+    // where somebody looking for their version number already is.
+    api
+      .checkForUpdate()
+      .then((status) => {
+        if (!status.available) return;
+        get().toast({
+          kind: "info",
+          title: `Geode ${status.available} is available`,
+          body: `You have ${status.current}. Settings → About says what installing it would do.`,
+        });
+      })
+      .catch(() => {});
+
     await listen<ProgressEvent>("geode://progress", ({ payload }) => {
       set((s) => ({ progress: { ...s.progress, [payload.id]: payload } }));
       if (payload.done) {

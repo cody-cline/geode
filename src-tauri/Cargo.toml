@@ -20,6 +20,14 @@ tauri-plugin-opener = "2"
 # `deep-link` feature is what hands a link to the copy already running.
 tauri-plugin-deep-link = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+# Replacing Geode with a newer build off GitHub releases. Registered only in a
+# build that was compiled with a public key to verify against — see
+# `update.rs`. It asks `rustls` for `ring` only and installs that provider
+# itself, so it does not reopen the choice the comment below warns about;
+# `rustls` stays on one version. It does bring its own reqwest 0.13 alongside
+# the 0.12 here, which is a second client over the same hyper rather than a
+# second HTTP stack.
+tauri-plugin-updater = "2"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -48,6 +56,9 @@ tokio-util = { version = "0.7", features = ["io"] }
 igd-next = { version = "0.17", default-features = false, features = ["aio_tokio"] }
 
 thiserror = "2"
+# Comparing the version a release manifest announces against this build's, so
+# "newer" is a decision and not a string compare.
+semver = "1"
 sha1 = "0.10"
 sha2 = "0.10"
 hex = "0.4"

@@ -23,6 +23,7 @@ pub mod server;
 pub mod settings;
 pub mod share;
 pub mod state;
+pub mod update;
 
 use tauri::Manager;
 
@@ -32,7 +33,7 @@ use crate::state::AppState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         // First, before any other plugin starts anything: a second Geode, run
         // by the OS to open a `geode://` link, hands its arguments to this one
         // and exits instead of becoming a second launcher. The `deep-link`
@@ -43,7 +44,23 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_dialog::init());
+
+    // Registered only in a build that was compiled with a public key to verify
+    // an update against. Without one there is no plugin at all, so nothing can
+    // reach a manifest and nothing can be downloaded — which is the whole point
+    // of the feature: an update Geode cannot prove came from the same place
+    // this build did is worse than no updater. The key overrides the
+    // deliberately empty `pubkey` in tauri.conf.json; see `update.rs` for why
+    // it is read from the environment rather than committed.
+    //
+    // It goes here rather than at the top of the chain because single-instance
+    // has to be first, for the reason given above.
+    if let Some(pubkey) = update::public_key() {
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().pubkey(pubkey).build());
+    }
+
+    builder
         .setup(|app| {
             let paths = Paths::new();
 
@@ -121,6 +138,8 @@ pub fn run() {
             commands::set_curseforge_key,
             commands::test_curseforge_key,
             commands::app_info,
+            commands::check_for_update,
+            commands::install_update,
             commands::system_memory_mb,
             commands::list_game_versions,
             commands::list_loader_versions,

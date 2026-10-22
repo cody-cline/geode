@@ -52,6 +52,11 @@ two of which nobody has launched, go out under a version number.
 | Windows | yes | yes | yes | **no** | `Software\Classes\geode`, written by the NSIS installer |
 | macOS | yes | yes | yes | **no** | `CFBundleURLTypes` in the .app's `Info.plist` |
 
+Updating in place is a sixth column nobody can fill in yet: it is wired on all
+three (see [the updater](#the-updater-and-the-keypair-only-you-can-make)) and
+has been performed on none, including Linux, because there is no signed release
+to update from.
+
 "Built by CI" is not "works on Windows". Nothing in this repository has
 opened an `Info.plist`, read a registry key, launched the app, signed into
 Microsoft, started a JVM or clicked a `geode://` link on either platform. The
@@ -75,9 +80,11 @@ specific things most likely to be wrong first:
 ## Secrets the owner has to create
 
 Every one of these is optional and none is in the repository. Absent, the
-build still succeeds: the Windows installer is unsigned, and the macOS app is
-signed ad-hoc and not notarised. Set them under Settings → Secrets and
-variables → Actions.
+build still succeeds: the Windows installer is unsigned, the macOS app is
+signed ad-hoc and not notarised, and the release carries no update manifest.
+Set them under Settings → Secrets and variables → Actions. The three the
+updater needs are below, under their own heading, because they are the ones
+with a consequence you cannot undo.
 
 | Secret | What it is | How to make it |
 |---|---|---|
@@ -122,14 +129,201 @@ and `timestampUrl` in `src-tauri/tauri.windows.conf.json`. Tauri's own
 the exact commands, including the Azure Trusted Signing route, which needs no
 certificate on the runner at all.
 
-### The updater is not wired, so it needs no key
+### The updater, and the keypair only you can make
 
-There is no `tauri-plugin-updater` in `Cargo.toml`, no `plugins.updater`
-block, and no `bundle.createUpdaterArtifacts`. Nothing signs an update,
-so **do not create `TAURI_SIGNING_PRIVATE_KEY` yet** — a secret that nothing
-reads is a secret nobody audits. When the updater lands it needs
-`tauri signer generate`, a private key held only as that secret with
-`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, and its public half in the config.
+Geode can replace itself with a newer build from these releases, and it
+installs one only if it was signed with your key. Nothing in this repository
+holds either half of that key, and nothing here generated one — a keypair in
+a repository is a keypair anybody can sign with, and a convincing placeholder
+would be worse than none, because it would look real.
+
+Until you make one the feature is off end to end, and says so rather than
+pretending. There is no `createUpdaterArtifacts` in the committed config,
+`plugins > updater > pubkey` is deliberately the empty string,
+`GEODE_UPDATER_PUBKEY` is unset so `lib.rs` registers no updater plugin at
+all, and Settings → About reads *"This build cannot update itself"* beside a
+link to this page. A release cut today carries no manifest, and no Geode goes
+looking for one.
+
+**Switching it on, once.**
+
+1. Generate the keypair on your own machine. It writes two files and asks for
+   a password; give it one.
+
+   ```bash
+   npm run tauri -- signer generate -w ~/.tauri/geode.key
+   ```
+
+   `~/.tauri/geode.key` is the private half, `~/.tauri/geode.key.pub` the
+   public half. Back the private half up somewhere you will still have it in
+   two years. **Lose it and nothing you have already shipped can ever be
+   updated again**: every installed Geode trusts exactly the key it was
+   compiled with, there is no revocation and no second chance, and the only
+   way out is a new key and everybody reinstalling by hand.
+
+2. Add three repository secrets, under Settings → Secrets and variables →
+   Actions:
+
+   | Secret | What goes in it |
+   |---|---|
+   | `TAURI_SIGNING_PRIVATE_KEY` | the whole contents of `~/.tauri/geode.key` |
+   | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | the password you just chose |
+   | `TAURI_SIGNING_PUBLIC_KEY` | the whole contents of `~/.tauri/geode.key.pub` |
+
+   The public half is not a secret — it ships inside every binary — but it
+   lives beside the other two so there is one place to look and one place to
+   rotate.
+
+3. Tag a release as usual. That is all; nothing else changes.
+
+**What the `bundle` job then does.** Before building, the *Switch on signed
+updater artifacts* step checks for both halves. With neither, it logs that
+this release carries no manifest and changes nothing. With exactly one, it
+fails the job on purpose: a signed bundle nobody can verify, and a key with
+nothing signed for it, are both quietly broken, and quietly broken is the one
+outcome worth stopping for. With both, it patches the checked-out
+`src-tauri/tauri.conf.json` — `bundle.createUpdaterArtifacts` to `true` and
+`plugins.updater.pubkey` to the public half — and the build step gets the
+public half as `GEODE_UPDATER_PUBKEY` for the Rust compile and the private
+half as `TAURI_SIGNING_PRIVATE_KEY` for the bundler.
+
+The config is patched on the runner rather than committed because the bundler
+reads the public key from `plugins > updater > pubkey` to cross-check what it
+just signed, and a key committed there is a key you cannot rotate without a
+commit. The runner's checkout is thrown away, so this costs nothing. The
+binary gets its key from `option_env!` instead, the same route as the
+CurseForge key and the Microsoft client id, and for the same reason.
+
+`tauri-action` then writes `latest.json` beside the installers: one entry per
+platform, each naming a bundle URL and its signature. That file is what an
+installed Geode reads, from the endpoint in `tauri.conf.json`:
+
+```
+https://github.com/littlesquirt1/geode/releases/latest/download/latest.json
+```
+
+`latest/download` resolves to the most recent **published**, non-prerelease
+release — so a draft nobody has published is invisible to every installed
+Geode, which is the behaviour you want from a draft.
+
+**A local build still has no updater** unless you give it one. Put the public
+half in `.env` as `GEODE_UPDATER_PUBKEY` and a build from your desk will check
+these releases like any other; leave it out and it will not. Either way a
+local build can only ever install what CI signed, which is the point. Worth
+knowing before you set it: in `tauri dev` the thing an install would replace
+is the debug binary under `target/`, not an installed Geode, so set it on a
+real bundle rather than on the dev run.
+
+**What refuses, and refuses quietly.** Each of these does nothing rather than
+offering something unverified, because this is the one feature here that can
+do real harm:
+
+- no public key compiled in — no plugin is registered, so there is nothing to
+  ask and nothing to download;
+- a manifest endpoint that is not `https` — the plugin refuses it in a release
+  build, and a unit test refuses it in the repository
+  (`the_committed_config_names_an_https_endpoint_and_no_key`);
+- a version that is not newer, so a stale or rolled-back manifest cannot walk
+  somebody backwards;
+- a version string that will not parse, which is never read as "newer".
+
+None of the four is reported as a reason. They are deliberately
+indistinguishable from "nothing newer", because the only honest thing to do
+with a manifest that does not make sense is to carry on with the build already
+installed.
+
+**What refuses loudly, because it cannot do otherwise.** A signature is not
+one of the four above, however much it belongs with them. There is no
+signature to check at check time: `check_for_update` decides from the manifest
+alone, and the signature covers the artefact, which does not exist on this
+computer yet. So a tampered bundle behind a valid manifest is **offered**,
+Settings says it is ready to install, pressing Install downloads all of it,
+and only then does the check fail — with an error toast, and the installed
+Geode untouched. Nothing unsafe is installed, which is the part that matters;
+what it costs is a full transfer and a visible failure, and planning around
+"no offer, no download, no message" would be planning around something else.
+
+**What binds the version to the artefact.** `latest.json` is fetched over TLS
+but nobody signs it, so its `version` field on its own proves nothing about
+which release the `url` and `signature` beside it point at. Without more, a
+compromised release host — or a stolen `GITHUB_TOKEN`, which needs no key at
+all — could announce 9.9.9 over the url and signature of a genuine old
+release, and every installed Geode would verify it happily and downgrade
+itself. `requireSignedVersion` in `plugins.updater` is what closes that: the
+Tauri CLI records the app version in each signature's trusted comment, which
+minisign's own signature covers, and the plugin compares the two and refuses a
+mismatch. It needs a signer that records one — **CLI 2.12.0 or newer**, which
+is why `package-lock.json` pins it there and
+`the_signed_version_check_is_on_and_the_pinned_signer_records_one` fails if
+either half moves without the other. Turning the flag on against an older
+signer makes every update fail with `MissingSignedVersion` instead, so re-sign
+and re-publish anything people can still update from before changing it.
+
+**What is bounded rather than refused.** The manifest fetch gets 30 seconds
+and the download half an hour (`MANIFEST_TIMEOUT` and `DOWNLOAD_TIMEOUT` in
+`src-tauri/src/update.rs`), because `reqwest` applies no request timeout of
+its own and the plugin hands back an `Update` with none either — so a host
+that accepts the connection and then says nothing would otherwise leave
+Settings on its spinner for the life of the process. The download clock is
+also the only ceiling on how large an artefact a manifest can name: the plugin
+buffers the whole download into memory and its progress callback cannot refuse
+a chunk, so there is no byte count to refuse at.
+
+**It asks, and it waits.** Geode checks once at start and whenever somebody
+opens Settings → About or presses Check again — never on a timer, and it
+installs nothing on its own. The offer carries Install, Not now and Skip this
+one, and a skip is for that single version: the next release is offered as
+usual. Installing ends in a restart, and Geode runs Minecraft and servers as
+child processes of itself, so an install is **refused while any game or server
+is running** — a restart either kills a game outright or leaves it playing
+with no launcher attached to its log, its console or its Stop button. A launch
+that has begun but not yet spawned a JVM counts, and so does an install in
+flight: both spend minutes rewriting an instance's files with no process to
+show for it, and a restart through either leaves that instance half written.
+See `restart_would_interrupt` in `src-tauri/src/update.rs`.
+
+That question is asked **twice**, which matters more than it sounds. The first
+ask is before the download, which is where the button's own reason comes from;
+the second is after the download and before anything is written to disk.
+Between them sit minutes of network transfer during which the window stays
+fully live — `launch_instance` holds no lock against `install_update`, and a
+pending `invoke` stops nobody opening Instances and pressing Play. What is
+left is the gap between that second ask and the restart, which is local file
+work rather than a transfer.
+
+**What is wired and what is proven are not the same thing.** Nothing here has
+updated a Geode. There is no signed release to update from, no keypair on this
+machine, and no Windows or macOS to try one on. What the offline tests cover
+is most of the decisions — the version comparison, the downgrade and
+unparseable refusals, a skip and its expiry and the patch that clears one, the
+refusal under a running game and under a launch or install still in flight,
+the committed endpoint, the absence of a committed key, the signed-version
+flag against the signer the lockfile pins, and the states of the copy Settings
+shows. What they cannot reach is the part that only a real release exercises:
+
+- the signature check itself, against a real key and a real bundle, and with
+  it `requireSignedVersion`: that the CLI really does write `version:` into
+  the trusted comment of a bundle it signs, and that the plugin reads it back
+  and accepts a matching release. The pin and the flag are tested; the
+  signature they describe has never been made;
+- the two timeouts actually firing. Both are assignments into plugin fields,
+  and proving the behaviour needs a hung endpoint and a live window;
+- the second running-game check, for the same reason: it sits between a
+  download and an install that no offline test can reach;
+- `latest.json` having the shape the plugin expects, and
+  `releases/latest/download` resolving to it;
+- an AppImage replacing itself on disk and the restart coming back up on the
+  new build;
+- Windows, where the NSIS installer closes Geode and relaunches it, and macOS,
+  where the `.app` is swapped — neither of which anybody has run;
+- a Geode installed from the `.deb` or `.rpm`. The manifest's Linux entry is
+  the AppImage, so an update there is expected to fail at the install step
+  rather than do anything dangerous, and Settings says to take the new package
+  by hand. Expected, not observed.
+
+The first real release is where all of that gets tested. Cut it as a draft,
+publish it, and update a previous build to it before telling anybody the
+updater works.
 
 ## No API key is needed to build
 
@@ -162,7 +356,17 @@ floor Geode supports, so say in the release notes that it moved.
    draft release.
 4. Download the Linux package and run it. Say, in the release notes, which
    bundles were launched and which were not.
-5. Publish the draft.
+5. Publish the draft. Until it is published, `releases/latest/download` does
+   not resolve to it, so no installed Geode can see the update — which also
+   means publishing is the moment the manifest goes live to everybody.
+6. If the updater is switched on, update a copy of the *previous* release to
+   this one before saying anywhere that the updater works. It has never been
+   done.
+
+Step 1 matters more now than it used to: the version in `tauri.conf.json` is
+what goes into `latest.json`, and an installed Geode compares that against its
+own `CARGO_PKG_VERSION`. Those two disagreeing is how a release ends up either
+invisible to every existing install or offered to the build it already is.
 
 Nothing in this repository parses the workflow file — GitHub is the first
 thing that reads it, and a syntax error there surfaces as a run that never

@@ -732,6 +732,8 @@ export interface Config {
   hideOnLaunch: boolean;
   concurrentDownloads: number;
   showSnapshots: boolean;
+  /** The one Geode version "Skip this one" was pressed for, if any. */
+  skippedUpdate: string | null;
   hasCurseforgeKey: boolean;
   /** True when the key came from GEODE_CURSEFORGE_KEY at build time. */
   curseforgeKeyFromBuild: boolean;
@@ -1333,4 +1335,20 @@ export interface AppInfo {
   dataDir: string;
   platform: string;
   hasClientId: boolean;
+}
+
+/** What Settings says about updating Geode, from one check against the releases page. */
+export interface UpdateStatus {
+  /** The version running right now. */
+  current: string;
+  /** False in a build compiled without the public key that verifies an update. Nothing was checked. */
+  configured: boolean;
+  /** The newer version waiting. Null covers "nothing newer" and every reason Geode declined to offer one. */
+  available: string | null;
+  /** Its release notes, as the manifest gave them. */
+  notes: string | null;
+  /** The version being skipped, while that skip still means anything. */
+  skipped: string | null;
+  /** Why Install cannot be pressed this minute — a game or a server is running. */
+  blocked: string | null;
 }

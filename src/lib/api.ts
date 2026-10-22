@@ -67,6 +67,7 @@ import type {
   ShareStatus,
   StagedPack,
   UpdateCandidate,
+  UpdateStatus,
   WantedSetting,
 } from "./types";
 
@@ -87,6 +88,13 @@ export const api = {
   testCurseforgeKey: (key?: string) =>
     invoke<KeyCheck>("test_curseforge_key", { key: key ?? null }),
   appInfo: () => invoke<AppInfo>("app_info"),
+
+  // Updating Geode itself. `checkForUpdate` reaches the network and says
+  // nothing more than what is waiting; `installUpdate` is the only call that
+  // replaces anything, and it refuses while a game or a server is running.
+  checkForUpdate: () => invoke<UpdateStatus>("check_for_update"),
+  installUpdate: () => invoke<void>("install_update"),
+
   systemMemoryMb: () => invoke<number>("system_memory_mb"),
 
   // Versions

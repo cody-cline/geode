@@ -284,6 +284,17 @@
   color: var(--text);
 }
 
+/* Release notes as the manifest gave them: somebody else's text, so its own
+   line breaks are kept and nothing in it is rendered as markup. */
+.releaseNotes {
+  margin: 0;
+  padding: 2px 0 0;
+  white-space: pre-wrap;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+
 .javaList {
   list-style: none;
   padding: 8px 0 0;

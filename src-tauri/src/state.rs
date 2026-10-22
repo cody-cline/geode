@@ -180,6 +180,25 @@ impl AppState {
             .map(|launching| launching.contains(id))
             .unwrap_or(false)
     }
+
+    /// How many launches are preparing, with no process to show for it yet.
+    ///
+    /// For anything that has to know whether work is in flight without caring
+    /// whose: a restart during one of these leaves an instance half-rewritten,
+    /// and [`crate::update::restart_would_interrupt`] is the caller.
+    pub fn launching_count(&self) -> usize {
+        self.launching
+            .lock()
+            .map(|launching| launching.len())
+            .unwrap_or(0)
+    }
+
+    /// How many installs are in flight, counted by the cancellation flags they
+    /// registered. The same question as [`Self::launching_count`], for the
+    /// other kind of half-written instance a restart can leave behind.
+    pub fn installs_in_flight(&self) -> usize {
+        self.cancels.lock().map(|map| map.len()).unwrap_or(0)
+    }
 }
 
 /// One instance's launch, held from [`AppState::claim_launch`] until dropped.

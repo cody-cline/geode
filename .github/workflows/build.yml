@@ -181,6 +181,48 @@ jobs:
       # CLI this repo pins instead of a global one.
       - run: npm ci
 
+      # Whether this release can be updated *to*. Both halves of the keypair
+      # have to be present: the private half signs each bundle, and the public
+      # half goes two places — into `plugins > updater > pubkey`, which is what
+      # the bundler cross-checks its signature against, and into the Rust
+      # compile below as `GEODE_UPDATER_PUBKEY`, which is the only key the
+      # installed Geode will verify an update with.
+      #
+      # The config is patched here rather than committed because a public key
+      # in the repository is one the owner cannot rotate without a commit, and
+      # a placeholder would be worse — it would look real. The checked-out
+      # tree on a runner is thrown away, so patching it costs nothing.
+      #
+      # Neither secret set: no updater artifacts, no manifest, and a release
+      # people install by hand, exactly as before this existed. Exactly one
+      # set is a mistake worth failing on — a signed bundle nobody can verify,
+      # or a key with nothing signed for it, are both silently broken.
+      - name: Switch on signed updater artifacts
+        shell: bash
+        env:
+          UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_SIGNING_PUBLIC_KEY }}
+          UPDATER_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$UPDATER_PUBLIC_KEY" ] && [ -z "$UPDATER_PRIVATE_KEY" ]; then
+            echo "No updater keypair; this release carries no update manifest."
+            exit 0
+          fi
+          if [ -z "$UPDATER_PUBLIC_KEY" ] || [ -z "$UPDATER_PRIVATE_KEY" ]; then
+            echo "Only half the updater keypair is set. Set both" \
+                 "TAURI_SIGNING_PUBLIC_KEY and TAURI_SIGNING_PRIVATE_KEY," \
+                 "or neither. See docs/releasing.md." >&2
+            exit 1
+          fi
+          node -e '
+            const fs = require("fs");
+            const path = "src-tauri/tauri.conf.json";
+            const config = JSON.parse(fs.readFileSync(path, "utf8"));
+            config.bundle.createUpdaterArtifacts = true;
+            config.plugins.updater.pubkey = process.env.UPDATER_PUBLIC_KEY.trim();
+            fs.writeFileSync(path, JSON.stringify(config, null, 2) + "\n");
+          '
+          echo "Updater artifacts on; bundles will be signed and latest.json published."
+
       - name: Import the Apple signing certificate
         # Skipped entirely until the owner adds the secret. Without it the app
         # is signed ad-hoc below, which is enough for an Apple Silicon Mac to
@@ -224,6 +266,14 @@ jobs:
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The public half, compiled into the binary by `option_env!`. Unset,
+          # the built Geode registers no updater at all and says so in
+          # Settings; see `src-tauri/src/update.rs`.
+          GEODE_UPDATER_PUBKEY: ${{ secrets.TAURI_SIGNING_PUBLIC_KEY }}
+          # The private half, which never leaves this runner. Absent, the step
+          # above left `createUpdaterArtifacts` off and nothing asks for it.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           # Every signing secret is the owner's, and every one is optional.
           # `-` is an ad-hoc signature, which costs nothing and is what stops
           # an Apple Silicon Mac calling a downloaded app damaged. The real
@@ -237,4 +287,12 @@ jobs:
           # A draft, because the owner signs off on a release — and on
           # whichever of these three bundles nobody has been able to launch.
           releaseDraft: true
+          # `latest.json` — the manifest an installed Geode reads, listing each
+          # platform's bundle and its signature. The action's default, named
+          # here because it is the point of the two secrets above: it is built
+          # from the `.sig` files the bundler produced, so a release built
+          # without the keypair has none to list and publishes no manifest at
+          # all. On Linux it names the AppImage, which the action prefers over
+          # the deb and rpm.
+          uploadUpdaterJson: true
           args: ${{ matrix.args }}

@@ -75,6 +75,13 @@ pub struct Config {
     pub concurrent_downloads: usize,
     /// Show snapshots and other non-release versions in the version picker.
     pub show_snapshots: bool,
+    /// The one Geode version the person pressed "Skip this one" for.
+    ///
+    /// Kept here rather than in memory because the point of a skip is that it
+    /// outlives the sitting it was made in; and kept as the single version
+    /// rather than a list because a skip is not a way to turn updates off —
+    /// the next release replaces it. See [`crate::update::offer`].
+    pub skipped_update: Option<String>,
     /// How players reach this machine to fetch a shared server's pack.
     pub share: ShareConfig,
 }
@@ -136,6 +143,7 @@ impl Default for Config {
             hide_on_launch: false,
             concurrent_downloads: default_concurrency(),
             show_snapshots: false,
+            skipped_update: None,
             share: ShareConfig::default(),
         }
     }
