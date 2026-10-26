@@ -234,4 +234,22 @@ mod tests {
              nothing in CI builds `geoded` or `daemon/` at all"
         );
     }
+
+    /// Adding this binary gave the crate two of them, and `cargo run` refuses
+    /// to guess between them. The Tauri CLI runs plain `cargo run`, so without
+    /// `default-run` the one command a person develops with —
+    /// `npm run tauri dev` — stops before it compiles anything, saying only
+    /// "could not determine which binary to run". It did, for one commit.
+    #[test]
+    fn the_host_binary_did_not_take_cargo_run_away_from_the_app() {
+        let manifest = include_str!("../../Cargo.toml");
+        if manifest.matches("[[bin]]").count() < 2 {
+            return;
+        }
+        assert!(
+            manifest.contains("default-run = \"geode\""),
+            "Cargo.toml declares more than one binary and no `default-run`, so \
+             `cargo run` — and with it `npm run tauri dev` — cannot start the app"
+        );
+    }
 }
