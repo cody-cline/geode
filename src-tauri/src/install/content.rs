@@ -1204,17 +1204,20 @@ pub struct LinkReport {
 /// Give provenance to files that have none.
 ///
 /// Works from the file bytes: SHA-1 each untracked file and ask Modrinth which
-/// version it is. That covers hand-dropped jars and anything a pack installed
-/// by URL alone, and it is exact — a hash match is the same file, not a guess
-/// from the filename.
+/// version it is, then put whatever is still nameless to CurseForge as a
+/// murmur2 fingerprint. That covers hand-dropped jars and anything a pack
+/// installed by URL alone, and it is exact — a hash match is the same file,
+/// not a guess from the filename.
 ///
-/// Modrinth only. CurseForge's equivalent takes a bespoke murmur2 fingerprint
-/// rather than a standard hash, so files that exist only there stay untracked.
+/// Both platforms, because a jar that exists only on CurseForge is the common
+/// case for a Prism instance: asking Modrinth alone left four of fifty-seven
+/// mods of a real one unnamed, none of which Modrinth has.
 pub async fn link_untracked(
     client: &reqwest::Client,
     paths: &Paths,
     instance: &mut Instance,
     jars: &crate::instance::jar::MetaCache,
+    cf_key: Option<&str>,
     progress: &Progress,
 ) -> Result<LinkReport> {
     use crate::instance::content::{self as content, ContentKind};
@@ -1229,7 +1232,15 @@ pub async fn link_untracked(
     .map(|kind| (kind, content::content_dir(paths, &instance.id, kind)))
     .collect();
 
-    link_untracked_in(client, &folders, &mut instance.content, jars, progress).await
+    link_untracked_in(
+        client,
+        &folders,
+        &mut instance.content,
+        jars,
+        cf_key,
+        progress,
+    )
+    .await
 }
 
 /// The same, over whatever folders the caller names.
@@ -1242,18 +1253,22 @@ pub async fn link_untracked_in(
     folders: &[(crate::instance::content::ContentKind, std::path::PathBuf)],
     records: &mut Vec<ContentRecord>,
     jars: &crate::instance::jar::MetaCache,
+    cf_key: Option<&str>,
     progress: &Progress,
 ) -> Result<LinkReport> {
     use crate::instance::content::{self as content, ContentKind};
 
     // Collect the untracked files first so the hash lookup is one request.
-    let mut pending: Vec<(ContentKind, String, String)> = Vec::new();
+    // The path travels with each one: a file Modrinth cannot name is hashed a
+    // second time, CurseForge's way, and there is no second listing to find it
+    // in by then.
+    let mut pending: Vec<(ContentKind, String, std::path::PathBuf, String)> = Vec::new();
     for (kind, dir) in folders {
         let items = content::list_in(dir, records, *kind, jars).await?;
         for item in items.into_iter().filter(|i| i.from_disk) {
             let path = dir.join(&item.file_name);
             if let Ok(sha1) = crate::net::sha1_file(&path).await {
-                pending.push((*kind, item.file_name, sha1.to_lowercase()));
+                pending.push((*kind, item.file_name, path, sha1.to_lowercase()));
             }
         }
     }
@@ -1270,7 +1285,7 @@ pub async fn link_untracked_in(
         .stage("Identifying files", pending.len() as u64)
         .await;
 
-    let hashes: Vec<String> = pending.iter().map(|(_, _, h)| h.clone()).collect();
+    let hashes: Vec<String> = pending.iter().map(|(_, _, _, h)| h.clone()).collect();
     // Only the hits: here a file nobody answered about and a file Modrinth
     // does not have come to the same thing, which is that it stays untracked
     // until the next time this runs.
@@ -1294,49 +1309,45 @@ pub async fn link_untracked_in(
         .unwrap_or_default();
 
     let mut identified = 0;
-    for (kind, file_name, sha1) in pending {
+    // What Modrinth could not name, in the order it was asked about, so the
+    // second pass can hash those files CurseForge's way.
+    let mut nameless: Vec<(ContentKind, String, std::path::PathBuf)> = Vec::new();
+    for (kind, file_name, path, sha1) in pending {
         progress.advance(1, &file_name).await;
         let Some((version, _)) = found.get(&sha1) else {
+            nameless.push((kind, file_name, path));
             continue;
         };
         let project = projects.iter().find(|p| p.id == version.project_id);
-
-        // Records key off the plain name, so toggling does not orphan them.
-        let base = content::strip_disabled(&file_name).0.to_string();
-
-        // What a person set is not provenance, and a hash lookup has no answer
-        // to it. Dropping the side here would re-side, on the listing's word,
-        // the very mod whose listing the admin corrected; dropping the hold
-        // would put a jar they are keeping here into the next pack.
-        let held = records
-            .iter()
-            .find(|r| r.file_name == base && r.kind == kind);
-        let chosen_side = held.and_then(|r| r.chosen_side);
-        let keep_on_server = held.is_some_and(|r| r.keep_on_server);
-
-        records.retain(|r| !(r.file_name == base && r.kind == kind));
-        records.push(ContentRecord {
-            file_name: base,
-            kind,
-            provider: Provider::Modrinth.as_str().to_string(),
-            project_id: version.project_id.clone(),
-            version_id: version.id.clone(),
-            name: project
-                .map(|p| p.name.clone())
-                .unwrap_or_else(|| version.name.clone()),
-            version_number: version.version_number.clone(),
-            slug: project.map(|p| p.slug.clone()),
-            icon_url: project.and_then(|p| p.icon_url.clone()),
-            dependency: false,
-            origin: Default::default(),
-            // A hash lookup gives provenance, not a dependency list.
-            requires: None,
-            side: project.and_then(|p| p.listed_side()),
-            chosen_side,
-            keep_on_server,
-            server_off: false,
-        });
+        adopt(
+            records,
+            ContentRecord {
+                file_name: content::strip_disabled(&file_name).0.to_string(),
+                kind,
+                provider: Provider::Modrinth.as_str().to_string(),
+                project_id: version.project_id.clone(),
+                version_id: version.id.clone(),
+                name: project
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| version.name.clone()),
+                version_number: version.version_number.clone(),
+                slug: project.map(|p| p.slug.clone()),
+                icon_url: project.and_then(|p| p.icon_url.clone()),
+                dependency: false,
+                origin: Default::default(),
+                // A hash lookup gives provenance, not a dependency list.
+                requires: None,
+                side: project.and_then(|p| p.listed_side()),
+                chosen_side: None,
+                keep_on_server: false,
+                server_off: false,
+            },
+        );
         identified += 1;
+    }
+
+    if let Some(api_key) = cf_key.filter(|k| !k.trim().is_empty()) {
+        identified += ask_curseforge_about(client, api_key, &nameless, records, progress).await;
     }
 
     progress.finish().await;
@@ -1344,6 +1355,123 @@ pub async fn link_untracked_in(
         identified,
         unknown: hashes.len() - identified,
     })
+}
+
+/// Put a record where an untracked file's used to be, keeping what the person
+/// chose about it.
+///
+/// What a person set is not provenance, and a hash lookup has no answer to it.
+/// Dropping the side here would re-side, on the listing's word, the very mod
+/// whose listing the admin corrected; dropping the hold would put a jar they
+/// are keeping on their server into the next pack.
+fn adopt(records: &mut Vec<ContentRecord>, mut record: ContentRecord) {
+    let held = records
+        .iter()
+        .find(|r| r.file_name == record.file_name && r.kind == record.kind);
+    record.chosen_side = held.and_then(|r| r.chosen_side);
+    record.keep_on_server = held.is_some_and(|r| r.keep_on_server);
+    records.retain(|r| !(r.file_name == record.file_name && r.kind == record.kind));
+    records.push(record);
+}
+
+/// The second pass: everything Modrinth could not name, put to CurseForge.
+///
+/// Returns how many it named. A failure names none and says so through the
+/// progress sink rather than through the count — a refused key or no
+/// connection at all is not the same answer as "CurseForge does not have
+/// these", and nothing here may claim the second on the strength of the
+/// first. Nothing is ever unlinked: these files had no link to lose.
+async fn ask_curseforge_about(
+    client: &reqwest::Client,
+    api_key: &str,
+    nameless: &[(crate::instance::content::ContentKind, String, std::path::PathBuf)],
+    records: &mut Vec<ContentRecord>,
+    progress: &Progress,
+) -> usize {
+    use crate::instance::content as content;
+
+    if nameless.is_empty() {
+        return 0;
+    }
+
+    // CurseForge's fingerprint is a murmur2 of the file with its whitespace
+    // stripped, so the bytes are read a second time rather than reused.
+    let mut asking: Vec<(&(content::ContentKind, String, std::path::PathBuf), u32)> = Vec::new();
+    for item in nameless {
+        if let Ok(digests) = crate::net::digests(&item.2, true).await {
+            if let Some(fingerprint) = digests.murmur2 {
+                asking.push((item, fingerprint));
+            }
+        }
+    }
+    if asking.is_empty() {
+        return 0;
+    }
+
+    let fingerprints: Vec<u32> = asking.iter().map(|(_, f)| *f).collect();
+    let answer = match crate::providers::curseforge::match_fingerprints(
+        client,
+        &fingerprints,
+        api_key,
+    )
+    .await
+    {
+        Ok(answer) => answer,
+        Err(e) => {
+            progress.notice(
+                "Could not ask CurseForge",
+                format!("{e} — files only it has stay untracked for now"),
+            );
+            return 0;
+        }
+    };
+
+    let project_ids: Vec<u32> = {
+        let mut ids: Vec<u32> = answer
+            .found
+            .values()
+            .filter_map(|v| v.project_id.parse().ok())
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    };
+    let projects = crate::providers::curseforge::projects_by_ids(client, &project_ids, api_key)
+        .await
+        .unwrap_or_default();
+
+    let mut named = 0;
+    for ((kind, file_name, _), fingerprint) in asking {
+        let Some(version) = answer.found.get(&fingerprint) else {
+            continue;
+        };
+        let project = projects.iter().find(|p| p.id == version.project_id);
+        adopt(
+            records,
+            ContentRecord {
+                file_name: content::strip_disabled(file_name).0.to_string(),
+                kind: *kind,
+                provider: Provider::CurseForge.as_str().to_string(),
+                project_id: version.project_id.clone(),
+                version_id: version.id.clone(),
+                name: project
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| version.name.clone()),
+                version_number: version.version_number.clone(),
+                slug: project.map(|p| p.slug.clone()),
+                icon_url: project.and_then(|p| p.icon_url.clone()),
+                dependency: false,
+                origin: Default::default(),
+                requires: None,
+                side: project.and_then(|p| p.listed_side()),
+                chosen_side: None,
+                keep_on_server: false,
+                server_off: false,
+            },
+        );
+        named += 1;
+    }
+    named
 }
 
 // ---------------------------------------------------------------------------

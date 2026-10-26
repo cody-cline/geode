@@ -142,7 +142,7 @@ export default function ContentTab({
             : "Nothing new could be identified",
         body:
           report.unknown > 0
-            ? `${report.unknown} file${report.unknown === 1 ? " is" : "s are"} not on Modrinth, so ${report.unknown === 1 ? "it stays" : "they stay"} untracked.`
+            ? `${report.unknown} file${report.unknown === 1 ? " could" : "s could"} not be named, so ${report.unknown === 1 ? "it stays" : "they stay"} untracked.`
             : undefined,
       });
     } catch (e) {
@@ -244,7 +244,7 @@ export default function ContentTab({
               className="btn"
               onClick={linkUntracked}
               disabled={linking}
-              title="Match untracked files against Modrinth by file hash"
+              title="Match untracked files against Modrinth and CurseForge by file hash"
             >
               {linking ? (
                 <Loader2 size={14} className="spin" />

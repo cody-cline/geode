@@ -1319,6 +1319,7 @@ pub async fn link_untracked_content(
     id: String,
 ) -> Result<crate::install::content::LinkReport> {
     let mut inst = instance::load(&state.paths, &id).await?;
+    let cf_key = state.cf_key().await;
     let progress = Progress::new(crate::desktop::sink(app), format!("link:{id}"));
     state.register_cancel(progress.id(), progress.cancel_flag());
 
@@ -1327,6 +1328,7 @@ pub async fn link_untracked_content(
         &state.paths,
         &mut inst,
         &state.jars,
+        cf_key.as_deref(),
         &progress,
     )
     .await;
@@ -2600,6 +2602,7 @@ pub async fn link_untracked_server_content(
         &folders,
         &mut server.content,
         &state.jars,
+        state.cf_key().await.as_deref(),
         &progress,
     )
     .await;
