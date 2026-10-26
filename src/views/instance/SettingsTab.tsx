@@ -576,7 +576,7 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
                 {sync.yours.length > 0 && (
                   <ul className={styles.settings}>
                     {sync.yours.map((one) => {
-                      const id = [one.path, ...one.key].join(" ");
+                      const id = [one.path, ...one.key].join("\u0000");
                       return (
                         <li className={styles.setting} key={id}>
                           <span className={styles.settingWhat}>
