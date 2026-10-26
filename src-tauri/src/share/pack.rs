@@ -2789,6 +2789,9 @@ pub(crate) struct Sent {
     /// client file, which has no folder of its own there — see
     /// [`instance::modpack::pack_rel`].
     pub lands: PathBuf,
+    /// Read by the admin's picker, which is the app's. The headless host has
+    /// no picker, so nothing there asks how big a settings file is.
+    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
     pub size: u64,
     /// Whether this server's pack carries it at all.
     pub sent: bool,
@@ -2839,10 +2842,15 @@ pub struct Refused {
 /// Every settings file a server has, and every pick that will never be one.
 pub(crate) struct Sends {
     pub files: Vec<Sent>,
+    /// Shown to the admin beside their picks, so only the app reads it.
+    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
     pub refused: Vec<Refused>,
     /// Whether the admin has picked anything at all. False means this server's
     /// `config/` folder whole, a file a mod writes for the first time next
     /// week included — what sending a config folder has always meant.
+    ///
+    /// The picker's question, so the app asks it and the host does not.
+    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
     pub whole_config: bool,
 }
 
@@ -3080,6 +3088,13 @@ pub struct SettingsPicker {
 /// can be kept in sync means looking inside it. That is work for a listing
 /// somebody asked for and not for a pack a stranger downloads, which is why it
 /// is here and not in [`settings_sent`].
+///
+/// Only the app calls this — it is what fills the admin's picker — so in a
+/// headless build the function is compiled and never reached. It stays
+/// compiled rather than gated out so its tests run in both builds, which is
+/// the point of the rule this file lives by: what a pack sends is decided in
+/// one place, and that place is checked wherever it is built.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 pub(crate) async fn settings_picker(paths: &Paths, id: &str) -> Result<SettingsPicker> {
     let sends = settings_sent(paths, id).await?;
     let run = paths.server_run(id);
