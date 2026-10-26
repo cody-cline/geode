@@ -26,6 +26,7 @@ import type {
   Server,
 } from "../../lib/types";
 
+import viewStyles from "../ServerView.module.css";
 import styles from "./PlayersTab.module.css";
 
 /**
@@ -431,7 +432,10 @@ export default function PlayersTab({ server }: { server: Server }) {
   }
 
   return (
-    <div className={styles.stack}>
+    // The pane's own geometry comes from `settings`, the class every other tab
+    // of this view wraps itself in: without it this one neither padded nor
+    // scrolled, and the ban lists below the fold could not be reached at all.
+    <div className={clsx(viewStyles.settings, styles.stack)}>
       {/* What direction changes take, said once, before any of them. */}
       <p className="hint">
         {lists.running
