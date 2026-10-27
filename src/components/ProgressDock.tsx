@@ -16,7 +16,14 @@ export default function ProgressDock() {
   return (
     <div className={styles.dock}>
       {jobs.map((job) => {
-        const pct = job.total > 0 ? Math.round((job.current / job.total) * 100) : null;
+        // Clamped the way ProjectCard does it. The totals are fixed at the
+        // source, but a stage that learns how much work it has only part-way
+        // through is an ordinary shape here, and a dock reading 400% is worse
+        // than one that sits at 100% for a moment.
+        const pct =
+          job.total > 0
+            ? Math.min(100, Math.round((job.current / job.total) * 100))
+            : null;
         return (
           <div key={job.id} className={styles.job}>
             <div className={styles.row}>

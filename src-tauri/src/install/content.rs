@@ -362,6 +362,12 @@ pub async fn install_with_dependencies_into(
         .filter_map(|d| d.project_id.clone())
         .collect();
 
+    // The stage was opened for the mod alone, because until its own version
+    // was fetched nothing knew it had dependencies. Now that they are known
+    // the denominator can say so — without this the dock advanced four times
+    // against a total of one and read 400%.
+    progress.set_total(1 + queue.len() as u64).await;
+
     // Bounded so a cyclic or pathological dependency graph cannot spin forever.
     let mut budget = 32;
     while let Some(project_id) = queue.pop() {
@@ -402,6 +408,13 @@ pub async fn install_with_dependencies_into(
                         .filter(|d| d.kind == DependencyKind::Required)
                         .filter_map(|d| d.project_id.clone()),
                 );
+                // A dependency's own dependencies only appear once it has
+                // been fetched, so the total grows as the graph is walked.
+                // Counted from what is done plus what is left, which can
+                // never be smaller than what has already been advanced past.
+                progress
+                    .set_total((report.installed.len() + queue.len()) as u64)
+                    .await;
             }
             Ok(None) => report
                 .skipped
