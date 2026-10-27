@@ -646,7 +646,14 @@ async fn back_up(host: &Arc<Host>, id: &str) -> Response<Body> {
     let host = host.clone();
     tokio::spawn(async move {
         let progress = Progress::new(host.sink.clone(), format!("server-backup:{}", server.id));
-        match server::backup::create(&host.state.paths, &server.id, &progress).await {
+        match server::backup::create(
+            &host.state.paths,
+            &host.state.servers,
+            &server.id,
+            &progress,
+        )
+        .await
+        {
             Ok(_) => {
                 progress.finish().await;
                 // Retention is the point of the setting; applying it when a

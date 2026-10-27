@@ -2933,7 +2933,8 @@ pub async fn create_server_backup(
     // zips the whole run directory inside one `spawn_blocking` with nowhere to
     // read the flag.
 
-    let result = crate::server::backup::create(&state.paths, &id, &progress).await;
+    let result =
+        crate::server::backup::create(&state.paths, &state.servers, &id, &progress).await;
     match result {
         Ok(info) => {
             progress.finish().await;

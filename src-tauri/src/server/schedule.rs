@@ -20,7 +20,6 @@ const TICK: Duration = Duration::from_secs(60);
 
 /// Long enough for a busy server to finish flushing chunks before the archive
 /// starts reading them.
-const FLUSH_GRACE: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", tag = "kind", content = "value")]
@@ -84,16 +83,10 @@ async fn run_backup(
     servers: &ServerRegistry,
     server: &super::Server,
 ) {
-    if servers.is_running(&server.id) {
-        // Flush the world before archiving it. `save-off` would give a cleaner
-        // snapshot, but if we die mid-backup the server is left never saving —
-        // a slightly torn archive is the better failure.
-        servers.send(&server.id, "save-all flush");
-        tokio::time::sleep(FLUSH_GRACE).await;
-    }
-
+    // The world is flushed by `backup::create` itself, so this path and the
+    // two buttons cannot drift apart on it.
     let progress = Progress::silent(format!("schedule-backup:{}", server.id));
-    match super::backup::create(paths, &server.id, &progress).await {
+    match super::backup::create(paths, servers, &server.id, &progress).await {
         Ok(info) => {
             announce(
                 sink,

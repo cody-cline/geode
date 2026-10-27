@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use geode_lib::net::Progress;
 use geode_lib::paths::Paths;
 use geode_lib::server::backup;
+use geode_lib::server::run::ServerRegistry;
 
 /// A throwaway data directory per test; they run in parallel in one process.
 fn scratch(name: &str) -> Paths {
@@ -47,7 +48,7 @@ async fn a_backup_restores_what_it_backed_up() {
     let paths = scratch("roundtrip");
     populate(&paths, "srv").await;
 
-    let info = backup::create(&paths, "srv", &Progress::silent("test"))
+    let info = backup::create(&paths, &ServerRegistry::default(), "srv", &Progress::silent("test"))
         .await
         .expect("backup should be taken");
     assert!(info.size > 0, "an empty archive is not a backup");
@@ -92,7 +93,7 @@ async fn logs_are_not_carried_along() {
     let paths = scratch("excludes");
     populate(&paths, "srv").await;
 
-    let info = backup::create(&paths, "srv", &Progress::silent("test"))
+    let info = backup::create(&paths, &ServerRegistry::default(), "srv", &Progress::silent("test"))
         .await
         .expect("backup");
 
@@ -129,7 +130,7 @@ async fn restoring_puts_back_rather_than_rewinds() {
     let paths = scratch("additive");
     populate(&paths, "srv").await;
 
-    let info = backup::create(&paths, "srv", &Progress::silent("test"))
+    let info = backup::create(&paths, &ServerRegistry::default(), "srv", &Progress::silent("test"))
         .await
         .expect("backup");
 
@@ -194,7 +195,7 @@ async fn backups_are_listed_newest_first_and_pruned_to_the_limit() {
 #[tokio::test]
 async fn a_server_with_no_files_cannot_be_backed_up() {
     let paths = scratch("empty");
-    let error = backup::create(&paths, "never-started", &Progress::silent("test"))
+    let error = backup::create(&paths, &ServerRegistry::default(), "never-started", &Progress::silent("test"))
         .await
         .expect_err("there is nothing to archive");
     assert!(error.to_string().contains("no files"), "{error}");
