@@ -75,12 +75,38 @@ const BY_DEFAULT: [Group; 6] = [
 
 /// Entries of a game directory no pack has ever carried, and none should.
 ///
-/// Caches rather than the player's files: `.fabric` is the loader's unpacked
-/// jars and `versions` is a launcher's copy of the game itself, both rebuilt on
-/// first launch. They are in no group at all rather than falling into
+/// Caches rather than the player's files, every one of them rebuilt on the
+/// next launch. They are in no group at all rather than falling into
 /// [`Group::Other`], because somebody ticking "everything else" is asking for
 /// their own files, not for a gigabyte of cache.
-const NEVER: [&str; 2] = [".fabric", "versions"];
+///
+/// The list was written for Fabric and then measured against a real, played
+/// NeoForge instance with Sinytra Connector — 56 mods, 380 MB — where the
+/// first two matched nothing at all and these five held 51 MB:
+///
+/// * `.fabric` — the loader's unpacked jars.
+/// * `versions` — a launcher's copy of the game itself.
+/// * `.cache` — Connector's remapped jars, 47 MB of that instance on its own.
+/// * `.sable` — extracted natives.
+/// * `.mixin.out` — mixin's dumped classes, written only with debug on.
+/// * `dynamic-resource-pack-cache`, `dynamic-data-pack-cache` — packs
+///   Supplementaries and its kin generate, each beside the `hash.txt` they
+///   regenerate themselves from.
+///
+/// Nothing is here on the strength of its name. `pfm/` on that same instance
+/// is 28 MB and holds nothing but a `cache/` folder, and it is deliberately
+/// not listed: it is a mod's own directory that happens to hold a cache
+/// today, and a pack that dropped the player's files out of one would be a
+/// worse failure than a pack that is large.
+const NEVER: [&str; 7] = [
+    ".fabric",
+    "versions",
+    ".cache",
+    ".sable",
+    ".mixin.out",
+    "dynamic-resource-pack-cache",
+    "dynamic-data-pack-cache",
+];
 
 impl Group {
     /// The content kind whose folder this group is, where it is one.
@@ -639,6 +665,28 @@ mod tests {
         assert_eq!(counted(&tallies, Group::Other), (1, 7));
         assert_eq!(group_of(".fabric"), None);
         assert_eq!(group_of("versions"), None);
+
+        // The ones a NeoForge instance with Sinytra Connector writes, which
+        // the list was not written for: 51 MB of the 380 MB instance this was
+        // measured against, `.cache` alone being 47 MB of it.
+        for cache in [
+            ".cache",
+            ".sable",
+            ".mixin.out",
+            "dynamic-resource-pack-cache",
+            "dynamic-data-pack-cache",
+        ] {
+            assert_eq!(group_of(cache), None, "{cache} would travel");
+        }
+
+        // And the line that is not crossed. `pfm/` on that same instance is
+        // 28 MB and holds nothing but a `cache/`, and it still travels: it is
+        // a mod's own directory, and dropping a player's files out of a pack
+        // is a worse failure than a pack that is large. Beside it, two more
+        // mod directories that are nothing but the player's own work.
+        for theirs in ["pfm", "immersive_furniture", "xaero"] {
+            assert_eq!(group_of(theirs), Some(Group::Other), "{theirs}");
+        }
     }
 
     /// Every format an instance exports as.
