@@ -227,6 +227,15 @@ fn is_stop(command: &str, kind: ServerKind) -> bool {
 pub struct RunningServer {
     pub pid: u32,
     pub started_at: std::time::Instant,
+    /// Which run of this server this is, counted by the registry.
+    ///
+    /// An id is not an identity: stop a server, change a setting and start it
+    /// again, and the second process answers to the same id as the first. A
+    /// stop's grace timer has to outlive the process it is about, so without
+    /// this it would find the id still taken two minutes later and kill a
+    /// healthy server nobody asked it to touch. Set by [`ServerRegistry::insert`],
+    /// so no caller can get it wrong.
+    generation: u64,
     /// Which software this is, so the registry knows the word that asks it to
     /// shut down without being told.
     kind: ServerKind,
@@ -295,6 +304,9 @@ pub struct ServerRegistry {
     /// stopped: without this, closing the app would race a restart that then
     /// has nobody left to watch it.
     closing: Arc<AtomicBool>,
+    /// Counts every process this registry has ever held, so each one can be
+    /// told from the next under the same id. See [`RunningServer::generation`].
+    generations: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl ServerRegistry {
@@ -316,8 +328,9 @@ impl ServerRegistry {
         })
     }
 
-    pub fn insert(&self, id: String, running: RunningServer) {
+    pub fn insert(&self, id: String, mut running: RunningServer) {
         if let Ok(mut map) = self.inner.lock() {
+            running.generation = self.generations.fetch_add(1, Ordering::Relaxed);
             map.insert(id, running);
         }
     }
@@ -405,6 +418,15 @@ impl ServerRegistry {
     /// that had to look it up could pass one the running process disagrees
     /// with, and the stop would go out in a word it does not understand.
     pub fn stop(&self, id: &str) -> bool {
+        // Taken before the word goes out, because the grace timer below runs
+        // long after this process may have exited and the id may have been
+        // taken by the next one. Stop, change a setting, start again is an
+        // ordinary afternoon, and a timer that knew only the id would kill
+        // that healthy second server two minutes later with nothing said but
+        // "stopped".
+        let Some(generation) = self.generation(id) else {
+            return false;
+        };
         if !self.ask_to_stop(id) {
             return false;
         }
@@ -412,9 +434,14 @@ impl ServerRegistry {
         let id = id.to_string();
         tokio::spawn(async move {
             tokio::time::sleep(STOP_GRACE).await;
-            registry.kill(&id);
+            registry.kill_run(&id, generation);
         });
         true
+    }
+
+    /// Which run of `id` is in the registry now, if any.
+    fn generation(&self, id: &str) -> Option<u64> {
+        self.inner.lock().ok()?.get(id).map(|s| s.generation)
     }
 
     pub fn kill(&self, id: &str) -> bool {
@@ -422,6 +449,23 @@ impl ServerRegistry {
             .lock()
             .ok()
             .and_then(|m| m.get(id).map(|s| s.force_kill()))
+            .is_some()
+    }
+
+    /// Kill `id` only while it is still the run that `generation` names.
+    ///
+    /// False when that run has already gone — which is the ordinary case for
+    /// a server that stopped when it was asked to, and the whole reason this
+    /// exists rather than [`Self::kill`].
+    fn kill_run(&self, id: &str, generation: u64) -> bool {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|m| {
+                m.get(id)
+                    .filter(|s| s.generation == generation)
+                    .map(|s| s.force_kill())
+            })
             .is_some()
     }
 
@@ -494,6 +538,7 @@ impl ServerRegistry {
             RunningServer {
                 pid: 0,
                 started_at: std::time::Instant::now(),
+                generation: 0,
                 kind,
                 asked_to_stop: Arc::new(AtomicBool::new(false)),
                 commands,
@@ -864,6 +909,7 @@ async fn spawn(
         RunningServer {
             pid,
             started_at,
+            generation: 0,
             kind: server.kind,
             asked_to_stop: asked_to_stop.clone(),
             commands: command_tx,
@@ -1395,6 +1441,44 @@ mod tests {
             ran: std::time::Duration::from_secs(4),
             restarts: 0,
         }
+    }
+
+    /// A stop's grace timer must not reach past the process it was about.
+    ///
+    /// Stop a server, change a setting, start it again — an ordinary
+    /// afternoon. The first stop's timer is still out there, and it wakes two
+    /// minutes later to find the id taken. Keyed on the id alone it killed
+    /// whatever held it, which is a live server with players on it, and
+    /// `force_kill` marks the exit as asked for, so the auto-restarter
+    /// correctly leaves it down. The admin's only clue was a toast reading
+    /// "stopped".
+    #[test]
+    fn an_old_stops_grace_does_not_kill_the_server_that_replaced_it() {
+        let registry = ServerRegistry::default();
+        let _first = registry.fake_start("survival", ServerKind::Paper);
+        let stopping = registry
+            .generation("survival")
+            .expect("the first run is registered");
+
+        // It stopped when it was asked to, so its process deregisters...
+        registry.remove("survival");
+        // ...and the admin starts it again well inside the grace period.
+        let _second = registry.fake_start("survival", ServerKind::Paper);
+
+        // Now the first stop's timer fires.
+        assert!(
+            !registry.kill_run("survival", stopping),
+            "the old stop killed the run that replaced it"
+        );
+        assert!(
+            !asked_to_stop(&registry, "survival"),
+            "the new run was marked as ending on purpose, so nothing would restart it"
+        );
+
+        // And the guard is not simply refusing everything: its own run dies.
+        let current = registry.generation("survival").expect("still running");
+        assert!(registry.kill_run("survival", current));
+        assert!(asked_to_stop(&registry, "survival"));
     }
 
     /// Whether the registry has this server down as ending on purpose.
