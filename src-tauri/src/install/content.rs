@@ -501,6 +501,23 @@ pub fn pick_best(versions: &[Version]) -> Option<&Version> {
         .or_else(|| versions.iter().find(|v| v.primary_file().is_some()))
 }
 
+/// The same, falling back to a version whose author has turned third-party
+/// downloads off.
+///
+/// [`pick_best`] requires a file it could fetch, and a blocked version has
+/// none — so an Install button that asked it alone got `None` for a mod that
+/// plainly does support this Minecraft version, and said "no release for
+/// Minecraft 26.3 on NeoForge", which is false and sends the person looking
+/// in the wrong place.
+///
+/// Handing the blocked version on instead reaches the two things that already
+/// exist for it: [`blocked::Fallback`] installs the author's own Modrinth
+/// release when the hash CurseForge publishes proves it is the same bytes,
+/// and says what the author decided when it is not.
+pub fn pick_best_or_blocked(versions: &[Version]) -> Option<&Version> {
+    pick_best(versions).or_else(|| versions.iter().find(|v| v.blocked_reason.is_some()))
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateCandidate {
@@ -1180,6 +1197,34 @@ mod tests {
     fn none_when_nothing_installable() {
         let versions = vec![version("blocked", "release", false)];
         assert!(pick_best(&versions).is_none());
+    }
+
+    /// An author who turned third-party downloads off is a different answer
+    /// from a Minecraft version nobody supports, and the Install button used
+    /// to give the second for the first — "no release for Minecraft 26.3 on
+    /// NeoForge", about a mod that plainly has one. Handing the blocked
+    /// version on is what reaches the fallback that takes the author's own
+    /// Modrinth release, and the honest sentence when there is none.
+    #[test]
+    fn a_blocked_version_is_picked_so_the_fallback_can_see_it() {
+        let mut blocked = version("blocked", "release", false);
+        blocked.blocked_reason = Some("the author has turned off third-party downloads".into());
+
+        assert!(pick_best(std::slice::from_ref(&blocked)).is_none());
+        assert_eq!(
+            pick_best_or_blocked(std::slice::from_ref(&blocked))
+                .expect("the blocked version, rather than nothing at all")
+                .id,
+            "blocked"
+        );
+
+        // And it is still only the fallback: anything fetchable wins.
+        let both = vec![blocked, version("ok", "beta", true)];
+        assert_eq!(pick_best_or_blocked(&both).unwrap().id, "ok");
+
+        // Nothing at all is still nothing, so the "no release" sentence is
+        // reached only when it is true.
+        assert!(pick_best_or_blocked(&[version("gone", "release", false)]).is_none());
     }
 }
 

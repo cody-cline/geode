@@ -975,7 +975,7 @@ pub async fn install_content(
             .iter()
             .find(|v| &v.id == want)
             .ok_or_else(|| Error::msg("that version is no longer available"))?,
-        None => crate::install::content::pick_best(&versions).ok_or_else(|| {
+        None => crate::install::content::pick_best_or_blocked(&versions).ok_or_else(|| {
             Error::msg(format!(
                 "{} has no release for Minecraft {} on {}",
                 project.name,
@@ -2707,7 +2707,7 @@ pub async fn install_server_content(
                 chosen = Some(exact.clone());
                 break;
             }
-        } else if let Some(best) = crate::install::content::pick_best(&versions) {
+        } else if let Some(best) = crate::install::content::pick_best_or_blocked(&versions) {
             chosen = Some(best.clone());
             break;
         }
