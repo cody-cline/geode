@@ -127,6 +127,15 @@ pub fn run() {
             tauri::async_runtime::block_on(crate::drive::clear_staged(
                 &app.state::<AppState>().paths,
             ));
+            // And a server that was arriving when Geode last died. The host
+            // has swept this since it gained the route; the app drives every
+            // pull and never did, so a transfer whose process was killed
+            // part-way left up to the bundle ceiling sitting under
+            // `transfers/` for ever. Nothing can be arriving yet, for the
+            // same reason as the two above.
+            tauri::async_runtime::block_on(crate::server::transfer::sweep(
+                &app.state::<AppState>().paths,
+            ));
             // Only once the state is managed: links are parked in it.
             deeplink::start(app);
             // A server shared when Geode last closed is shared again now,
