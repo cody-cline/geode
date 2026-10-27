@@ -189,7 +189,16 @@ pub async fn list(paths: &Paths, id: &str) -> Result<Vec<BackupInfo>> {
 }
 
 pub async fn delete(paths: &Paths, id: &str, name: &str) -> Result<()> {
-    tokio::fs::remove_file(resolve(paths, id, name)?).await?;
+    let archive = resolve(paths, id, name)?;
+    // Said the way `restore` says it. A second Delete — a double click, a
+    // list another window took a minute ago, a retried DELETE against the
+    // host — otherwise reached the screen as `No such file or directory (os
+    // error 2)`, and an Error here serialises straight into the frontend's
+    // copy.
+    if tokio::fs::metadata(&archive).await.is_err() {
+        return Err(Error::msg(format!("no backup called {name}")));
+    }
+    tokio::fs::remove_file(&archive).await?;
     Ok(())
 }
 
@@ -308,6 +317,33 @@ mod tests {
         create(&paths, &servers, "survival", &Progress::silent("test"))
             .await
             .expect("a backup of a stopped server");
+    }
+
+    /// Error text is the frontend's copy, so a second Delete must read like a
+    /// sentence rather than like errno.
+    #[tokio::test]
+    async fn deleting_a_backup_that_is_not_there_says_so_in_words() {
+        let scratch = crate::paths::Scratch::new("backup-delete-twice");
+        let paths = scratch.paths.clone();
+        tokio::fs::create_dir_all(paths.server_backups("survival"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            paths.server_backups("survival").join("2026-01-01T00-00-00.zip"),
+            b"not really a zip",
+        )
+        .await
+        .unwrap();
+
+        delete(&paths, "survival", "2026-01-01T00-00-00.zip")
+            .await
+            .expect("the first delete");
+        let said = delete(&paths, "survival", "2026-01-01T00-00-00.zip")
+            .await
+            .expect_err("the second")
+            .to_string();
+        assert_eq!(said, "no backup called 2026-01-01T00-00-00.zip");
+        assert!(!said.contains("os error"), "{said}");
     }
 
     #[test]
