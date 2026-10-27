@@ -176,27 +176,50 @@ async fn notes_for(
         });
     }
 
-    // The off state is a fact about the files, not about the records. A jar
-    // dropped into `mods/` by hand and switched off in Geode has no record at
-    // all — `set_enabled` only renames it — and the index carries it under its
-    // enabled name all the same, so without a note of its own it would arrive
-    // switched on. Which is worse than not sending it: the sharer turned it
-    // off for a reason.
+    // What the files say, which the records do not always know. A jar dropped
+    // into `mods/` by hand has no record at all, so the loop above never
+    // reaches it:
+    //
+    // * Its source was therefore never written, and this half's note is the
+    //   only channel that carries one. `referenced()` reads the notes, so the
+    //   file was left out of the referenced set and the `overrides/` walk
+    //   copied its bytes — while the report the sharer reads counted it as a
+    //   reference, because that count is taken from the catalogue. The two
+    //   disagreed, and the one that was right was the zip.
+    // * Its off state was never written either — `set_enabled` only renames
+    //   the file — and the index carries it under its enabled name, so it
+    //   would arrive switched on. Worse than not sending it: the sharer
+    //   turned it off for a reason.
+    //
+    // Merged into whatever the records already said rather than replacing it,
+    // so a side read from the jar above survives.
     for ident in catalogue.identities() {
-        if !ident.disabled
-            || !selection.carries(&ident.disk_rel)
-            || !matches!(travel(ident, Carry::GEODEPACK), Travel::Linked(_))
-        {
+        if !selection.carries(&ident.disk_rel) {
+            continue;
+        }
+        let travel = travel(ident, Carry::GEODEPACK);
+        let source = source_of(Some(&travel));
+        // As above: a file the recipient fetches arrives switched on, so one
+        // that is off has to say so. A file carried as bytes keeps its
+        // `.disabled` name and needs no note.
+        let turned_off =
+            ident.disabled && matches!(travel, Travel::Named(_) | Travel::Linked(_));
+        if source.is_none() && !turned_off {
             continue;
         }
         let path = format!("{}/{}", ident.kind.folder(), ident.file_name);
         match out.iter_mut().find(|note| note.path == path) {
-            Some(note) => note.disabled = true,
+            Some(note) => {
+                if note.source.is_none() {
+                    note.source = source;
+                }
+                note.disabled |= turned_off;
+            }
             None => out.push(FileNote {
                 path,
                 side: None,
-                disabled: true,
-                source: None,
+                disabled: turned_off,
+                source,
             }),
         }
     }
@@ -4075,6 +4098,51 @@ mod tests {
             !entries(&dest).contains(&"overrides/mods/sodium.jar".to_string()),
             "{:?}",
             entries(&dest)
+        );
+    }
+
+    /// A jar with no record at all, named by CurseForge's by-id channel.
+    ///
+    /// Modrinth content rides the index, so the `.mrpack` case above already
+    /// worked. CurseForge has no index entry: a note is the only channel this
+    /// format has for naming it. Those notes were written from
+    /// `instance.content`, so a jar nobody had a record for got none — and
+    /// `referenced()` reads the notes, so the file was left out of the
+    /// referenced set and the `overrides/` walk copied its bytes. Meanwhile
+    /// the report the sharer reads counts from the catalogue, which knew
+    /// perfectly well it was a reference. The two disagreed, and the zip was
+    /// the one telling the truth.
+    ///
+    /// That report is what the sharer reads to confirm nothing travelled that
+    /// should not have, and sending bytes rather than a link is a licensing
+    /// position here, not a size optimisation.
+    #[tokio::test]
+    async fn a_geodepack_references_a_jar_with_no_record_rather_than_copying_it() {
+        let (scratch, inst) = fixture("norecord-geode", &[("mods", "create.jar")]).await;
+        let paths = scratch.paths.clone();
+        assert!(inst.content.is_empty());
+
+        let mut catalogue = from_records(&paths, &inst).await;
+        catalogue.pretend_curseforge_holds(&[("create.jar", 731, 4242, true)]);
+
+        let manifest = manifest_for(&paths, &inst, &Selection::default(), &catalogue).await;
+        let note = manifest
+            .note("mods/create.jar")
+            .expect("a note naming where the jar came from");
+        assert_eq!(
+            note.source.as_ref().map(|s| s.provider.as_str()),
+            Some("curseforge"),
+            "the Geode half named no source, so the walk would copy the bytes"
+        );
+
+        // And the link that was actually broken: `referenced` is what the
+        // `overrides/` walk subtracts, and it reads the notes. A full export
+        // cannot stand in for this here, because `export` builds its own
+        // catalogue and a pretended answer cannot reach it.
+        assert!(
+            referenced(&manifest).contains(&PathBuf::from("mods/create.jar")),
+            "the jar was not in the referenced set, so the walk would copy it: {:?}",
+            referenced(&manifest)
         );
     }
 
