@@ -14,6 +14,9 @@ use crate::paths::Paths;
 /// The key naming the port Minecraft itself listens on — the one another
 /// server can be holding.
 const PORT: &str = "server-port";
+/// Which address the server binds, when it has been told to bind just one.
+/// Empty — the default — means every interface.
+const IP: &str = "server-ip";
 
 /// One setting, in the order the file lists it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,6 +146,25 @@ pub async fn game_port(paths: &Paths, id: &str) -> Option<u16> {
 /// never named as the other server, never warned about one: saying 25565 for
 /// a proxy would be repeating Velocity's default back as though it had been
 /// read.
+/// The socket this server will try to bind, as Minecraft itself would read it.
+///
+/// `None` for a server set to port 0, which means "any free port" and so can
+/// never be in anyone's way. The address is `server-ip` where one is set, and
+/// every interface where it is not — asking about the wrong one is how a
+/// probe comes back with the opposite of the truth.
+pub async fn game_socket(paths: &Paths, id: &str) -> Option<std::net::SocketAddr> {
+    let port = game_port(paths, id).await?;
+    let properties = read(paths, id).await.unwrap_or_default();
+    let ip = properties
+        .iter()
+        .find(|p| p.key == IP)
+        .map(|p| p.value.trim())
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse::<std::net::IpAddr>().ok())
+        .unwrap_or(std::net::IpAddr::from([0, 0, 0, 0]));
+    Some(std::net::SocketAddr::new(ip, port))
+}
+
 pub async fn clashes(paths: &Paths, id: &str, port: Option<u16>) -> Result<Vec<String>> {
     let servers = super::list(paths).await?;
     if servers.iter().any(|s| s.id == id && s.kind.is_proxy()) {
