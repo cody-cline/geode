@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::paths::Paths;
 
 /// The key naming the port Minecraft itself listens on — the one another
@@ -89,6 +89,36 @@ pub fn apply(original: &str, changes: &[Property]) -> String {
         }
     }
     out
+}
+
+/// Refuse a change this file cannot hold, rather than writing something else.
+///
+/// One setting is one line, so a value carrying a newline would be written as
+/// a value that stops at it followed by a line of its own — which the server
+/// reads back as an extra key nobody asked for, named after whatever came
+/// after the break. A multi-line MOTD is a thing people genuinely want, and
+/// it needs the `\n` escape honoured in both directions before it can be
+/// offered; until then it is refused in a sentence rather than half-written.
+fn refuse_unwritable(changes: &[Property]) -> Result<()> {
+    for change in changes {
+        if change.value.contains(['\n', '\r']) {
+            return Err(Error::msg(format!(
+                "{} cannot hold a line break: one setting is one line in server.properties",
+                change.key
+            )));
+        }
+        if change.key.is_empty()
+            || change
+                .key
+                .contains(|c: char| c == '=' || c == ':' || c == '#' || c.is_whitespace())
+        {
+            return Err(Error::msg(format!(
+                "'{}' is not a setting name server.properties can hold",
+                change.key
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn file(paths: &Paths, id: &str) -> std::path::PathBuf {
@@ -193,6 +223,7 @@ pub async fn clashes(paths: &Paths, id: &str, port: Option<u16>) -> Result<Vec<S
 }
 
 pub async fn write(paths: &Paths, id: &str, changes: &[Property]) -> Result<()> {
+    refuse_unwritable(changes)?;
     let path = file(paths, id);
     let original = tokio::fs::read_to_string(&path).await.unwrap_or_default();
     if let Some(parent) = path.parent() {
@@ -205,6 +236,52 @@ pub async fn write(paths: &Paths, id: &str, changes: &[Property]) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A value with a line break in it used to be written as two lines, so the
+    /// server read back the tail as an extra key of its own — and the value
+    /// the admin typed was silently cut at the break.
+    #[tokio::test]
+    async fn a_value_with_a_line_break_is_refused_rather_than_written_as_two() {
+        let scratch = crate::paths::Scratch::new("properties-newline");
+        let paths = scratch.paths.clone();
+        tokio::fs::create_dir_all(paths.server_run("survival"))
+            .await
+            .unwrap();
+
+        let said = write(
+            &paths,
+            "survival",
+            &[Property {
+                key: "motd".into(),
+                value: "A Minecraft Server\nenable-rcon=true".into(),
+            }],
+        )
+        .await
+        .expect_err("a line break must not reach the file")
+        .to_string();
+        assert!(said.contains("motd"), "{said}");
+        assert!(said.contains("line break"), "{said}");
+
+        // And nothing was written on the way to refusing.
+        assert!(
+            tokio::fs::read_to_string(paths.server_run("survival").join("server.properties"))
+                .await
+                .is_err()
+        );
+
+        // The ordinary value still goes through.
+        write(
+            &paths,
+            "survival",
+            &[Property {
+                key: "motd".into(),
+                value: "A Minecraft Server".into(),
+            }],
+        )
+        .await
+        .expect("an ordinary value");
+    }
+
 
     const SAMPLE: &str = "\
 #Minecraft server properties
