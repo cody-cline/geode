@@ -269,6 +269,18 @@ pub(super) mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_console_socket_keeps_watching_while_the_servers_are_stopped() {
         let scratch = Scratch::new("daemon-console-cut");
+        // A real server, because the route now refuses a console for an id
+        // nothing answers to — the handshake used to succeed for any id at
+        // all, which is what this test was unwittingly leaning on.
+        let server = crate::server::create(
+            &scratch.paths,
+            "Survival".into(),
+            crate::server::ServerKind::Paper,
+            "1.21.1".into(),
+        )
+        .await
+        .expect("a scratch directory to write into");
+        assert_eq!(server.id, "survival");
         let listening = started(host(&scratch)).await;
 
         let mut socket = TcpStream::connect(listening.local_addr).expect("the listener is up");

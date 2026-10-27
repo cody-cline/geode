@@ -229,6 +229,15 @@ pub async fn respond(host: &Arc<Host>, mut request: Request<Incoming>) -> Respon
     // Answered before the body is taken, because this is the one route that
     // needs the connection itself rather than what was sent on it.
     if method == Method::GET && matches!(segments.as_slice(), ["v1", "servers", _, "console"]) {
+        // The server is looked up first, so a stale or mistyped id is refused
+        // in the same sentence every other route gives it. Without this the
+        // handshake succeeded for a server that does not exist: the client
+        // waited for ever on a console that could never produce a line, its
+        // typed commands went nowhere, and it held one of the host's console
+        // permits until it gave up.
+        if let Err(e) = server::load(&host.state.paths, &id).await {
+            return refused(e);
+        }
         return console::open(host, id, &mut request);
     }
 
@@ -1340,6 +1349,36 @@ mod tests {
             answer.contains("sec-websocket-accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo="),
             "{answer}"
         );
+        listening.stop().await;
+    }
+
+    /// A console asked for by an id nothing answers to is refused, not
+    /// upgraded.
+    ///
+    /// The handshake used to succeed for any id at all: the client got its
+    /// 101, then waited for ever on a console that could never produce a
+    /// line, its typed commands went nowhere, and the socket held one of this
+    /// host's console permits until somebody noticed. A stale id in a saved
+    /// tab is enough to reach it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_console_for_a_server_that_is_not_there_is_refused() {
+        let scratch = Scratch::new("daemon-console-ghost");
+        let _server = with_a_server(&scratch).await;
+        let listening = started(host(&scratch)).await;
+
+        let answer = super::super::serve::tests::ask(
+            listening.local_addr,
+            "GET /v1/servers/not-a-server/console HTTP/1.1\r\nHost: localhost\r\n\
+             Authorization: Bearer {TOKEN}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+                .replace("{TOKEN}", TOKEN)
+                .as_str(),
+        );
+        assert!(
+            !answer.starts_with("HTTP/1.1 101 "),
+            "a server that does not exist was handed a console: {answer}"
+        );
+        assert!(answer.starts_with("HTTP/1.1 400 "), "{answer}");
         listening.stop().await;
     }
 
