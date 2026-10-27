@@ -341,6 +341,17 @@ async fn snapshot(paths: &Paths, id: &str, rel: &Path) -> Result<()> {
         tokio::fs::create_dir_all(parent).await?;
     }
     let bytes = tokio::fs::read(&from).await?;
+    // A baseline nothing can read is worse than none at all. A mod's config
+    // on its first run is often all comments and no settings yet, and that
+    // sniffs as no format at all — snapshot it and every later Review of that
+    // file refuses with "not in the format it was in when its settings were
+    // last published", for ever, because the only branch that re-baselines is
+    // the one for a snapshot that is *missing*. Leaving it missing is what
+    // lets that branch take a real baseline the first time the mod writes
+    // real settings into it.
+    if crate::settings::sniff(&bytes).is_none() {
+        return Ok(());
+    }
     crate::server::write_atomic(&to, &bytes).await
 }
 
@@ -537,6 +548,58 @@ mod tests {
         assert_eq!(moved[1].key, vec!["renderDistance".to_string()]);
         assert_eq!(moved[1].was.as_deref(), Some("8"));
         assert_eq!(moved[1].now.as_deref(), Some("12"));
+    }
+
+    /// A config file that holds nothing yet must not become a baseline.
+    ///
+    /// Mods write their config on first run, and plenty of them write the
+    /// comments before any setting. Snapshotting that gave the file a
+    /// baseline `settings::diff` cannot read, so from the moment the mod
+    /// wrote real settings every Review refused the file by name and nothing
+    /// in it could ever be pushed — and the only branch that re-baselines is
+    /// the one for a snapshot that is missing, so it never healed.
+    #[tokio::test]
+    async fn a_config_with_no_settings_yet_does_not_become_a_baseline() {
+        let (scratch, server) = kept_in_sync(
+            "empty-baseline",
+            &[("config/lithium.properties", "# mixin options\n# nothing set\n")],
+        )
+        .await;
+        let paths = scratch.paths.clone();
+        let rel = std::path::Path::new("config/lithium.properties");
+
+        assert!(
+            tokio::fs::metadata(paths.server_published(&server.id).join(rel))
+                .await
+                .is_err(),
+            "a file with no settings in it was taken as a baseline"
+        );
+
+        // The mod writes its settings on a later run, and the first Review
+        // after that takes the baseline rather than refusing the file.
+        tokio::fs::write(
+            paths.server_run(&server.id).join(rel),
+            "# mixin options\nmixin.chunk=true\n",
+        )
+        .await
+        .unwrap();
+        let first = review(&paths, &server.id).await.unwrap();
+        assert!(first.unreadable.is_empty(), "{:?}", first.unreadable);
+        assert!(first.moved.is_empty(), "{:?}", first.moved);
+
+        // And from there it behaves like any other kept file: an edit is
+        // offered by key.
+        tokio::fs::write(
+            paths.server_run(&server.id).join(rel),
+            "# mixin options\nmixin.chunk=false\n",
+        )
+        .await
+        .unwrap();
+        let second = review(&paths, &server.id).await.unwrap();
+        assert!(second.unreadable.is_empty(), "{:?}", second.unreadable);
+        assert_eq!(second.moved.len(), 1, "{:?}", second.moved);
+        assert_eq!(second.moved[0].key, vec!["mixin.chunk".to_string()]);
+        assert_eq!(second.moved[0].now.as_deref(), Some("false"));
     }
 
     /// A file Geode cannot read one setting at a time is named with the
