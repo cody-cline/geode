@@ -91,6 +91,15 @@ pub struct ServerExit {
     pub server_id: String,
     pub code: Option<i32>,
     pub success: bool,
+    /// Whether somebody asked for this exit — Stop, Kill, `stop` typed into
+    /// the console, or Geode closing.
+    ///
+    /// An exit code cannot stand in for it. Paper exits 0 after `Failed to
+    /// bind to port`, so a server that never came up at all arrived on screen
+    /// as a clean "stopped. Ran for 7 seconds." The wait already has this
+    /// answer — it is what decides a restart — and it was simply not passed
+    /// on to the thing that tells the person.
+    pub asked_for: bool,
     pub ran_seconds: u64,
     /// Seconds until Geode starts it again, or `None` when it is not going to
     /// — because somebody asked for this exit, because automatic restarts are
@@ -111,6 +120,7 @@ impl ServerExit {
         server_id: String,
         code: Option<i32>,
         success: bool,
+        asked_for: bool,
         ran: std::time::Duration,
         after: AfterExit,
     ) -> Self {
@@ -118,6 +128,7 @@ impl ServerExit {
             server_id,
             code,
             success,
+            asked_for,
             ran_seconds: ran.as_secs(),
             restart_in_seconds: match after {
                 AfterExit::Restart { wait, .. } => Some(wait.as_secs()),
@@ -677,6 +688,57 @@ pub async fn start(
     start_again(sink, paths, http, registry, id, heap_ceiling_mb, 0).await
 }
 
+/// Refuse a start whose game port something already holds.
+///
+/// Minecraft's own answer to a taken port is to log `Failed to bind to port`
+/// and exit — zero, on Paper — within a few seconds, which is why this is
+/// worth asking first: an exit code cannot say what happened, and the admin
+/// is left with a server that was running a moment ago and is not now.
+///
+/// [`properties::clashes`] answers a neighbouring question and cannot stand
+/// in for this one: it compares this server's port against the other Geode
+/// servers' `server.properties` files, so it is silent about another
+/// launcher, a container, a `geoded` on the same box, or a Geode server whose
+/// port was changed outside that file. Binding the socket asks the machine
+/// instead, which is the only thing that knows.
+///
+/// This is a better error, not a reservation: the port can be taken in the
+/// moment between here and the JVM. A proxy is skipped, because its port
+/// lives in its own config rather than in `server.properties` and reading
+/// 25565 for it would be a guess.
+async fn refuse_if_the_port_is_taken(paths: &Paths, server: &super::Server) -> Result<()> {
+    if server.kind.is_proxy() {
+        return Ok(());
+    }
+    let Some(address) = super::properties::game_socket(paths, &server.id).await else {
+        return Ok(());
+    };
+    // `TcpListener::bind` sets `SO_REUSEADDR`, so a socket merely sitting in
+    // TIME_WAIT from this server's own last run does not read as taken —
+    // which matters, because stopping and starting again is when that is most
+    // likely.
+    if std::net::TcpListener::bind(address).is_ok() {
+        return Ok(());
+    }
+
+    // Name the neighbour where Geode can, because "another Geode server" is
+    // something the admin can act on and "something on this machine" is not.
+    let port = address.port();
+    let mine = super::properties::clashes(paths, &server.id, Some(port))
+        .await
+        .unwrap_or_default();
+    Err(Error::msg(match mine.first() {
+        Some(name) => format!(
+            "port {port} is already in use, and {name} is set to the same port. \
+             Give one of them a different port, or stop that server first"
+        ),
+        None => format!(
+            "port {port} is already in use by something else on this machine. \
+             Stop whatever is holding it, or give this server a different port"
+        ),
+    }))
+}
+
 /// The same start, carrying how many restarts it took to get here so the exit
 /// after it knows whether to keep trying, and the ceiling it was started
 /// under so a restart does not quietly ask for more memory than the host
@@ -714,6 +776,10 @@ async fn start_again(
         return Err(Error::msg("that server is already running"));
     }
     let mut server = super::load(paths, id).await?;
+
+    // Before anything is moved or pruned, because a start that is going to be
+    // refused should leave the server exactly as it found it.
+    refuse_if_the_port_is_taken(paths, &server).await?;
 
     // While nothing is running, so the server never loads a mod that only
     // runs in players' games. Saved straight away, so the moves stay recorded
@@ -946,8 +1012,9 @@ async fn spawn(
             .map(|server| server.settings.auto_restart)
             .unwrap_or(false);
 
+        let asked_for = asked_to_stop.load(Ordering::Relaxed);
         let after = after_exit(Exit {
-            asked_for: asked_to_stop.load(Ordering::Relaxed),
+            asked_for,
             closing: registry.is_closing(),
             auto_restart,
             ran,
@@ -957,7 +1024,7 @@ async fn spawn(
         events::emit(
             &Some(sink_for_wait.clone()),
             "geode://server-exit",
-            &ServerExit::new(id.clone(), code, success, ran, after),
+            &ServerExit::new(id.clone(), code, success, asked_for, ran, after),
         );
 
         carry_out(
@@ -1079,6 +1146,70 @@ mod tests {
         let mut s = Server::new("Test".into(), kind, "1.21.1".into());
         s.jar = "server.jar".into();
         s
+    }
+
+    /// A port something else holds is refused before the JVM is spawned.
+    ///
+    /// Minecraft's own answer is `Failed to bind to port` and an exit — zero,
+    /// on Paper — a few seconds later, which the app reported as a clean
+    /// stop. Port-in-use is the most ordinary first-run failure on a real
+    /// host, and it was the one Geode could say least about.
+    #[tokio::test]
+    async fn a_start_is_refused_when_something_already_holds_the_port() {
+        let scratch = Scratch::new("server-port-probe");
+        let paths = scratch.paths.clone();
+        let server = server(ServerKind::Paper);
+
+        // A real socket on a real free port, held for the length of the test.
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = held.local_addr().unwrap().port();
+
+        let run = paths.server_run(&server.id);
+        tokio::fs::create_dir_all(&run).await.unwrap();
+        tokio::fs::write(
+            run.join("server.properties"),
+            format!("server-ip=127.0.0.1\nserver-port={port}\n"),
+        )
+        .await
+        .unwrap();
+
+        let refused = refuse_if_the_port_is_taken(&paths, &server)
+            .await
+            .expect_err("a port something else holds must not reach the JVM");
+        let said = refused.to_string();
+        assert!(said.contains(&port.to_string()), "{said}");
+        assert!(said.contains("already in use"), "{said}");
+
+        // And once it is free again the same server starts.
+        drop(held);
+        refuse_if_the_port_is_taken(&paths, &server)
+            .await
+            .expect("a free port is not an obstacle");
+    }
+
+    /// A proxy keeps its port in its own config, so `server.properties` says
+    /// nothing about it and 25565 would be a guess — and a guess that refuses
+    /// a start is worse than not asking.
+    #[tokio::test]
+    async fn a_proxy_is_not_probed() {
+        let scratch = Scratch::new("server-port-proxy");
+        let paths = scratch.paths.clone();
+        let server = server(ServerKind::Velocity);
+
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = held.local_addr().unwrap().port();
+        let run = paths.server_run(&server.id);
+        tokio::fs::create_dir_all(&run).await.unwrap();
+        tokio::fs::write(
+            run.join("server.properties"),
+            format!("server-ip=127.0.0.1\nserver-port={port}\n"),
+        )
+        .await
+        .unwrap();
+
+        refuse_if_the_port_is_taken(&paths, &server)
+            .await
+            .expect("a proxy is left alone");
     }
 
     #[test]
@@ -1667,7 +1798,8 @@ mod tests {
     fn an_exit_says_what_geode_is_about_to_do_about_it() {
         let ran = std::time::Duration::from_secs(90);
 
-        let quiet = ServerExit::new("survival".into(), Some(0), true, ran, AfterExit::Nothing);
+        let quiet =
+            ServerExit::new("survival".into(), Some(0), true, true, ran, AfterExit::Nothing);
         assert_eq!(quiet.restart_in_seconds, None);
         assert_eq!(quiet.restarts, 0);
         assert!(!quiet.gave_up);
@@ -1676,6 +1808,7 @@ mod tests {
         let coming = ServerExit::new(
             "survival".into(),
             Some(1),
+            false,
             false,
             ran,
             AfterExit::Restart {
@@ -1690,6 +1823,7 @@ mod tests {
         let done = ServerExit::new(
             "survival".into(),
             None,
+            false,
             false,
             ran,
             AfterExit::GaveUp { attempts: 5 },

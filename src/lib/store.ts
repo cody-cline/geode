@@ -378,14 +378,28 @@ export const useStore = create<State>((set, get) => ({
         });
         return;
       }
+      // Whether anybody asked, not whether the code was zero. A server that
+      // could not bind its port exits 0 within seconds, and reading that as
+      // success told the admin their server had "stopped" when it had never
+      // started.
+      if (payload.askedFor) {
+        get().toast({
+          kind: "info",
+          title: `${name} stopped`,
+          body: `Ran for ${formatDuration(payload.ranSeconds)}.`,
+        });
+        return;
+      }
       get().toast({
-        kind: payload.success ? "info" : "error",
-        title: payload.success ? `${name} stopped` : `${name} exited`,
-        body: payload.success
-          ? `Ran for ${formatDuration(payload.ranSeconds)}.`
-          : payload.code === null
-            ? "The process was stopped."
-            : `Exit code ${payload.code}. Check the console for the cause.`,
+        kind: "error",
+        title:
+          payload.ranSeconds < 30
+            ? `${name} did not start`
+            : `${name} exited on its own`,
+        body:
+          payload.code === null
+            ? "The process ended without saying why. The console has its last words."
+            : `Exit code ${payload.code} after ${formatDuration(payload.ranSeconds)}. The console says why.`,
       });
     });
 

@@ -456,6 +456,12 @@ export interface ServerExit {
   serverId: string;
   code: number | null;
   success: boolean;
+  /**
+   * Whether somebody asked for this exit — Stop, Kill, `stop` typed into the
+   * console, or Geode closing. An exit code cannot stand in for it: Paper
+   * exits 0 after `Failed to bind to port`.
+   */
+  askedFor: boolean;
   ranSeconds: number;
   /**
    * Seconds until Geode starts it again, or `null` when it is not going to —
