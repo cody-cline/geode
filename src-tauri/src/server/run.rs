@@ -688,6 +688,66 @@ pub async fn start(
     start_again(sink, paths, http, registry, id, heap_ceiling_mb, 0).await
 }
 
+/// The one file a start cannot do without, by the way this server launches.
+///
+/// Modern Forge and NeoForge produce no runnable jar at all and are started
+/// from an argument file, so the jar name alone cannot answer this.
+fn launch_target(server: &super::Server) -> String {
+    match &server.launch {
+        LaunchKind::ArgFile(file) => file.clone(),
+        LaunchKind::Jar => server.jar.clone(),
+    }
+}
+
+/// Fetch the server's software again when it is not on disk.
+///
+/// A backup carries what only this machine has — the world, the
+/// configuration, the player lists — and not the bytes Geode can ask for
+/// again. So a restored server is one whose jar, libraries and extracted
+/// version are all absent, and before this the start simply refused and told
+/// the admin to reinstall by hand. Nothing else about the server is touched:
+/// this is the same install that created it, run a second time.
+async fn install_if_the_software_is_gone(
+    sink: &EventSink,
+    paths: &Paths,
+    http: &reqwest::Client,
+    server: &mut super::Server,
+) -> Result<()> {
+    // Only for a server Geode has installed before, which is what
+    // `java_major` records — it is written by that install and by nothing
+    // else. A server that was never installed has no software to put back
+    // and is refused later in the start's own words; without this check,
+    // every such server would reach for the network to find that out.
+    let needed = launch_target(server);
+    if needed.is_empty()
+        || server.java_major.is_none()
+        || tokio::fs::metadata(paths.server_run(&server.id).join(&needed))
+            .await
+            .is_ok()
+    {
+        return Ok(());
+    }
+
+    super::schedule::announce(
+        sink,
+        &server.id,
+        format!("{needed} is not here, so Geode is fetching this server's software again"),
+    );
+    let progress = Progress::new(sink.clone(), format!("server-install:{}", server.id));
+    let outcome = super::install::install_jar(http, paths, server, &progress).await;
+    match outcome {
+        Ok(()) => {
+            server.save_if_present(paths).await?;
+            progress.finish().await;
+            Ok(())
+        }
+        Err(e) => {
+            progress.fail(&e.to_string()).await;
+            Err(e)
+        }
+    }
+}
+
 /// Refuse a start whose game port something already holds.
 ///
 /// Minecraft's own answer to a taken port is to log `Failed to bind to port`
@@ -707,7 +767,10 @@ pub async fn start(
 /// lives in its own config rather than in `server.properties` and reading
 /// 25565 for it would be a guess.
 async fn refuse_if_the_port_is_taken(paths: &Paths, server: &super::Server) -> Result<()> {
-    if server.kind.is_proxy() {
+    // A server with nothing installed is not going to start whatever the
+    // port says, and "install one first" is the more useful of the two
+    // sentences — so the cheaper refusal keeps its place in the queue.
+    if server.kind.is_proxy() || launch_target(server).is_empty() {
         return Ok(());
     }
     let Some(address) = super::properties::game_socket(paths, &server.id).await else {
@@ -780,6 +843,10 @@ async fn start_again(
     // Before anything is moved or pruned, because a start that is going to be
     // refused should leave the server exactly as it found it.
     refuse_if_the_port_is_taken(paths, &server).await?;
+
+    // And before the Java it needs is looked up, because installing is what
+    // records which Java that is.
+    install_if_the_software_is_gone(sink, paths, http, &mut server).await?;
 
     // While nothing is running, so the server never loads a mod that only
     // runs in players' games. Saved straight away, so the moves stay recorded
@@ -902,13 +969,11 @@ async fn spawn(
 
     let run = paths.server_run(&server.id);
     tokio::fs::create_dir_all(&run).await?;
-    // Whatever the launch actually depends on has to be there. An installed
-    // server whose files were deleted underneath it should say so here rather
-    // than as a wall of Java output.
-    let needed = match &server.launch {
-        LaunchKind::ArgFile(file) => file.clone(),
-        LaunchKind::Jar => server.jar.clone(),
-    };
+    // Whatever the launch actually depends on has to be there. By here the
+    // start has already offered to fetch it again, so anything still missing
+    // is a folder somebody emptied underneath a running Geode, and says so
+    // rather than arriving as a wall of Java output.
+    let needed = launch_target(server);
     if tokio::fs::metadata(run.join(&needed)).await.is_err() {
         return Err(Error::msg(format!(
             "{needed} is missing from the server folder — reinstall it"
@@ -1146,6 +1211,61 @@ mod tests {
         let mut s = Server::new("Test".into(), kind, "1.21.1".into());
         s.jar = "server.jar".into();
         s
+    }
+
+    /// The reinstall is only for software that is actually gone.
+    ///
+    /// It reaches the network, so firing it when the jar is sitting right
+    /// there would turn every start into a download — and a start that is
+    /// offline would stop working for a server that was perfectly installed.
+    #[tokio::test]
+    async fn a_server_whose_software_is_there_is_not_fetched_again() {
+        let scratch = Scratch::new("server-present-jar");
+        let paths = scratch.paths.clone();
+        let recorder = std::sync::Arc::new(crate::events::Recorder::default());
+        let sink: EventSink = recorder.clone();
+        let mut server = server(ServerKind::Paper);
+
+        let run = paths.server_run(&server.id);
+        tokio::fs::create_dir_all(&run).await.unwrap();
+        tokio::fs::write(run.join(&server.jar), "a jar").await.unwrap();
+
+        install_if_the_software_is_gone(&sink, &paths, &crate::net::client(), &mut server)
+            .await
+            .expect("nothing to do");
+        assert!(console_lines(&recorder).is_empty(), "it said something");
+    }
+
+    /// And a server that was never installed at all is left alone, so the
+    /// start refuses it in its own words rather than trying to guess what it
+    /// should have been.
+    #[tokio::test]
+    async fn a_server_that_was_never_installed_is_left_to_the_refusal() {
+        let scratch = Scratch::new("server-no-jar");
+        let paths = scratch.paths.clone();
+        let recorder = std::sync::Arc::new(crate::events::Recorder::default());
+        let sink: EventSink = recorder.clone();
+        let mut server = server(ServerKind::Paper);
+        server.jar = String::new();
+
+        install_if_the_software_is_gone(&sink, &paths, &crate::net::client(), &mut server)
+            .await
+            .expect("nothing to do");
+        assert!(console_lines(&recorder).is_empty());
+    }
+
+    /// What a start cannot do without depends on how the server launches:
+    /// modern Forge and NeoForge produce no runnable jar at all.
+    #[test]
+    fn what_a_start_needs_follows_how_the_server_launches() {
+        let mut jar = server(ServerKind::Paper);
+        jar.jar = "paper-26.3.jar".into();
+        assert_eq!(launch_target(&jar), "paper-26.3.jar");
+
+        let mut argfile = server(ServerKind::NeoForge);
+        argfile.jar = "leftover.jar".into();
+        argfile.launch = LaunchKind::ArgFile("libraries/neoforge/unix_args.txt".into());
+        assert_eq!(launch_target(&argfile), "libraries/neoforge/unix_args.txt");
     }
 
     /// A port something else holds is refused before the JVM is spawned.
