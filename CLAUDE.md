@@ -155,6 +155,15 @@ guessed when neither can answer.
 **Unit tests stay offline.** Anything needing the network is an `#[ignore]`d
 test in `src-tauri/tests/`.
 
+**A backup holds only what exists nowhere else.** The world, the configs, the
+plugin data, the player lists — not the server's own software. The jar,
+`libraries/` and `versions/` are 156 MB of a 165 MB Paper server and all of it
+is something Geode can ask for again, so `server/backup.rs` leaves them out
+and `server/run.rs` installs them again when a start finds them gone. That
+pair has to stay a pair: thinning the backup without the reinstall is a backup
+that restores to a server which will not boot. The same rule governs a pack —
+a mod that a provider can name travels as a reference, never as bytes.
+
 **A transfer deletes nothing until the other side is proved complete.** Moving
 a server (`server/transfer.rs`) is a copy that is verified *by content* — a
 per-file digest list written as the bundle's last entry, checked against what

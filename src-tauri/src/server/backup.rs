@@ -1,12 +1,13 @@
 //! Backing a server up, and putting it back.
 //!
-//! A backup is a zip of the server's run directory — the world, the configs,
-//! the plugins, everything it needs to be itself — kept beside the server
-//! rather than inside it, so a backup is never swept into the next backup.
+//! A backup is a zip of what only this machine has — the world, the configs,
+//! the plugin data, the player lists — kept beside the server rather than
+//! inside it, so a backup is never swept into the next backup.
 //!
-//! Logs and crash reports are left out. They are written afresh every run,
-//! they are the bulk of a long-lived server's folder, and nobody has ever
-//! restored one.
+//! Everything else is left out. Logs and crash reports are written afresh
+//! every run and nobody has ever restored one; the server's own software is
+//! something Geode can ask for again, and a start that finds it gone does
+//! exactly that. See [`fetchable_again`].
 //!
 //! A running server is asked to write its world out first. Minecraft holds a
 //! world open and only puts `level.dat` on disk at an autosave or a clean
