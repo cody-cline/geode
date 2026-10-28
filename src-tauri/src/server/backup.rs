@@ -30,6 +30,15 @@ use crate::server::run::ServerRegistry;
 /// Written every run and never worth restoring.
 const SKIP: &[&str] = &["logs", "crash-reports", "cache"];
 
+/// Directories that are only ever the installer's output.
+///
+/// `libraries/` is what the loader or the bundler downloaded, and `versions/`
+/// is the game the bundler extracted out of the server jar sitting beside it.
+/// Neither is ever the admin's own work, and both come back by asking the same
+/// place they came from the first time — which [`crate::server::run`] does by
+/// itself when a start finds the software gone.
+const FETCHABLE: &[&str] = &["libraries", "versions"];
+
 /// How long to let a running server write its world out before archiving it.
 const FLUSH_GRACE: Duration = Duration::from_secs(3);
 
@@ -74,6 +83,32 @@ pub fn to_prune(names: &[String], keep: usize) -> Vec<String> {
     sorted
 }
 
+/// Everything under this server's run directory that a backup leaves out.
+///
+/// A backup is for what only this machine has: the world, the configuration,
+/// the plugin data, the player lists. The bytes Geode can ask for again are
+/// not worth carrying — on a fresh Paper server they are 156 MB of 165 MB,
+/// and at ten kept backups that is the same jar ten times over.
+///
+/// Derived from the server rather than listed by name, because what is
+/// fetchable is a fact about how this one launches: its own jar or argument
+/// file is the thing a start reinstalls, and `libraries/` and `versions/` are
+/// what that install writes.
+fn fetchable_again(server: Option<&crate::server::Server>) -> Vec<String> {
+    let mut out: Vec<String> = SKIP.iter().map(|s| s.to_string()).collect();
+    // Only once there is a record saying how to fetch it again. A folder with
+    // no `server.json` beside it is backed up whole, because nothing can
+    // promise to put any of it back.
+    let Some(server) = server else {
+        return out;
+    };
+    out.extend(FETCHABLE.iter().map(|s| s.to_string()));
+    if !server.jar.is_empty() {
+        out.push(server.jar.clone());
+    }
+    out
+}
+
 /// Ask a running server to put its world on disk, and give it a moment to.
 ///
 /// `save-off` would give a cleaner snapshot, but a backup that died halfway
@@ -101,6 +136,10 @@ pub async fn create(
 
     flush_world(servers, id).await;
 
+    // Read rather than passed in: every caller already has the id and none of
+    // them should have to know what makes a file worth keeping.
+    let skip = fetchable_again(crate::server::load(paths, id).await.ok().as_ref());
+
     let dir = paths.server_backups(id);
     tokio::fs::create_dir_all(&dir).await?;
     let name = new_name();
@@ -125,7 +164,7 @@ pub async fn create(
                     continue;
                 };
                 let top = rel.components().next().and_then(|c| c.as_os_str().to_str());
-                if top.is_some_and(|t| SKIP.contains(&t)) {
+                if top.is_some_and(|t| skip.iter().any(|s| s == t)) {
                     continue;
                 }
                 if path.is_dir() {
@@ -344,6 +383,101 @@ mod tests {
             .to_string();
         assert_eq!(said, "no backup called 2026-01-01T00-00-00.zip");
         assert!(!said.contains("os error"), "{said}");
+    }
+
+    /// A backup carries what only this machine has, and nothing Geode can ask
+    /// for again.
+    ///
+    /// On a fresh Paper server the jar, `libraries/` and `versions/` are
+    /// 156 MB of 165 MB, and the irreplaceable part — world, plugins,
+    /// configs, player lists — is under 9 MB. At ten kept backups the old
+    /// behaviour stored the same server jar ten times.
+    #[tokio::test(start_paused = true)]
+    async fn a_backup_leaves_out_what_geode_can_fetch_again() {
+        use crate::server::ServerKind;
+
+        let scratch = crate::paths::Scratch::new("backup-thin");
+        let paths = scratch.paths.clone();
+        let mut server =
+            crate::server::Server::new("Survival".into(), ServerKind::Paper, "26.3".into());
+        server.jar = "paper-26.3.jar".into();
+        server.save(&paths).await.unwrap();
+
+        let run = paths.server_run(&server.id);
+        for dir in ["world", "plugins/MyPlugin", "libraries/net/x", "versions/26.3"] {
+            tokio::fs::create_dir_all(run.join(dir)).await.unwrap();
+        }
+        for (rel, body) in [
+            ("world/level.dat", "the world"),
+            ("plugins/MyPlugin/config.yml", "the admin's own"),
+            ("server.properties", "settings"),
+            ("ops.json", "[]"),
+            ("paper-26.3.jar", "fetchable"),
+            ("libraries/net/x/x.jar", "fetchable"),
+            ("versions/26.3/26.3.jar", "fetchable"),
+        ] {
+            tokio::fs::write(run.join(rel), body).await.unwrap();
+        }
+
+        let info = create(
+            &paths,
+            &crate::server::run::ServerRegistry::default(),
+            &server.id,
+            &Progress::silent("t"),
+        )
+        .await
+        .expect("a backup");
+
+        let held = entries(&paths.server_backups(&server.id).join(&info.name));
+        for kept in [
+            "world/level.dat",
+            "plugins/MyPlugin/config.yml",
+            "server.properties",
+            "ops.json",
+        ] {
+            assert!(held.contains(&kept.to_string()), "{kept} was dropped: {held:?}");
+        }
+        for dropped in [
+            "paper-26.3.jar",
+            "libraries/net/x/x.jar",
+            "versions/26.3/26.3.jar",
+        ] {
+            assert!(
+                !held.contains(&dropped.to_string()),
+                "{dropped} was carried: {held:?}"
+            );
+        }
+    }
+
+    /// With no record beside it there is nothing that could promise to fetch
+    /// any of it again, so the folder is carried whole.
+    #[tokio::test(start_paused = true)]
+    async fn a_folder_with_no_server_record_is_backed_up_whole() {
+        let scratch = crate::paths::Scratch::new("backup-orphan");
+        let paths = scratch.paths.clone();
+        let run = paths.server_run("stray");
+        tokio::fs::create_dir_all(run.join("libraries")).await.unwrap();
+        tokio::fs::write(run.join("libraries/x.jar"), "bytes").await.unwrap();
+
+        let info = create(
+            &paths,
+            &crate::server::run::ServerRegistry::default(),
+            "stray",
+            &Progress::silent("t"),
+        )
+        .await
+        .expect("a backup");
+        let held = entries(&paths.server_backups("stray").join(&info.name));
+        assert!(held.contains(&"libraries/x.jar".to_string()), "{held:?}");
+    }
+
+    /// Everything inside a backup, by entry name.
+    fn entries(archive: &std::path::Path) -> Vec<String> {
+        let file = std::fs::File::open(archive).unwrap();
+        let mut zip = zip::ZipArchive::new(file).unwrap();
+        (0..zip.len())
+            .map(|i| zip.by_index(i).unwrap().name().to_string())
+            .collect()
     }
 
     #[test]
