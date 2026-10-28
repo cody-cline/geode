@@ -11,6 +11,9 @@ services:
       context: ..
       dockerfile: container/Dockerfile
     image: geode/host
+    # Brings back the daemon and its listener. A server inside it comes back
+    # only if its own "Start it when a headless host starts" is on — nothing
+    # is restored on the strength of having happened to be running.
     restart: unless-stopped
 
     # `docker compose stop` sends SIGTERM and then, ten seconds later, SIGKILL.

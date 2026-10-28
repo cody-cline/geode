@@ -817,9 +817,10 @@ function BackupsPane({ server }: { server: Server }) {
         </div>
       ) : items.length === 0 ? (
         <p className={styles.pending}>
-          No backups yet. A backup is a zip of everything the server needs to be
-          itself — its world, configs and plugins — without the logs it writes
-          afresh every run.
+          No backups yet. A backup holds what exists nowhere else — the world,
+          the configs, the plugin data, who is whitelisted, opped and banned.
+          The server&apos;s own software is left out and fetched again when it
+          is needed, so a backup is small enough to keep a lot of.
         </p>
       ) : (
         <div className={styles.rows}>
@@ -1229,6 +1230,27 @@ function SettingsTab({ server }: { server: Server }) {
               <code>stop</code> in the console all leave it stopped. A server
               that keeps exiting without staying up is given up on after five
               tries, and the console says so.
+            </span>
+          </span>
+        </label>
+        <label className={styles.settingToggle}>
+          <input
+            type="checkbox"
+            checked={draft.startWithHost}
+            onChange={(e) =>
+              setDraft({ ...draft, startWithHost: e.target.checked })
+            }
+          />
+          <span>
+            <strong>Start it when a headless host starts</strong>
+            <span className={styles.settingWhy}>
+              For a server running on <code>geoded</code>: after a reboot, a
+              container restart or a crash of the machine itself, this server
+              comes back on its own. Nothing is assumed — a host does not
+              restore whatever happened to be running, because a server you
+              stopped a minute before the power went out should stay stopped.
+              This window ignores the setting: closing Geode stops its servers
+              on purpose.
             </span>
           </span>
         </label>

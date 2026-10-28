@@ -273,7 +273,13 @@ to ship `ops.json`.
   exits without being asked to is started again here exactly as in the app
   (`server/run.rs`), which is why that shutdown marks the registry closing
   before it asks anything to stop: a restart that raced a `docker stop` would
-  bring a server back with nothing left to watch it. Moving or copying a whole
+  bring a server back with nothing left to watch it. Coming *up*, the host
+  starts the servers whose `start_with_host` is on and no others — the switch
+  is asked for rather than inferred, because restoring whatever happened to be
+  running would also restore one stopped deliberately a minute before the
+  machine went down. The app ignores that setting entirely: opening Geode is
+  not a machine booting, and closing it stops its servers on purpose. Moving
+  or copying a whole
   server between the app and a host is `server/transfer.rs` with two routes in
   `daemon/api.rs`; its rules — verify by digest, delete nothing until the other
   side is proved complete, and what happens to the server's sharing — are at

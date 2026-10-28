@@ -265,6 +265,13 @@ export interface ServerSettings {
    * inside the server process.
    */
   readCommands: boolean;
+  /**
+   * Whether a headless host starts this server when it starts.
+   *
+   * Off by default, and asked for rather than inferred. The app ignores it:
+   * opening Geode is not the same event as a machine booting.
+   */
+  startWithHost: boolean;
 }
 
 /**

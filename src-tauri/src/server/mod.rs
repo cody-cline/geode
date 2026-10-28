@@ -229,6 +229,19 @@ pub struct ServerSettings {
     /// Geode puts its own code inside somebody else's server process, and
     /// "don't" is a reasonable thing to want to be able to say.
     pub read_commands: bool,
+    /// Start this server when a headless host starts.
+    ///
+    /// Off by default, and asked for rather than inferred: a host that
+    /// restored whatever happened to be running would also restore a server
+    /// stopped deliberately a moment before the machine went down, and would
+    /// decide for the admin which worlds are worth having online. The
+    /// container's `restart: unless-stopped` brings back the daemon; this is
+    /// what makes it bring back a server, and only one that was asked for.
+    ///
+    /// The app ignores it entirely. Opening Geode is not the same event as a
+    /// machine booting, and closing it stops its servers on purpose.
+    #[serde(default)]
+    pub start_with_host: bool,
 }
 
 impl Default for ServerSettings {
@@ -241,6 +254,7 @@ impl Default for ServerSettings {
             keep_logs: Some(20),
             keep_backups: Some(10),
             read_commands: true,
+            start_with_host: false,
         }
     }
 }

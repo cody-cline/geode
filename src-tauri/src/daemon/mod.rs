@@ -158,6 +158,10 @@ pub async fn run() -> Result<()> {
         ),
     );
 
+    // After the listener, so a server that takes a while to come up does not
+    // hold off the route that would let somebody ask what is going on.
+    start_the_ones_asked_for(&host).await;
+
     shutdown::asked_to_stop().await;
     // The ticker first, so nothing new starts while we are stopping — a
     // scheduled backup begun now would be racing the shutdown below for the
@@ -188,6 +192,39 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
+/// Start the servers whose owner asked for them to come back.
+///
+/// `restart: unless-stopped` in the compose file brings back the daemon and
+/// its listener, which is why a host could come up healthy — `/health`
+/// answering, the container green — with every world offline and nothing
+/// saying so. This is what makes that promise reach the servers.
+///
+/// Only the ones asked for, one switch at a time: a host that restored
+/// whatever happened to be running would also restore a server stopped
+/// deliberately a moment before the machine went down. Each failure is said
+/// and then stepped over, because one server that will not install is not a
+/// reason to leave the others down.
+async fn start_the_ones_asked_for(host: &Arc<Host>) {
+    let Ok(servers) = crate::server::list(&host.state.paths).await else {
+        return;
+    };
+    for server in servers.into_iter().filter(|s| s.settings.start_with_host) {
+        notice(&host.sink, format!("starting {} with the host", server.name));
+        if let Err(e) = crate::server::run::start(
+            &host.sink,
+            &host.state.paths,
+            &host.state.http,
+            &host.state.servers,
+            &server.id,
+            host.max_heap_mb,
+        )
+        .await
+        {
+            notice(&host.sink, format!("could not start {}: {e}", server.name));
+        }
+    }
+}
+
 /// Something the person running the host should see, said through the sink
 /// rather than printed — so it goes wherever events go.
 fn notice(sink: &EventSink, message: impl Into<String>) {
@@ -199,6 +236,62 @@ fn notice(sink: &EventSink, message: impl Into<String>) {
 
 #[cfg(test)]
 mod tests {
+    use crate::paths::Scratch;
+    use crate::server::ServerKind;
+
+    /// A host brings back the servers whose owner asked for it, and only
+    /// those.
+    ///
+    /// `restart: unless-stopped` restores the daemon and its listener, so a
+    /// host could come up with `/health` answering, the container green, and
+    /// every world offline with nothing saying why. It is deliberately not
+    /// "whatever was running": a server stopped a minute before the power went
+    /// out should stay stopped, and which worlds are worth having online is
+    /// the admin's call rather than an inference.
+    #[tokio::test]
+    async fn a_host_starts_the_servers_that_asked_to_come_back() {
+        let scratch = Scratch::new("daemon-autostart");
+        let paths = scratch.paths.clone();
+
+        let mut wanted =
+            crate::server::create(&paths, "Survival".into(), ServerKind::Paper, "1.21.1".into())
+                .await
+                .unwrap();
+        wanted.settings.start_with_host = true;
+        wanted.save(&paths).await.unwrap();
+
+        // Left alone, and named differently so the console can be read.
+        crate::server::create(&paths, "Creative".into(), ServerKind::Paper, "1.21.1".into())
+            .await
+            .unwrap();
+
+        let host = super::serve::tests::host(&scratch);
+        let mut lines = host.console.subscribe();
+        super::start_the_ones_asked_for(&host).await;
+
+        let mut said = Vec::new();
+        while let Ok(event) = lines.try_recv() {
+            if let Some(line) = event.payload.get("message").and_then(|v| v.as_str()) {
+                said.push(line.to_string());
+            }
+        }
+        let all = said.join(" | ");
+        assert!(
+            all.contains("starting Survival with the host"),
+            "the server that asked was not started: {all}"
+        );
+        assert!(
+            !all.contains("Creative"),
+            "a server that did not ask was started: {all}"
+        );
+        // Neither has a jar, so the one that was asked for fails — and says
+        // so rather than taking the host down with it.
+        assert!(
+            all.contains("could not start Survival"),
+            "a failure must be said, not swallowed: {all}"
+        );
+    }
+
     /// Nothing that compiles the desktop app compiles this module.
     ///
     /// Tauri is behind the `desktop` feature and hands the default build
