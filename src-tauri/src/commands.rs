@@ -3380,6 +3380,18 @@ pub async fn add_offline_account(
     state: State<'_, AppState>,
     username: String,
 ) -> Result<AccountView> {
+    let mut file = AccountsFile::load(&state.paths).await?;
+    // Asked before the name is, because "pick a shorter name" is no use to
+    // somebody who cannot add this account at all.
+    if !file.owns_the_game() {
+        return Err(Error::msg(
+            "Add a Microsoft account first. An offline account plays a copy of \
+             Minecraft you already own, so Geode asks once who owns it — \
+             signing in with Microsoft does it, and so does importing a \
+             session from another launcher on this machine.",
+        ));
+    }
+
     let username = username.trim().to_string();
     // Mojang's own rules for a Java username; rejecting here beats a confusing
     // failure once the game is already running.
@@ -3393,7 +3405,6 @@ pub async fn add_offline_account(
         return Err(Error::msg("usernames may only use letters, digits and _"));
     }
 
-    let mut file = AccountsFile::load(&state.paths).await?;
     let account = Account::offline(username);
     let id = account.id.clone();
     file.upsert(account);

@@ -142,6 +142,30 @@ impl AccountsFile {
             .collect()
     }
 
+    /// Whether this install has an account that has proved it owns Minecraft:
+    /// Java Edition.
+    ///
+    /// Two kinds qualify, and both were checked against Minecraft itself
+    /// rather than taken on trust: a Microsoft sign-in is refused with
+    /// [`crate::error::Error::NoEntitlement`] when the store holds no Java
+    /// licence, and an imported session is only accepted once
+    /// `minecraft/profile` answered for it, which it does not for an account
+    /// without the game.
+    ///
+    /// This is what an offline account is allowed behind. An offline account
+    /// exists to play a copy you already own — single-player, or a LAN or
+    /// private server with authentication off — and not to play without
+    /// owning one. Mojang's rule for any launcher that talks to their APIs is
+    /// that ownership is verified before gameplay "regardless of server
+    /// configuration", so the check cannot live in the server's settings; it
+    /// has to be here. Asked once per install, which is the shape Prism
+    /// Launcher settled on for the same reason.
+    pub fn owns_the_game(&self) -> bool {
+        self.accounts
+            .iter()
+            .any(|a| matches!(a.kind, AccountKind::Microsoft | AccountKind::Imported))
+    }
+
     pub fn active_account(&self) -> Option<&Account> {
         let id = self.active.as_deref()?;
         self.accounts.iter().find(|a| a.id == id)
@@ -305,6 +329,60 @@ pub fn dash_uuid(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn with(kinds: &[AccountKind]) -> AccountsFile {
+        let mut file = AccountsFile::default();
+        for (n, kind) in kinds.iter().enumerate() {
+            let mut account = Account::offline(format!("Player{n}"));
+            account.kind = *kind;
+            file.upsert(account);
+        }
+        file
+    }
+
+    /// An offline account plays a copy you already own, so something on this
+    /// install has to have proved that once. Nothing has, on a fresh one.
+    #[test]
+    fn a_fresh_install_owns_nothing() {
+        assert!(!AccountsFile::default().owns_the_game());
+    }
+
+    /// The case the rule is actually about: offline accounts cannot vouch for
+    /// each other, or the check would be one click away from meaning nothing.
+    #[test]
+    fn offline_accounts_do_not_prove_ownership_between_themselves() {
+        assert!(!with(&[AccountKind::Offline, AccountKind::Offline]).owns_the_game());
+    }
+
+    /// Microsoft sign-in is refused without a Java entitlement, so reaching
+    /// the accounts file at all is the proof.
+    #[test]
+    fn a_microsoft_account_proves_it() {
+        assert!(with(&[AccountKind::Microsoft]).owns_the_game());
+    }
+
+    /// And an imported session, which Minecraft answered a profile for — the
+    /// route that works while an application id is still unapproved.
+    #[test]
+    fn an_imported_session_proves_it_too() {
+        assert!(with(&[AccountKind::Imported]).owns_the_game());
+    }
+
+    /// Removing the owner closes the gate again, rather than leaving an
+    /// install permanently unlocked by an account that is no longer there.
+    #[test]
+    fn taking_the_owning_account_away_closes_it_again() {
+        let mut file = with(&[AccountKind::Microsoft, AccountKind::Offline]);
+        let owner = file
+            .accounts
+            .iter()
+            .find(|a| a.kind == AccountKind::Microsoft)
+            .map(|a| a.id.clone())
+            .expect("the owning account is there");
+        assert!(file.owns_the_game());
+        file.remove(&owner);
+        assert!(!file.owns_the_game());
+    }
 
     #[test]
     fn dashes_undashed_uuid() {

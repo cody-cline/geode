@@ -38,6 +38,15 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
   const [scanning, setScanning] = useState(true);
   const [importing, setImporting] = useState<string | null>(null);
 
+  // An offline account plays a copy you already own, so one account here has
+  // to have proved that: a Microsoft sign-in, which Minecraft refuses without
+  // a Java entitlement, or an imported session, which it answered a profile
+  // for. `add_offline_account` enforces the same rule — this is so the reason
+  // is on screen rather than arriving as an error after typing a name.
+  const ownsTheGame = accounts.some(
+    (a) => a.kind === "microsoft" || a.kind === "imported",
+  );
+
   // Scan on open. It is a handful of file reads plus one API call per token,
   // and finding an existing session is the answer for most people.
   const rescan = useCallback(async () => {
@@ -384,20 +393,22 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
             placeholder="Username"
             value={offlineName}
             maxLength={16}
+            disabled={!ownsTheGame}
             onChange={(e) => setOfflineName(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && addOffline()}
           />
           <button
             className="btn"
             onClick={addOffline}
-            disabled={!offlineName.trim() || addingOffline}
+            disabled={!ownsTheGame || !offlineName.trim() || addingOffline}
           >
             Add
           </button>
         </div>
         <p className="hint">
-          Offline accounts work for single-player and LAN. Servers with online
-          mode enabled will reject them.
+          {ownsTheGame
+            ? "Offline accounts work for single-player and LAN. Servers with online mode enabled will reject them."
+            : "Add a Microsoft account first — signing in, or importing a session from another launcher, both count. An offline account plays a copy of Minecraft you already own, so Geode asks once who owns it."}
         </p>
       </div>
     </Modal>
