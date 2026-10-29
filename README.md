@@ -1,427 +1,122 @@
 <div align="center">
 
-<img src="src-tauri/icons/128x128.png" width="88" alt="">
+<img src="src-tauri/icons/128x128.png" width="96" alt="">
 
 # Geode
 
-**A fast, native Minecraft launcher and server manager.**
+**A fast, native Minecraft launcher — with a full server manager built in.**
 
-Most launchers stop at the client. Geode installs the server too — runs it,
-keeps its backups, manages who is allowed on, and hands your players a matching
-instance in a single link.
+Play your instances. Run your server. Hand your friends a link that sets up
+both.
 
 </div>
 
 ---
 
-Geode manages Minecraft instances, installs mods from Modrinth and CurseForge
-in one combined list, and launches the game directly — no official launcher in
-the middle. It installs and runs servers too, from the same content list. It's a
-Tauri app: a Rust core doing the downloading, patching and process work, and a
-React frontend that stays out of the way.
+## Features
 
-The release binary is **7.3 MB**, because the UI runs in the webview your OS
-already ships rather than a bundled copy of Chromium. Measured idle memory is
-**~170 MB PSS** across the main and WebKit processes (Linux, software
-rendering — a real GPU should do better, but that hasn't been measured).
+**Instances**
+
+- Unlimited instances, each with its own version, loader, mods, configs and worlds
+- Vanilla, Fabric, Quilt, NeoForge and Forge (1.13+)
+- Versions, libraries, assets and Java runtimes shared between instances
+- Java detected automatically, and downloaded when nothing on the system fits
+- Per-instance memory, JVM flags, environment variables and wrapper commands
+- Groups, icons, duplication, and a log viewer that reads Minecraft's log4j stream
+
+**Mods**
+
+- Modrinth, CurseForge and SpigotMC in one search, filtered to your version and loader
+- Dependencies resolved automatically
+- Update checking that still works months later
+- Hand-dropped jars recognised by reading the jar
+
+**Servers**
+
+- Fourteen kinds: Paper, Purpur, Folia, Spigot, Vanilla, Fabric, Quilt, NeoForge, Forge, Mohist, Arclight, Banner, Velocity, Waterfall
+- Live console with working input, so `stop` is graceful
+- Scheduled backups and timed commands
+- `server.properties` in plain words
+- Whitelist, ops and bans, with command completion read from the running server
+- Runs headless in Docker, with no desktop at all
+
+**Sharing**
+
+- Export a `.geodepack` — other launchers read it as a normal `.mrpack`
+- Or share a server: players open one link and get a matching instance, kept up to date
+- Goes straight from your machine to theirs over TLS, with no middleman
+
+**Plans**
+
+- Collect mods first, pick a version later — Geode works out which loader and version can run all of them
 
 ## How it compares
-
-Geode is a client launcher that also runs servers. That is the whole
-difference; most of the rest is table stakes.
 
 | | Geode | Prism | ATLauncher | Modrinth | CurseForge |
 |---|:---:|:---:|:---:|:---:|:---:|
 | Modrinth **and** CurseForge in one search | ✅ | ✅ | ✅ | ❌ | ❌ |
-| Spigot and Paper **plugins** | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Installs a Minecraft server | ✅ | ❌ | ✅ | ❌ <sup>1</sup> | ❌ |
-| Runs it, with a two-way console | ✅ | ❌ | ❌ <sup>2</sup> | ❌ | ❌ |
-| Backups, and commands on a timer | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Whitelist, ops and bans from the app | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Runs headless, with no desktop at all | ✅ | ❌ | ❌ | ❌ | ❌ |
-| A mod list with no version picked yet | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Serves its players the pack directly | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Microsoft sign-in out of the box | ❌ <sup>3</sup> | ✅ | ✅ | ✅ | ✅ |
-| Tested on Windows and macOS | ❌ | ✅ | ✅ | ✅ | ✅ |
-| Years of people relying on it | ❌ | ✅ | ✅ | ✅ | ✅ |
+| Spigot and Paper plugins | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Installs a Minecraft server | ✅ | ❌ | ✅ | ❌ | ❌ |
+| Runs it, with a live console | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Backups and timed commands | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Whitelist, ops and bans in-app | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Runs headless, no desktop | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Mod lists with no version picked | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Sends players the pack directly | ✅ | ❌ | ❌ | ❌ | ❌ |
 
-<sup>1</sup> Modrinth sells hosted servers and you can buy one from inside the
-app; it does not install one on your own machine.
-<sup>2</sup> ATLauncher writes the server files. Starting it, watching it and
-keeping it alive are yours to do, outside the launcher.
-<sup>3</sup> Not a missing feature — see
-[Accounts](#accounts-and-curseforge). Mojang reviews every launcher's
-application ID by hand before it may sign anyone in, and Geode's is in that
-queue. Until it clears, Geode borrows a session from a launcher you already
-use, which needs no ID at all.
+ATLauncher writes server files; starting and managing the server is yours to do.
+Modrinth sells hosted servers rather than installing one on your machine.
 
-The last three rows are the honest ones. Prism, ATLauncher, the Modrinth app
-and CurseForge are mature, translated, and have been run by a lot of people on
-every platform; Geode has not. Checked October 2026 — if something here is
-wrong or has gone stale, please open an issue. A comparison table that quietly
-rots is worse than none.
+## Install
 
-## What it does
+Linux — AppImage, `.deb` and `.rpm` on the [releases page](https://github.com/littlesquirt1/geode/releases).
 
-**Instances.** As many as you want, each with its own version, loader, mods,
-configs and worlds. Minecraft versions, libraries, assets and Java runtimes are
-shared between them, so a second 1.21 instance costs a few megabytes, not a few
-hundred. Group them, duplicate them, give them emoji, set per-instance memory
-and JVM flags, or leave everything inheriting the global defaults.
+Windows and macOS builds are produced but have not been tested yet. See
+[docs/releasing.md](docs/releasing.md).
 
-**Every loader.** Vanilla, Fabric, Quilt, NeoForge and Forge (1.13+). Fabric
-and Quilt come from their meta APIs. NeoForge and Forge don't publish a
-ready-made launch profile — Geode runs their installer's patch processors
-locally, the same way the official installer does.
+## Build
 
-**Mods, from both platforms at once.** Search returns one merged list with
-source badges, scoped to the target instance so everything shown actually fits
-its version and loader. Required dependencies resolve automatically. Optional
-ones don't — that's the author saying "works well with", not "needs".
-Everything installed is tracked, so *Check updates* works even months later.
-Jars you drop in by hand still show up, with names read out of the jar itself.
-
-**Real launching.** Online play without registering anything: Geode can adopt a
-session from Prism, MultiMC, ATLauncher or the official launcher if one is
-already signed in here. Failing that, Microsoft device-code sign-in with your
-own Azure ID. Offline accounts cover single-player and LAN, once one account on
-the install has shown it owns the game. Java is detected
-across every layout distros use, and a matching Temurin runtime is downloaded
-automatically when nothing on the system fits. The console parses Minecraft's log4j XML stream back into levelled,
-filterable, searchable entries instead of a wall of markup.
-
-**Modpacks.** Import `.mrpack` and CurseForge zips. Export `.mrpack` — Modrinth
-content is linked rather than copied, so packs stay small.
-
-**Servers.** Fourteen kinds: Paper, Purpur, Folia, Spigot, Vanilla, Fabric,
-Quilt, NeoForge, Forge, the hybrids Mohist, Arclight and Banner, and the
-Velocity and Waterfall proxies. Geode finds the build, runs the installer where
-there is one, and drives BuildTools for Spigot — which cannot legally be
-redistributed as a jar, so it is compiled locally, Git and all. The console is
-two-way: stdin stays open, so `stop` is graceful rather than a kill. Plus
-backups and commands on a timer, `server.properties` explained in words instead
-of keys, plugins and mods each in the folder they belong in, and command
-completion that knows what the installed mods and plugins actually registered —
-read from inside the JVM by a small Java agent, with nobody joining the world.
-
-**Plans.** A plan is a mod list with no Minecraft version and no loader
-attached. You collect what you want to play with; the resolver works out
-afterwards which pair can actually run all of it — preferring Fabric, then
-NeoForge, then Forge, and using Sinytra Connector where a mod has no native
-build. The same plan can be built more than once, at different versions, as an
-instance or as a server.
-
-**Logs, and something to paste when you ask for help.** Old logs stay readable
-inside the app — Minecraft gzips yesterday's, and Geode reads those back rather
-than making you find them — and the oldest are pruned so a long-lived server
-does not fill a disk with its own history. One button copies the log *plus* what
-is installed, the loader and version, and any crash report, under a prompt
-asking for the cause: a stack trace alone rarely explains anything, and the mod
-list is what turns it into a diagnosis.
-
-**Sharing, two ways.** Export a `.geodepack`: a `.mrpack` with one extra
-directory, so other launchers still read it correctly and Geode gets the things
-`.mrpack` has nowhere to put — artwork, memory settings, per-file notes. Content
-that exists on a provider travels as a reference rather than a copy, which keeps
-a pack in single digits of megabytes and means each recipient fetches from the
-author's own source with their own credentials.
-
-Or share a server with the people who play on it. The admin copies a
-`geode://join` link, a player opens it, and their Geode builds a matching
-instance — client mods and all, server-only jars left behind — then keeps it in
-step, bringing it up to date before Play starts the game. It goes straight from
-the admin's machine over TLS, with no third party in the middle: players already
-need the server's address to join, so there is nothing to gain by routing the
-pack elsewhere. The link carries the certificate's fingerprint, so a player's
-Geode talks to that machine and no other, and Geode asks the router for the port
-itself — on a lease, so a crash cannot leave a hole in somebody's firewall.
-
-## Status
-
-Working and verified end to end. Every combination below was installed from
-scratch and run until it reached the render loop:
-
-| Minecraft | Loader | |
-|---|---|---|
-| 1.21.1 | Vanilla | ✅ |
-| 1.21.1 | Fabric 0.19.4 | ✅ |
-| 1.21.1 | Quilt 0.20.0-beta.9 | ✅ |
-| 1.21.1 | NeoForge 21.1.248 | ✅ |
-| 1.21.1 | Forge 52.1.16 | ✅ |
-| 1.20.1 | Forge 47.4.23 | ✅ *(auto-installed Java 17)* |
-| 1.12.2 | Vanilla | ✅ *(auto-installed Java 8)* |
-
-Linux is the only platform tested so far. The code paths for macOS and Windows
-are written and rule evaluation is exercised by unit tests, but neither has
-been run.
-
-CI builds all three — a Windows installer and a universal macOS dmg alongside
-the Linux packages. It checks Linux on every push, and all three when a release
-is asked for or the workflow is run by hand; a Windows minute is billed at two
-and a macOS minute at ten, so the other two are paid for deliberately rather
-than on every commit.
-
-Even a green run there is a weaker statement than it looks: it would mean the
-code compiles, the offline tests pass and an installer comes out, not that
-anybody has launched Geode on Windows or macOS. Nothing on either has signed
-into Microsoft, started a JVM, or clicked a `geode://` link.
-
-And those runs are not green today. About a dozen tests fail on each, nearly
-all in one family: binding a port that is already held succeeds on Windows and
-macOS where it fails on Linux, so everything that reports a port as taken is
-untrustworthy there. A couple more are filename encoding. They are real
-findings about real platform differences, they are known, and they are not
-fixed yet. See [docs/releasing.md](docs/releasing.md).
-
-## Building
-
-Needs Rust, Node 20+, and the usual Tauri Linux dependencies
-(`webkit2gtk4.1-devel`, `libsoup3-devel`, `gtk3-devel`).
+Needs Rust and Node 20+. On Linux also `webkit2gtk4.1-devel`, `libsoup3-devel`
+and `gtk3-devel`.
 
 ```bash
 npm install
-npm run tauri dev
+npm run tauri dev      # run it
+npm run tauri build    # AppImage, deb, rpm
 ```
 
-For a release build:
-
-```bash
-npm run tauri build
-```
-
-That produces the AppImage, deb and rpm. The Windows and macOS bundles come
-from `tauri.windows.conf.json` and `tauri.macos.conf.json`, which Tauri merges
-over `tauri.conf.json` on their own platforms, and are built by CI when a
-release is asked for — see [docs/releasing.md](docs/releasing.md). No API key
-is needed to build any of them.
-
-Everything Geode owns lives in `~/.local/share/geode` (override with
-`GEODE_HOME`). Deleting that directory resets it completely.
-
-### NVIDIA on Wayland
-
-WebKitGTK's DMABUF renderer aborts on the NVIDIA proprietary driver under
-Wayland, killing the process before the window appears:
-
-```text
-Gdk-Message: Error 71 (Protocol error) dispatching to Wayland display.
-```
-
-Geode detects that combination at startup and sets
-`WEBKIT_DISABLE_DMABUF_RENDERER=1` for itself, so there is nothing to configure.
-It stays on native Wayland — forcing `GDK_BACKEND=x11` would also work but gives
-up correct HiDPI and fractional scaling. Set the variable yourself to override
-the detection in either direction.
-
-The failure is a race: GDK connects successfully and only errors later during
-dispatch, so it can appear intermittent. Forcing `GDK_BACKEND=wayland`
-reproduces it reliably.
-
-## Accounts and CurseForge
-
-Modrinth works out of the box, and so does playing online, as long as something
-else on this machine is already signed in. Both limits below come from other
-people's terms, not from missing work.
-
-### Online play — the easy way, and the thorough way
-
-**Easy: import a session from a launcher you already use.** If Prism, MultiMC,
-ATLauncher or the official launcher is signed in on this machine, open
-*Accounts* and Geode offers to use that session. No Azure, no forms, nothing to
-register.
-
-That works because the Minecraft access token belongs to *your account*, not to
-the launcher that fetched it. Geode takes only that token — never the other
-launcher's client ID or refresh token, since renewing with someone else's
-application registration would be impersonating their app.
-
-The trade-off: Geode can't renew what it didn't issue. A session lasts around a
-day. When it lapses, open the other launcher once — it refreshes on start — and
-Geode picks the new token up on its own. If a scan finds nothing, it tells you
-which of the two cases you're in: no account signed in, or a session that has
-expired.
-
-**Thorough: your own Azure client ID.** Only needed if you want Geode standing
-on its own with no other launcher installed. Microsoft issues client IDs per
-application and Mojang separately approves each one for Minecraft API access, so
-there is no shared ID to ship.
-
-1. Register an app in the [Azure portal](https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade) — public client, no secret. The name may not contain *Minecraft*, *Mojang*, *Microsoft*, *Live*, *Xbox*, *Discord* or *Hypixel*.
-2. Turn on **Allow public client flows** so the device-code grant works.
-3. Apply at [aka.ms/mce-reviewappid](https://aka.ms/mce-reviewappid) and wait.
-4. Paste the Application (client) ID into *Settings → Accounts*.
-
-Or bake it in at build time with `GEODE_CLIENT_ID=... npm run tauri build`.
-
-**Step 3 is not a formality.** Mojang keeps an allow list and adds every new
-application to it by hand, in weekly batches, with no stated timeline and no
-appeal. Until yours is on it, sign-in walks the whole chain correctly and then
-stops with `403` at the last step — which is Mojang's answer, not a mistake in
-the three steps above. Geode says so in those words when it happens.
-
-**Offline accounts** cover single-player, LAN, and servers with authentication
-off — but only once one account on this install has proved it owns Minecraft:
-Java Edition. A Microsoft sign-in does that, and so does an imported session.
-An offline account is for playing a copy you own; it is not a way to play
-without one, and Mojang's rules for any launcher touching their APIs say the
-check belongs here rather than in a server's settings.
-
-### Sharing a pack through Google Drive needs your own Google client
-
-Handing somebody a `.geodepack` file still works with none of this, and is
-still the simplest thing: export it, send the file. Drive is for the case the
-file is awkward — you are not in the same room, and your laptop will be shut
-when they get round to installing it.
-
-Connected, *Share to Drive* on an instance exports the pack, uploads it to a
-folder of its own in **your** Drive, makes that one file readable by anyone with
-the link, and hands you a message to paste: a `geode://` link for people who
-have Geode, and the plain Drive link in the body for people who do not.
-Opening the `geode://` link downloads the pack, checks it against the
-fingerprint the link carries, shows what is in it, and installs it only when
-the person says so.
-
-Google issues OAuth client IDs per application, so there is no shared ID to
-ship — the same position as the Azure ID above and the CurseForge key below.
-
-1. Create a project at the [Google Cloud console](https://console.cloud.google.com/).
-2. *APIs & Services → Library →* **Google Drive API** *→ Enable*.
-3. *Google Auth Platform → Audience*: user type **External**, then press
-   **Publish app**.
-4. *Data access*: add the scope `https://www.googleapis.com/auth/drive.file`.
-   It is a non-sensitive scope, so there is nothing to submit for review.
-5. *Clients → Create client →* application type **Desktop app**.
-6. Paste the Client ID into *Settings → Google Drive*.
-
-Or bake it in at build time with `GEODE_GOOGLE_CLIENT_ID=... npm run tauri build`.
-
-**Do not skip step 3.** While the app's publishing status is Testing, Google
-expires every authorization seven days after it is given, and the connection
-then stops working for no visible reason. Publishing your own client needs no
-review for this scope; you will see Google's "unverified app" screen once,
-which is expected for a client you made yourself.
-
-Two things worth knowing before you use it:
-
-- **Geode asks for one scope, `drive.file`, which reaches only files Geode
-  itself created.** It cannot see the rest of your Drive. Google classes that
-  scope as non-sensitive for exactly this reason.
-- **Anyone with the link can download the pack**, and that cannot be taken back
-  from anyone who already has it. Deleting the file in Drive is what stops the
-  link working. Geode says so where the link is made, and in the message
-  itself.
-- Geode does not need the client secret. A Desktop app is a public client and
-  Google's own parameter tables mark it optional. There is a field for one in
-  case connecting fails with `invalid_client`.
-
-### CurseForge needs your own API key
-
-CurseForge issues keys per developer and their terms state a key is
-non-transferable and must not be disclosed to third parties. Get a free key from
-the [CurseForge console](https://console.curseforge.com/) and paste it into
-*Settings → Mod sources*.
-
-Two shortcuts, depending on what you are doing:
-
-- **Private build?** There is no third party, so compile your key in and stop
-  pasting it. Copy `.env.example` to `.env` and fill it in:
-
-  ```bash
-  cp .env.example .env
-  # GEODE_CURSEFORGE_KEY=$2a$10$your-key-here
-  npm run tauri build
-  ```
-
-  `.env` is gitignored, and editing it triggers a rebuild. Settings will show
-  "Enabled (compiled in)". Distribute that binary and the clause applies again.
-
-  **Quote it if you use the command line instead.** CurseForge keys are
-  bcrypt-format (`$2a$10$…`), so an unquoted shell assignment expands `$2a` and
-  `$10` to nothing and bakes in a mangled key:
-
-  ```bash
-  GEODE_CURSEFORGE_KEY='$2a$10$...' npm run tauri build   # single quotes
-  ```
-
-  The `.env` file has no such problem — it is read directly, never by a shell.
-  *Settings → Mod sources → Test* reports which case you are in.
-- **Curious what others do?** Prism, PolyMC and most open-source launchers ship
-  a shared key in their binaries. It was raised as a ToS violation in
-  [PrismLauncher#263](https://github.com/PrismLauncher/PrismLauncher/issues/263)
-  and closed as not planned. Geode doesn't copy that by default — see
-  [docs/mod-databases.md](docs/mod-databases.md).
-
-Note that some authors disable third-party downloads for their projects. Geode
-shows those with a **Manual** badge and links to the project page rather than
-reconstructing the CDN URL — that setting is the author's call.
-
-See [docs/mod-databases.md](docs/mod-databases.md) for why it works this way,
-and what else was evaluated.
-
-## Layout
-
-```
-src/                    React frontend
-  components/           Sidebar, modals, cards, the project drawer
-  views/                Library, Browse, Servers, Plans, Settings, and the tabs
-  lib/                  Typed IPC wrappers, store, formatting
-
-src-tauri/src/
-  commands.rs           The IPC surface: 114 of the 115 thin commands
-  meta/                 Version manifests; Fabric/Quilt/Forge resolution
-  install/              Download engine, assets, natives, content installs
-  launch/               Argument templating, process control, log4j parsing
-  auth/                 MSA → Xbox Live → XSTS → Minecraft, token storage
-  providers/            Modrinth, CurseForge, SpigotMC, and the federated merge
-  instance/             Instance CRUD, content tracking, modpack import/export
-  server/               Server software, console, backups, schedules, the probe
-  plan/                 Versionless mod lists and the loader/version resolver
-  share/                .geodepack export/import and share codes
-  events.rs             Where the library reports to, so it needs no window
-
-agent/                  The Java command probe (built into a committed jar)
-container/              Headless hosting image — written, not yet built
-docs/                   Architecture and design notes
-```
-
-[docs/architecture.md](docs/architecture.md) is the guided version of that, and
-[CLAUDE.md](CLAUDE.md) is the short brief for anyone — or anything — making a
-change here.
+Everything Geode owns lives in `~/.local/share/geode`. Set `GEODE_HOME` to put
+it elsewhere; delete it to reset.
 
 ## Tests
 
 ```bash
-npm test                                            # node --test, the frontend's own
-cargo test --manifest-path src-tauri/Cargo.toml     # unit tests, no network
-
-# Against the real APIs. Eight files: metadata, install, launch, server, plan,
-# plugins, sides and spiget — 42 tests, every one #[ignore]d.
-cargo test --manifest-path src-tauri/Cargo.toml --test live_metadata -- --ignored --nocapture
-
-# Full install-and-launch. Downloads a lot; runs the game under Xvfb.
-GEODE_HOME=/tmp/geode-e2e GEODE_TEST_VERSION=1.21.1 GEODE_TEST_LOADER=fabric \
-  cargo test --manifest-path src-tauri/Cargo.toml --test live_launch -- --ignored --nocapture
+npm test                                          # frontend
+cargo test --manifest-path src-tauri/Cargo.toml   # Rust, offline
 ```
 
-Two of the integration test files need no network and so run in the ordinary
-pass: `backup_roundtrip.rs` writes real zips and restores them across five
-tests, and `header_wire_format.rs` binds a socket to prove a bcrypt CurseForge
-key reaches the wire unmangled.
+Tests that hit real APIs are `#[ignore]`d and live in `src-tauri/tests/`.
 
-The live tests exist because the parts most likely to break are the ones nobody
-here controls. They've already earned their keep: the launch test caught
-NeoForge and Forge failing to start, because both pass
-`-DignoreList=client-extra,${version_name}.jar` to keep the unpatched client
-jar out of the module layer — and that match is on the *filename*. Geode's
-shared jar was named after the Minecraft version, so it was never excluded and
-collided with the loader's patched `minecraft` module.
+## Docs
 
-## Licence
+- [docs/architecture.md](docs/architecture.md) — module map, IPC, event flow
+- [docs/sharing-and-hosting.md](docs/sharing-and-hosting.md) — the pack format
+- [docs/mod-databases.md](docs/mod-databases.md) — why search is federated
+- [docs/releasing.md](docs/releasing.md) — what CI builds, and what that proves
+- [agent/README.md](agent/README.md) — the server command probe
+
+## Built with
+
+[Tauri](https://tauri.app) · [Rust](https://www.rust-lang.org) ·
+[React](https://react.dev). Mod metadata from
+[Modrinth](https://modrinth.com), [CurseForge](https://curseforge.com) and
+[SpigotMC](https://spigotmc.org).
+
+---
 
 **NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG
 OR MICROSOFT.**
 
-Not affiliated with Mojang, Microsoft, Modrinth, CurseForge or SpigotMC.
-Minecraft is a trademark of Mojang AB. Geode ships no game files: Minecraft,
-its libraries and its assets are downloaded from Mojang's own servers, and mods
-from the author's own provider under that provider's terms.
+Minecraft is a trademark of Mojang AB. Geode ships no game files — Minecraft,
+its libraries and its assets come from Mojang's own servers, and mods from each
+author's own provider.
