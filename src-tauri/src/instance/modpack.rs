@@ -1239,6 +1239,8 @@ pub async fn import_into_at(
             instance.overrides.java_args = prism_instance.overrides.java_args;
             instance.overrides.width = prism_instance.overrides.width;
             instance.overrides.height = prism_instance.overrides.height;
+            instance.overrides.env = prism_instance.overrides.env;
+            instance.overrides.wrapper_command = prism_instance.overrides.wrapper_command;
 
             progress.stage("Reading the instance's index", 1).await;
             instance

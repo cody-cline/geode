@@ -52,6 +52,13 @@ export interface InstanceOverrides {
   preLaunchCommand?: string | null;
   postExitCommand?: string | null;
   quickPlayServer?: string | null;
+  /**
+   * Environment variables for the game's own process, added to the ones Geode
+   * itself was started with rather than replacing them.
+   */
+  env?: Record<string, string>;
+  /** A command to run the game through — `gamemoderun`, `mangohud`. */
+  wrapperCommand?: string | null;
 }
 
 export interface PackSource {

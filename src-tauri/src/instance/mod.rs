@@ -30,6 +30,26 @@ pub struct InstanceOverrides {
     pub post_exit_command: Option<String>,
     /// Connect straight to a server on launch.
     pub quick_play_server: Option<String>,
+    /// Environment variables for the game's own process.
+    ///
+    /// The JVM is spawned with whatever Geode itself was started with, which
+    /// is almost never what a particular instance wants: a driver override, a
+    /// Wayland or X11 choice, a Mesa toggle. Without somewhere to put them
+    /// the only way to pass one was to start the whole launcher with it.
+    ///
+    /// A `BTreeMap` so a saved instance round-trips in a stable order rather
+    /// than reshuffling its own file on every write.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// A command to run the game through — `gamemoderun`, `mangohud`,
+    /// `prime-run`.
+    ///
+    /// Prefixed to the Java command rather than handed to a shell: this is
+    /// one program with arguments, and a shell here would make every
+    /// character of it meaningful for no gain. The hooks above are the place
+    /// where a shell is the point.
+    #[serde(default)]
+    pub wrapper_command: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

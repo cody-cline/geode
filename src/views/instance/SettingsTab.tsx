@@ -37,6 +37,29 @@ function textOrNull(value: string): string | null {
   return trimmed === "" ? null : trimmed;
 }
 
+/** The environment as a textarea shows it: one `NAME=value` per line. */
+function envToText(env: Record<string, string> | undefined): string {
+  return Object.entries(env ?? {})
+    .map(([name, value]) => `${name}=${value}`)
+    .join("\n");
+}
+
+/**
+ * And back again. Split on the first `=` only, since a value may hold more of
+ * them — `SDL_LOGGING=video=verbose` is a real one. A line without an `=` is
+ * not a variable yet and is left out rather than stored under an empty name.
+ */
+function envFromText(text: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const line of text.split("\n")) {
+    const at = line.indexOf("=");
+    if (at <= 0) continue;
+    const name = line.slice(0, at).trim();
+    if (name !== "") env[name] = line.slice(at + 1);
+  }
+  return env;
+}
+
 export default function SettingsTab({ instance }: { instance: Instance }) {
   const config = useStore((s) => s.config);
   const navigate = useStore((s) => s.navigate);
@@ -48,6 +71,10 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
   const [group, setGroup] = useState(instance.group ?? "");
   const [notes, setNotes] = useState(instance.notes);
   const [overrides, setOverrides] = useState<InstanceOverrides>(instance.overrides);
+  // The environment is edited as text and stored as a map, so the textarea
+  // keeps its own copy: deriving it back from the map every keystroke would
+  // delete a line the moment it was half-typed, before it had an `=` in it.
+  const [envText, setEnvText] = useState(() => envToText(instance.overrides.env));
 
   const [loaderVersions, setLoaderVersions] = useState<string[]>([]);
   const [loader, setLoader] = useState(instance.loader);
@@ -487,6 +514,52 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
         </section>
 
         <section className={styles.section}>
+          <h2 className={styles.sectionTitle}>Environment</h2>
+          <div>
+            <label className="label" htmlFor="inst-env">
+              Variables
+            </label>
+            <textarea
+              id="inst-env"
+              className="input"
+              rows={4}
+              spellCheck={false}
+              value={envText}
+              placeholder={"MESA_LOADER_DRIVER_OVERRIDE=zink\n__GL_THREADED_OPTIMIZATIONS=0"}
+              onChange={(e) => {
+                setEnvText(e.target.value);
+                set("env", envFromText(e.target.value));
+              }}
+            />
+            <p className="hint">
+              One <code>NAME=value</code> per line, set for the game and not
+              for Geode. Added to what Geode was started with, so the game
+              still gets the rest of your session. A line with no{" "}
+              <code>=</code> is ignored.
+            </p>
+          </div>
+
+          <div>
+            <label className="label" htmlFor="inst-wrapper">
+              Run the game through
+            </label>
+            <input
+              id="inst-wrapper"
+              className="input"
+              value={overrides.wrapperCommand ?? ""}
+              placeholder="gamemoderun"
+              onChange={(e) => set("wrapperCommand", textOrNull(e.target.value))}
+            />
+            <p className="hint">
+              A command the game is launched inside —{" "}
+              <code>gamemoderun</code>, <code>mangohud</code>,{" "}
+              <code>prime-run</code>. Quotes are honoured so a path can hold a
+              space; it is not a shell, so anything more belongs in a hook.
+            </p>
+          </div>
+        </section>
+
+        <section className={styles.section}>
           <h2 className={styles.sectionTitle}>Hooks</h2>
           <div>
             <label className="label" htmlFor="inst-pre">
@@ -648,6 +721,7 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
               setLoader(instance.loader);
               setLoaderVersion(instance.loaderVersion);
               setOverrides(instance.overrides);
+              setEnvText(envToText(instance.overrides.env));
             }}
           >
             Discard

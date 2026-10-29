@@ -385,6 +385,22 @@ fn from_texts(cfg: &str, pack: &str, fallback_name: &str) -> Result<PrismInstanc
             .get("MinecraftWinHeight")
             .and_then(|v| v.parse().ok());
     }
+    if gated(&general, "OverrideEnv") {
+        // Prism keeps these as one JSON object in a single INI value; the
+        // reader above has already taken the quotes and the escaping off it.
+        // A value that will not parse is dropped rather than failing the
+        // import — an instance is worth having without its environment.
+        overrides.env = general
+            .get("Env")
+            .and_then(|raw| serde_json::from_str(raw).ok())
+            .unwrap_or_default();
+    }
+    if gated(&general, "OverrideCommands") {
+        overrides.wrapper_command = general
+            .get("WrapperCommand")
+            .filter(|command| !command.is_empty())
+            .cloned();
+    }
     // `JavaPath` is never read, gate or no gate: a path to somebody else's
     // runtime means nothing on this machine, and Geode picks its own.
 
@@ -1066,6 +1082,23 @@ fn instance_cfg(instance: &Instance, icon_key: &str) -> Vec<u8> {
         keys.push(("OverrideJavaArgs", "true".to_string()));
         keys.push(("JvmArgs", args.clone()));
     }
+    if !instance.overrides.env.is_empty() {
+        keys.push(("OverrideEnv", "true".to_string()));
+        // Serialised rather than hand-built so a value holding a quote or a
+        // backslash survives; `ini_escaped` then makes it an INI value.
+        if let Ok(json) = serde_json::to_string(&instance.overrides.env) {
+            keys.push(("Env", json));
+        }
+    }
+    if let Some(wrapper) = instance
+        .overrides
+        .wrapper_command
+        .as_ref()
+        .filter(|command| !command.is_empty())
+    {
+        keys.push(("OverrideCommands", "true".to_string()));
+        keys.push(("WrapperCommand", wrapper.clone()));
+    }
     if instance.overrides.width.is_some() || instance.overrides.height.is_some() {
         keys.push(("OverrideWindow", "true".to_string()));
         if let Some(width) = instance.overrides.width {
@@ -1467,6 +1500,78 @@ project-id = 1649197
     /// The gates are the thing that silently does nothing in Prism when they
     /// are written wrong: an ungated value is one the instance was never
     /// running under, because Prism takes its global setting instead.
+    /// The environment an instance runs under comes across, and only when
+    /// Prism's own gate says the instance was running under it.
+    ///
+    /// Taken from a real instance on this machine, which carries four: a
+    /// Wayland choice, an NVIDIA EGL vendor file, a threaded-optimisations
+    /// toggle and SDL logging. Those are precisely the settings that made
+    /// Geode unusable as a daily launcher, because it had nowhere to put one.
+    #[tokio::test]
+    async fn an_instances_environment_and_wrapper_come_across() {
+        let scratch = Scratch::new("prism-env");
+        let paths = scratch.paths.clone();
+        let folder = paths.root.join("Env");
+        let general = cfg(&[
+            "OverrideEnv=true",
+            r#"Env="{\"SDL_VIDEO_DRIVER\":\"wayland\",\"__GL_THREADED_OPTIMIZATIONS\":\"0\"}""#,
+            "OverrideCommands=true",
+            "WrapperCommand=gamemoderun",
+        ]);
+        write_tree(
+            &folder,
+            &[
+                ("instance.cfg", &general),
+                ("mmc-pack.json", &mmc("1.21.1", None)),
+            ],
+        );
+
+        let instance = import(&paths, "env", &folder).await.unwrap();
+        assert_eq!(
+            instance.overrides.env.get("SDL_VIDEO_DRIVER").map(String::as_str),
+            Some("wayland")
+        );
+        assert_eq!(
+            instance
+                .overrides
+                .env
+                .get("__GL_THREADED_OPTIMIZATIONS")
+                .map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(
+            instance.overrides.wrapper_command.as_deref(),
+            Some("gamemoderun")
+        );
+    }
+
+    /// And neither is taken when Prism says the instance was using its global
+    /// settings — importing one would be importing a setting the instance was
+    /// never actually running under.
+    #[tokio::test]
+    async fn an_ungated_environment_is_not_imported() {
+        let scratch = Scratch::new("prism-env-ungated");
+        let paths = scratch.paths.clone();
+        let folder = paths.root.join("Ungated");
+        let general = cfg(&[
+            "OverrideEnv=false",
+            r#"Env="{\"SDL_VIDEO_DRIVER\":\"wayland\"}""#,
+            "OverrideCommands=false",
+            "WrapperCommand=gamemoderun",
+        ]);
+        write_tree(
+            &folder,
+            &[
+                ("instance.cfg", &general),
+                ("mmc-pack.json", &mmc("1.21.1", None)),
+            ],
+        );
+
+        let instance = import(&paths, "ungated", &folder).await.unwrap();
+        assert!(instance.overrides.env.is_empty(), "{:?}", instance.overrides.env);
+        assert_eq!(instance.overrides.wrapper_command, None);
+    }
+
     #[tokio::test]
     async fn overridden_settings_are_read_and_unoverridden_ones_are_not() {
         let scratch = Scratch::new("prism-gates");

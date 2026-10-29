@@ -288,6 +288,83 @@ impl RunningGame {
 }
 
 /// Run a shell command and fail the launch if it does not succeed.
+/// The command a launch spawns, built but not started.
+///
+/// Its own function so the three things an instance can change about it — the
+/// wrapper, the environment and the working directory — can be read off a
+/// constructed command in a test, without a JVM or a download in the way.
+fn game_command(
+    plan: &LaunchPlan,
+    overrides: &crate::instance::InstanceOverrides,
+) -> tokio::process::Command {
+    let (program, leading) = wrapped(&plan.java, overrides.wrapper_command.as_deref());
+    let mut command = tokio::process::Command::new(program);
+    command
+        .args(leading)
+        .args(&plan.args)
+        // Added to Geode's own environment rather than replacing it: the game
+        // still needs HOME, PATH, DISPLAY and the rest of what a desktop
+        // session puts there, and an instance that had to restate all of it
+        // would be a worse place to put one variable than the shell Geode was
+        // started from.
+        .envs(&overrides.env)
+        .current_dir(&plan.game_dir);
+    command
+}
+
+/// The program to run and whatever has to come before the Java path.
+///
+/// With no wrapper this is just the JVM. With one — `gamemoderun`,
+/// `mangohud`, `prime-run`, `env FOO=bar` — the wrapper becomes the program
+/// and the Java path becomes its first argument, which is exactly what those
+/// tools expect and what Prism does with the same setting.
+fn wrapped(java: &std::path::Path, wrapper: Option<&str>) -> (std::path::PathBuf, Vec<String>) {
+    let words = wrapper.map(split_words).unwrap_or_default();
+    let Some((program, rest)) = words.split_first() else {
+        return (java.to_path_buf(), Vec::new());
+    };
+    let mut leading: Vec<String> = rest.to_vec();
+    leading.push(java.to_string_lossy().into_owned());
+    (std::path::PathBuf::from(program), leading)
+}
+
+/// Split a wrapper command into words, honouring quotes.
+///
+/// Not a shell: no expansion, no globs, no operators, because the wrapper is
+/// one program with arguments and anything more belongs in a pre-launch hook,
+/// which is run by a shell on purpose. Quotes are honoured only so a path
+/// with a space in it can be written at all.
+fn split_words(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote: Option<char> = None;
+    let mut any = false;
+    for c in line.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => word.push(c),
+            None if c == '\'' || c == '"' => {
+                quote = Some(c);
+                any = true;
+            }
+            None if c.is_whitespace() => {
+                if any {
+                    words.push(std::mem::take(&mut word));
+                    any = false;
+                }
+            }
+            None => {
+                word.push(c);
+                any = true;
+            }
+        }
+    }
+    if any {
+        words.push(word);
+    }
+    words
+}
+
 async fn run_hook(command: &str, game_dir: &Path) -> Result<()> {
     let trimmed = command.trim();
     if trimmed.is_empty() {
@@ -333,17 +410,19 @@ pub async fn spawn(
         run_hook(hook, &plan.game_dir).await?;
     }
 
-    let mut child = tokio::process::Command::new(&plan.java)
-        .args(&plan.args)
-        .current_dir(&plan.game_dir)
+    // What actually runs: the JVM, or the JVM inside whatever the instance
+    // asked to wrap it in, with whatever environment the instance asked for.
+    let mut command = game_command(&plan, &instance.overrides);
+    let program = command.as_std().get_program().to_os_string();
+    let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null())
         .spawn()
         .map_err(|e| {
             Error::msg(format!(
-                "could not start Java at {}: {e}",
-                plan.java.display()
+                "could not start {}: {e}",
+                std::path::Path::new(&program).display()
             ))
         })?;
 
@@ -446,6 +525,107 @@ pub async fn spawn(
 mod tests {
     use super::*;
     use crate::meta::piston::ArgumentValue;
+
+    /// The three things an instance can change about the command a launch
+    /// spawns, read off the command itself.
+    ///
+    /// The environment is the point of this one. The JVM used to be spawned
+    /// with whatever Geode was started with and nothing else, so the only way
+    /// to give the game a driver override or a Wayland choice was to start
+    /// the whole launcher with it — which is why a Prism instance carrying
+    /// four of them could not be moved here.
+    #[test]
+    fn an_instance_can_change_the_environment_the_game_runs_in() {
+        let plan = LaunchPlan {
+            java: PathBuf::from("/jvm/bin/java"),
+            args: vec!["-Xmx2G".into(), "net.minecraft.client.main.Main".into()],
+            game_dir: PathBuf::from("/games/survival"),
+        };
+        let mut overrides = crate::instance::InstanceOverrides {
+            wrapper_command: Some("gamemoderun".into()),
+            ..Default::default()
+        };
+        overrides
+            .env
+            .insert("__GL_THREADED_OPTIMIZATIONS".into(), "0".into());
+        // A value with an `=` in it, which a real one has:
+        // `SDL_LOGGING=video=verbose`.
+        overrides
+            .env
+            .insert("SDL_LOGGING".into(), "video=verbose".into());
+
+        let command = game_command(&plan, &overrides);
+        let std = command.as_std();
+
+        assert_eq!(std.get_program(), "gamemoderun");
+        let args: Vec<_> = std.get_args().collect();
+        assert_eq!(
+            args,
+            vec!["/jvm/bin/java", "-Xmx2G", "net.minecraft.client.main.Main"],
+            "the JVM has to be the wrapper's first argument, before the game's own"
+        );
+
+        let env: std::collections::HashMap<_, _> = std
+            .get_envs()
+            .filter_map(|(k, v)| v.map(|v| (k.to_owned(), v.to_owned())))
+            .collect();
+        assert_eq!(
+            env.get(std::ffi::OsStr::new("__GL_THREADED_OPTIMIZATIONS")).map(|v| v.as_os_str()),
+            Some(std::ffi::OsStr::new("0"))
+        );
+        assert_eq!(
+            env.get(std::ffi::OsStr::new("SDL_LOGGING")).map(|v| v.as_os_str()),
+            Some(std::ffi::OsStr::new("video=verbose"))
+        );
+        // Added, not replacing: nothing here clears the inherited environment,
+        // because the game still needs HOME, PATH and DISPLAY.
+        assert!(
+            !std.get_envs().any(|(_, v)| v.is_none()),
+            "something was removed from the environment rather than added to it"
+        );
+
+        assert_eq!(std.get_current_dir(), Some(std::path::Path::new("/games/survival")));
+    }
+
+    /// With no wrapper the JVM is the program, exactly as before.
+    #[test]
+    fn no_wrapper_runs_java_itself() {
+        let (program, leading) = wrapped(std::path::Path::new("/jvm/bin/java"), None);
+        assert_eq!(program, std::path::PathBuf::from("/jvm/bin/java"));
+        assert!(leading.is_empty());
+
+        // A wrapper of only spaces is the same as none, so an emptied field
+        // cannot produce a launch that tries to exec "".
+        let (program, leading) = wrapped(std::path::Path::new("/jvm/bin/java"), Some("   "));
+        assert_eq!(program, std::path::PathBuf::from("/jvm/bin/java"));
+        assert!(leading.is_empty());
+    }
+
+    /// With one, the wrapper becomes the program and Java its last argument —
+    /// which is what `gamemoderun java …` and its kin expect.
+    #[test]
+    fn a_wrapper_takes_the_jvm_as_its_argument() {
+        let (program, leading) = wrapped(
+            std::path::Path::new("/jvm/bin/java"),
+            Some("mangohud --dlsym"),
+        );
+        assert_eq!(program, std::path::PathBuf::from("mangohud"));
+        assert_eq!(leading, vec!["--dlsym", "/jvm/bin/java"]);
+    }
+
+    /// Quotes exist so a path with a space in it can be written at all. This
+    /// is not a shell and does not pretend to be one.
+    #[test]
+    fn a_wrapper_can_name_a_path_with_a_space_in_it() {
+        assert_eq!(
+            split_words("\"/opt/my tools/gamemoderun\" -v"),
+            vec!["/opt/my tools/gamemoderun", "-v"]
+        );
+        assert_eq!(split_words("  prime-run   "), vec!["prime-run"]);
+        assert!(split_words("").is_empty());
+        // An empty quoted word is a word, so `--flag ""` keeps its argument.
+        assert_eq!(split_words("--flag \"\""), vec!["--flag", ""]);
+    }
 
     #[test]
     fn substitutes_known_variables() {
