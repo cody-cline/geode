@@ -285,7 +285,7 @@ pub async fn session_for(
         .clone()
         .ok_or(Error::AuthExpired)?;
     let client_id = client_id
-        .ok_or_else(|| Error::msg("no Microsoft client ID is configured — set one in Settings"))?;
+        .ok_or_else(|| Error::msg("This account cannot be refreshed in this copy of Geode."))?;
 
     let msa = super::refresh_msa(client, client_id, &refresh).await?;
     let (token, expires_at, profile) = super::minecraft_session(client, &msa.access_token).await?;

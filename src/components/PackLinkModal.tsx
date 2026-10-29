@@ -204,7 +204,7 @@ export default function PackLinkModal({
                 tone: "warn",
                 title: "This pack names mods on CurseForge",
                 detail:
-                  "Finishing the import needs your own CurseForge API key, which you can add in Settings → Mod sources. Without one those mods are left out and listed.",
+                  "This copy of Geode cannot reach CurseForge, so those mods are left out. They are listed below, and you can add them by hand.",
               }}
             />
           )}

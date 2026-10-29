@@ -23,7 +23,6 @@ import styles from "./AccountsModal.module.css";
 export default function AccountsModal({ onClose }: { onClose: () => void }) {
   const accounts = useStore((s) => s.accounts);
   const config = useStore((s) => s.config);
-  const navigate = useStore((s) => s.navigate);
   const refreshAccounts = useStore((s) => s.refreshAccounts);
   const toast = useStore((s) => s.toast);
   const reportError = useStore((s) => s.reportError);
@@ -259,7 +258,7 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
         </div>
       ) : (
         <div className={styles.section}>
-          {/* Importing needs no Azure application at all, so it leads. */}
+          {/* An existing session signs in with one click, so it leads. */}
           {scanning ? (
             <p className={styles.scanning}>
               <Loader2 size={13} className="spin" />
@@ -268,9 +267,9 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
           ) : importable.length > 0 ? (
             <div className={styles.importBlock}>
               <p className={styles.importLead}>
-                <strong>Found an existing session.</strong> Use your own
-                Minecraft login from another launcher on this machine — no Azure
-                setup needed.
+                <strong>Found an existing session.</strong> Sign in with the
+                Minecraft account another launcher on this machine is already
+                using.
               </p>
               {importable.map((candidate) => (
                 <div key={candidate.uuid} className={styles.importRow}>
@@ -321,23 +320,21 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
               Sign in with Microsoft
             </button>
           ) : importable.length > 0 ? (
-            // An import is available, so the Azure route is a footnote rather
-            // than a wall of setup instructions.
+            // An import is one click, so direct sign-in is the quieter
+            // option rather than the headline.
             <details className={styles.altAuth}>
-              <summary>Or sign in directly with Microsoft</summary>
+              <summary>Or sign in with Microsoft</summary>
               <p>
-                Needs your own Azure application ID, which Mojang has to approve
-                for Minecraft API access. Only worth it if you want Geode to
-                stand on its own without another launcher installed.
+                Signs in with your Microsoft account directly, without needing
+                another launcher installed.
               </p>
               <button
                 className="btn btn-sm"
-                onClick={() => {
-                  navigate({ view: "settings", tab: "accounts" });
-                  onClose();
-                }}
+                onClick={startMicrosoftLogin}
+                disabled={signingIn}
               >
-                Set it up in Settings
+                {signingIn ? <Loader2 size={13} className="spin" /> : null}
+                Sign in with Microsoft
               </button>
             </details>
           ) : (
@@ -351,11 +348,6 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
               ) : (
                 <p>No other launcher with a signed-in account was found here.</p>
               )}
-              <p className={styles.noticeAlt}>
-                Signing in directly instead needs your own Azure application ID —
-                Microsoft issues them per app and Mojang approves each one, so
-                Geode cannot ship one.
-              </p>
               <div className={styles.noticeActions}>
                 <button className="btn btn-sm" onClick={rescan} disabled={scanning}>
                   {scanning ? (
@@ -364,15 +356,6 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
                     <RefreshCw size={13} />
                   )}
                   Scan again
-                </button>
-                <button
-                  className="btn btn-sm"
-                  onClick={() => {
-                    navigate({ view: "settings", tab: "accounts" });
-                    onClose();
-                  }}
-                >
-                  Set up Microsoft sign-in
                 </button>
               </div>
             </div>

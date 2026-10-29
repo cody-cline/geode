@@ -112,61 +112,6 @@ pub async fn set_config(
     Ok(config.redacted())
 }
 
-#[tauri::command]
-pub async fn set_curseforge_key(state: State<'_, AppState>, key: Option<String>) -> Result<bool> {
-    let mut config = state.config().await;
-    config.curseforge_api_key = key
-        .filter(|k| !k.trim().is_empty())
-        .map(|k| k.trim().to_string());
-    config.save(&state.paths).await?;
-    let has_key = config.effective_curseforge_key().is_some();
-    state.set_config(config).await;
-    Ok(has_key)
-}
-
-/// Try a key against CurseForge and report exactly what came back.
-///
-/// Takes the key to test so Settings can verify before saving; omit it to test
-/// whatever is currently in effect.
-#[tauri::command]
-pub async fn test_curseforge_key(
-    state: State<'_, AppState>,
-    key: Option<String>,
-) -> Result<providers::curseforge::KeyCheck> {
-    let typed = key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
-    let config = state.config().await;
-
-    let (candidate, source) = match typed {
-        Some(k) => (Some(k), "the key you typed"),
-        None => {
-            let saved = config
-                .curseforge_api_key
-                .as_ref()
-                .map(|k| k.trim())
-                .filter(|k| !k.is_empty())
-                .map(str::to_string);
-            match saved {
-                Some(k) => (Some(k), "the key saved in Settings"),
-                None => (
-                    crate::config::default_curseforge_key(),
-                    "the key compiled into this build",
-                ),
-            }
-        }
-    };
-
-    let Some(candidate) = candidate else {
-        return Ok(providers::curseforge::KeyCheck {
-            ok: false,
-            status: 0,
-            message: "No CurseForge key is set.".into(),
-            source: "nothing".into(),
-            fingerprint: String::new(),
-        });
-    };
-
-    Ok(providers::curseforge::check_key(&state.http, &candidate, source).await)
-}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -3298,8 +3243,8 @@ pub async fn begin_microsoft_login(
     let config = state.config().await;
     let client_id = config.effective_client_id().ok_or_else(|| {
         Error::msg(
-            "Microsoft sign-in needs an Azure client ID. Add one in Settings — \
-             see the README for how to register one.",
+            "Microsoft sign-in is unavailable in this copy of Geode. Signing \
+             in through another launcher on this machine still works.",
         )
     })?;
     crate::auth::begin_device_code(&state.http, &client_id).await
@@ -3314,7 +3259,7 @@ pub async fn complete_microsoft_login(
     let config = state.config().await;
     let client_id = config
         .effective_client_id()
-        .ok_or_else(|| Error::msg("no Microsoft client ID is configured"))?;
+        .ok_or_else(|| Error::msg("Microsoft sign-in is unavailable in this copy of Geode."))?;
 
     let msa = crate::auth::poll_device_code(&state.http, &client_id, &start).await?;
     let (token, expires_at, profile) =
@@ -7192,23 +7137,6 @@ pub async fn disconnect_drive(state: State<'_, AppState>) -> Result<crate::drive
         &config,
     )
     .await
-}
-
-/// Saved apart from the other settings, the same as the CurseForge key, so a
-/// field Google calls a secret is never part of a routine round-trip.
-#[tauri::command]
-pub async fn set_google_client_secret(
-    state: State<'_, AppState>,
-    secret: Option<String>,
-) -> Result<bool> {
-    let mut config = state.config().await;
-    config.google_client_secret = secret
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| s.trim().to_string());
-    config.save(&state.paths).await?;
-    let has_secret = config.google_client_secret.is_some();
-    state.set_config(config).await;
-    Ok(has_secret)
 }
 
 /// Export the pack that is about to be published, and say what it did.

@@ -10,7 +10,6 @@ import {
   ExternalLink,
   FolderOpen,
   Info,
-  KeyRound,
   Loader2,
   Palette,
   RefreshCw,
@@ -33,7 +32,6 @@ import type {
   DriveStatus,
   RemoteHost,
   JavaInstall,
-  KeyCheck,
   ShareSettings,
   UpdateStatus,
 } from "../lib/types";
@@ -44,7 +42,6 @@ const TABS = [
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "java", label: "Java & Memory", icon: Coffee },
   { id: "accounts", label: "Accounts", icon: UserRound },
-  { id: "sources", label: "Mod sources", icon: KeyRound },
   { id: "sharing", label: "Server sharing", icon: Share2 },
   { id: "hosts", label: "Server hosts", icon: ServerIcon },
   { id: "drive", label: "Google Drive", icon: Cloud },
@@ -110,11 +107,10 @@ export default function Settings() {
         <div className={styles.content}>
           {tab === "appearance" && <Appearance update={update} />}
           {tab === "java" && <JavaSettings update={update} />}
-          {tab === "accounts" && <AccountsSettings update={update} />}
-          {tab === "sources" && <Sources />}
+          {tab === "accounts" && <AccountsSettings />}
           {tab === "sharing" && <SharingSettings />}
           {tab === "hosts" && <HostSettings />}
-          {tab === "drive" && <DriveSettings update={update} />}
+          {tab === "drive" && <DriveSettings />}
           {tab === "about" && <About />}
         </div>
       </div>
@@ -412,13 +408,11 @@ function JavaSettings({ update }: { update: Updater }) {
   );
 }
 
-function AccountsSettings({ update }: { update: Updater }) {
-  const config = useStore((s) => s.config)!;
+function AccountsSettings() {
   const accounts = useStore((s) => s.accounts);
   const refreshAccounts = useStore((s) => s.refreshAccounts);
   const reportError = useStore((s) => s.reportError);
 
-  const [clientId, setClientId] = useState(config.clientId ?? "");
   const [managing, setManaging] = useState(false);
 
   return (
@@ -466,75 +460,6 @@ function AccountsSettings({ update }: { update: Updater }) {
           <UserRound size={14} />
           Manage accounts
         </button>
-      </section>
-
-      <section className={styles.section}>
-        <h2 className={styles.sectionTitle}>Microsoft sign-in</h2>
-        <div className={styles.callout}>
-          <p>
-            Microsoft issues OAuth client IDs per application, and Mojang has to
-            approve each one for Minecraft API access before it works. Those
-            terms are why Geode cannot ship a shared ID — you register your own,
-            once, and it belongs to you.
-          </p>
-          <ol className={styles.steps}>
-            <li>
-              Create an app registration in the Azure portal (public client, no
-              secret needed).
-            </li>
-            <li>
-              Enable <em>Allow public client flows</em> so the device-code flow
-              works.
-            </li>
-            <li>
-              Apply for Minecraft API access with Mojang, then paste the
-              Application (client) ID below.
-            </li>
-          </ol>
-          <div className={styles.calloutLinks}>
-            <button
-              className="btn btn-sm"
-              onClick={() => void openUrl("https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade")}
-            >
-              <ExternalLink size={13} />
-              Azure app registrations
-            </button>
-            <button
-              className="btn btn-sm"
-              onClick={() => void openUrl("https://help.minecraft.net/hc/en-us/articles/16254801392141")}
-            >
-              <ExternalLink size={13} />
-              Mojang approval form
-            </button>
-          </div>
-        </div>
-
-        <div className={styles.field}>
-          <label className="label" htmlFor="client-id">
-            Azure client ID
-          </label>
-          <div className={styles.inlineRow}>
-            <input
-              id="client-id"
-              className="input"
-              value={clientId}
-              placeholder="00000000-0000-0000-0000-000000000000"
-              onChange={(e) => setClientId(e.target.value)}
-            />
-            <button
-              className="btn"
-              onClick={() => update({ clientId: clientId.trim() || null })}
-              disabled={clientId.trim() === (config.clientId ?? "")}
-            >
-              Save
-            </button>
-          </div>
-          <p className="hint">
-            {config.clientIdFromBuild
-              ? "This build has its own ID compiled in, so sign-in already works. Anything saved here is used instead."
-              : "Offline accounts work without this. Only online play needs it."}
-          </p>
-        </div>
       </section>
 
       {managing && <AccountsModal onClose={() => setManaging(false)} />}
@@ -731,15 +656,11 @@ function HostSettings() {
  * days, which arrives later as a connection that stopped working for no
  * visible reason; pressing Publish app is what prevents it.
  */
-function DriveSettings({ update }: { update: Updater }) {
-  const config = useStore((s) => s.config)!;
-  const loadConfig = useStore((s) => s.loadConfig);
+function DriveSettings() {
   const toast = useStore((s) => s.toast);
   const reportError = useStore((s) => s.reportError);
 
   const [status, setStatus] = useState<DriveStatus | null>(null);
-  const [clientId, setClientId] = useState(config.googleClientId ?? "");
-  const [secret, setSecret] = useState("");
   const [connecting, setConnecting] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -781,36 +702,6 @@ function DriveSettings({ update }: { update: Updater }) {
       });
     } catch (e) {
       reportError("Could not disconnect", e);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  // Saved first, then read: `drive_status` reads the config the save writes,
-  // and reading it in parallel came back "not configured" more often than not
-  // — leaving Connect greyed out, Save greyed out by its own success, and
-  // nothing on screen to press.
-  async function saveClientId() {
-    await update({ googleClientId: clientId.trim() || null });
-    try {
-      setStatus(await api.driveStatus());
-    } catch (e) {
-      reportError("Could not read the Google Drive connection", e);
-    }
-  }
-
-  async function saveSecret(value: string | null) {
-    setBusy(true);
-    try {
-      await api.setGoogleClientSecret(value);
-      await loadConfig();
-      setSecret("");
-      toast({
-        kind: "success",
-        title: value ? "Client secret saved" : "Client secret removed",
-      });
-    } catch (e) {
-      reportError("Could not save the client secret", e);
     } finally {
       setBusy(false);
     }
@@ -866,323 +757,10 @@ function DriveSettings({ update }: { update: Updater }) {
         </p>
       </section>
 
-      <section className={styles.section}>
-        <h2 className={styles.sectionTitle}>Your own Google client</h2>
-        <div className={styles.callout}>
-          <p>
-            Google issues OAuth client IDs per application, and Geode ships no
-            API keys — the same position as the Azure ID for Microsoft sign-in
-            and the CurseForge key. You create one, once, and it belongs to you.
-            It takes a few minutes and costs nothing.
-          </p>
-          <ol className={styles.steps}>
-            <li>Create a project at the Google Cloud console.</li>
-            <li>
-              <em>APIs &amp; Services → Library → Google Drive API → Enable</em>.
-            </li>
-            <li>
-              <em>Google Auth Platform → Audience</em>: user type{" "}
-              <strong>External</strong>, then press <strong>Publish app</strong>.
-            </li>
-            <li>
-              <em>Data access</em>: add the scope{" "}
-              <code>.../auth/drive.file</code>. It is a non-sensitive scope, so
-              there is nothing to submit for review.
-            </li>
-            <li>
-              <em>Clients → Create client</em>: application type{" "}
-              <strong>Desktop app</strong>.
-            </li>
-            <li>Paste the Client ID below.</li>
-          </ol>
-          <p className={styles.calloutNote}>
-            <strong>Do not skip step 3.</strong> While the app&apos;s publishing
-            status is Testing, Google expires every authorization seven days
-            after you give it, and the connection then stops working for no
-            visible reason. Publishing your own client needs no review for this
-            scope; you will see Google&apos;s &ldquo;unverified app&rdquo;
-            screen once, which is expected for a client you made yourself.
-          </p>
-          <p className={styles.calloutNote}>
-            Geode asks for one scope only:{" "}
-            <code>https://www.googleapis.com/auth/drive.file</code>, which
-            reaches <em>only files Geode itself created</em>. Geode cannot see
-            the rest of your Drive, and nothing here can widen that.
-          </p>
-          <p className={styles.calloutNote}>
-            You can compile an ID into a private build instead of pasting it:{" "}
-            <code>GEODE_GOOGLE_CLIENT_ID=… npm run tauri build</code>.
-          </p>
-          <div className={styles.calloutLinks}>
-            <button
-              className="btn btn-sm"
-              onClick={() => void openUrl("https://console.cloud.google.com/auth/clients")}
-            >
-              <ExternalLink size={13} />
-              Google Cloud console
-            </button>
-            <button
-              className="btn btn-sm"
-              onClick={() =>
-                void openUrl(
-                  "https://developers.google.com/identity/protocols/oauth2/native-app",
-                )
-              }
-            >
-              <ExternalLink size={13} />
-              How the desktop flow works
-            </button>
-          </div>
-        </div>
-
-        <div className={styles.field}>
-          <label className="label" htmlFor="google-client-id">
-            Client ID
-          </label>
-          <div className={styles.inlineRow}>
-            <input
-              id="google-client-id"
-              className="input"
-              value={clientId}
-              placeholder="000000000000-xxxxxxxx.apps.googleusercontent.com"
-              spellCheck={false}
-              autoComplete="off"
-              onChange={(e) => setClientId(e.target.value)}
-            />
-            <button
-              className="btn"
-              onClick={() => void saveClientId()}
-              disabled={clientId.trim() === (config.googleClientId ?? "")}
-            >
-              Save
-            </button>
-          </div>
-          <p className="hint">
-            Not a secret: it rides in the address your own browser opens.
-          </p>
-        </div>
-
-        <div className={styles.field}>
-          <label className="label" htmlFor="google-client-secret">
-            Client secret — only if connecting fails
-          </label>
-          <div className={styles.inlineRow}>
-            <input
-              id="google-client-secret"
-              className="input"
-              type="password"
-              value={secret}
-              placeholder={
-                config.hasGoogleClientSecret ? "•••••••••••••••• (stored)" : "Not needed"
-              }
-              autoComplete="off"
-              onChange={(e) => setSecret(e.target.value)}
-            />
-            <button
-              className="btn btn-primary"
-              onClick={() => void saveSecret(secret.trim())}
-              disabled={!secret.trim() || busy}
-            >
-              {busy && <Loader2 size={13} className="spin" />}
-              Save
-            </button>
-            {config.hasGoogleClientSecret && (
-              <button className="btn btn-danger" onClick={() => void saveSecret(null)} disabled={busy}>
-                Remove
-              </button>
-            )}
-          </div>
-          <p className="hint">
-            A Desktop app is a public client, so Google&apos;s own documentation
-            marks this optional and Geode does not send one. If connecting fails
-            with <code>invalid_client</code>, paste the string Google showed
-            beside the ID here.
-          </p>
-        </div>
-      </section>
     </div>
   );
 }
 
-function Sources() {
-  const config = useStore((s) => s.config)!;
-  const loadConfig = useStore((s) => s.loadConfig);
-  const toast = useStore((s) => s.toast);
-  const reportError = useStore((s) => s.reportError);
-
-  const [key, setKey] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [testing, setTesting] = useState(false);
-  const [check, setCheck] = useState<KeyCheck | null>(null);
-
-  async function testKey() {
-    setTesting(true);
-    setCheck(null);
-    try {
-      // Test what is typed if anything, else whatever is currently in effect.
-      setCheck(await api.testCurseforgeKey(key.trim() || undefined));
-    } catch (e) {
-      reportError("Could not test the key", e);
-    } finally {
-      setTesting(false);
-    }
-  }
-
-  async function saveKey(value: string | null) {
-    setSaving(true);
-    try {
-      await api.setCurseforgeKey(value);
-      await loadConfig();
-      setKey("");
-      toast({
-        kind: "success",
-        title: value ? "CurseForge enabled" : "CurseForge key removed",
-      });
-    } catch (e) {
-      reportError("Could not save the key", e);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div className={styles.form}>
-      <section className={styles.section}>
-        <h2 className={styles.sectionTitle}>Modrinth</h2>
-        <div className={styles.sourceRow}>
-          <span className="badge badge-modrinth">Modrinth</span>
-          <span className={styles.sourceState}>
-            <Check size={14} /> Always on — no key required
-          </span>
-        </div>
-        <p className="hint">
-          Modrinth's API is open, so search, installs and updates work out of the
-          box.
-        </p>
-      </section>
-
-      <section className={styles.section}>
-        <h2 className={styles.sectionTitle}>CurseForge</h2>
-        <div className={styles.sourceRow}>
-          <span className="badge badge-curseforge">CurseForge</span>
-          <span className={styles.sourceState}>
-            {config.hasCurseforgeKey ? (
-              <>
-                <Check size={14} />
-                {config.curseforgeKeyFromBuild ? "Enabled (compiled in)" : "Enabled"}
-              </>
-            ) : (
-              "Not configured"
-            )}
-          </span>
-        </div>
-
-        <div className={styles.callout}>
-          <p>
-            CurseForge issues API keys per developer, and their terms say a key
-            is non-transferable and must not be disclosed to a third party. A
-            key shipped in a public build is exactly that — Prism and most
-            open-source launchers do it anyway, but Geode does not by default.
-            Keys are free to request.
-          </p>
-          <p className={styles.calloutNote}>
-            For a build you keep to yourself there is no third party, so you can
-            compile your own key in instead of pasting it here:{" "}
-            <code>GEODE_CURSEFORGE_KEY=… npm run tauri build</code>. Share that
-            binary and the clause applies again.
-          </p>
-          <p className={styles.calloutNote}>
-            Some authors also disable third-party downloads for their projects.
-            Those show a <strong>Manual</strong> badge and link out to the
-            project page — Geode will not work around that setting.
-          </p>
-          <div className={styles.calloutLinks}>
-            <button
-              className="btn btn-sm"
-              onClick={() => void openUrl("https://console.curseforge.com/")}
-            >
-              <ExternalLink size={13} />
-              CurseForge developer console
-            </button>
-          </div>
-        </div>
-
-        <div className={styles.field}>
-          <label className="label" htmlFor="cf-key">
-            API key
-          </label>
-          <div className={styles.inlineRow}>
-            <input
-              id="cf-key"
-              className="input"
-              type="password"
-              value={key}
-              placeholder={
-                config.curseforgeKeyFromBuild
-                  ? "using the compiled-in key — paste one to override"
-                  : config.hasCurseforgeKey
-                    ? "•••••••••••••••• (stored)"
-                    : "Paste your key"
-              }
-              onChange={(e) => setKey(e.target.value)}
-            />
-            <button
-              className="btn"
-              onClick={testKey}
-              disabled={testing || (!key.trim() && !config.hasCurseforgeKey)}
-            >
-              {testing ? <Loader2 size={13} className="spin" /> : <Check size={13} />}
-              Test
-            </button>
-            <button
-              className="btn btn-primary"
-              onClick={() => saveKey(key.trim())}
-              disabled={!key.trim() || saving}
-            >
-              {saving && <Loader2 size={13} className="spin" />}
-              Save
-            </button>
-            {config.hasCurseforgeKey && !config.curseforgeKeyFromBuild && (
-              <button
-                className="btn btn-danger"
-                onClick={() => saveKey(null)}
-                disabled={saving}
-              >
-                Remove
-              </button>
-            )}
-          </div>
-          {check && (
-            <div className={check.ok ? styles.checkOk : styles.checkBad}>
-              {check.ok ? <Check size={13} /> : <AlertTriangle size={13} />}
-              <span>
-                {check.message}
-                {check.fingerprint && (
-                  <span className={styles.fingerprint}>
-                    Tested {check.source}: <code>{check.fingerprint}</code>
-                  </span>
-                )}
-              </span>
-            </div>
-          )}
-          <p className="hint">
-            Stored in your Geode config directory with owner-only permissions and
-            never sent anywhere except CurseForge.
-          </p>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-/**
- * How players reach this machine for every server it shares.
- *
- * Saved together with one button rather than field by field: a save is applied
- * to the listener and the router straight away, and doing that per keystroke
- * while a port number is half typed would ask the router for ports nobody
- * wants.
- */
 function SharingSettings() {
   const config = useStore((s) => s.config)!;
   const loadConfig = useStore((s) => s.loadConfig);

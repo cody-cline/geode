@@ -165,8 +165,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_config,
             commands::set_config,
-            commands::set_curseforge_key,
-            commands::test_curseforge_key,
             commands::app_info,
             commands::check_for_update,
             commands::install_update,
@@ -318,7 +316,6 @@ pub fn run() {
             commands::drive_status,
             commands::connect_drive,
             commands::disconnect_drive,
-            commands::set_google_client_secret,
             commands::stage_drive_pack,
             commands::upload_drive_pack,
             commands::preview_pack_link,

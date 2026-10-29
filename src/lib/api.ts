@@ -31,7 +31,6 @@ import type {
   JoinLink,
   JoinOutcome,
   JoinPreview,
-  KeyCheck,
   LastServerSync,
   LinkReport,
   ListedClientOnly,
@@ -92,10 +91,6 @@ export const api = {
   getConfig: () => invoke<Config>("get_config"),
   setConfig: (patch: Partial<Record<string, unknown>>) =>
     invoke<Config>("set_config", { patch }),
-  setCurseforgeKey: (key: string | null) =>
-    invoke<boolean>("set_curseforge_key", { key }),
-  testCurseforgeKey: (key?: string) =>
-    invoke<KeyCheck>("test_curseforge_key", { key: key ?? null }),
   appInfo: () => invoke<AppInfo>("app_info"),
 
   // Updating Geode itself. `checkForUpdate` reaches the network and says
@@ -696,8 +691,6 @@ export const api = {
   /** Forgets the connection whatever Google answers, and says whether Google accepted the revoke. */
   disconnectDrive: () => invoke<Disconnected>("disconnect_drive"),
   /** Separate from setConfig so a secret is never part of a routine settings round-trip. */
-  setGoogleClientSecret: (secret: string | null) =>
-    invoke<boolean>("set_google_client_secret", { secret }),
   /** Export the pack and report what travelled, before anything is published. Progress id `export:<id>`. */
   stageDrivePack: (id: string, includeSaves: boolean) =>
     invoke<StagedPack>("stage_drive_pack", { id, includeSaves }),

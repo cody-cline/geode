@@ -155,8 +155,8 @@ export default function NewInstanceModal({ onClose }: { onClose: () => void }) {
 
     if (preview.needsCurseforgeKey && !config?.hasCurseforgeKey) {
       reportError(
-        "CurseForge key needed",
-        "This is a CurseForge pack. Add your CurseForge API key in Settings first.",
+        "CurseForge packs are not available",
+        "This pack's mods come from CurseForge, which this copy of Geode cannot reach.",
       );
       return;
     }

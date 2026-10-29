@@ -890,25 +890,15 @@ export default function Browse({
               />
               <span className="badge badge-modrinth">Modrinth</span>
             </label>
-            <label className={clsx(styles.check, !config?.hasCurseforgeKey && styles.checkOff)}>
-              <input
-                type="checkbox"
-                checked={providers.includes("curseforge")}
-                disabled={!config?.hasCurseforgeKey}
-                onChange={() => toggleSource("curseforge")}
-              />
-              <span className="badge badge-curseforge">CurseForge</span>
-            </label>
-            {!config?.hasCurseforgeKey && (
-              <p className={styles.filterNote}>
-                Needs your own API key.{" "}
-                <button
-                  className={styles.linkBtn}
-                  onClick={() => navigate({ view: "settings", tab: "sources" })}
-                >
-                  Add it
-                </button>
-              </p>
+            {config?.hasCurseforgeKey && (
+              <label className={styles.check}>
+                <input
+                  type="checkbox"
+                  checked={providers.includes("curseforge")}
+                  onChange={() => toggleSource("curseforge")}
+                />
+                <span className="badge badge-curseforge">CurseForge</span>
+              </label>
             )}
             {kind === "plugin" && (
               <>
