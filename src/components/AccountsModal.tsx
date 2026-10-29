@@ -31,6 +31,7 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
   const [pending, setPending] = useState<DeviceCodeStart | null>(null);
   const [signingIn, setSigningIn] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [autoCopied, setAutoCopied] = useState(false);
   const [offlineName, setOfflineName] = useState("");
   const [addingOffline, setAddingOffline] = useState(false);
   const [scan, setScan] = useState<ImportScan | null>(null);
@@ -75,11 +76,31 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
     }
   }
 
+  /// Whether the code actually reached the clipboard. Reported rather than
+  /// assumed: a webview can refuse a clipboard write that has no user gesture
+  /// behind it, and telling somebody their code is copied when it is not
+  /// leaves them pasting whatever was there before.
+  async function writeCode(code: string): Promise<boolean> {
+    try {
+      await navigator.clipboard.writeText(code);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async function startMicrosoftLogin() {
     setSigningIn(true);
+    setAutoCopied(false);
     try {
       const start = await api.beginMicrosoftLogin();
       setPending(start);
+      // The code is the one thing the browser cannot be handed. Microsoft
+      // does not return `verification_uri_complete`, and its sign-in page
+      // ignores the code as a query parameter — the field is there but a GET
+      // leaves it empty — so it has to be pasted. Putting it on the clipboard
+      // before the browser opens means the page lands under a paste.
+      setAutoCopied(await writeCode(start.userCode));
       await openUrl(start.verificationUri).catch(() => {});
 
       // This resolves only once the user finishes in their browser.
@@ -180,16 +201,35 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
       {pending ? (
         <div className={styles.deviceCode}>
           <p className={styles.deviceLead}>
-            Enter this code at <strong>{pending.verificationUri}</strong>:
+            {autoCopied ? (
+              <>
+                Copied. Paste it at <strong>{pending.verificationUri}</strong>:
+              </>
+            ) : (
+              <>
+                Enter this code at <strong>{pending.verificationUri}</strong>:
+              </>
+            )}
           </p>
           <div className={styles.codeRow}>
             <code className={styles.code}>{pending.userCode}</code>
             <button
               className="btn btn-sm"
               onClick={() => {
-                void navigator.clipboard.writeText(pending.userCode);
-                setCopied(true);
-                setTimeout(() => setCopied(false), 1800);
+                void (async () => {
+                  if (await writeCode(pending.userCode)) {
+                    setAutoCopied(true);
+                    setCopied(true);
+                    setTimeout(() => setCopied(false), 1800);
+                    return;
+                  }
+                  setAutoCopied(false);
+                  toast({
+                    kind: "error",
+                    title: "Could not reach the clipboard",
+                    body: "Select the code above and copy it by hand.",
+                  });
+                })();
               }}
             >
               {copied ? <Check size={13} /> : <Copy size={13} />}
