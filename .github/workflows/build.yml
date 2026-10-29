@@ -23,14 +23,27 @@ name: build
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
+  # A release is asked for, never triggered. Pushing a tag builds nothing on
+  # purpose: work lands on main in small commits for weeks, and only the owner
+  # knows which run of them is worth shipping. Tick `release` here when it is.
   workflow_dispatch:
+    inputs:
+      release:
+        description: "Build the installers and attach them to a draft release"
+        type: boolean
+        default: false
+      tag:
+        description: "Version to release, e.g. v0.1.0 (read only when releasing)"
+        type: string
+        default: ""
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  # A tag build is a release. Never cancel one.
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  # A release gets a group of its own. It runs from `main` like every check
+  # does, so without this a push landing mid-build would share the group and
+  # cancel a release halfway through bundling.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.release && 'release' || 'check' }}
+  cancel-in-progress: ${{ !inputs.release }}
 
 permissions:
   contents: read
@@ -49,7 +62,17 @@ jobs:
       # and say whether it is that platform or the change.
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-2022, macos-15]
+        # Linux on every push; all three on a pull request or when this
+        # workflow is run by hand. GitHub bills a Windows minute at two and a
+        # macOS minute at ten, which made all three on every push cost about
+        # 88 billable minutes a time — 23 pushes against an allowance of 2000
+        # a month, and it ran out in eight days. Linux alone is about 10.
+        #
+        # What the other two catch is real: they are the only thing that has
+        # ever run this code on a platform the author does not own. So they
+        # are kept, and moved to where they are paid for deliberately — a
+        # release runs them, and `workflow_dispatch` runs them on demand.
+        os: ${{ github.event_name == 'push' && fromJSON('["ubuntu-22.04"]') || fromJSON('["ubuntu-22.04", "windows-2022", "macos-15"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -124,7 +147,7 @@ jobs:
     # Nothing is published that the checks have not passed on its own
     # platform.
     needs: check
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: ${{ inputs.release }}
     runs-on: ${{ matrix.os }}
     permissions:
       # To create the draft release and attach the installers to it.
@@ -153,6 +176,17 @@ jobs:
       # a certificate. Unset, it is the empty string and that step is skipped.
       APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
     steps:
+      # The tag is what names the git tag, the draft release and the version
+      # an installed Geode compares its own against, and the box is easy to
+      # leave empty. Said here, before three platforms spend half an hour
+      # building something that would be published as "Geode main".
+      - name: Refuse a release with no version to publish it under
+        if: inputs.tag == ''
+        run: |
+          echo "Release was ticked but no tag was given. Run the workflow" \
+               "again and fill in the tag, e.g. v0.1.0." >&2
+          exit 1
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the Linux build dependencies
@@ -296,8 +330,11 @@ jobs:
           # above, which sets them only when all three exist.
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: Geode ${{ github.ref_name }}
+          # The tag the owner typed, not the ref this ran from — a release is
+          # dispatched from `main`, so `github.ref_name` would name the branch.
+          # The action creates the tag if it does not exist yet.
+          tagName: ${{ inputs.tag }}
+          releaseName: Geode ${{ inputs.tag }}
           # A draft, because the owner signs off on a release — and on
           # whichever of these three bundles nobody has been able to launch.
           releaseDraft: true

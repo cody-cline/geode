@@ -944,7 +944,7 @@ pub(super) mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let mut held = Vec::new();
-            for n in 0.. {
+            for n in 0..=usize::MAX {
                 let (mut inbound, _) = listener.accept().await.unwrap();
                 if n >= answered {
                     held.push(inbound);
@@ -967,7 +967,7 @@ pub(super) mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            for n in 0.. {
+            for n in 0..=usize::MAX {
                 let (inbound, _) = listener.accept().await.unwrap();
                 tokio::spawn(async move {
                     let outbound = TcpStream::connect(to).await.unwrap();
@@ -992,7 +992,7 @@ pub(super) mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            for n in 0.. {
+            for n in 0..=usize::MAX {
                 let (inbound, _) = listener.accept().await.unwrap();
                 tokio::spawn(async move {
                     let outbound = TcpStream::connect(to).await.unwrap();

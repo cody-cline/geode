@@ -2,15 +2,16 @@
 
 [.github/workflows/build.yml](../.github/workflows/build.yml) does two
 separate things, and the difference between them matters more here than in
-most projects: it **checks** Geode on three platforms, and on a tag it
-**builds installers** for three platforms. Neither is the same as having run
-Geode there.
+most projects: it **checks** Geode on three platforms, and when it is asked
+to, it **builds installers** for three platforms. Neither is the same as
+having run Geode there.
 
 ## What the workflow runs
 
-**`check`** — on every push to `main`, every pull request, and every tag.
-Runs on `ubuntu-22.04`, `windows-2022` and `macos-15`, and on each one runs
-the whole gate a change is held to locally:
+**`check`** — on every push to `main`, every pull request, and every manual
+run. A push runs `ubuntu-22.04` alone; a pull request or a manual run adds
+`windows-2022` and `macos-15`. Each of them runs the whole gate a change is
+held to locally:
 
 ```
 npm ci · npm run typecheck · npm test · npm run build
@@ -20,6 +21,17 @@ cargo test --lib · cargo clippy --all-targets -- -D warnings
 plus the three files in `src-tauri/tests/` that need no network —
 `backup_roundtrip` (5 tests), `curseforge_fingerprints` (24) and
 `header_wire_format` (1). A warning is a failure, in CI as on a desk.
+
+Why a push gets one platform and not three: GitHub bills a Windows minute at
+two and a macOS minute at ten, so all three on every push cost about 88
+billable minutes a time. Against the 2000 a month a private repository is
+given, that is 23 pushes, and it ran out in eight days. Linux alone is about
+10. What the other two catch is real — they are the only thing that has ever
+run this code on a platform nobody here owns — so they are kept and paid for
+deliberately rather than dropped: **Actions → build → Run workflow** runs all
+three on demand, and a release runs them before it bundles anything. The
+cheapest way to stop this mattering at all is a public repository, where
+Actions minutes are not metered.
 
 Everything above compiles the desktop app, so Linux runs one step more:
 
@@ -39,9 +51,15 @@ What this does *not* cover: the nine `live_*` files hold 48 `#[ignore]`d
 tests that reach real upstream APIs, and CI runs none of them. Unit tests
 stay offline, so the offline ones are all any platform gets here.
 
-**`bundle`** — only on a tag matching `v*`, and only once `check` has passed
-on all three. Builds the installers and attaches them to a **draft** GitHub
-release:
+**`bundle`** — only when the workflow is run by hand with **release** ticked,
+and only once `check` has passed on all three. Pushing a tag builds nothing,
+on purpose: work lands on `main` in small commits for weeks, and only the
+owner knows which run of them is worth shipping. The **tag** box is what
+names the git tag, the draft release and the version an installed Geode
+compares its own against, and `bundle` refuses before it builds anything if
+it was left empty — a release dispatched from `main` would otherwise be
+published as "Geode main". Builds the installers and attaches them to a
+**draft** GitHub release:
 
 | Runner | `bundle.targets` | Out |
 |---|---|---|
@@ -415,15 +433,18 @@ floor Geode supports, so say in the release notes that it moved.
    `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`.
    The installers are named from the one in `tauri.conf.json`, so a tag that
    disagrees with it produces assets labelled with the old version.
-2. Commit, then tag `vX.Y.Z` and push the tag.
-3. `check` runs on three platforms, then `bundle` builds on three and opens a
+2. Commit and push to `main`. Pushing builds nothing and checks Linux only.
+3. **Actions → build → Run workflow**, tick **release**, and put the version
+   in **tag** as `vX.Y.Z`. The action makes the tag itself, from whatever is
+   on `main` when the run starts, so there is nothing to tag by hand.
+4. `check` runs on three platforms, then `bundle` builds on three and opens a
    draft release.
-4. Download the Linux package and run it. Say, in the release notes, which
+5. Download the Linux package and run it. Say, in the release notes, which
    bundles were launched and which were not.
-5. Publish the draft. Until it is published, `releases/latest/download` does
+6. Publish the draft. Until it is published, `releases/latest/download` does
    not resolve to it, so no installed Geode can see the update — which also
    means publishing is the moment the manifest goes live to everybody.
-6. If the updater is switched on, update a copy of the *previous* release to
+7. If the updater is switched on, update a copy of the *previous* release to
    this one before saying anywhere that the updater works. It has never been
    done.
 
@@ -434,4 +455,4 @@ invisible to every existing install or offered to the build it already is.
 
 Nothing in this repository parses the workflow file — GitHub is the first
 thing that reads it, and a syntax error there surfaces as a run that never
-starts. Changing it is worth a push to a branch before a tag depends on it.
+starts. Changing it is worth a manual run before a release depends on it.

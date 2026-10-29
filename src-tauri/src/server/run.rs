@@ -1300,10 +1300,32 @@ mod tests {
         assert!(said.contains(&port.to_string()), "{said}");
         assert!(said.contains("already in use"), "{said}");
 
-        // And once it is free again the same server starts.
+        // And a port nothing holds is no obstacle. A free port can only be
+        // found by binding one and letting it go, so any other test in this
+        // binary can take it in the gap — which is a steal rather than a
+        // regression, and asserting on the first try fails about one run in
+        // three. Trying a few ports makes a steal vanishingly unlikely
+        // without hiding a refusal that is real, because every attempt has
+        // to be refused before the test is.
         drop(held);
-        refuse_if_the_port_is_taken(&paths, &server)
+        let mut asked = None;
+        for _ in 0..5 {
+            let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let free = probe.local_addr().unwrap().port();
+            drop(probe);
+            tokio::fs::write(
+                run.join("server.properties"),
+                format!("server-ip=127.0.0.1\nserver-port={free}\n"),
+            )
             .await
+            .unwrap();
+            asked = Some(refuse_if_the_port_is_taken(&paths, &server).await);
+            if matches!(asked, Some(Ok(()))) {
+                break;
+            }
+        }
+        asked
+            .expect("the loop asks at least once")
             .expect("a free port is not an obstacle");
     }
 
