@@ -378,6 +378,23 @@ pub async fn minecraft_session(
         .json(&json!({ "identityToken": format!("XBL3.0 x={uhs};{xsts_token}") }))
         .send()
         .await?;
+    // A 403 here means one thing and it is worth saying outright: Mojang
+    // reviews every new application by hand and adds it to an allow list, and
+    // until this one is on it the exchange stops here no matter how correct
+    // the Azure registration is. Everything before this point having worked
+    // is what *proves* that — the device code, Xbox Live and XSTS all
+    // accepted the application. "HTTP 403" alone sends a person back to check
+    // settings that were never wrong.
+    if resp.status() == reqwest::StatusCode::FORBIDDEN {
+        return Err(Error::msg(
+            "Mojang has not approved this launcher's application ID yet. Every \
+             new one is reviewed by hand before it may sign anyone in, so this \
+             is where an unapproved ID stops — the Azure side is fine. Apply at \
+             https://aka.ms/mce-reviewappid. Until it is approved, importing a \
+             session from another launcher signs in with no application ID at \
+             all.",
+        ));
+    }
     if !resp.status().is_success() {
         return Err(Error::msg(format!(
             "Minecraft services rejected the sign-in (HTTP {})",
