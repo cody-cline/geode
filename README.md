@@ -4,9 +4,11 @@
 
 # Geode
 
-**A fast, native Minecraft launcher and mod manager.**
+**A fast, native Minecraft launcher and server manager.**
 
-Prism-grade control, in an interface that doesn't feel like a control panel.
+Most launchers stop at the client. Geode installs the server too — runs it,
+keeps its backups, manages who is allowed on, and hands your players a matching
+instance in a single link.
 
 </div>
 
@@ -22,6 +24,42 @@ The release binary is **7.3 MB**, because the UI runs in the webview your OS
 already ships rather than a bundled copy of Chromium. Measured idle memory is
 **~170 MB PSS** across the main and WebKit processes (Linux, software
 rendering — a real GPU should do better, but that hasn't been measured).
+
+## How it compares
+
+Geode is a client launcher that also runs servers. That is the whole
+difference; most of the rest is table stakes.
+
+| | Geode | Prism | ATLauncher | Modrinth | CurseForge |
+|---|:---:|:---:|:---:|:---:|:---:|
+| Modrinth **and** CurseForge in one search | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Spigot and Paper **plugins** | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Installs a Minecraft server | ✅ | ❌ | ✅ | ❌ <sup>1</sup> | ❌ |
+| Runs it, with a two-way console | ✅ | ❌ | ❌ <sup>2</sup> | ❌ | ❌ |
+| Backups, and commands on a timer | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Whitelist, ops and bans from the app | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Runs headless, with no desktop at all | ✅ | ❌ | ❌ | ❌ | ❌ |
+| A mod list with no version picked yet | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Serves its players the pack directly | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Microsoft sign-in out of the box | ❌ <sup>3</sup> | ✅ | ✅ | ✅ | ✅ |
+| Tested on Windows and macOS | ❌ | ✅ | ✅ | ✅ | ✅ |
+| Years of people relying on it | ❌ | ✅ | ✅ | ✅ | ✅ |
+
+<sup>1</sup> Modrinth sells hosted servers and you can buy one from inside the
+app; it does not install one on your own machine.
+<sup>2</sup> ATLauncher writes the server files. Starting it, watching it and
+keeping it alive are yours to do, outside the launcher.
+<sup>3</sup> Not a missing feature — see
+[Accounts](#accounts-and-curseforge). Mojang reviews every launcher's
+application ID by hand before it may sign anyone in, and Geode's is in that
+queue. Until it clears, Geode borrows a session from a launcher you already
+use, which needs no ID at all.
+
+The last three rows are the honest ones. Prism, ATLauncher, the Modrinth app
+and CurseForge are mature, translated, and have been run by a lot of people on
+every platform; Geode has not. Checked October 2026 — if something here is
+wrong or has gone stale, please open an issue. A comparison table that quietly
+rots is worse than none.
 
 ## What it does
 
@@ -46,7 +84,8 @@ Jars you drop in by hand still show up, with names read out of the jar itself.
 **Real launching.** Online play without registering anything: Geode can adopt a
 session from Prism, MultiMC, ATLauncher or the official launcher if one is
 already signed in here. Failing that, Microsoft device-code sign-in with your
-own Azure ID, or offline accounts for single-player and LAN. Java is detected
+own Azure ID. Offline accounts cover single-player and LAN, once one account on
+the install has shown it owns the game. Java is detected
 across every layout distros use, and a matching Temurin runtime is downloaded
 automatically when nothing on the system fits. The console parses Minecraft's log4j XML stream back into levelled,
 filterable, searchable entries instead of a wall of markup.
@@ -116,13 +155,23 @@ Linux is the only platform tested so far. The code paths for macOS and Windows
 are written and rule evaluation is exercised by unit tests, but neither has
 been run.
 
-CI now builds all three — a Windows installer and a universal macOS dmg
-alongside the Linux packages — and runs the whole check suite on all three.
-That is a weaker statement than it looks: it means the code compiles, the
-offline tests pass and an installer comes out, not that anybody has launched
-Geode on Windows or macOS. Nothing there has signed into Microsoft, started a
-JVM, or clicked a `geode://` link. See
-[docs/releasing.md](docs/releasing.md).
+CI builds all three — a Windows installer and a universal macOS dmg alongside
+the Linux packages. It checks Linux on every push, and all three when a release
+is asked for or the workflow is run by hand; a Windows minute is billed at two
+and a macOS minute at ten, so the other two are paid for deliberately rather
+than on every commit.
+
+Even a green run there is a weaker statement than it looks: it would mean the
+code compiles, the offline tests pass and an installer comes out, not that
+anybody has launched Geode on Windows or macOS. Nothing on either has signed
+into Microsoft, started a JVM, or clicked a `geode://` link.
+
+And those runs are not green today. About a dozen tests fail on each, nearly
+all in one family: binding a port that is already held succeeds on Windows and
+macOS where it fails on Linux, so everything that reports a port as taken is
+untrustworthy there. A couple more are filename encoding. They are real
+findings about real platform differences, they are known, and they are not
+fixed yet. See [docs/releasing.md](docs/releasing.md).
 
 ## Building
 
@@ -142,9 +191,9 @@ npm run tauri build
 
 That produces the AppImage, deb and rpm. The Windows and macOS bundles come
 from `tauri.windows.conf.json` and `tauri.macos.conf.json`, which Tauri merges
-over `tauri.conf.json` on their own platforms, and are built by CI on a `v*`
-tag — see [docs/releasing.md](docs/releasing.md). No API key is needed to
-build any of them.
+over `tauri.conf.json` on their own platforms, and are built by CI when a
+release is asked for — see [docs/releasing.md](docs/releasing.md). No API key
+is needed to build any of them.
 
 Everything Geode owns lives in `~/.local/share/geode` (override with
 `GEODE_HOME`). Deleting that directory resets it completely.
@@ -170,9 +219,9 @@ reproduces it reliably.
 
 ## Accounts and CurseForge
 
-Neither needs setting up before Geode is useful — offline accounts and Modrinth
-work out of the box. Both limits below come from other people's terms, not from
-missing work.
+Modrinth works out of the box, and so does playing online, as long as something
+else on this machine is already signed in. Both limits below come from other
+people's terms, not from missing work.
 
 ### Online play — the easy way, and the thorough way
 
@@ -197,14 +246,25 @@ on its own with no other launcher installed. Microsoft issues client IDs per
 application and Mojang separately approves each one for Minecraft API access, so
 there is no shared ID to ship.
 
-1. Register an app in the [Azure portal](https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade) — public client, no secret.
+1. Register an app in the [Azure portal](https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade) — public client, no secret. The name may not contain *Minecraft*, *Mojang*, *Microsoft*, *Live*, *Xbox*, *Discord* or *Hypixel*.
 2. Turn on **Allow public client flows** so the device-code grant works.
-3. Apply for Minecraft API access with Mojang.
+3. Apply at [aka.ms/mce-reviewappid](https://aka.ms/mce-reviewappid) and wait.
 4. Paste the Application (client) ID into *Settings → Accounts*.
 
 Or bake it in at build time with `GEODE_CLIENT_ID=... npm run tauri build`.
 
-**Neither:** offline accounts work immediately for single-player and LAN.
+**Step 3 is not a formality.** Mojang keeps an allow list and adds every new
+application to it by hand, in weekly batches, with no stated timeline and no
+appeal. Until yours is on it, sign-in walks the whole chain correctly and then
+stops with `403` at the last step — which is Mojang's answer, not a mistake in
+the three steps above. Geode says so in those words when it happens.
+
+**Offline accounts** cover single-player, LAN, and servers with authentication
+off — but only once one account on this install has proved it owns Minecraft:
+Java Edition. A Microsoft sign-in does that, and so does an imported session.
+An offline account is for playing a copy you own; it is not a way to play
+without one, and Mojang's rules for any launcher touching their APIs say the
+check belongs here rather than in a server's settings.
 
 ### Sharing a pack through Google Drive needs your own Google client
 
@@ -358,5 +418,10 @@ collided with the loader's patched `minecraft` module.
 
 ## Licence
 
-Not affiliated with Mojang, Microsoft, Modrinth or CurseForge. Minecraft is a
-trademark of Mojang AB.
+**NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG
+OR MICROSOFT.**
+
+Not affiliated with Mojang, Microsoft, Modrinth, CurseForge or SpigotMC.
+Minecraft is a trademark of Mojang AB. Geode ships no game files: Minecraft,
+its libraries and its assets are downloaded from Mojang's own servers, and mods
+from the author's own provider under that provider's terms.
