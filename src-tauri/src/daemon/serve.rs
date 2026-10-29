@@ -315,27 +315,48 @@ pub(super) mod tests {
         );
     }
 
-    /// A container stop has to leave the port free, not leave it held by a
-    /// client that has not hung up.
+    /// A container stop has to let go of a client that opened a connection and
+    /// then said nothing — the state an accepted-but-unread socket sits in.
     ///
-    /// Proved by nothing answering there any more, rather than by binding the
-    /// port again: the OS hands these out as ephemeral ports, and a rebind
-    /// races every other test in this binary asking for one — which it lost,
-    /// reporting "address already in use" for a port this code had released.
-    /// A refused connection says what the test means, and says it about this
-    /// listener rather than about the OS's bookkeeping.
+    /// This used to assert the port itself by connecting to it again and
+    /// requiring a refusal, and it lost a race it could not win: the moment
+    /// the accept loop ends the OS puts that ephemeral port back in the pool,
+    /// and any of the other tests in this binary asking for one can be handed
+    /// it and answer. It failed roughly two runs in three once two more tests
+    /// started taking ephemeral ports. Nothing about the port needed asserting
+    /// anyway — [`Listener::stop`] awaits the accept task, so by the time it
+    /// returns the listening socket has been dropped, and the thing worth
+    /// pinning is what happens to a connection that was already open.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_port_is_free_once_it_has_stopped() {
+    async fn a_client_that_said_nothing_is_let_go_when_the_host_stops() {
         let scratch = Scratch::new("daemon-port");
         let listening = started(host(&scratch)).await;
-        let addr = listening.local_addr;
-        let _idle = TcpStream::connect(addr).expect("a client that never says anything");
+        let mut idle = TcpStream::connect(listening.local_addr)
+            .expect("a client that never says anything");
         listening.stop().await;
 
-        let refused = TcpStream::connect(addr);
+        // Gone rather than left waiting, by either of the two ways a socket
+        // goes: a clean close when the accept loop had already taken this
+        // connection and the shutdown cut it, or a reset when it was still in
+        // the kernel's backlog and the listening socket was dropped out from
+        // under it. Which of the two happens is a race with the accept loop
+        // and is not this test's business — what matters is that neither is a
+        // client sitting there until `HEADER_TIMEOUT` runs out, which is the
+        // one outcome a read timeout tells apart from the others.
+        idle.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut buf = [0u8; 16];
+        let outcome = idle.read(&mut buf);
+        let waiting = matches!(
+            &outcome,
+            Err(e) if matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            )
+        );
         assert!(
-            refused.is_err(),
-            "something is still listening on {addr} after the host stopped"
+            !waiting && !matches!(outcome, Ok(n) if n > 0),
+            "a client holding an unused connection was left waiting on a host \
+             that had gone: {outcome:?}"
         );
     }
 
