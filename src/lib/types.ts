@@ -787,6 +787,10 @@ export interface Config {
   javaArgs: string;
   javaPath: string | null;
   clientId: string | null;
+  /** True when sign-in has an id to use, saved here or compiled in. */
+  hasClientId: boolean;
+  /** True when that id came from GEODE_CLIENT_ID at build time. */
+  clientIdFromBuild: boolean;
   theme: string;
   accent: string;
   hideOnLaunch: boolean;

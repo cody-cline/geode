@@ -530,7 +530,9 @@ function AccountsSettings({ update }: { update: Updater }) {
             </button>
           </div>
           <p className="hint">
-            Offline accounts work without this. Only online play needs it.
+            {config.clientIdFromBuild
+              ? "This build has its own ID compiled in, so sign-in already works. Anything saved here is used instead."
+              : "Offline accounts work without this. Only online play needs it."}
           </p>
         </div>
       </section>

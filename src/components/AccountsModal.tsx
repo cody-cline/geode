@@ -261,7 +261,7 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
             </div>
           ) : null}
 
-          {config?.clientId ? (
+          {config?.hasClientId ? (
             <button
               className="btn btn-primary"
               onClick={startMicrosoftLogin}

@@ -131,7 +131,15 @@ impl Default for Config {
             memory_mb: default_memory(),
             java_args: default_java_args(),
             java_path: None,
-            client_id: crate::auth::default_client_id(),
+            // Not seeded from the build-time id, for the same reason as the
+            // key below — and this one had to learn it the hard way. Seeding
+            // it here only reaches a config.json that does not exist yet: a
+            // file written before the id was baked in holds `"clientId":
+            // null`, `#[serde(default)]` fills absent fields and not explicit
+            // nulls, so the compiled-in id stayed shadowed for ever and the
+            // app asked for an id it already had. `effective_client_id`
+            // layers instead.
+            client_id: None,
             // Deliberately not seeded from the build-time key: that would get
             // written into config.json on first save, and a later `null` there
             // would then shadow it. `effective_curseforge_key` layers instead.
@@ -164,6 +172,19 @@ impl Config {
         Ok(())
     }
 
+    /// The Azure application id to actually sign in with: whatever the user
+    /// saved, else whatever was compiled in from `GEODE_CLIENT_ID`. Every
+    /// caller that is about to talk to Microsoft reads this rather than the
+    /// field, so a private build signs in without anyone typing anything.
+    pub fn effective_client_id(&self) -> Option<String> {
+        self.client_id
+            .as_ref()
+            .map(|id| id.trim())
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .or_else(crate::auth::default_client_id)
+    }
+
     /// The key to actually send to CurseForge: whatever the user saved, else
     /// whatever was compiled in.
     pub fn effective_curseforge_key(&self) -> Option<String> {
@@ -194,6 +215,23 @@ impl Config {
             obj.insert(
                 "curseforgeKeyFromBuild".into(),
                 serde_json::Value::Bool(!from_config && default_curseforge_key().is_some()),
+            );
+            // `clientId` itself stays as the user typed it, so the Settings
+            // field keeps meaning "what you saved". Whether sign-in *works*
+            // is a different question once a build can carry its own id.
+            obj.insert(
+                "hasClientId".into(),
+                serde_json::Value::Bool(self.effective_client_id().is_some()),
+            );
+            obj.insert(
+                "clientIdFromBuild".into(),
+                serde_json::Value::Bool(
+                    !self
+                        .client_id
+                        .as_ref()
+                        .is_some_and(|id| !id.trim().is_empty())
+                        && crate::auth::default_client_id().is_some(),
+                ),
             );
             let has_google_secret = self
                 .google_client_secret
@@ -331,5 +369,44 @@ mod tests {
         assert!(!text.contains("super-secret"), "key leaked to the frontend");
         assert_eq!(v["hasCurseforgeKey"], serde_json::json!(true));
         assert_eq!(v["curseforgeKeyFromBuild"], serde_json::json!(false));
+    }
+
+    /// The bug this guards: seeding `Default` with the compiled-in id put it
+    /// into config.json on first save, and a config.json written *before* the
+    /// id existed holds `"clientId": null` instead. `#[serde(default)]` fills
+    /// fields that are *absent*, never ones that are explicitly null, so that
+    /// file turned the id back into `None` on every load and the app asked
+    /// for an id it was already carrying. The id has to come from the
+    /// layering in `effective_client_id` and never from here.
+    ///
+    /// Asserted on `Default` rather than on a loaded file because this holds
+    /// with or without the `.env` that CI does not have.
+    #[test]
+    fn the_build_time_client_id_is_never_written_into_the_config() {
+        assert_eq!(Config::default().client_id, None);
+    }
+
+    #[test]
+    fn an_id_saved_in_settings_wins_over_the_compiled_in_one() {
+        let config = Config {
+            client_id: Some("typed-into-settings".into()),
+            ..Config::default()
+        };
+        assert_eq!(
+            config.effective_client_id().as_deref(),
+            Some("typed-into-settings")
+        );
+    }
+
+    /// A field cleared to spaces is a field with nothing in it, not an id
+    /// that happens to be blank — otherwise clearing the box would turn
+    /// sign-in off in a build that can sign in perfectly well.
+    #[test]
+    fn a_blank_client_id_falls_back_rather_than_disabling_sign_in() {
+        let config = Config {
+            client_id: Some("   ".into()),
+            ..Config::default()
+        };
+        assert_eq!(config.effective_client_id(), crate::auth::default_client_id());
     }
 }

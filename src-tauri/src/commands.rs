@@ -194,7 +194,7 @@ pub async fn app_info(state: State<'_, AppState>) -> Result<AppInfo> {
         version: env!("CARGO_PKG_VERSION").into(),
         data_dir: state.paths.root.to_string_lossy().to_string(),
         platform: crate::meta::piston::current_os().to_string(),
-        has_client_id: config.client_id.is_some(),
+        has_client_id: config.effective_client_id().is_some(),
     })
 }
 
@@ -3296,7 +3296,7 @@ pub async fn begin_microsoft_login(
     state: State<'_, AppState>,
 ) -> Result<crate::auth::DeviceCodeStart> {
     let config = state.config().await;
-    let client_id = config.client_id.ok_or_else(|| {
+    let client_id = config.effective_client_id().ok_or_else(|| {
         Error::msg(
             "Microsoft sign-in needs an Azure client ID. Add one in Settings — \
              see the README for how to register one.",
@@ -3313,7 +3313,7 @@ pub async fn complete_microsoft_login(
 ) -> Result<AccountView> {
     let config = state.config().await;
     let client_id = config
-        .client_id
+        .effective_client_id()
         .ok_or_else(|| Error::msg("no Microsoft client ID is configured"))?;
 
     let msa = crate::auth::poll_device_code(&state.http, &client_id, &start).await?;
@@ -3936,7 +3936,7 @@ pub async fn launch_instance(
     let session = crate::auth::store::session_for(
         &state.http,
         &state.paths,
-        config.client_id.as_deref(),
+        config.effective_client_id().as_deref(),
         account_id.as_deref(),
     )
     .await
