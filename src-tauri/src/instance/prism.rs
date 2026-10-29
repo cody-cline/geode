@@ -2180,6 +2180,54 @@ project-id = 1649197
         assert!(!cfg.contains("JvmArgs"), "{cfg}");
     }
 
+    /// An instance's environment goes back out the way it came in, so a
+    /// round trip through Prism does not quietly drop the four variables that
+    /// are the reason the instance runs at all on this machine.
+    #[tokio::test]
+    async fn an_exported_instance_carries_its_environment_and_wrapper() {
+        let (scratch, mut inst, catalogue) = exportable("env-out", &[]).await;
+        inst.overrides
+            .env
+            .insert("SDL_VIDEO_DRIVER".into(), "wayland".into());
+        // A value with its own `=`, which is what a real one looks like.
+        inst.overrides
+            .env
+            .insert("SDL_LOGGING".into(), "video=verbose".into());
+        inst.overrides.wrapper_command = Some("gamemoderun".into());
+
+        let dest = scratch.paths.root.join("env-out.zip");
+        write_to(&scratch.paths, &inst, &dest, &catalogue).await;
+        let cfg = text_of(&dest, "instance.cfg");
+        let lines: Vec<&str> = cfg.lines().collect();
+
+        assert!(lines.contains(&"OverrideEnv=true"), "{cfg}");
+        assert!(lines.contains(&"OverrideCommands=true"), "{cfg}");
+        assert!(lines.contains(&"WrapperCommand=gamemoderun"), "{cfg}");
+
+        // And read back by the same reader Prism's own files go through, so
+        // what is asserted is that Prism would see it rather than that some
+        // bytes are present.
+        let read = general(&cfg);
+        let env: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(read.get("Env").expect("an Env value")).expect("valid JSON");
+        assert_eq!(env.get("SDL_VIDEO_DRIVER").map(String::as_str), Some("wayland"));
+        assert_eq!(env.get("SDL_LOGGING").map(String::as_str), Some("video=verbose"));
+    }
+
+    /// An instance with neither set says nothing about either, rather than
+    /// handing Prism an empty object and a gate that turns its own global
+    /// settings off.
+    #[tokio::test]
+    async fn an_instance_with_no_environment_writes_no_gate() {
+        let (scratch, inst, catalogue) = exportable("env-none", &[]).await;
+        let dest = scratch.paths.root.join("env-none.zip");
+        write_to(&scratch.paths, &inst, &dest, &catalogue).await;
+        let cfg = text_of(&dest, "instance.cfg");
+        assert!(!cfg.contains("OverrideEnv"), "{cfg}");
+        assert!(!cfg.contains("Env="), "{cfg}");
+        assert!(!cfg.contains("WrapperCommand"), "{cfg}");
+    }
+
     /// Without `ConfigVersion` Prism reads the whole file with its pre-1.3
     /// parser, whose rules are not the QSettings ones [`ini_escaped`] writes
     /// for: it ends a value at an unescaped `#`, so a note or a JVM argument

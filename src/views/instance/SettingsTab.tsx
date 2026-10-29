@@ -521,7 +521,7 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
             </label>
             <textarea
               id="inst-env"
-              className="input"
+              className="textarea"
               rows={4}
               spellCheck={false}
               value={envText}
