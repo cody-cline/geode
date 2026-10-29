@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Everything the Geode window is allowed to call. Tauri v2 denies plugin commands unless a capability grants them; the app's own #[tauri::command] handlers do not need listing here.",
+  "description": "Everything the Geode window is allowed to call. Tauri v2 denies plugin commands unless a capability grants them; the app's own #[tauri::command] handlers do not need listing here. `opener:allow-open-url` needs more than the bare permission: the plugin asks `self.allowed.iter().any(...)`, which is false for an empty list, so granting the command without a scope opens nothing at all and says so nowhere a person can see. The glob is matched against the whole URL with separators unescaped, so `https://*` covers a path and a fragment and still refuses `file://`, `javascript:` and cleartext `http://` — which is the point of naming a scheme rather than `*`.",
   "windows": ["main"],
   "permissions": [
     "core:default",
@@ -15,7 +15,10 @@
     "dialog:allow-open",
     "dialog:allow-save",
 
-    "opener:allow-open-url",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [{ "url": "https://*" }]
+    },
     "opener:allow-reveal-item-in-dir"
   ]
 }
