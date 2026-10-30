@@ -12,7 +12,7 @@ A detailed walkthrough of the error, its code path and all known details is as f
 
 -- Mod loading issue for: colorwheel --
 Details:
-	Mod file: /home/codyc/.local/share/PrismLauncher/instances/Create Simulated/minecraft/mods/colorwheel-neoforge-1.2.9+mc1.21.1.jar
+	Mod file: /home/user/.local/share/PrismLauncher/instances/Example/minecraft/mods/colorwheel-neoforge-1.2.9+mc1.21.1.jar
 	Failure message: Mod colorwheel is incompatible with irisflw any
 		Currently, irisflw is 2.4.0
 		The reason is: Mixin conflict with Iris Flywheel Compat
