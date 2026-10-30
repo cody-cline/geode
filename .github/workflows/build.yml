@@ -62,17 +62,18 @@ jobs:
       # and say whether it is that platform or the change.
       fail-fast: false
       matrix:
-        # Linux on every push; all three on a pull request or when this
-        # workflow is run by hand. GitHub bills a Windows minute at two and a
-        # macOS minute at ten, which made all three on every push cost about
-        # 88 billable minutes a time — 23 pushes against an allowance of 2000
-        # a month, and it ran out in eight days. Linux alone is about 10.
+        # All three, on everything. This was briefly Linux-only on a push,
+        # because a Windows minute bills at two and a macOS minute at ten, and
+        # all three on every push came to about 88 billable minutes a time —
+        # which emptied a 2000-minute month in eight days. That stopped being
+        # a reason when the repository went public: standard runners are free
+        # and unmetered there, macOS included, and only *larger* runners are
+        # still billed.
         #
-        # What the other two catch is real: they are the only thing that has
-        # ever run this code on a platform the author does not own. So they
-        # are kept, and moved to where they are paid for deliberately — a
-        # release runs them, and `workflow_dispatch` runs them on demand.
-        os: ${{ github.event_name == 'push' && fromJSON('["ubuntu-22.04"]') || fromJSON('["ubuntu-22.04", "windows-2022", "macos-15"]') }}
+        # Worth putting back rather than leaving cheap, because these two are
+        # the only thing that has ever run this code on a platform nobody here
+        # owns, and a check that runs on demand is a check nobody runs.
+        os: [ubuntu-22.04, windows-2022, macos-15]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

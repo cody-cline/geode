@@ -9,9 +9,8 @@ having run Geode there.
 ## What the workflow runs
 
 **`check`** — on every push to `main`, every pull request, and every manual
-run. A push runs `ubuntu-22.04` alone; a pull request or a manual run adds
-`windows-2022` and `macos-15`. Each of them runs the whole gate a change is
-held to locally:
+run, on `ubuntu-22.04`, `windows-2022` and `macos-15`. Each of them runs the
+whole gate a change is held to locally:
 
 ```
 npm ci · npm run typecheck · npm test · npm run build
@@ -22,16 +21,15 @@ plus the three files in `src-tauri/tests/` that need no network —
 `backup_roundtrip` (5 tests), `curseforge_fingerprints` (24) and
 `header_wire_format` (1). A warning is a failure, in CI as on a desk.
 
-Why a push gets one platform and not three: GitHub bills a Windows minute at
-two and a macOS minute at ten, so all three on every push cost about 88
-billable minutes a time. Against the 2000 a month a private repository is
-given, that is 23 pushes, and it ran out in eight days. Linux alone is about
-10. What the other two catch is real — they are the only thing that has ever
-run this code on a platform nobody here owns — so they are kept and paid for
-deliberately rather than dropped: **Actions → build → Run workflow** runs all
-three on demand, and a release runs them before it bundles anything. The
-cheapest way to stop this mattering at all is a public repository, where
-Actions minutes are not metered.
+This cost nothing, and briefly cost a great deal. GitHub bills a Windows
+minute at two and a macOS minute at ten, so while the repository was private
+all three on every push came to about 88 billable minutes a time — 23 pushes
+against the 2000 a month a private repository gets, and it emptied the month
+in eight days. The workflow was cut back to Linux on a push for exactly as
+long as that was true. Going public ended it: standard runners are free and
+unmetered on a public repository, macOS included, and only *larger* runners
+are still billed. All three run on everything again, because a check that
+only runs on demand is a check nobody runs.
 
 Everything above compiles the desktop app, so Linux runs one step more:
 
