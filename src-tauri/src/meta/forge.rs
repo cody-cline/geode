@@ -581,9 +581,20 @@ mod tests {
             root: PathBuf::from("/root"),
         };
         let tokens = HashMap::new();
+        // Built from `Paths` rather than written out, because the separator is
+        // the platform's: a literal with forward slashes passes on Linux and
+        // fails on Windows for a reason that has nothing to do with whether a
+        // Maven coordinate expands correctly.
+        let expected = paths
+            .libraries()
+            .join("net")
+            .join("minecraft")
+            .join("client")
+            .join("1.20.1")
+            .join("client-1.20.1-slim.jar");
         assert_eq!(
             expand_arg("[net.minecraft:client:1.20.1:slim]", &tokens, &paths),
-            "/root/libraries/net/minecraft/client/1.20.1/client-1.20.1-slim.jar"
+            expected.to_string_lossy()
         );
     }
 }

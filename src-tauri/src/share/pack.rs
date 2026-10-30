@@ -4274,7 +4274,12 @@ mod tests {
     /// A file whose name is not text cannot be an index path and cannot be a
     /// zip entry either. It is named to the sharer rather than written as
     /// U+FFFD, which would be a name no reader could ever match back.
-    #[cfg(unix)]
+    ///
+    /// Not macOS: APFS and HFS+ enforce UTF-8 in filenames and refuse this one
+    /// outright with `EILSEQ`, so the fixture cannot be created and there is
+    /// nothing on that platform for the behaviour to be about. Linux and the
+    /// BSDs take arbitrary bytes, which is where a pack can meet such a name.
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[tokio::test]
     async fn a_non_utf8_path_is_reported_rather_than_mangled() {
         use std::os::unix::ffi::OsStrExt;
