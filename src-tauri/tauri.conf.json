@@ -48,7 +48,7 @@
     },
     "updater": {
       "endpoints": [
-        "https://github.com/littlesquirt1/geode/releases/latest/download/latest.json"
+        "https://github.com/cody-cline/geode/releases/latest/download/latest.json"
       ],
       "pubkey": "",
       "requireSignedVersion": true

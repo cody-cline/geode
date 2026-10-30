@@ -94,7 +94,7 @@ fn usable_key(from_env: Option<&str>) -> Option<String> {
 /// the same release rather than two ideas of "latest", and
 /// `both_modes_look_at_the_same_repository` holds them to the same repository
 /// as well.
-pub const RELEASES_API: &str = "https://api.github.com/repos/littlesquirt1/geode/releases/latest";
+pub const RELEASES_API: &str = "https://api.github.com/repos/cody-cline/geode/releases/latest";
 
 /// The one release a keyless build asks about, as the API gives it. Every other
 /// field in that response — the assets, the draft and prerelease flags, who cut
@@ -355,8 +355,8 @@ mod tests {
     fn the_releases_api_response_is_read_for_the_tag_and_the_notes() {
         let release: Release = serde_json::from_str(
             r#"{
-                "url": "https://api.github.com/repos/littlesquirt1/geode/releases/1",
-                "html_url": "https://github.com/littlesquirt1/geode/releases/tag/v0.2.0",
+                "url": "https://api.github.com/repos/cody-cline/geode/releases/1",
+                "html_url": "https://github.com/cody-cline/geode/releases/tag/v0.2.0",
                 "id": 1,
                 "tag_name": "v0.2.0",
                 "name": "Geode 0.2.0",

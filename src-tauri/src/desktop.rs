@@ -27,6 +27,30 @@ pub fn sink(app: AppHandle) -> EventSink {
 
 #[cfg(test)]
 mod tests {
+    /// The app's identifier is its identity on disk, not a URL, and it does
+    /// not follow a GitHub rename.
+    ///
+    /// It keys the single-instance lock, the `geode://` scheme registration,
+    /// and the data directory on all three platforms. Changing it does not
+    /// migrate anything: every existing install becomes a different
+    /// application that cannot see its own instances, servers or accounts,
+    /// and the old ones are left behind with nothing pointing at them. The
+    /// owner's GitHub account was renamed from `littlesquirt1` to
+    /// `cody-cline` and every URL moved with it; this deliberately did not,
+    /// and this test is here so the next person to grep for the old name does
+    /// not finish the job.
+    #[test]
+    fn the_app_identifier_does_not_follow_a_rename() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json"))
+                .expect("tauri.conf.json is not valid JSON");
+        assert_eq!(
+            config["identifier"], "dev.littlesquirt1.geode",
+            "the identifier is the installed app's identity: changing it \
+             orphans every existing data directory"
+        );
+    }
+
     /// `opener:allow-open-url` grants the command and nothing more. The
     /// plugin decides each URL with `self.allowed.iter().any(..)`, which is
     /// `false` for an empty list, so the bare permission refuses every URL

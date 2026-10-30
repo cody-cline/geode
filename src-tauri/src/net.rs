@@ -15,7 +15,7 @@ use crate::error::{Error, Result};
 pub const USER_AGENT: &str = concat!(
     "geode/",
     env!("CARGO_PKG_VERSION"),
-    " (github.com/littlesquirt1/geode)"
+    " (github.com/cody-cline/geode)"
 );
 
 /// How long one request may take, and how long it may spend reaching the host.

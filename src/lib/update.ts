@@ -2,7 +2,7 @@ import type { StatusLine } from "./share";
 import type { UpdateStatus } from "./types";
 
 /** Where a new version comes from when Geode cannot fetch one itself. */
-export const RELEASES_URL = "https://github.com/littlesquirt1/geode/releases";
+export const RELEASES_URL = "https://github.com/cody-cline/geode/releases";
 
 /**
  * Somebody else's words — a backend error, a network stack's — ended with one

@@ -184,7 +184,7 @@ them.** Reading the public releases API needs no key, no token and no
 signature:
 
 ```
-https://api.github.com/repos/littlesquirt1/geode/releases/latest
+https://api.github.com/repos/cody-cline/geode/releases/latest
 ```
 
 So such a build asks that, compares the tag against its own version through
@@ -267,7 +267,7 @@ platform, each naming a bundle URL and its signature. That file is what an
 installed Geode reads, from the endpoint in `tauri.conf.json`:
 
 ```
-https://github.com/littlesquirt1/geode/releases/latest/download/latest.json
+https://github.com/cody-cline/geode/releases/latest/download/latest.json
 ```
 
 `latest/download` resolves to the most recent **published**, non-prerelease

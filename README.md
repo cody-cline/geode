@@ -80,7 +80,7 @@ Modrinth sells hosted servers rather than installing one on your machine.
 
 ## Install
 
-Linux — AppImage, `.deb` and `.rpm` on the [releases page](https://github.com/littlesquirt1/geode/releases).
+Linux — AppImage, `.deb` and `.rpm` on the [releases page](https://github.com/cody-cline/geode/releases).
 
 Windows and macOS builds are produced but have not been tested yet. See
 [docs/releasing.md](docs/releasing.md).
