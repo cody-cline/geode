@@ -189,10 +189,32 @@ by the same strict parser as a link off the internet. The sharing traps in
 [docs/architecture.md](docs/architecture.md) are worth reading before you touch
 any of it.
 
-**Ship no API keys.** CurseForge keys are per-developer and non-transferable;
-Microsoft client IDs are per-application and Mojang-approved individually.
-Both are user-supplied, or compiled into a private build from a gitignored
-`.env`. Never commit either, and never add a shared fallback key.
+**The keys ship, and the fork notice is what makes that legitimate.**
+`DEFAULT_CURSEFORGE_KEY` in `config.rs` is committed, the way Prism Launcher
+and PolyMC commit theirs, and the Microsoft client id will join it once Mojang
+approves one. There is no box to paste a key into anywhere in the app — that
+was removed on purpose, because a person who wants to play Minecraft should
+never read the word "key" — so withholding one would not protect it, it would
+only mean the feature did not work in any build that is still this software.
+
+Three things hold that together, and all three are load-bearing:
+
+- **The comment above each key is a fork notice**, not decoration. A key was
+  issued for Geode; CurseForge's terms require a derivative work to use its
+  own, and Mojang approves an application id for one application. Rewrite the
+  notice away and what is left is a licence violation with no warning attached.
+- **`""` must keep compiling.** It is how a fork builds before its own key
+  arrives, and `effective_curseforge_key` / `effective_client_id` layer a
+  user-saved value over the built-in one without writing either into
+  `config.json` — see the comments there for why seeding `Default` is the bug
+  that hid the client id for a week.
+- **Revocation lands on the wrong people.** A misused key is revoked from
+  everyone using the real Geode, not from whoever misused it. That asymmetry is
+  the reason the notice exists and the reason it is worded as a requirement.
+
+This licenses no *other* shared key. A Google client was ruled out for exactly
+these reasons and the feature was removed rather than shipped — see
+[docs/sharing-and-hosting.md](docs/sharing-and-hosting.md).
 
 **The queue lives in a shared doc, and its status is yours to keep true.**
 What to build next is tracked at

@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "A fast, modern Minecraft launcher and mod manager"
 edition = "2021"
 rust-version = "1.77"
+license = "GPL-3.0-only"
+repository = "https://github.com/cody-cline/geode"
 # Two binaries, so `cargo run` has to be told which one. Without this
 # `npm run tauri dev` stops with "could not determine which binary to run",
 # because the Tauri CLI runs plain `cargo run` and never names a target.

@@ -123,6 +123,21 @@ Tests that hit real APIs are `#[ignore]`d and live in `src-tauri/tests/`.
 [Modrinth](https://modrinth.com), [CurseForge](https://curseforge.com) and
 [SpigotMC](https://spigotmc.org).
 
+## Licence
+
+[GPL-3.0-only](LICENSE). If you distribute a build, you distribute the source.
+
+The name *Geode* and its icon are not covered by that — fork the code freely,
+but give your fork its own name, so nobody downloads yours thinking it is this
+one.
+
+**If you fork or rebrand, request your own CurseForge key and your own Azure
+application ID and put them in place of the ones here.** They were issued for
+Geode, CurseForge's terms require a derivative work to use its own, and both
+are revoked from the people using the real thing rather than from whoever
+misused them. `""` is a supported value for either: the build works, and that
+feature is simply off.
+
 ---
 
 **NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG

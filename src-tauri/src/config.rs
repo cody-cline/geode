@@ -27,23 +27,34 @@ fn default_accent() -> String {
     "#4ade80".into()
 }
 
-/// A CurseForge key compiled in via `GEODE_CURSEFORGE_KEY`, if there was one.
+/// The CurseForge key Geode searches with.
 ///
-/// CurseForge issues keys per developer and their terms say a key is
-/// non-transferable and must not be disclosed to a third party. A *private*
-/// build never reaches a third party, so baking your own key into your own
-/// binary does not engage that clause — and it saves pasting it into every
-/// fresh config.
+/// Committed, the way Prism Launcher and PolyMC commit theirs. There is no
+/// box to paste one into any more, so withholding it would not protect a key
+/// — it would only mean CurseForge did not work, for everyone, in every build
+/// that is still this software.
 ///
-/// Build a copy for anyone else and that stops being true, which is why this is
-/// opt-in at compile time rather than a checked-in constant. Prism and most
-/// open-source launchers do ship a shared key; that is a knowing trade they
-/// have made, not a pattern to copy by default.
+/// **If you fork or rebrand Geode you must request your own and put it here.**
+/// CurseForge's terms say a key is non-transferable and must not be disclosed
+/// to a third party, and they require a derivative work to use its own; this
+/// one was issued for Geode. Keys are free to request at
+/// <https://console.curseforge.com/>. Setting this to `""` compiles fine and
+/// turns CurseForge off, which is a supported way to build — Modrinth needs no
+/// key and keeps working.
+///
+/// The bill for misuse does not arrive at the forker's address. A key is
+/// revoked by CurseForge, and revoking this one takes CurseForge away from
+/// everybody using the real thing at once.
+const DEFAULT_CURSEFORGE_KEY: &str = "$2a$10$Y16nsLYwkM9oHOxqf8J2tOCyUudDxritcaeGWPrq/CWoqoL3ni5Mi";
+
+/// The key to search CurseForge with: `GEODE_CURSEFORGE_KEY` at build time if
+/// it was given, else [`DEFAULT_CURSEFORGE_KEY`]. Empty either way means no
+/// CurseForge, which is a build that works.
 pub fn default_curseforge_key() -> Option<String> {
-    option_env!("GEODE_CURSEFORGE_KEY")
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
+    let key = option_env!("GEODE_CURSEFORGE_KEY")
+        .unwrap_or(DEFAULT_CURSEFORGE_KEY)
+        .trim();
+    (!key.is_empty()).then(|| key.to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
