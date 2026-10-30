@@ -3024,4 +3024,75 @@ pub(super) mod tests {
         }
         assert_eq!(outgoing_files(&scratch.paths), 0, "the abandoned build left its file behind");
     }
+
+    /// TEMPORARY. Reports what this platform actually does when two sockets
+    /// want the same port across address families, because `listen` binds the
+    /// IPv6 wildcard dual-stack and every test squats the IPv4 one — and the
+    /// answer differs per platform in ways worth reading rather than recalling.
+    /// Panics on purpose so the findings reach the log on all three.
+    #[test]
+    #[ignore = "diagnostic; run with --ignored to read the platform's answer"]
+    fn what_this_platform_does_with_two_sockets_on_one_port() {
+        use socket2::{Domain, Protocol, Socket, Type};
+        use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+
+        fn try_bind(v6: bool, dual: bool, reuse: bool, port: u16) -> String {
+            let domain = if v6 { Domain::IPV6 } else { Domain::IPV4 };
+            let s = match Socket::new(domain, Type::STREAM, Some(Protocol::TCP)) {
+                Ok(s) => s,
+                Err(e) => return format!("socket() failed: {e}"),
+            };
+            if v6 {
+                if let Err(e) = s.set_only_v6(!dual) {
+                    return format!("set_only_v6 failed: {e}");
+                }
+            }
+            if reuse {
+                if let Err(e) = s.set_reuse_address(true) {
+                    return format!("set_reuse_address failed: {e}");
+                }
+            }
+            let addr = if v6 {
+                SocketAddr::from((Ipv6Addr::UNSPECIFIED, port))
+            } else {
+                SocketAddr::from((Ipv4Addr::UNSPECIFIED, port))
+            };
+            match s.bind(&addr.into()).and_then(|()| s.listen(16)) {
+                Ok(()) => "BOUND (no conflict seen)".into(),
+                Err(e) => format!("refused: {e}"),
+            }
+        }
+
+        let mut out = String::from("\n=== one port, two sockets ===\n");
+        out += &format!("platform: {} {}\n", std::env::consts::OS, std::env::consts::ARCH);
+
+        let squatter = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+        let port = squatter.local_addr().unwrap().port();
+        out += &format!("squatter holds 0.0.0.0:{port}\n");
+        for (label, v6, dual, reuse) in [
+            ("  [::] dual  +reuse  (what listen() does today)", true, true, true),
+            ("  [::] dual  -reuse                            ", true, true, false),
+            ("  [::] v6only+reuse                            ", true, false, true),
+            ("  0.0.0.0    +reuse                            ", false, false, true),
+            ("  0.0.0.0    -reuse                            ", false, false, false),
+        ] {
+            out += &format!("{label} -> {}\n", try_bind(v6, dual, reuse, port));
+        }
+        out += &format!("  listen() itself                                -> {}\n",
+            match listen(port) { Ok(_) => "BOUND (no conflict seen)".into(), Err(e) => format!("refused: {e}") });
+        drop(squatter);
+
+        let v6squat = std::net::TcpListener::bind("[::]:0");
+        match v6squat {
+            Ok(l) => {
+                let p = l.local_addr().unwrap().port();
+                out += &format!("squatter holds [::]:{p}\n");
+                out += &format!("  0.0.0.0    +reuse                            -> {}\n", try_bind(false, false, true, p));
+                out += &format!("  listen() itself                              -> {}\n",
+                    match listen(p) { Ok(_) => "BOUND (no conflict seen)".into(), Err(e) => format!("refused: {e}") });
+            }
+            Err(e) => out += &format!("no IPv6 on this runner: {e}\n"),
+        }
+        panic!("{out}");
+    }
 }

@@ -117,6 +117,13 @@ jobs:
 
       - run: cargo test --lib
         working-directory: src-tauri
+      # TEMPORARY, remove with the diagnostic it runs. Reports what this
+      # platform does when two sockets want one port across address families.
+      # `|| true` on purpose: it panics to get its findings into the log, and
+      # it must not change whether this job passes.
+      - name: What this platform does with two sockets on one port
+        run: cargo test --lib what_this_platform_does -- --ignored --nocapture || true
+        working-directory: src-tauri
       # The three integration tests that need no network: one writes and
       # restores a real zip, two serve themselves over a localhost socket.
       # Paths and sockets are where a platform differs first, so these are
