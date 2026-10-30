@@ -11,6 +11,8 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import clsx from "clsx";
 import {
+  Link2 as LinkIcon,
+  Settings2,
   ArrowLeft,
   ChevronRight,
   Clock,
@@ -38,6 +40,8 @@ import type { ServerFolder } from "./server/ContentTab";
 import PlayersTab from "./server/PlayersTab";
 import Properties from "./server/Properties";
 import ShareTab from "./server/ShareTab";
+import ShareMenu from "../components/ShareMenu";
+import type { ShareItem } from "../components/ShareMenu";
 import { api } from "../lib/api";
 import {
   parseLine,
@@ -405,6 +409,52 @@ export default function ServerView({ id }: { id: string }) {
     }
   }
 
+  /**
+   * A server's pack is not a file somebody uploads — it is served by the
+   * server itself, over its own address, while it is running. So there is no
+   * "make a link" here the way there is on an instance: the link already
+   * exists, and this copies it.
+   *
+   * It is read fresh rather than remembered, because the link is built from
+   * the address, the port and the certificate, and a remembered one goes stale
+   * the moment any of those move.
+   */
+  async function copyJoinLink() {
+    try {
+      const share = await api.getServerShare(id);
+      if (!share?.link) {
+        setActive("share");
+        toast({
+          kind: "info",
+          title: "This server is not shared yet",
+          body: "Turn sharing on here and Geode will make a link for it.",
+        });
+        return;
+      }
+      await navigator.clipboard.writeText(share.link);
+      await api.shareLinkCopied(id).catch(() => {});
+      toast({ kind: "success", title: "Join link copied" });
+    } catch (e) {
+      reportError("Could not copy the join link", e);
+    }
+  }
+
+  const shareItems: ShareItem[] = [
+    {
+      kind: "item",
+      label: "Copy the join link",
+      icon: <LinkIcon size={14} />,
+      onSelect: () => void copyJoinLink(),
+    },
+    { kind: "rule" },
+    {
+      kind: "item",
+      label: "Sharing settings\u2026",
+      icon: <Settings2 size={14} />,
+      onSelect: () => setActive("share"),
+    },
+  ];
+
   // A server has no pack artwork, so it gets the same generated wash an
   // instance without a banner gets — the layout is then identical either way.
   const hue = hashHue(server.id);
@@ -499,6 +549,7 @@ export default function ServerView({ id }: { id: string }) {
             <FolderOpen size={15} />
             Folder
           </button>
+          {server.hasWorld && <ShareMenu items={shareItems} />}
           {server.running ? (
             <button
               className="btn btn-danger"

@@ -37,6 +37,7 @@ import type {
   PackFormat,
   PackImport,
   PackInfo,
+  PackLinkBuilt,
   PackLinkView,
   PackPreview,
   PackUpdate,
@@ -680,6 +681,9 @@ export const api = {
     invoke<TransferArrived>("bring_server_from_host", { host, id, mode }),
 
   /** The strict parse, in Rust, before anything is fetched. */
+  /** Fingerprint an exported pack and build a geode:// link for the address it was put at. */
+  buildPackLink: (file: string, url: string) =>
+    invoke<PackLinkBuilt>("build_pack_link", { file, url }),
   previewPackLink: (link: string) => invoke<PackLinkView>("preview_pack_link", { link }),
   /** Download the pack a link names, verify its hash, and read what is in it. Progress id `pack-link` — fixed, because there is one dialog at a time and the webview has to be able to cancel an id it never saw. */
   fetchPackLink: (link: string) => invoke<PackArrival>("fetch_pack_link", { link }),

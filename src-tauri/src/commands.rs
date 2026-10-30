@@ -7050,6 +7050,53 @@ pub struct PackLinkView {
 }
 
 
+/// A `geode://pack` link Geode built, and what the URL answered.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackLinkBuilt {
+    pub link: String,
+    pub check: share::fetch::PublicCheck,
+}
+
+/// Build a pack link for a file the sharer has already put somewhere.
+///
+/// Geode uploads nothing and holds no account anywhere, so where the bytes
+/// live is the sharer's business — a chat attachment, a release asset, their
+/// own web space. What Geode can do is the two things they cannot check by
+/// eye.
+///
+/// It hashes the file **they exported**, so the hash in the link is of the
+/// bytes they meant rather than of whatever the URL happens to serve today.
+/// Then it fetches the URL the way the recipient will, with nothing signed in,
+/// and reports what came back: the commonest mistake here is pasting the page
+/// a file sits on instead of a link that downloads it, and that is invisible
+/// to the person pasting because their own browser is signed in.
+///
+/// The URL goes through [`share::packlink::PackLink::parse`] rather than
+/// being trusted — the webview is never the parser, and a link Geode writes
+/// answers to the same rules as one off the internet.
+#[tauri::command]
+pub async fn build_pack_link(file: String, url: String) -> Result<PackLinkBuilt> {
+    let bytes = tokio::fs::read(&file)
+        .await
+        .map_err(|e| Error::msg(format!("could not read the pack to fingerprint it: {e}")))?;
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(&bytes);
+    let hash = share::packlink::PackHash::from_hex(&hex::encode(digest))
+        .ok_or_else(|| Error::msg("could not fingerprint the pack"))?;
+
+    // Built, then re-read by the parser, so what is handed over is a link that
+    // has been proved readable rather than one that was merely formatted.
+    let built = share::packlink::PackLink {
+        source: share::packlink::PackSource { url: url.trim().into() },
+        hash,
+    };
+    let link = built.to_url();
+    let parsed = share::packlink::PackLink::parse(&link)?;
+
+    let check = share::fetch::probe(&parsed.source.download_urls()[0]).await;
+    Ok(PackLinkBuilt { link, check })
+}
+
 /// Read a pack link, as strictly as a join link is read, before anything is
 /// fetched. The webview is never the parser.
 #[tauri::command]

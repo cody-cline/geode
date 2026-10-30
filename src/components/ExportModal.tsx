@@ -48,15 +48,18 @@ const BY_DEFAULT: Group[] = ["mods", "config", "resourcePacks", "shaderPacks", "
 export default function ExportModal({
   instance,
   onClose,
+  startWith = "geodepack",
 }: {
   instance: Instance;
   onClose: () => void;
+  /** Which format to open on, so a Share menu can name one. */
+  startWith?: PackFormat;
 }) {
   const accounts = useStore((s) => s.accounts);
   const toast = useStore((s) => s.toast);
   const reportError = useStore((s) => s.reportError);
 
-  const [format, setFormat] = useState<PackFormat>("geodepack");
+  const [format, setFormat] = useState<PackFormat>(startWith);
   const [chosen, setChosen] = useState<Group[]>(BY_DEFAULT);
   const [tallies, setTallies] = useState<GroupTally[] | null>(null);
   // One entry per format *and* selection looked at: a group left out travels

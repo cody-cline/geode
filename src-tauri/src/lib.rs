@@ -307,6 +307,7 @@ pub fn run() {
             commands::join_server,
             commands::relink_joined_instance,
             commands::preview_pack_link,
+            commands::build_pack_link,
             commands::fetch_pack_link,
             commands::import_pack_stage,
             deeplink::take_pending_join,

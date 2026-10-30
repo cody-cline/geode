@@ -11,9 +11,14 @@ import {
   Clock,
   ExternalLink,
   Package,
+  Link2 as LinkIcon,
 } from "lucide-react";
 
+import ExportModal from "../components/ExportModal";
 import InstanceIcon from "../components/InstanceIcon";
+import PackLinkBuildModal from "../components/PackLinkBuildModal";
+import ShareMenu from "../components/ShareMenu";
+import type { ShareItem } from "../components/ShareMenu";
 import Browse from "./Browse";
 import ContentTab from "./instance/ContentTab";
 import GraphTab from "./instance/GraphTab";
@@ -25,8 +30,9 @@ import { useBackHandler } from "../lib/useBackHandler";
 import { launchInstance, stopInstance } from "../lib/actions";
 import { hashHue, relativeTime } from "../lib/format";
 import { formatDuration, useStore } from "../lib/store";
+import { EXPORT_FORMATS } from "../lib/share";
 import { LOADERS } from "../lib/types";
-import type { ContentKind } from "../lib/types";
+import type { ContentKind, PackFormat } from "../lib/types";
 
 import styles from "./InstanceView.module.css";
 
@@ -56,6 +62,30 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
   // Browsing happens inside the instance rather than navigating to the global
   // Browse view, so the sidebar stays put and the destination stays obvious.
   const [browsing, setBrowsing] = useState(false);
+  const [exportAs, setExportAs] = useState<PackFormat | null>(null);
+  const [makingLink, setMakingLink] = useState(false);
+
+  // Export was only reachable from the instance's own Settings tab, which is
+  // the last place somebody looks when they want to hand a pack to a friend.
+  // The formats come from the one table that describes them, so a format
+  // added there appears here without this list knowing it exists.
+  const shareItems: ShareItem[] = [
+    { kind: "group", label: "Save a file" },
+    ...(Object.keys(EXPORT_FORMATS) as PackFormat[]).map((format) => ({
+      kind: "item" as const,
+      label: EXPORT_FORMATS[format].filter,
+      hint: `.${EXPORT_FORMATS[format].ext}`,
+      icon: <Package size={14} />,
+      onSelect: () => setExportAs(format),
+    })),
+    { kind: "rule" },
+    {
+      kind: "item",
+      label: "Make a link\u2026",
+      icon: <LinkIcon size={14} />,
+      onSelect: () => setMakingLink(true),
+    },
+  ];
   // A temporary way in, until the export dialog in the Settings tab offers it
   // beside the other export options. It calls the same two commands.
 
@@ -172,6 +202,7 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
             <FolderOpen size={15} />
             Folder
           </button>
+          <ShareMenu items={shareItems} />
           {instance.running ? (
             <button
               className="btn btn-danger"
@@ -225,6 +256,14 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
         {active === "settings" && <SettingsTab instance={instance} />}
       </div>
 
+      {exportAs && (
+        <ExportModal
+          instance={instance}
+          startWith={exportAs}
+          onClose={() => setExportAs(null)}
+        />
+      )}
+      {makingLink && <PackLinkBuildModal onClose={() => setMakingLink(false)} />}
     </>
   );
 }

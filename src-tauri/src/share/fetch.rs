@@ -61,7 +61,8 @@ const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 pub enum PublicCheck {
     /// The link served the archive.
     Served,
-    /// The link served a web page — Drive's download warning, most likely.
+    /// The link served a web page — the page a file sits on rather than a
+    /// link that downloads it, or a share that has gone private.
     WebPage,
     /// The check itself could not be made: no answer at all, or one that says
     /// nothing about what a recipient gets.
