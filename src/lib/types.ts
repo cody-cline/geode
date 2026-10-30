@@ -801,9 +801,6 @@ export interface Config {
   hasCurseforgeKey: boolean;
   /** True when the key came from GEODE_CURSEFORGE_KEY at build time. */
   curseforgeKeyFromBuild: boolean;
-  googleClientId: string | null;
-  /** Google calls it a secret, so it is redacted — even though a Desktop app's is not confidential. */
-  hasGoogleClientSecret: boolean;
   /** How players reach this machine for shared servers' packs. */
   share: ShareSettings;
 }

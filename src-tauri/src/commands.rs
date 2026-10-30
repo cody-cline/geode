@@ -6512,11 +6512,13 @@ mod tests {
         assert_eq!(url.hash, hash);
 
         for junk in [
+            // No hash, which is the whole of what makes an open-ended address
+            // safe to accept.
             "geode://pack?url=https://files.example.com/a.geodepack".to_string(),
-            format!("geode://pack?drive=../../etc/passwd&h={hash}"),
+            // Cleartext, so the bytes could be replaced in flight.
             format!("geode://pack?url=http://files.example.com/a.geodepack&h={hash}"),
             format!("geode://join?addr=203.0.113.7:25590&code=7K2QF9XWMP&pin={hash}"),
-            format!("geode://pack?drive=1A2b3C4d&h={hash}&name=Survival"),
+            format!("geode://pack?url=https://files.example.com/a.geodepack&h={hash}&name=Survival"),
         ] {
             assert!(
                 preview_pack_link(junk.clone()).await.is_err(),
@@ -7036,7 +7038,7 @@ mod tests {
 }
 
 // ---------------------------------------------------------------------------
-// Sharing a pack through Google Drive
+// Pack links
 // ---------------------------------------------------------------------------
 
 /// A pack link as the strict parser read it, before anything is fetched.

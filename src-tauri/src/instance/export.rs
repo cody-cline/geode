@@ -226,7 +226,6 @@ impl Selection {
     }
 
     /// The old boolean, for the callers that still have one to give: a pack
-    /// staged for Google Drive is published from its own dialog, which asks
     /// about worlds and nothing else.
     pub fn with_saves(include_saves: bool) -> Self {
         let mut groups = BY_DEFAULT.to_vec();

@@ -1,26 +1,22 @@
 //! Downloading a pack a link names, with no credentials at all.
 //!
-//! The recipient of a `geode://pack` link has no Google account, no token and
-//! no API key — Geode ships none. So the Drive API is no help to them:
-//! `files.get?alt=media` is documented only with a bearer token, and nothing
-//! on Google's download page says the link works unauthenticated. What is left
-//! is the endpoints Drive serves to ordinary browsers, and **Google documents
-//! none of them**. `webContentLink` is a documented *field* whose URL format
-//! is promised nowhere, and the virus-scan interstitial is not in Google's
-//! developer documentation at all.
+//! The recipient of a `geode://pack` link has no account anywhere and no API
+//! key — Geode ships none, and the address in the link is whatever the sharer
+//! put the file at. A chat attachment, a release asset, their own web space:
+//! the one thing they all have in common is that nothing here can ask them a
+//! question or prove who it is.
 //!
-//! That is the weakest link in this transport, and it is why:
+//! So what comes back is **judged, not believed**:
 //!
-//! - the link carries a **file id**, not a URL, so a later Geode can fix links
-//!   already handed out (see [`super::packlink`]);
-//! - two URL shapes are tried, in order, at most one request each;
-//! - what comes back is **judged**, not believed. A web page is not a pack,
-//!   and four checks say so: the status, the content type, the first four bytes
-//!   (`PK\x03\x04`), and the SHA-256 the link carries;
-//! - when both shapes answer with a web page, Geode **refuses** and sends the
-//!   user down the path that already works — open the Drive link in a browser
-//!   and import the file — rather than scraping the warning page's hidden form
-//!   or pressing "Download anyway" on their behalf.
+//! - what comes back is checked four ways. The status, the content type, the
+//!   first four bytes (`PK\x03\x04`), and the SHA-256 the link carries. A web
+//!   page is not a pack, and a host serving an interstitial, a preview page or
+//!   a sign-in wall is the ordinary case rather than the strange one;
+//! - when the address answers with a page, Geode **refuses** and sends the
+//!   person down the path that already works — open it in a browser and import
+//!   the file — rather than scraping the page for a real link on their behalf;
+//! - [`probe`] makes the same request from the *sharer's* machine before a
+//!   link is handed out, so the mistake is caught by the person who can fix it.
 //!
 //! The client here carries no `Authorization`, no cookies and no compression:
 //! every byte counted is a byte that arrived, which is the same argument
@@ -142,17 +138,17 @@ enum Attempt {
 /// What a candidate URL answered with, when it was not the pack.
 ///
 /// Told apart because each one is a different thing for the person holding the
-/// link to do, and because Drive's warning page is the *least* likely of them
-/// on a given day — naming it for all three sent people off to a browser for a
-/// download that had simply been cut off.
+/// link to do, and because a web page is the *least* likely of them on a given
+/// day — naming it for all three sent people off to a browser for a download
+/// that had simply been cut off.
 enum Refusal {
     /// The request never finished: a reset connection, a name that did not
     /// resolve, a read that timed out.
     Interrupted(String),
     /// An answer arrived, and it was not a success.
     Status(u16),
-    /// A 200 that is a web page rather than an archive — Drive's download
-    /// warning, a sign-in page — by its content type or by its first bytes.
+    /// A 200 that is a web page rather than an archive — a preview page, an
+    /// interstitial, a sign-in wall — by content type or by first bytes.
     Page,
 }
 
@@ -353,7 +349,7 @@ pub async fn probe(url: &str) -> PublicCheck {
 }
 
 /// A real answer is `application/zip` or `application/octet-stream`. HTML is
-/// Drive's warning page, a sign-in page, or an error page.
+/// the page a file sits on, a sign-in wall, or an error page.
 fn is_html(response: &reqwest::Response) -> bool {
     response
         .headers()
@@ -404,7 +400,7 @@ mod tests {
             Self {
                 status: 200,
                 content_type: Some("text/html; charset=utf-8"),
-                body: b"<html><body>Google Drive can't scan this file for viruses.</body></html>"
+                body: b"<html><body>Sign in to download this file.</body></html>"
                     .to_vec(),
             }
         }
@@ -535,8 +531,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_web_page_on_the_first_shape_makes_the_second_be_tried() {
-        // Drive's two candidate URLs, pointed at the fake by host override —
-        // which is what makes this testable at all without Google.
+        // Pointed at the fake by host override, which is what makes this
+        // testable without reaching a real host.
         let bytes = archive(300);
         let serving = serving(vec![
             ("/first", Answer::html()),
@@ -546,7 +542,6 @@ mod tests {
         let scratch = Scratch::new("fetch-second");
         let dest = scratch.paths.root.join("one.geodepack");
 
-        // Stands in for `PackSource::Drive`'s two shapes.
         let client = plain().unwrap();
         let first = attempt(
             &client,

@@ -236,10 +236,11 @@ mod tests {
     /// it: setting the value and rebuilding then reuses the cached binary and
     /// appears to do nothing at all, with no error anywhere.
     ///
-    /// That is not hypothetical. `GEODE_GOOGLE_CLIENT_ID` was added with the
-    /// Drive sharing and never listed, so a private build could carry a Google
-    /// client id in `.env` and still ask the user to paste one in. This reads
-    /// both sides and makes the next omission a test failure instead.
+    /// That is not hypothetical. `GEODE_GOOGLE_CLIENT_ID` was once added
+    /// with the Drive sharing and never listed, so a private build could carry
+    /// a client id in `.env` and still behave as though it had none. Drive is
+    /// gone and so is that key, but the trap is not: this reads both sides and
+    /// makes the next omission a test failure instead.
     #[test]
     fn every_compiled_in_credential_is_one_cargo_watches() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));

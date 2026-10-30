@@ -875,7 +875,7 @@ test("a password replaced while sharing is stopped is not sent before sharing ag
 });
 
 // ---------------------------------------------------------------------------
-// Sharing a pack through Google Drive
+// Pack links
 // ---------------------------------------------------------------------------
 
 function report(over = {}) {
@@ -893,47 +893,35 @@ function report(over = {}) {
   };
 }
 
-function driveStatus(over = {}) {
-  return {
-    configured: true,
-    connected: true,
-    needsReconnect: false,
-    account: "someone@example.com",
-    folderName: "Geode Packs",
-    folderUrl: "https://drive.google.com/drive/folders/folder-1",
-    ...over,
-  };
-}
-
 test("linkKind tells the two kinds of link apart and refuses anything else", () => {
   assert.equal(linkKind("geode://join?addr=203.0.113.7:25590&code=7K2QF9XWMP"), "join");
-  assert.equal(linkKind("geode://pack?drive=abc&h=" + "ab".repeat(32)), "pack");
+  assert.equal(linkKind("geode://pack?url=https://files.example.com/a.geodepack&h=" + "ab".repeat(32)), "pack");
   // Case and one trailing slash are the only forgiveness, the same as the
   // parser in Rust.
-  assert.equal(linkKind("GEODE://PACK?drive=abc"), "pack");
-  assert.equal(linkKind("geode://pack/?drive=abc"), "pack");
-  assert.equal(linkKind("  geode://pack?drive=abc  "), "pack");
+  assert.equal(linkKind("GEODE://PACK?url=https://files.example.com/a.geodepack"), "pack");
+  assert.equal(linkKind("geode://pack/?url=https://files.example.com/a.geodepack"), "pack");
+  assert.equal(linkKind("  geode://pack?url=https://files.example.com/a.geodepack  "), "pack");
   for (const junk of [
-    "geode://packs?drive=abc",
+    "geode://packs?url=https://files.example.com/a.geodepack",
     "geode://",
     "https://pack.example.com",
     "",
-    "geode://@pack?drive=abc",
+    "geode://@pack?url=https://files.example.com/a.geodepack",
   ]) {
     assert.equal(linkKind(junk), null, junk);
   }
 });
 
 test("the same pack link twice opens one dialog", () => {
-  const first = nextPack(null, "geode://pack?drive=a&h=1", 1);
-  assert.equal(nextPack(first, "geode://pack?drive=a&h=1", 2), first);
-  const second = nextPack(first, "geode://pack?drive=b&h=2", 2);
+  const first = nextPack(null, "geode://pack?url=https://files.example.com/a.geodepack&h=1", 1);
+  assert.equal(nextPack(first, "geode://pack?url=https://files.example.com/a.geodepack&h=1", 2), first);
+  const second = nextPack(first, "geode://pack?url=https://files.example.com/b.geodepack&h=2", 2);
   assert.notEqual(second, first);
   assert.equal(second.seq, 2);
 });
 
 test("packStep walks look, download, import, done and offers import once", () => {
-  const view = { source: "drive", host: "drive.google.com", hash: "ab".repeat(32) };
+  const view = { host: "files.example.com", hash: "ab".repeat(32) };
   const arrival = { stage: "s", preview: { name: "Survival" } };
   const instance = { id: "i", name: "Survival" };
   assert.equal(packStep(null, null, null), "look");

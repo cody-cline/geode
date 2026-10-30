@@ -259,7 +259,7 @@ mod tests {
 
     #[test]
     fn a_hash_is_required_and_is_exactly_64_hex_characters() {
-        assert_refused("geode://pack?drive=abc");
+        assert_refused("geode://pack?drive=abc");  // a key this link form never had
         for bad in [
             String::new(),
             EMPTY_SHA256[..63].to_string(),

@@ -1301,7 +1301,7 @@ export function publicLinkLine(check: PublicCheck): StatusLine {
     case "webPage":
       return {
         tone: "warn",
-        title: "Google answered with a web page for this link",
+        title: "That address served a web page, not the pack",
         detail:
           "Anyone you send it to will have to open the link in a browser, download the file, and use Add instance → Import a pack. Most hosts need a direct download link rather than the page the file sits on.",
       };

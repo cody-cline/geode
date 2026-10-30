@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 const BAKED: &[&str] = &[
     "GEODE_CLIENT_ID",
     "GEODE_CURSEFORGE_KEY",
-    "GEODE_GOOGLE_CLIENT_ID",
     // Not a secret — it ships in the binary — but it belongs here for the
     // `rerun-if-env-changed` below as much as for `.env`: a release build that
     // reused a cached binary compiled without it would produce an installer

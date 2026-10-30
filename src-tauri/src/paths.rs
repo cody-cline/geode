@@ -41,12 +41,6 @@ impl Paths {
     pub fn accounts_file(&self) -> PathBuf {
         self.root.join("accounts.json")
     }
-    /// The Google Drive connection: a refresh token and the folder Geode made.
-    /// Beside `accounts.json` and written the same way, because it holds the
-    /// same kind of thing.
-    pub fn google_file(&self) -> PathBuf {
-        self.root.join("google.json")
-    }
     pub fn instances(&self) -> PathBuf {
         self.root.join("instances")
     }
@@ -126,8 +120,8 @@ impl Paths {
         self.transfers().join(id)
     }
     /// The `geoded` hosts this copy of Geode can reach, and the token for
-    /// each. Beside `accounts.json` and `google.json`, written the same way,
-    /// because it holds the same kind of thing.
+    /// each. Beside `accounts.json`, written the same way, because it holds
+    /// the same kind of thing.
     pub fn hosts_file(&self) -> PathBuf {
         self.root.join("hosts.json")
     }

@@ -213,8 +213,8 @@ fn to_msa_tokens(t: TokenResponse) -> MsaTokens {
 
 /// The `error` code an OAuth endpoint returned, if it returned one.
 ///
-/// Shared with [`crate::drive`]: Google's OAuth errors and Microsoft's have
-/// the same shape, and one piece of code should read both.
+/// Every OAuth endpoint in this chain answers failures the same shape, so one
+/// reader serves all of them.
 pub(crate) fn oauth_error_code(body: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(body)
         .ok()?

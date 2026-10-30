@@ -19,15 +19,14 @@
 //! certificate, so a player's Geode will only ever download jars from the
 //! machine the admin meant.
 //!
-//! A **pack in the sharer's own Google Drive** is the third shape, for the
-//! case the file is awkward and there is no server to reach: a laptop is not
-//! up when somebody gets round to installing the pack, so the bytes wait in
-//! Drive instead. [`crate::drive`] uploads the pack and makes that one file
-//! readable by anyone with the link; [`packlink`] is the `geode://pack` link,
-//! which carries where the bytes are and the SHA-256 they must hash to and
-//! nothing else; [`fetch`] downloads them with no credentials at all and
-//! verifies that hash before the importer sees the archive. Geode still hosts
-//! nothing: the file sits in the sharer's own Drive, under their own quota.
+//! A **pack at an address the sharer chose** is the third shape, for the
+//! same case with no machine of theirs online: they put the file where they
+//! already put files, and `geode://pack?url=…&h=…` carries the address and
+//! the hash. Geode hosts nothing and holds no account, so there is no host it
+//! depends on. [`packlink`] is that link, which carries where the bytes are
+//! and the SHA-256 they must hash to and nothing else; [`fetch`] downloads
+//! them with no credentials at all and verifies that hash before the importer
+//! sees the archive.
 //!
 //! The rule underneath all three paths is that **bytes are a last resort**. A mod
 //! that exists on a provider is carried as its reference and hashes, not as

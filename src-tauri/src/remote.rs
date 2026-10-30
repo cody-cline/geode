@@ -21,11 +21,12 @@
 //!
 //! # The token
 //!
-//! Kept in `hosts.json` beside `accounts.json` and `google.json`, written
+//! Kept in `hosts.json` beside `accounts.json`, written
 //! through the same owner-only helper, and never sent across the IPC boundary:
 //! [`HostView`] has no token field at all, which is what every command here
-//! returns. The same posture, and the same honest caveat, as the Google
-//! connection in `drive/tokens.rs`.
+//! returns. Whoever holds a host's token can do everything on that host,
+//! which is `daemon/token.rs`'s decision rather than this module's, and the
+//! panel says so rather than implying otherwise.
 
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
