@@ -12,9 +12,6 @@ import type {
   ContentKind,
   CrashReport,
   DeviceCodeStart,
-  Disconnected,
-  DriveShare,
-  DriveStatus,
   ExportPlan,
   ExportReport,
   GameVersion,
@@ -70,7 +67,6 @@ import type {
   SettingsReview,
   ShareSettings,
   ShareStatus,
-  StagedPack,
   TransferArrived,
   TransferMeasure,
   TransferMode,
@@ -683,20 +679,6 @@ export const api = {
   bringServerFromHost: (host: string, id: string, mode: TransferMode) =>
     invoke<TransferArrived>("bring_server_from_host", { host, id, mode }),
 
-  // Google Drive. Connecting opens the user's browser and blocks until they
-  // come back, the way completeMicrosoftLogin does; cancel it with
-  // cancelTask("drive:connect").
-  driveStatus: () => invoke<DriveStatus>("drive_status"),
-  connectDrive: () => invoke<DriveStatus>("connect_drive"),
-  /** Forgets the connection whatever Google answers, and says whether Google accepted the revoke. */
-  disconnectDrive: () => invoke<Disconnected>("disconnect_drive"),
-  /** Separate from setConfig so a secret is never part of a routine settings round-trip. */
-  /** Export the pack and report what travelled, before anything is published. Progress id `export:<id>`. */
-  stageDrivePack: (id: string, includeSaves: boolean) =>
-    invoke<StagedPack>("stage_drive_pack", { id, includeSaves }),
-  /** Upload a staged pack and make it readable by anyone with the link. Progress id `drive-upload:<stage>`. */
-  uploadDrivePack: (stage: string, name: string) =>
-    invoke<DriveShare>("upload_drive_pack", { stage, name }),
   /** The strict parse, in Rust, before anything is fetched. */
   previewPackLink: (link: string) => invoke<PackLinkView>("preview_pack_link", { link }),
   /** Download the pack a link names, verify its hash, and read what is in it. Progress id `pack-link` — fixed, because there is one dialog at a time and the webview has to be able to cancel an id it never saw. */

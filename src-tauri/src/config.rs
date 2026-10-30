@@ -59,15 +59,6 @@ pub struct Config {
     /// CurseForge API key. Falls back to one baked in at build time; see
     /// [`default_curseforge_key`].
     pub curseforge_api_key: Option<String>,
-    /// Google OAuth client id for sharing a pack through the user's own Drive.
-    /// In the clear, like `client_id`: it rides in the authorization URL the
-    /// user's browser opens, so it is not a secret to begin with.
-    pub google_client_id: Option<String>,
-    /// Only for the case where Google answers `invalid_client`. A Desktop app
-    /// is a public client and its secret is not confidential by Google's own
-    /// words, but it is redacted anyway — it is called a secret, and a field
-    /// called a secret should not round-trip through the webview.
-    pub google_client_secret: Option<String>,
     pub theme: String,
     pub accent: String,
     /// Hide the launcher window while the game runs.
@@ -144,8 +135,6 @@ impl Default for Config {
             // written into config.json on first save, and a later `null` there
             // would then shadow it. `effective_curseforge_key` layers instead.
             curseforge_api_key: None,
-            google_client_id: crate::drive::default_google_client_id(),
-            google_client_secret: None,
             theme: default_theme(),
             accent: default_accent(),
             hide_on_launch: false,
@@ -232,15 +221,6 @@ impl Config {
                         .is_some_and(|id| !id.trim().is_empty())
                         && crate::auth::default_client_id().is_some(),
                 ),
-            );
-            let has_google_secret = self
-                .google_client_secret
-                .as_ref()
-                .is_some_and(|secret| !secret.trim().is_empty());
-            obj.remove("googleClientSecret");
-            obj.insert(
-                "hasGoogleClientSecret".into(),
-                serde_json::Value::Bool(has_google_secret),
             );
         }
         v
@@ -333,33 +313,6 @@ mod tests {
         assert_eq!(config.effective_curseforge_key(), default_curseforge_key());
     }
 
-    /// The same rule as the CurseForge key, for the field Google calls a
-    /// secret even though a desktop client's is not confidential.
-    #[test]
-    fn redacted_never_leaks_the_google_secret() {
-        let config = Config {
-            google_client_id: Some("1234-abc.apps.googleusercontent.com".into()),
-            google_client_secret: Some("secret-from-google".into()),
-            ..Config::default()
-        };
-        let v = config.redacted();
-        let text = serde_json::to_string(&v).unwrap();
-        assert!(
-            !text.contains("secret-from-google"),
-            "the Google secret leaked to the frontend"
-        );
-        assert_eq!(v["hasGoogleClientSecret"], serde_json::json!(true));
-        // The client id stays in the clear: it rides in the URL the user's own
-        // browser opens, exactly as the Azure client id does.
-        assert_eq!(
-            v["googleClientId"],
-            serde_json::json!("1234-abc.apps.googleusercontent.com")
-        );
-        assert_eq!(
-            Config::default().redacted()["hasGoogleClientSecret"],
-            serde_json::json!(false)
-        );
-    }
 
     #[test]
     fn redacted_never_leaks_the_key() {

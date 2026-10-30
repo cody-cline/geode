@@ -37,7 +37,6 @@ pub struct ConfigPatch {
     pub java_args: Option<String>,
     pub java_path: Option<Option<String>>,
     pub client_id: Option<Option<String>>,
-    pub google_client_id: Option<Option<String>>,
     pub theme: Option<String>,
     pub accent: Option<String>,
     pub hide_on_launch: Option<bool>,
@@ -84,9 +83,6 @@ pub async fn set_config(
     }
     if let Some(v) = patch.client_id {
         config.client_id = v.filter(|s| !s.trim().is_empty());
-    }
-    if let Some(v) = patch.google_client_id {
-        config.google_client_id = v.filter(|s| !s.trim().is_empty());
     }
     if let Some(v) = patch.theme {
         config.theme = v;
@@ -6507,23 +6503,16 @@ mod tests {
     async fn a_pack_link_is_read_by_the_parser_and_not_by_the_window() {
         let hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
-        let drive = preview_pack_link(format!("geode://pack?drive=1A2b3C4d&h={hash}"))
-            .await
-            .unwrap();
-        assert_eq!(drive.source, "drive");
-        assert_eq!(drive.host, "drive.google.com");
-        assert_eq!(drive.hash, hash);
-
         let url = preview_pack_link(format!(
             "  geode://pack?url=https://files.example.com/a.geodepack&h={hash}  "
         ))
         .await
         .unwrap();
-        assert_eq!(url.source, "url");
         assert_eq!(url.host, "files.example.com");
+        assert_eq!(url.hash, hash);
 
         for junk in [
-            "geode://pack?drive=1A2b3C4d".to_string(),
+            "geode://pack?url=https://files.example.com/a.geodepack".to_string(),
             format!("geode://pack?drive=../../etc/passwd&h={hash}"),
             format!("geode://pack?url=http://files.example.com/a.geodepack&h={hash}"),
             format!("geode://join?addr=203.0.113.7:25590&code=7K2QF9XWMP&pin={hash}"),
@@ -7054,12 +7043,22 @@ mod tests {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PackLinkView {
-    /// `drive` or `url`.
-    pub source: String,
     /// The host the pack will come from — proved by parsing, never a name the
     /// link supplied.
     pub host: String,
     pub hash: String,
+}
+
+
+/// Read a pack link, as strictly as a join link is read, before anything is
+/// fetched. The webview is never the parser.
+#[tauri::command]
+pub async fn preview_pack_link(link: String) -> Result<PackLinkView> {
+    let parsed = share::packlink::PackLink::parse(link.trim())?;
+    Ok(PackLinkView {
+        host: parsed.source.host(),
+        hash: parsed.hash.to_hex(),
+    })
 }
 
 /// A pack downloaded from a link, waiting for the person to say yes.
@@ -7068,181 +7067,6 @@ pub struct PackLinkView {
 pub struct PackArrival {
     pub stage: String,
     pub preview: instance::modpack::PackPreview,
-}
-
-#[tauri::command]
-pub async fn drive_status(state: State<'_, AppState>) -> Result<crate::drive::DriveStatus> {
-    let config = state.config().await;
-    crate::drive::status(&state.paths, &config).await
-}
-
-/// Connect a Google account.
-///
-/// Blocks while the user is on Google's page, exactly as
-/// [`complete_microsoft_login`] blocks while they are on Microsoft's. Its
-/// cancel flag goes under the fixed id `drive:connect`, so the dialog's Cancel
-/// is the `cancel_task` command that already exists — there is at most one
-/// connect at a time.
-#[tauri::command]
-pub async fn connect_drive(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<crate::drive::DriveStatus> {
-    let config = state.config().await;
-    let client_id = crate::drive::client_id(&config).ok_or_else(|| {
-        Error::msg(
-            "Sharing a pack through Google Drive needs your own Google client ID. \
-             Add one in Settings — see the README for how to make one.",
-        )
-    })?;
-    let endpoints = crate::drive::Endpoints::google();
-    let (authorization, url) = crate::drive::begin(&endpoints, &client_id).await?;
-
-    // Opening a browser is an app-shell detail, so the library hands back the
-    // address and this opens it. Returning here drops `authorization`, which
-    // closes the loopback port Google would send the browser back to — so this
-    // must not offer the address to paste, because nothing would be listening
-    // when it landed. Connecting again binds a new port and a new address.
-    if let Err(e) = tauri_plugin_opener::OpenerExt::opener(&app).open_url(&url, None::<&str>) {
-        return Err(Error::msg(format!(
-            "Geode could not open your browser ({e}), so there is nothing waiting for a sign-in.              Set a default browser on this machine, then press Connect again."
-        )));
-    }
-
-    // Silent: there is nothing to report until the user comes back, and the
-    // only thing this handle is for is the cancel flag.
-    let progress = Progress::silent("drive:connect");
-    state.register_cancel(progress.id(), progress.cancel_flag());
-    let outcome = crate::drive::finish(
-        &state.http,
-        &state.paths,
-        &endpoints,
-        &client_id,
-        crate::drive::client_secret(&config).as_deref(),
-        authorization,
-        &progress,
-    )
-    .await;
-    state.clear_cancel(progress.id());
-    outcome
-}
-
-#[tauri::command]
-pub async fn disconnect_drive(state: State<'_, AppState>) -> Result<crate::drive::Disconnected> {
-    let config = state.config().await;
-    crate::drive::disconnect(
-        &state.http,
-        &state.paths,
-        &crate::drive::Endpoints::google(),
-        &config,
-    )
-    .await
-}
-
-/// Export the pack that is about to be published, and say what it did.
-///
-/// The same export `export_geodepack` runs, so the counts the dialog shows are
-/// the ones the export actually produced. This is the step that makes "see what
-/// you are publishing" true rather than promised.
-#[tauri::command]
-pub async fn stage_drive_pack(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    id: String,
-    include_saves: bool,
-) -> Result<crate::drive::StagedPack> {
-    let inst = instance::load(&state.paths, &id).await?;
-    let (stage, dest) = crate::drive::stage(&state.paths).await?;
-    let progress = Progress::new(crate::desktop::sink(app), format!("export:{id}"));
-    state.register_cancel(progress.id(), progress.cancel_flag());
-    let cf_key = state.cf_key().await;
-
-    let report = share::pack::export(
-        crate::install::identity::Ask::exporting(
-            &state.http,
-            cf_key.as_deref(),
-            instance::export::PackFormat::Geodepack.carry(),
-        ),
-        &state.paths,
-        &inst,
-        dest.clone(),
-        // The Drive dialog asks about worlds and nothing else, so it still has
-        // a boolean to give rather than a selection.
-        &instance::export::Selection::with_saves(include_saves),
-        &progress,
-    )
-    .await;
-    state.clear_cancel(progress.id());
-
-    let report = match report {
-        Ok(report) => report,
-        Err(e) => {
-            // Failed explicitly: the dock drops a job only when it hears one
-            // is done, so a bar left unfinished stays for the session.
-            progress.fail(&e.to_string()).await;
-            return Err(e);
-        }
-    };
-    progress.finish().await;
-
-    Ok(crate::drive::StagedPack {
-        stage,
-        name: inst.name,
-        size: tokio::fs::metadata(&dest).await?.len(),
-        sha256: crate::net::sha256_file(&dest).await?,
-        report,
-    })
-}
-
-/// Upload a staged pack and make it readable by anyone with the link.
-///
-/// Takes the staging id, never a path: a command that took a path would let
-/// the webview ask Geode to upload any file on the disk.
-#[tauri::command]
-pub async fn upload_drive_pack(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    stage: String,
-    name: String,
-) -> Result<crate::drive::DriveShare> {
-    let config = state.config().await;
-    let progress = Progress::new(crate::desktop::sink(app), format!("drive-upload:{stage}"));
-    state.register_cancel(progress.id(), progress.cancel_flag());
-
-    let outcome = crate::drive::upload_pack(
-        &state.http,
-        &state.paths,
-        &crate::drive::Endpoints::google(),
-        &config,
-        &stage,
-        &name,
-        &progress,
-    )
-    .await;
-    state.clear_cancel(progress.id());
-
-    match outcome {
-        Ok(share) => {
-            progress.finish().await;
-            Ok(share)
-        }
-        Err(e) => {
-            progress.fail(&e.to_string()).await;
-            Err(e)
-        }
-    }
-}
-
-/// Read a pack link, as strictly as a join link is read, before anything is
-/// fetched. The webview is never the parser.
-#[tauri::command]
-pub async fn preview_pack_link(link: String) -> Result<PackLinkView> {
-    let parsed = share::packlink::PackLink::parse(link.trim())?;
-    Ok(PackLinkView {
-        source: parsed.source.kind().to_string(),
-        host: parsed.source.host(),
-        hash: parsed.hash.to_hex(),
-    })
 }
 
 /// Download the pack a link names, check it against the link's own

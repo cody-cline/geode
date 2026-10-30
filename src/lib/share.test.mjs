@@ -14,7 +14,6 @@ import {
   authorDefault,
   configChoices,
   copiedByReason,
-  driveLine,
   existingLine,
   exportSummary,
   forbiddenAsTyped,
@@ -42,7 +41,6 @@ import {
   settingsRowNote,
   wholeConfigHint,
   outcomeLine,
-  packShareMessage,
   packStep,
   publicLinkLine,
   publishSummary,
@@ -947,33 +945,11 @@ test("packStep walks look, download, import, done and offers import once", () =>
   assert.equal(packStep(null, null, instance), "done");
 });
 
-test("the arrival line names the source parsing proved, not one the link claimed", () => {
+test("the arrival line names the host parsing proved, not one the link claimed", () => {
   assert.match(
-    arrivalLine({ source: "drive", host: "drive.google.com", hash: "" }).title,
-    /Google Drive/,
-  );
-  assert.match(
-    arrivalLine({ source: "url", host: "files.example.com", hash: "" }).title,
+    arrivalLine({ host: "files.example.com", hash: "" }).title,
     /files\.example\.com/,
   );
-});
-
-test("the share message puts the Geode link first and ends on who can download it", () => {
-  const message = packShareMessage({
-    name: "Survival with Create",
-    link: "geode://pack?drive=1A2b3C&h=" + "ab".repeat(32),
-    fileUrl: "https://drive.google.com/file/d/1A2b3C/view",
-    size: "18.4 MB",
-  });
-  const lines = message.split("\n");
-  assert.match(lines[0], /^Survival with Create — a Minecraft pack for Geode$/);
-  const geodeAt = lines.findIndex((line) => line.startsWith("geode://pack"));
-  const driveAt = lines.findIndex((line) => line.startsWith("https://drive.google.com"));
-  assert.ok(geodeAt > 0, "the message carries the geode:// link");
-  assert.ok(driveAt > geodeAt, "the plain link should follow the geode:// one");
-  assert.match(message, /\(18\.4 MB\)/);
-  assert.equal(lines[lines.length - 1], "Anyone with these links can download it.");
-  assert.match(message, /\.mrpack any launcher can open/);
 });
 
 test("publishSummary says references and published bytes apart", () => {
@@ -1013,25 +989,6 @@ test("the public-link check reads as a confirmation or as a warning", () => {
   assert.equal(publicLinkLine("webPage").tone, "warn");
   assert.match(publicLinkLine("webPage").detail, /Import a pack/);
   assert.equal(publicLinkLine("unknown").tone, "info");
-});
-
-test("the Drive line tells not configured, not connected and reconnect apart", () => {
-  assert.match(driveLine(driveStatus({ configured: false })).title, /Not configured/);
-  assert.match(
-    driveLine(driveStatus({ configured: false })).detail,
-    /export a \.geodepack and hand it over/,
-  );
-  assert.match(driveLine(driveStatus({ connected: false })).title, /Not connected/);
-  const stale = driveLine(driveStatus({ connected: false, needsReconnect: true }));
-  assert.match(stale.title, /Reconnect/);
-  // The seven-day trap is named where it will be read.
-  assert.match(stale.detail, /seven days/);
-  assert.match(stale.detail, /Publish app/);
-  const connected = driveLine(driveStatus());
-  assert.match(connected.title, /Connected as someone@example\.com/);
-  assert.match(connected.detail, /Geode Packs/);
-  assert.match(connected.detail, /cannot see anything else/);
-  assert.match(driveLine(driveStatus({ account: null })).title, /^Connected$/);
 });
 
 function described(

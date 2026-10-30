@@ -11,11 +11,9 @@ import {
   Clock,
   ExternalLink,
   Package,
-  Share2,
 } from "lucide-react";
 
 import InstanceIcon from "../components/InstanceIcon";
-import PackShareModal from "../components/PackShareModal";
 import Browse from "./Browse";
 import ContentTab from "./instance/ContentTab";
 import GraphTab from "./instance/GraphTab";
@@ -60,7 +58,6 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
   const [browsing, setBrowsing] = useState(false);
   // A temporary way in, until the export dialog in the Settings tab offers it
   // beside the other export options. It calls the same two commands.
-  const [sharing, setSharing] = useState(false);
 
   // Browsing is a place you came from the instance to, so back returns to it
   // rather than leaving the instance altogether.
@@ -175,10 +172,6 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
             <FolderOpen size={15} />
             Folder
           </button>
-          <button className="btn" onClick={() => setSharing(true)}>
-            <Share2 size={15} />
-            Share to Drive
-          </button>
           {instance.running ? (
             <button
               className="btn btn-danger"
@@ -232,9 +225,6 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
         {active === "settings" && <SettingsTab instance={instance} />}
       </div>
 
-      {sharing && (
-        <PackShareModal instance={instance} onClose={() => setSharing(false)} />
-      )}
     </>
   );
 }

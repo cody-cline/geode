@@ -1080,7 +1080,7 @@ mod tests {
     #[test]
     fn a_join_link_and_a_pack_link_each_go_to_their_own_parser() {
         let join = direct_link("203.0.113.7:25590");
-        let pack = format!("geode://pack?drive=1A2b3C&h={EMPTY_SHA256}");
+        let pack = format!("geode://pack?url=https://files.example.com/a.geodepack&h={EMPTY_SHA256}");
 
         assert_eq!(
             Opened::parse(&join).unwrap(),
@@ -1096,7 +1096,7 @@ mod tests {
 
         // A pack link is not a join link, and neither is anything else.
         assert!(Link::parse(&pack).is_err(), "a pack link is not a join link");
-        for junk in ["geode://packs?drive=a", "geode://", "https://pack.example.com"] {
+        for junk in ["geode://packs?url=https://files.example.com/a.geodepack", "geode://", "https://pack.example.com"] {
             assert!(Opened::parse(junk).is_err(), "{junk:?} should be refused");
         }
     }

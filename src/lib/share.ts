@@ -8,7 +8,6 @@ import type {
   ConfigPolicy,
   LastServerSync,
   MovedSetting,
-  DriveStatus,
   ExistingInstance,
   ExportReport,
   FileJourney,
@@ -1154,7 +1153,7 @@ export function verificationLine(verified: JoinPreview["verified"], typed: boole
 }
 
 // ---------------------------------------------------------------------------
-// Sharing a pack through Google Drive
+// Pack links
 // ---------------------------------------------------------------------------
 
 /**
@@ -1217,7 +1216,7 @@ export function packStep(
 
 /** Where a pack link's bytes come from, in words. */
 export function sourceName(view: PackLinkView): string {
-  return view.source === "drive" ? "Google Drive" : view.host;
+  return view.host;
 }
 
 /** What the receiving dialog says before anything is downloaded. */
@@ -1280,15 +1279,15 @@ export function publishSummary(report: ExportReport): string[] {
 
 /** Said once, where the link is made, because it cannot be taken back. */
 export const PUBLIC_LINK_WARNING =
-  "Uploading publishes this file. Anyone with the link can download it, and that cannot be undone for anyone who already has — delete the file in your Drive to stop the link working.";
+  "Anyone with this link can download the pack, and that cannot be undone for anyone who already has it. Remove the file from wherever you put it to stop the link working.";
 
 /**
  * What the sharing machine found when it fetched its own public link.
  *
- * Drive's download endpoint is undocumented and interposes a virus-scan
- * warning page above some size nobody has published, so this is the one thing
- * in this transport that can only be found out by trying it. Better the sharer
- * finds out than the person they sent it to.
+ * A host can serve an interstitial, a preview page or a sign-in wall where
+ * the sharer expects the file — which is the one thing about a link that can
+ * only be found out by fetching it. Better the sharer finds out than the
+ * person they sent it to.
  */
 export function publicLinkLine(check: PublicCheck): StatusLine {
   switch (check) {
@@ -1304,7 +1303,7 @@ export function publicLinkLine(check: PublicCheck): StatusLine {
         tone: "warn",
         title: "Google answered with a web page for this link",
         detail:
-          "Anyone you send it to will have to open the Drive link in a browser, download the file, and use Add instance → Import a pack. This happens with large packs; a smaller one usually downloads straight away.",
+          "Anyone you send it to will have to open the link in a browser, download the file, and use Add instance → Import a pack. Most hosts need a direct download link rather than the page the file sits on.",
       };
     case "unknown":
       return {
@@ -1317,72 +1316,7 @@ export function publicLinkLine(check: PublicCheck): StatusLine {
 }
 
 /** What a sharer pastes wherever they are sending it. */
-export interface PackMessage {
-  name: string;
-  link: string;
-  fileUrl: string;
-  /** Already formatted: this file may not import `fileSize`, only types. */
-  size: string;
-}
 
-/**
- * The message, geode:// link first.
- *
- * The plain Drive link is in the body so somebody without Geode can still get
- * the file, and it is the link Drive itself returned rather than one Geode
- * assembled. The last line is the one place the public-link fact is stated, and
- * it sits in the message as well as in the dialog so it travels with the thing
- * being shared.
- */
-export function packShareMessage(message: PackMessage): string {
-  return [
-    `${message.name} — a Minecraft pack for Geode`,
-    "",
-    "Open this in Geode to install it:",
-    message.link,
-    "",
-    `Or download the file (${message.size}):`,
-    message.fileUrl,
-    "",
-    "It is a .geodepack — a .mrpack any launcher can open.",
-    "Anyone with these links can download it.",
-  ].join("\n");
-}
-
-/** The line Settings shows for the Drive connection. */
-export function driveLine(status: DriveStatus): StatusLine {
-  if (!status.configured) {
-    return {
-      tone: "info",
-      title: "Not configured",
-      detail:
-        "Sharing a pack through Drive needs your own Google client ID. Offline sharing works without one: export a .geodepack and hand it over.",
-    };
-  }
-  if (status.needsReconnect) {
-    return {
-      tone: "warn",
-      title: "Reconnect needed",
-      detail:
-        "Google will not accept this connection again. If your OAuth client is still in Testing, Google expires every authorization after seven days — press Publish app in Google's Audience screen and connect again.",
-    };
-  }
-  if (!status.connected) {
-    return {
-      tone: "info",
-      title: "Not connected",
-      detail:
-        "Press Connect to sign in to Google in your browser. Geode only ever sees the files it creates in your Drive.",
-    };
-  }
-  return {
-    tone: "ok",
-    title: status.account ? `Connected as ${status.account}` : "Connected",
-    detail: status.folderName
-      ? `Packs you share go into ${status.folderName} in your Drive. Geode cannot see anything else there.`
-      : "Geode cannot see anything in your Drive but the files it created there.",
-  };
-}
 
 // ---------------------------------------------------------------------------
 // The export dialog

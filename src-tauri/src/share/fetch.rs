@@ -157,10 +157,10 @@ enum Refusal {
 
 /// What to say when no candidate URL produced the pack.
 ///
-/// The first refusal that is not a page decides. A page is what Drive serves
-/// *instead* of the file, so it is only the answer when every candidate
-/// actually answered with one; a dropped connection or a 404 says something
-/// more definite, and says it about the link rather than about its size.
+/// The first refusal that is not a page decides. A page is what a host serves
+/// *instead* of the file — an interstitial, or a share gone private — so it is
+/// only the answer when nothing more definite came back; a dropped connection
+/// or a 404 says something about the link itself.
 fn refused(source: &PackSource, refusals: &[Refusal]) -> Error {
     let host = source.host();
     match refusals.iter().find(|why| !matches!(why, Refusal::Page)) {
@@ -177,18 +177,13 @@ fn refused(source: &PackSource, refusals: &[Refusal]) -> Error {
             "{host} answered {status} instead of serving the pack. Try the link again later, or \
              ask whoever sent it for a fresh one."
         )),
-        // Every candidate answered with a page. For Drive that is either the
-        // virus-scan warning or a sign-in page, which cannot be told apart
-        // without reading the page — so the one answer covers both.
-        _ => match source {
-            PackSource::Drive { .. } => Error::msg(
-                "Google Drive answered with a web page instead of the pack. That happens with \
-                 large files, and also when the file is no longer shared. Open the Drive link in \
-                 your browser: if it downloads, use Add instance → Import a pack; if it asks for \
-                 access, ask whoever sent it for a fresh link.",
-            ),
-            PackSource::Url { .. } => Error::msg(format!("{host} did not serve a Geode pack")),
-        },
+        // A page where an archive should be. Usually a share that has gone
+        // private, or a host that serves an interstitial before the file.
+        _ => Error::msg(format!(
+            "{host} served a web page instead of the pack. The file may no longer be shared. \
+             Open the link in your browser: if it downloads, use Add instance → Import a pack; \
+             if not, ask whoever sent it for a fresh link."
+        )),
     }
 }
 
@@ -485,10 +480,8 @@ mod tests {
         PackHash::from_hex(&hex::encode(hasher.finalize())).unwrap()
     }
 
-    /// A source whose candidates are the two paths the fake serves, so the
-    /// "try the next shape" path is exercised without touching Google.
-    fn two_urls(base: &str) -> PackSource {
-        PackSource::Url {
+    fn one_url(base: &str) -> PackSource {
+        PackSource {
             url: format!("{base}/one"),
         }
     }
@@ -501,7 +494,7 @@ mod tests {
         let dest = scratch.paths.root.join("incoming/one.geodepack");
 
         pack(
-            &two_urls(&serving.base),
+            &one_url(&serving.base),
             &hash_of(&bytes),
             &dest,
             &Progress::silent("pack-link"),
@@ -522,7 +515,7 @@ mod tests {
         let scratch = Scratch::new("fetch-url");
         let dest = scratch.paths.root.join("one.geodepack");
 
-        let source = PackSource::Url {
+        let source = PackSource {
             url: format!("{}/deep/path?export=download", serving.base),
         };
         pack(
@@ -583,21 +576,18 @@ mod tests {
     /// do, and the virus-scan page is the one that must not be named for the
     /// others: it sends them to a browser for a download that was working.
     ///
-    /// A pure test, because `PackSource::Drive`'s candidate URLs are Google's
-    /// own — asking them anything from `cargo test --lib` is the one thing
-    /// this module may not do.
+    /// A pure test: which refusal is reported is a decision about what came
+    /// back, and needs no server to make.
     #[test]
     fn what_no_candidate_serving_the_pack_is_blamed_on_depends_on_what_happened() {
-        let drive = PackSource::Drive {
-            file_id: "1A2b3C4d5E6fG7h8I9j".into(),
-        };
-        let elsewhere = PackSource::Url {
+        let elsewhere = PackSource {
             url: "https://files.example.com/survival.geodepack".into(),
         };
 
-        // Both shapes answered with a page: the one case that is Drive's
-        // interstitial, and the only one that says to use a browser.
-        let said = refused(&drive, &[Refusal::Page, Refusal::Page]).to_string();
+        // A page where an archive should be: the one case that says to open
+        // it in a browser, because that is what distinguishes a share that
+        // went private from a host that is simply down.
+        let said = refused(&elsewhere, &[Refusal::Page]).to_string();
         assert!(said.contains("Import a pack"), "{said}");
 
         // One of them answered with a page, but the other never finished. The
@@ -612,7 +602,7 @@ mod tests {
                 Refusal::Interrupted("connection reset".into()),
             ],
         ] {
-            let said = refused(&drive, &refusals).to_string();
+            let said = refused(&elsewhere, &refusals).to_string();
             assert!(said.contains("was interrupted"), "{said}");
             assert!(said.contains("connection reset"), "{said}");
             assert!(!said.contains("Import a pack"), "{said}");
@@ -628,9 +618,10 @@ mod tests {
         // Anything else says what the host answered rather than guessing.
         let said = refused(&elsewhere, &[Refusal::Status(500)]).to_string();
         assert!(said.contains("answered 500"), "{said}");
-        // And a page from a host that is not Drive has no browser story.
-        let said = refused(&elsewhere, &[Refusal::Page]).to_string();
-        assert!(said.contains("did not serve a Geode pack"), "{said}");
+        // A page loses to anything more definite: a status says something
+        // about the link, where a page only says what the host chose to render.
+        let said = refused(&elsewhere, &[Refusal::Page, Refusal::Status(404)]).to_string();
+        assert!(said.contains("no longer has that pack"), "{said}");
     }
 
     /// The same, end to end: what `attempt` saw is what the message is built
@@ -644,7 +635,7 @@ mod tests {
         let dest = scratch.paths.root.join("one.geodepack");
 
         let said = pack(
-            &two_urls(&serving.base),
+            &one_url(&serving.base),
             &hash_of(b"nothing"),
             &dest,
             &Progress::silent("pack-link"),
@@ -671,7 +662,7 @@ mod tests {
         let dest = scratch.paths.root.join("one.geodepack");
 
         let failed = pack(
-            &two_urls(&serving.base),
+            &one_url(&serving.base),
             &hash_of(&not_a_pack),
             &dest,
             &Progress::silent("p"),
@@ -695,7 +686,7 @@ mod tests {
         let dest = scratch.paths.root.join("one.geodepack");
 
         let failed = pack(
-            &two_urls(&serving.base),
+            &one_url(&serving.base),
             &hash_of(&bytes),
             &dest,
             &Progress::silent("p"),
@@ -721,7 +712,7 @@ mod tests {
             let serving = in_pieces(bytes.clone(), piece).await;
             let dest = scratch.paths.root.join(format!("{piece}.geodepack"));
             pack(
-                &two_urls(&serving),
+                &one_url(&serving),
                 &hash_of(&bytes),
                 &dest,
                 &Progress::silent("p"),
@@ -740,7 +731,7 @@ mod tests {
         let dest = scratch.paths.root.join("one.geodepack");
 
         let said = pack(
-            &two_urls(&serving.base),
+            &one_url(&serving.base),
             &hash_of(&archive(2047)),
             &dest,
             &Progress::silent("p"),
@@ -823,7 +814,7 @@ mod tests {
 
         let lies = claiming(MAX_PACK_BYTES + 1, archive(64)).await;
         let said = pack(
-            &two_urls(&lies),
+            &one_url(&lies),
             &hash_of(&archive(64)),
             &dest,
             &Progress::silent("p"),
@@ -839,7 +830,7 @@ mod tests {
         // the ceiling is brought down to what a test can push through a socket.
         let big = chunked(archive(4096)).await;
         let said = pack_within(
-            &two_urls(&big),
+            &one_url(&big),
             &hash_of(&archive(4096)),
             &dest,
             &Progress::silent("p"),
@@ -864,7 +855,7 @@ mod tests {
         progress
             .cancel_flag()
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        let stopped = pack(&two_urls(&serving.base), &hash_of(&bytes), &dest, &progress).await;
+        let stopped = pack(&one_url(&serving.base), &hash_of(&bytes), &dest, &progress).await;
         assert!(matches!(stopped, Err(Error::Cancelled)), "{stopped:?}");
         assert!(!dest.exists());
         assert!(!dest.with_extension("part").exists());

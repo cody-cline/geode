@@ -4,7 +4,6 @@ import clsx from "clsx";
 import {
   AlertTriangle,
   Check,
-  Cloud,
   Coffee,
   Download,
   ExternalLink,
@@ -23,13 +22,12 @@ import {
 import AccountsModal from "../components/AccountsModal";
 import { api, errorMessage } from "../lib/api";
 import { hashHue, initials } from "../lib/format";
-import { DEFAULT_SHARE_PORT, driveLine, parsePort } from "../lib/share";
+import { DEFAULT_SHARE_PORT, parsePort } from "../lib/share";
 import { RELEASES_URL, panelHint, panelLine } from "../lib/update";
 import { useStore } from "../lib/store";
 import StatusNote from "../components/StatusNote";
 import type {
   AppInfo,
-  DriveStatus,
   RemoteHost,
   JavaInstall,
   ShareSettings,
@@ -44,7 +42,6 @@ const TABS = [
   { id: "accounts", label: "Accounts", icon: UserRound },
   { id: "sharing", label: "Server sharing", icon: Share2 },
   { id: "hosts", label: "Server hosts", icon: ServerIcon },
-  { id: "drive", label: "Google Drive", icon: Cloud },
   { id: "about", label: "About", icon: Info },
 ] as const;
 
@@ -110,7 +107,6 @@ export default function Settings() {
           {tab === "accounts" && <AccountsSettings />}
           {tab === "sharing" && <SharingSettings />}
           {tab === "hosts" && <HostSettings />}
-          {tab === "drive" && <DriveSettings />}
           {tab === "about" && <About />}
         </div>
       </div>
@@ -642,121 +638,6 @@ function HostSettings() {
           </p>
         </div>
       </section>
-    </div>
-  );
-}
-
-/**
- * Connecting a Google account so a pack can be shared as one link.
- *
- * Two sentences here are load-bearing and should not be softened. The scope is
- * per-file, so Geode cannot see the rest of the user's Drive — that is a fact
- * about what Google grants, not a promise about this code. And an OAuth client
- * left in **Testing** has its authorizations expired by Google every seven
- * days, which arrives later as a connection that stopped working for no
- * visible reason; pressing Publish app is what prevents it.
- */
-function DriveSettings() {
-  const toast = useStore((s) => s.toast);
-  const reportError = useStore((s) => s.reportError);
-
-  const [status, setStatus] = useState<DriveStatus | null>(null);
-  const [connecting, setConnecting] = useState(false);
-  const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    api
-      .driveStatus()
-      .then(setStatus)
-      .catch((e) => reportError("Could not read the Google Drive connection", e));
-  }, [reportError]);
-
-  async function connect() {
-    setConnecting(true);
-    try {
-      // Blocks while the user is in their browser, the way Microsoft sign-in
-      // does. Cancel is the ordinary cancel_task command.
-      setStatus(await api.connectDrive());
-      toast({ kind: "success", title: "Connected to Google Drive" });
-    } catch (e) {
-      reportError("Could not connect to Google Drive", e);
-    } finally {
-      setConnecting(false);
-    }
-  }
-
-  async function disconnect() {
-    setBusy(true);
-    try {
-      // The connection is forgotten whatever Google answered, so the toast
-      // says which of the two happened: somebody disconnecting to get the
-      // grant gone must not be left believing it is.
-      const gone = await api.disconnectDrive();
-      setStatus(gone.status);
-      toast({
-        kind: "info",
-        title: "Disconnected from Google Drive",
-        body: gone.revoked
-          ? "Packs you already shared stay in your Drive, and their links keep working until you delete the files."
-          : "Google could not be reached to revoke Geode's access, so remove Geode yourself at myaccount.google.com → Third-party access. Packs you already shared stay in your Drive.",
-      });
-    } catch (e) {
-      reportError("Could not disconnect", e);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className={styles.form}>
-      <section className={styles.section}>
-        <h2 className={styles.sectionTitle}>Sharing a pack through your Drive</h2>
-        {status && <StatusNote line={driveLine(status)} busy={connecting} />}
-
-        {status?.folderUrl && (
-          <div className={styles.calloutLinks}>
-            <button className="btn btn-sm" onClick={() => void openUrl(status.folderUrl!)}>
-              <ExternalLink size={13} />
-              {status.folderName ?? "Open the folder in Drive"}
-            </button>
-          </div>
-        )}
-
-        <div className={styles.inlineRow}>
-          {status?.connected ? (
-            <button className="btn btn-danger" onClick={() => void disconnect()} disabled={busy}>
-              {busy ? <Loader2 size={13} className="spin" /> : <Unplug size={13} />}
-              Disconnect
-            </button>
-          ) : (
-            <button
-              className="btn btn-primary"
-              onClick={() => void connect()}
-              disabled={!status?.configured || connecting}
-            >
-              {connecting && <Loader2 size={13} className="spin" />}
-              {status?.needsReconnect ? "Reconnect" : "Connect"}
-            </button>
-          )}
-          {connecting && (
-            <button className="btn" onClick={() => void api.cancelTask("drive:connect")}>
-              Cancel
-            </button>
-          )}
-        </div>
-
-        <p className="hint">
-          Sharing uploads a <code>.geodepack</code> to a folder of its own in
-          your Drive and gives you one message to paste: a{" "}
-          <code>geode://</code> link for people with Geode, and the plain Drive
-          link for people without. Anyone holding either can download that
-          file, so delete it in Drive when you want the link to stop working.
-          Disconnecting asks Google to revoke Geode&apos;s access and says so if
-          Google did not answer; you can also remove it yourself at{" "}
-          <em>myaccount.google.com → Third-party access</em>.
-        </p>
-      </section>
-
     </div>
   );
 }
