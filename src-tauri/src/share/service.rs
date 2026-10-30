@@ -1556,8 +1556,15 @@ mod tests {
         24_000 + (pid % 200) as u16 * 32
     }
 
+    /// Asked the way the service asks it, rather than re-stated.
+    ///
+    /// This used to bind the IPv4 wildcard while the service holds the IPv6
+    /// one dual-stack. Linux calls that a clash and the two agreed; Windows
+    /// does not, so a port the service was listening on read back as free.
+    /// Borrowing `share::host::listen` means the question cannot drift from the
+    /// answer again — and the socket is dropped the moment it is made.
     fn port_is_free(port: u16) -> bool {
-        std::net::TcpListener::bind(("0.0.0.0", port)).is_ok()
+        crate::share::host::listen(port).is_ok()
     }
 
     /// Two `cargo test` runs at once — one worktree each, which is how this

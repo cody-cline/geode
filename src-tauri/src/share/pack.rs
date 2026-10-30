@@ -5814,7 +5814,10 @@ mod tests {
                 if entry.path().is_dir() {
                     stack.push(entry.path());
                 } else {
-                    let rel = entry.path().strip_prefix(&game).unwrap().to_string_lossy().to_string();
+                    // Separators normalised: this walks a real directory, so
+                    // the paths come back with the platform's separator, and
+                    // the names below are what a pack calls them.
+                    let rel = entry.path().strip_prefix(&game).unwrap().to_string_lossy().replace('\\', "/");
                     on_disk.push(rel);
                 }
             }

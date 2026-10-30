@@ -472,7 +472,7 @@ impl Host {
 /// rather than no sharing. Any other failure — the port being taken, above
 /// all — is reported as it is, not taken as a reason to fall back to IPv4 and
 /// quietly refuse the players who arrive over IPv6.
-fn listen(port: u16) -> std::io::Result<std::net::TcpListener> {
+pub(super) fn listen(port: u16) -> std::io::Result<std::net::TcpListener> {
     let v4 = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
     let dual = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))
         .and_then(|socket| socket.set_only_v6(false).map(|()| socket));
@@ -1413,6 +1413,24 @@ pub(super) mod tests {
 
     pub(crate) fn outgoing_files(paths: &Paths) -> usize {
         std::fs::read_dir(outgoing(paths)).map_or(0, |entries| entries.count())
+    }
+
+    /// Open `how_many` connections, letting the host accept between each.
+    ///
+    /// `connect` here is blocking and the test runtime is single-threaded, so
+    /// building the whole crowd in a `map` never lets the accept loop run and
+    /// every one of them lands in the kernel's pending queue instead. Linux
+    /// takes that: the backlog asked for is 1024 and `somaxconn` is far above
+    /// it. macOS caps `somaxconn` at 128, which is `MAX_CONNECTIONS` exactly,
+    /// so the connection after that has nowhere to wait and times out — which
+    /// is a fact about the test's own impatience, not about the host.
+    async fn crowd_of(how_many: usize, port: u16) -> Vec<TcpStream> {
+        let mut made = Vec::with_capacity(how_many);
+        for _ in 0..how_many {
+            made.push(connect_from(Ipv4Addr::LOCALHOST, port, None));
+            tokio::task::yield_now().await;
+        }
+        made
     }
 
     /// A TCP connection to the host on loopback, made from `local`.
@@ -2570,9 +2588,7 @@ pub(super) mod tests {
             .unwrap();
 
         let extra = 4;
-        let mut idle: Vec<TcpStream> = (0..MAX_CONNECTIONS + extra)
-            .map(|_| connect_from(Ipv4Addr::LOCALHOST, port, None))
-            .collect();
+        let mut idle: Vec<TcpStream> = crowd_of(MAX_CONNECTIONS + extra, port).await;
         assert!(
             closed_within(&mut idle[extra - 1], Duration::from_secs(3)).await,
             "the host never made room for the last connection"
@@ -2884,9 +2900,7 @@ pub(super) mod tests {
         assert_eq!(said["error"], BUSY);
 
         let extra = 4;
-        let mut idle: Vec<TcpStream> = (0..MAX_CONNECTIONS + extra)
-            .map(|_| connect_from(Ipv4Addr::LOCALHOST, port, None))
-            .collect();
+        let mut idle: Vec<TcpStream> = crowd_of(MAX_CONNECTIONS + extra, port).await;
         assert!(
             closed_within(&mut idle[extra - 1], Duration::from_secs(3)).await,
             "the host never made room for the last connection"
@@ -3060,74 +3074,4 @@ pub(super) mod tests {
         assert_eq!(outgoing_files(&scratch.paths), 0, "the abandoned build left its file behind");
     }
 
-    /// TEMPORARY. Reports what this platform actually does when two sockets
-    /// want the same port across address families, because `listen` binds the
-    /// IPv6 wildcard dual-stack and every test squats the IPv4 one — and the
-    /// answer differs per platform in ways worth reading rather than recalling.
-    /// Panics on purpose so the findings reach the log on all three.
-    #[test]
-    #[ignore = "diagnostic; run with --ignored to read the platform's answer"]
-    fn what_this_platform_does_with_two_sockets_on_one_port() {
-        use socket2::{Domain, Protocol, Socket, Type};
-        use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-
-        fn try_bind(v6: bool, dual: bool, reuse: bool, port: u16) -> String {
-            let domain = if v6 { Domain::IPV6 } else { Domain::IPV4 };
-            let s = match Socket::new(domain, Type::STREAM, Some(Protocol::TCP)) {
-                Ok(s) => s,
-                Err(e) => return format!("socket() failed: {e}"),
-            };
-            if v6 {
-                if let Err(e) = s.set_only_v6(!dual) {
-                    return format!("set_only_v6 failed: {e}");
-                }
-            }
-            if reuse {
-                if let Err(e) = s.set_reuse_address(true) {
-                    return format!("set_reuse_address failed: {e}");
-                }
-            }
-            let addr = if v6 {
-                SocketAddr::from((Ipv6Addr::UNSPECIFIED, port))
-            } else {
-                SocketAddr::from((Ipv4Addr::UNSPECIFIED, port))
-            };
-            match s.bind(&addr.into()).and_then(|()| s.listen(16)) {
-                Ok(()) => "BOUND (no conflict seen)".into(),
-                Err(e) => format!("refused: {e}"),
-            }
-        }
-
-        let mut out = String::from("\n=== one port, two sockets ===\n");
-        out += &format!("platform: {} {}\n", std::env::consts::OS, std::env::consts::ARCH);
-
-        let squatter = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
-        let port = squatter.local_addr().unwrap().port();
-        out += &format!("squatter holds 0.0.0.0:{port}\n");
-        for (label, v6, dual, reuse) in [
-            ("  [::] dual  +reuse  (what listen() does today)", true, true, true),
-            ("  [::] dual  -reuse                            ", true, true, false),
-            ("  [::] v6only+reuse                            ", true, false, true),
-            ("  0.0.0.0    +reuse                            ", false, false, true),
-            ("  0.0.0.0    -reuse                            ", false, false, false),
-        ] {
-            out += &format!("{label} -> {}\n", try_bind(v6, dual, reuse, port));
-        }
-        out += &format!("  listen() itself                                -> {}\n",
-            match listen(port) { Ok(_) => "BOUND (no conflict seen)".into(), Err(e) => format!("refused: {e}") });
-        drop(squatter);
-
-        let v6squat = std::net::TcpListener::bind("[::]:0");
-        match v6squat {
-            Ok(l) => {
-                let p = l.local_addr().unwrap().port();
-                out += &format!("squatter holds [::]:{p}\n");
-                out += &format!("  0.0.0.0    +reuse                            -> {}\n", try_bind(false, false, true, p));
-                out += &format!("  listen() itself                              -> {}\n",
-                    match listen(p) { Ok(_) => "BOUND (no conflict seen)".into(), Err(e) => format!("refused: {e}") });
-            }
-            Err(e) => out += &format!("no IPv6 on this runner: {e}\n"),
-        }
-        panic!("{out}");
-    }
 }
