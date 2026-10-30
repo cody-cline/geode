@@ -333,6 +333,12 @@ pub(super) mod tests {
         let listening = started(host(&scratch)).await;
         let mut idle = TcpStream::connect(listening.local_addr)
             .expect("a client that never says anything");
+        // Set while the connection is still up. macOS refuses a socket option
+        // on one that has already been reset — `EINVAL`, where Linux takes it
+        // — so setting this after the stop failed on exactly the platform
+        // where the stop had done its job most promptly.
+        idle.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+
         listening.stop().await;
 
         // Gone rather than left waiting, by either of the two ways a socket
@@ -343,7 +349,6 @@ pub(super) mod tests {
         // and is not this test's business — what matters is that neither is a
         // client sitting there until `HEADER_TIMEOUT` runs out, which is the
         // one outcome a read timeout tells apart from the others.
-        idle.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let mut buf = [0u8; 16];
         let outcome = idle.read(&mut buf);
         let waiting = matches!(
