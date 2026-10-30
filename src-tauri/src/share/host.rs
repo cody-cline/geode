@@ -477,14 +477,49 @@ fn listen(port: u16) -> std::io::Result<std::net::TcpListener> {
     let dual = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))
         .and_then(|socket| socket.set_only_v6(false).map(|()| socket));
     match dual {
-        Ok(socket) => match bound(socket, SocketAddr::from((Ipv6Addr::UNSPECIFIED, port))) {
-            Err(e) if e.kind() == ErrorKind::AddrNotAvailable => {
-                bound(Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?, v4)
+        Ok(socket) => {
+            already_taken(v4)?;
+            match bound(socket, SocketAddr::from((Ipv6Addr::UNSPECIFIED, port))) {
+                Err(e) if e.kind() == ErrorKind::AddrNotAvailable => {
+                    bound(Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?, v4)
+                }
+                listening => listening,
             }
-            listening => listening,
-        },
+        }
         Err(_) => bound(Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?, v4),
     }
+}
+
+/// Refuse if something already holds the IPv4 wildcard on this port.
+///
+/// Only Linux treats a dual-stack `[::]` bind as clashing with a socket
+/// already on `0.0.0.0`. macOS and Windows both bind it happily — measured on
+/// the runners, with and without `SO_REUSEADDR`, so it is the dual-stack rule
+/// rather than that option. Without this, sharing on those two comes up
+/// believing it owns a port whose IPv4 players are all reaching something
+/// else, and reports itself as listening while it does.
+///
+/// The IPv4 wildcard refuses correctly on all three, so it is what gets asked.
+/// Asked with the same `SO_REUSEADDR` the real bind uses, or a port whose last
+/// connections are still in TIME_WAIT would read as somebody else's. The
+/// socket is dropped immediately: this is a question, not a reservation, and
+/// the dual-stack socket below is what actually serves. A port taken in the
+/// moment between the two is the same race `bound` already has with the rest
+/// of the machine, and it narrows a real failure to a rare one.
+fn already_taken(v4: SocketAddr) -> std::io::Result<()> {
+    // Port 0 is a fresh port each time, so there is nothing it could clash
+    // with and the answer would be about a different port anyway.
+    if v4.port() == 0 {
+        return Ok(());
+    }
+    let probe = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+    #[cfg(not(windows))]
+    probe.set_reuse_address(true)?;
+    probe.bind(&v4.into())?;
+    // Listened on as well as bound, because that is the pair the platforms
+    // were measured as refusing; a bind alone was never checked.
+    probe.listen(1)?;
+    Ok(())
 }
 
 fn bound(socket: Socket, addr: SocketAddr) -> std::io::Result<std::net::TcpListener> {
