@@ -11,6 +11,10 @@ both.
 
 </div>
 
+<div align="center">
+<img src="docs/images/browse.png" width="900" alt="Browsing mods: Modrinth and CurseForge results in one list">
+</div>
+
 ---
 
 ## Features
@@ -40,9 +44,16 @@ both.
 - Whitelist, ops and bans, with command completion read from the running server
 - Runs headless in Docker, with no desktop at all
 
+<div align="center">
+<img src="docs/images/server.png" width="900" alt="A Paper server running, with its console">
+<br><br>
+<img src="docs/images/new-server.png" width="900" alt="Creating a server: fourteen kinds to pick from">
+</div>
+
 **Sharing**
 
-- Export a `.geodepack` — other launchers read it as a normal `.mrpack`
+- One Share button: export as `.geodepack`, `.mrpack`, CurseForge or Prism
+- Put the pack anywhere and Geode makes a link for it — it checks the address really serves the file before you send it
 - Or share a server: players open one link and get a matching instance, kept up to date
 - Goes straight from your machine to theirs over TLS, with no middleman
 
