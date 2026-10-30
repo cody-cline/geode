@@ -82,8 +82,8 @@ Modrinth sells hosted servers rather than installing one on your machine.
 
 Linux — AppImage, `.deb` and `.rpm` on the [releases page](https://github.com/cody-cline/geode/releases).
 
-Windows and macOS builds are produced but have not been tested yet. See
-[docs/releasing.md](docs/releasing.md).
+Windows and macOS installers are built by CI and their tests pass there, but
+nobody has launched Geode on either. See [docs/releasing.md](docs/releasing.md).
 
 ## Build
 

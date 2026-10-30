@@ -90,6 +90,19 @@ separate answer: it needs no key and no signature, so it works in any build,
 and it has been seen on none of the three either, because there is as yet no
 release to be told about.
 
+Those three "yes" columns are new. CI was added on 21 October and did not
+pass once until 30 October: Windows and macOS failed about a dozen tests each
+for nine days, and the repository was private, so each full run cost 88
+billable minutes against an allowance of 2000 a month. Going public made the
+runners free and the failures affordable to chase. One of the dozen was a real
+bug — `listen` bound the IPv6 wildcard dual-stack, which only Linux treats as
+clashing with a socket already on `0.0.0.0`, so sharing on the other two took
+a port whose IPv4 players were reaching something else and called itself
+listening. The rest were tests misreading a platform: a path compared with the
+wrong separator, a filename APFS will not create, a backlog smaller than the
+crowd a test made, a socket option set after the connection it belonged to had
+gone.
+
 "Built by CI" is not "works on Windows". Nothing in this repository has
 opened an `Info.plist`, read a registry key, launched the app, signed into
 Microsoft, started a JVM or clicked a `geode://` link on either platform. The
