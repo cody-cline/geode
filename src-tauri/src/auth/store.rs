@@ -17,8 +17,13 @@ use crate::paths::Paths;
 pub enum AccountKind {
     Microsoft,
     Offline,
-    /// A live session borrowed from another launcher on this machine. Online
-    /// play works, but the token cannot be renewed here — see [`super::import`].
+    /// A session borrowed from another launcher, which Geode no longer does.
+    ///
+    /// The variant stays only so an `accounts.json` written before that was
+    /// removed still parses: drop it and serde fails the whole file, which
+    /// would lose every account on the install rather than the one that is
+    /// obsolete. [`AccountsFile::load`] discards these as it reads them, and
+    /// nothing ever writes one.
     Imported,
 }
 
@@ -37,11 +42,10 @@ pub struct Account {
     pub msa_refresh_token: Option<String>,
     #[serde(default)]
     pub added_at: i64,
-    /// For imported accounts: the file to re-read when the session expires.
-    #[serde(default)]
+    /// Left on the struct so an old file still parses; never written.
+    #[serde(default, skip_serializing)]
     pub source_path: Option<String>,
-    /// Human-readable name of the launcher it came from.
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub source_label: Option<String>,
 }
 
@@ -57,25 +61,6 @@ impl Account {
             added_at: chrono::Utc::now().timestamp(),
             source_path: None,
             source_label: None,
-        }
-    }
-
-    /// Wrap a session lifted from another launcher.
-    ///
-    /// Minecraft tokens run about 24 hours and the file gives no expiry we can
-    /// trust, so assume a conservative 12 and let the re-read path handle it
-    /// being wrong in either direction.
-    pub fn imported(candidate: &super::import::ImportCandidate) -> Self {
-        Self {
-            id: candidate.uuid.clone(),
-            username: candidate.username.clone(),
-            kind: AccountKind::Imported,
-            mc_access_token: Some(candidate.access_token.clone()),
-            mc_expires_at: chrono::Utc::now().timestamp() + 12 * 3600,
-            msa_refresh_token: None,
-            added_at: chrono::Utc::now().timestamp(),
-            source_path: Some(candidate.source_path.clone()),
-            source_label: Some(candidate.source_label.clone()),
         }
     }
 
@@ -95,8 +80,6 @@ pub struct AccountView {
     pub kind: AccountKind,
     pub active: bool,
     pub needs_reauth: bool,
-    /// Which launcher an imported session came from.
-    pub source_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -113,7 +96,22 @@ impl AccountsFile {
         let path = paths.accounts_file();
         match tokio::fs::read(&path).await {
             Ok(bytes) => {
-                serde_json::from_slice(&bytes).map_err(|e| Error::json("accounts.json", e))
+                let mut file: Self =
+                    serde_json::from_slice(&bytes).map_err(|e| Error::json("accounts.json", e))?;
+                // Borrowed sessions are gone. They could never be renewed
+                // here, so one in an old file is at best hours from useless;
+                // dropping it quietly beats offering an account that cannot
+                // play. `active` is repaired rather than left pointing at
+                // something no longer in the list.
+                file.accounts.retain(|a| a.kind != AccountKind::Imported);
+                if !file
+                    .active
+                    .as_deref()
+                    .is_some_and(|id| file.accounts.iter().any(|a| a.id == id))
+                {
+                    file.active = file.accounts.first().map(|a| a.id.clone());
+                }
+                Ok(file)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e.into()),
@@ -137,7 +135,6 @@ impl AccountsFile {
                 kind: a.kind,
                 active: self.active.as_deref() == Some(a.id.as_str()),
                 needs_reauth: a.kind == AccountKind::Microsoft && a.msa_refresh_token.is_none(),
-                source_label: a.source_label.clone(),
             })
             .collect()
     }
@@ -145,12 +142,11 @@ impl AccountsFile {
     /// Whether this install has an account that has proved it owns Minecraft:
     /// Java Edition.
     ///
-    /// Two kinds qualify, and both were checked against Minecraft itself
-    /// rather than taken on trust: a Microsoft sign-in is refused with
+    /// One kind qualifies, and it was checked against Minecraft itself rather
+    /// than taken on trust: a Microsoft sign-in is refused with
     /// [`crate::error::Error::NoEntitlement`] when the store holds no Java
-    /// licence, and an imported session is only accepted once
-    /// `minecraft/profile` answered for it, which it does not for an account
-    /// without the game.
+    /// licence and no Java profile. Borrowed sessions used to count too; with
+    /// those gone this is simply "somebody signed in here".
     ///
     /// This is what an offline account is allowed behind. An offline account
     /// exists to play a copy you already own — single-player, or a LAN or
@@ -163,7 +159,7 @@ impl AccountsFile {
     pub fn owns_the_game(&self) -> bool {
         self.accounts
             .iter()
-            .any(|a| matches!(a.kind, AccountKind::Microsoft | AccountKind::Imported))
+            .any(|a| a.kind == AccountKind::Microsoft)
     }
 
     pub fn active_account(&self) -> Option<&Account> {
@@ -254,32 +250,6 @@ pub async fn session_for(
         }
     }
 
-    // An imported session has no refresh token by design. Instead, re-read the
-    // launcher it came from: if that launcher has been opened since, it will
-    // have renewed the token in place and the user needs to do nothing.
-    if account.kind == AccountKind::Imported {
-        let source = account
-            .source_path
-            .clone()
-            .ok_or_else(|| Error::msg("this imported account has no source launcher recorded"))?;
-
-        let token = super::import::refresh_from_source(client, &source, &account.id).await?;
-
-        let mut updated = account.clone();
-        updated.mc_access_token = Some(token.clone());
-        updated.mc_expires_at = chrono::Utc::now().timestamp() + 12 * 3600;
-        let (uuid, username) = (updated.id.clone(), updated.username.clone());
-        file.upsert(updated);
-        file.save(paths).await?;
-
-        return Ok(Session {
-            username,
-            uuid,
-            access_token: token,
-            user_type: "msa",
-        });
-    }
-
     let refresh = account
         .msa_refresh_token
         .clone()
@@ -361,11 +331,47 @@ mod tests {
         assert!(with(&[AccountKind::Microsoft]).owns_the_game());
     }
 
-    /// And an imported session, which Minecraft answered a profile for — the
-    /// route that works while an application id is still unapproved.
+    /// A borrowed session does not, and cannot: Geode no longer takes one, so
+    /// the only way an account of this kind exists is an `accounts.json`
+    /// written before that changed — and `load` drops those on the way in.
     #[test]
-    fn an_imported_session_proves_it_too() {
-        assert!(with(&[AccountKind::Imported]).owns_the_game());
+    fn a_borrowed_session_does_not_prove_it() {
+        assert!(!with(&[AccountKind::Imported]).owns_the_game());
+    }
+
+    /// The migration, and the reason `AccountKind::Imported` is still a
+    /// variant at all. An install that had one before account import was
+    /// removed must still be able to read its own file: dropping the variant
+    /// outright makes serde reject the whole document, which would lose every
+    /// account on that machine rather than the one that is obsolete.
+    #[tokio::test]
+    async fn a_file_holding_a_borrowed_session_still_loads_and_drops_it() {
+        let scratch = crate::paths::Scratch::new("accounts-migrate");
+        let written = serde_json::json!({
+            "accounts": [
+                { "id": "11111111-1111-1111-1111-111111111111", "username": "Borrowed",
+                  "kind": "imported", "mcAccessToken": "t", "mcExpiresAt": 0 },
+                { "id": "22222222-2222-2222-2222-222222222222", "username": "Real",
+                  "kind": "microsoft", "msaRefreshToken": "r", "mcExpiresAt": 0 }
+            ],
+            "active": "11111111-1111-1111-1111-111111111111"
+        });
+        tokio::fs::create_dir_all(&scratch.paths.root).await.unwrap();
+        tokio::fs::write(
+            scratch.paths.accounts_file(),
+            serde_json::to_vec(&written).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let file = AccountsFile::load(&scratch.paths).await.expect("the file still reads");
+        assert_eq!(file.accounts.len(), 1, "the borrowed session should be gone");
+        assert_eq!(file.accounts[0].username, "Real");
+        assert_eq!(
+            file.active.as_deref(),
+            Some("22222222-2222-2222-2222-222222222222"),
+            "active pointed at the dropped account and should have moved"
+        );
     }
 
     /// Removing the owner closes the gate again, rather than leaving an

@@ -3283,39 +3283,6 @@ pub async fn complete_microsoft_login(
         .ok_or_else(|| Error::msg("account was not saved"))
 }
 
-/// Sessions found in other launchers on this machine.
-///
-/// Needs no Azure application: the token belongs to the user's own Minecraft
-/// account, and the launcher that issued it stays responsible for renewing it.
-#[tauri::command]
-pub async fn find_importable_accounts(
-    state: State<'_, AppState>,
-) -> Result<crate::auth::import::ImportScan> {
-    Ok(crate::auth::import::discover(&state.http).await)
-}
-
-#[tauri::command]
-pub async fn import_account(state: State<'_, AppState>, uuid: String) -> Result<AccountView> {
-    // Re-discover rather than trusting a token round-tripped through the
-    // frontend — the candidate list deliberately does not serialise one.
-    let candidate = crate::auth::import::discover_candidates(&state.http)
-        .await
-        .into_iter()
-        .find(|c| c.uuid == uuid)
-        .ok_or_else(|| Error::msg("that session is no longer available — try scanning again"))?;
-
-    let mut file = AccountsFile::load(&state.paths).await?;
-    let account = Account::imported(&candidate);
-    let id = account.id.clone();
-    file.upsert(account);
-    file.save(&state.paths).await?;
-
-    file.views()
-        .into_iter()
-        .find(|v| v.id == id)
-        .ok_or_else(|| Error::msg("account was not saved"))
-}
-
 #[tauri::command]
 pub async fn add_offline_account(
     state: State<'_, AppState>,

@@ -19,7 +19,6 @@ import type {
   Forbidden,
   Group,
   GroupTally,
-  ImportScan,
   InstallReport,
   Instance,
   InstanceOverrides,
@@ -583,8 +582,6 @@ export const api = {
   beginMicrosoftLogin: () => invoke<DeviceCodeStart>("begin_microsoft_login"),
   completeMicrosoftLogin: (start: DeviceCodeStart) =>
     invoke<Account>("complete_microsoft_login", { start }),
-  findImportableAccounts: () => invoke<ImportScan>("find_importable_accounts"),
-  importAccount: (uuid: string) => invoke<Account>("import_account", { uuid }),
   addOfflineAccount: (username: string) =>
     invoke<Account>("add_offline_account", { username }),
   removeAccount: (id: string) => invoke<Account[]>("remove_account", { id }),

@@ -1,13 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import clsx from "clsx";
 import {
   Check,
   Copy,
-  DownloadCloud,
   ExternalLink,
   Loader2,
-  RefreshCw,
   Trash2,
   UserPlus,
 } from "lucide-react";
@@ -16,13 +14,13 @@ import Modal from "./Modal";
 import { api } from "../lib/api";
 import { hashHue, initials } from "../lib/format";
 import { useStore } from "../lib/store";
-import type { DeviceCodeStart, ImportCandidate, ImportScan } from "../lib/types";
+import type { DeviceCodeStart } from "../lib/types";
 
 import styles from "./AccountsModal.module.css";
 
 export default function AccountsModal({ onClose }: { onClose: () => void }) {
   const accounts = useStore((s) => s.accounts);
-  const config = useStore((s) => s.config);
+  const hasClientId = useStore((s) => s.config?.hasClientId ?? false);
   const refreshAccounts = useStore((s) => s.refreshAccounts);
   const toast = useStore((s) => s.toast);
   const reportError = useStore((s) => s.reportError);
@@ -33,56 +31,14 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
   const [autoCopied, setAutoCopied] = useState(false);
   const [offlineName, setOfflineName] = useState("");
   const [addingOffline, setAddingOffline] = useState(false);
-  const [scan, setScan] = useState<ImportScan | null>(null);
-  const [scanning, setScanning] = useState(true);
-  const [importing, setImporting] = useState<string | null>(null);
 
-  // An offline account plays a copy you already own, so one account here has
-  // to have proved that: a Microsoft sign-in, which Minecraft refuses without
-  // a Java entitlement, or an imported session, which it answered a profile
-  // for. `add_offline_account` enforces the same rule — this is so the reason
-  // is on screen rather than arriving as an error after typing a name.
-  const ownsTheGame = accounts.some(
-    (a) => a.kind === "microsoft" || a.kind === "imported",
-  );
+  // An offline account plays a copy you already own, so somebody has to have
+  // signed in here: Minecraft refuses a Microsoft sign-in without a Java
+  // entitlement and a Java profile. `add_offline_account` enforces the same
+  // rule — this is so the reason is on screen rather than arriving as an
+  // error after a name has been typed.
+  const ownsTheGame = accounts.some((a) => a.kind === "microsoft");
 
-  // Scan on open. It is a handful of file reads plus one API call per token,
-  // and finding an existing session is the answer for most people.
-  const rescan = useCallback(async () => {
-    setScanning(true);
-    try {
-      setScan(await api.findImportableAccounts());
-    } catch {
-      setScan({ candidates: [], notes: [] });
-    } finally {
-      setScanning(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void rescan();
-  }, [rescan]);
-
-  const known = new Set(accounts.map((a) => a.id));
-  const importable = (scan?.candidates ?? []).filter((c) => !known.has(c.uuid));
-  const notes = scan?.notes ?? [];
-
-  async function importSession(candidate: ImportCandidate) {
-    setImporting(candidate.uuid);
-    try {
-      const account = await api.importAccount(candidate.uuid);
-      await refreshAccounts();
-      toast({
-        kind: "success",
-        title: `Imported ${account.username}`,
-        body: `Using the session from ${candidate.sourceLabel}.`,
-      });
-    } catch (e) {
-      reportError("Could not import that session", e);
-    } finally {
-      setImporting(null);
-    }
-  }
 
   /// Whether the code actually reached the clipboard. Reported rather than
   /// assumed: a webview can refuse a clipboard write that has no user gesture
@@ -183,11 +139,7 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
                 <span className={styles.meta}>
                   <span className={styles.name}>{account.username}</span>
                   <span className={styles.kind}>
-                    {account.kind === "microsoft"
-                      ? "Microsoft"
-                      : account.kind === "imported"
-                        ? `via ${account.sourceLabel ?? "another launcher"}`
-                        : "Offline"}
+                    {account.kind === "microsoft" ? "Microsoft" : "Offline"}
                     {account.needsReauth && " · needs sign-in again"}
                   </span>
                 </span>
@@ -258,107 +210,21 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
         </div>
       ) : (
         <div className={styles.section}>
-          {/* An existing session signs in with one click, so it leads. */}
-          {scanning ? (
-            <p className={styles.scanning}>
-              <Loader2 size={13} className="spin" />
-              Looking for sessions in other launchers…
-            </p>
-          ) : importable.length > 0 ? (
-            <div className={styles.importBlock}>
-              <p className={styles.importLead}>
-                <strong>Found an existing session.</strong> Sign in with the
-                Minecraft account another launcher on this machine is already
-                using.
-              </p>
-              {importable.map((candidate) => (
-                <div key={candidate.uuid} className={styles.importRow}>
-                  <span
-                    className={styles.avatar}
-                    style={{
-                      background: `linear-gradient(135deg, hsl(${hashHue(candidate.uuid)} 55% 42%), hsl(${(hashHue(candidate.uuid) + 40) % 360} 55% 30%))`,
-                    }}
-                  >
-                    {initials(candidate.username)}
-                  </span>
-                  <span className={styles.meta}>
-                    <span className={styles.name}>{candidate.username}</span>
-                    <span className={styles.kind}>
-                      from {candidate.sourceLabel}
-                    </span>
-                  </span>
-                  <button
-                    className="btn btn-sm btn-primary"
-                    onClick={() => importSession(candidate)}
-                    disabled={importing !== null}
-                  >
-                    {importing === candidate.uuid ? (
-                      <Loader2 size={12} className="spin" />
-                    ) : (
-                      <DownloadCloud size={13} />
-                    )}
-                    Use this
-                  </button>
-                </div>
-              ))}
-              <p className={styles.importNote}>
-                Geode borrows only the session token, never the other launcher's
-                app credentials — so it can't renew it. When it lapses, open
-                that launcher once and Geode picks the fresh one up by itself.
-              </p>
-            </div>
-          ) : null}
-
-          {config?.hasClientId ? (
+          {ownsTheGame || hasClientId ? (
             <button
               className="btn btn-primary"
               onClick={startMicrosoftLogin}
-              disabled={signingIn}
+              disabled={signingIn || !hasClientId}
               style={{ width: "100%" }}
             >
               {signingIn ? <Loader2 size={14} className="spin" /> : <UserPlus size={15} />}
               Sign in with Microsoft
             </button>
-          ) : importable.length > 0 ? (
-            // An import is one click, so direct sign-in is the quieter
-            // option rather than the headline.
-            <details className={styles.altAuth}>
-              <summary>Or sign in with Microsoft</summary>
-              <p>
-                Signs in with your Microsoft account directly, without needing
-                another launcher installed.
-              </p>
-              <button
-                className="btn btn-sm"
-                onClick={startMicrosoftLogin}
-                disabled={signingIn}
-              >
-                {signingIn ? <Loader2 size={13} className="spin" /> : null}
-                Sign in with Microsoft
-              </button>
-            </details>
-          ) : (
-            <div className={styles.notice}>
-              {notes.length > 0 ? (
-                notes.map((note) => (
-                  <p key={note} className={styles.noteLine}>
-                    {note}
-                  </p>
-                ))
-              ) : (
-                <p>No other launcher with a signed-in account was found here.</p>
-              )}
-              <div className={styles.noticeActions}>
-                <button className="btn btn-sm" onClick={rescan} disabled={scanning}>
-                  {scanning ? (
-                    <Loader2 size={13} className="spin" />
-                  ) : (
-                    <RefreshCw size={13} />
-                  )}
-                  Scan again
-                </button>
-              </div>
-            </div>
+          ) : null}
+          {!hasClientId && (
+            <p className={styles.noteLine}>
+              Microsoft sign-in is unavailable in this copy of Geode.
+            </p>
           )}
         </div>
       )}

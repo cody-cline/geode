@@ -11,7 +11,6 @@
 //! engine to babysit, no redirect URI to register, and the user signs in inside
 //! their own browser where their password manager already works.
 
-pub mod import;
 pub mod store;
 
 use serde::{Deserialize, Serialize};
@@ -28,18 +27,38 @@ const MC_PROFILE_URL: &str = "https://api.minecraftservices.com/minecraft/profil
 const MC_ENTITLEMENTS_URL: &str = "https://api.minecraftservices.com/entitlements/mcstore";
 const SCOPE: &str = "XboxLive.signin offline_access";
 
-/// Azure application (client) id used for the OAuth request.
+/// The Azure application id Geode signs in with.
 ///
-/// There is deliberately no default. Microsoft issues these per application and
-/// Mojang must separately approve each one for Minecraft API access, so a
-/// shipped id would be both unusable by others and a violation of the terms it
-/// was granted under. Set one in Settings (or bake it in at build time with
-/// `GEODE_CLIENT_ID`) to enable Microsoft sign-in; offline accounts work
-/// without it.
+/// Committed, like [`crate::config::default_curseforge_key`] and for the same
+/// reasons. A client id is not a secret — it travels in cleartext in the
+/// authorization URL every sign-in opens — and there is no box to paste one
+/// into anywhere in the app, so withholding it would not protect anything. It
+/// would only mean nobody could sign in to any build that is still this
+/// software, including a distribution's.
+///
+/// This one is on Mojang's allow list, approved 30 October 2026 for Geode.
+/// That approval is keyed to the id rather than to the name, and it is the
+/// thing of value here: an id that is not on the list walks the whole OAuth
+/// chain correctly and is refused at `login_with_xbox` with a 403.
+///
+/// **Fork or rebrand this and you must register your own and have it approved
+/// in its own right.** Signing in with this one from something else is
+/// impersonating this application, and Mojang answers abuse by taking an id
+/// off the list — which signs out everybody using the real thing, at once,
+/// rather than whoever misused it. Setting it to `""` compiles and turns
+/// Microsoft sign-in off, which is a supported way to build.
+///
+/// By building with this id you accept the Microsoft Identity Platform terms
+/// of use: <https://docs.microsoft.com/en-us/legal/microsoft-identity-platform/terms-of-use>
+const DEFAULT_CLIENT_ID: &str = "7f70c2d8-5361-4c2e-817b-3ca971ab5a9b";
+
+/// The id to sign in with: `GEODE_CLIENT_ID` at build time if it was given,
+/// else [`DEFAULT_CLIENT_ID`]. Empty either way means no Microsoft sign-in.
 pub fn default_client_id() -> Option<String> {
-    option_env!("GEODE_CLIENT_ID")
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
+    let id = option_env!("GEODE_CLIENT_ID")
+        .unwrap_or(DEFAULT_CLIENT_ID)
+        .trim();
+    (!id.is_empty()).then(|| id.to_string())
 }
 
 // ---------------------------------------------------------------------------

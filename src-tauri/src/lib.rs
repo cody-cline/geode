@@ -268,8 +268,6 @@ pub fn run() {
             commands::list_accounts,
             commands::begin_microsoft_login,
             commands::complete_microsoft_login,
-            commands::find_importable_accounts,
-            commands::import_account,
             commands::add_offline_account,
             commands::remove_account,
             commands::set_active_account,
