@@ -1,5 +1,5 @@
-# Checks Geode on the three platforms it targets, and on a tag builds the
-# installers for all three.
+# Checks Geode on the three platforms it targets, and when a release is asked
+# for builds the installers for all three. Pushing a tag builds nothing.
 #
 # Linux is the only platform Geode has ever been run on. This file is what
 # makes the other two exist; it is not what makes them tested. A green Windows

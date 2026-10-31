@@ -19,7 +19,7 @@ Rust core                        src-tauri/src/
     ├── instances ─────► install/ launch/ meta/ java.rs auth/ instance/
     ├── servers ───────► server/ (+ agent/ for the command probe)
     ├── plans ─────────► plan/
-    ├── shares ────────► share/ + drive/ + deeplink.rs (geode:// links)
+    ├── shares ────────► share/ + deeplink.rs (geode:// links)
     └── content ───────► providers/  (Modrinth · CurseForge · Spiget)
 ```
 
@@ -43,7 +43,6 @@ Everything else is built on these, so read them before anything else.
 | `deeplink.rs` | Getting a `geode://join` link into the app, whichever of three ways the OS delivers it. Holds the one `#[tauri::command]` that lives outside `commands.rs`, `take_pending_join`. |
 | `state.rs` | `AppState`: `Paths`, the HTTP client, the running-game and running-server registries, and the caches (version manifests, Connector support, jar metadata, plan support tables, plan twins). |
 | `config.rs` | `config.json` — global defaults, API keys, settings. |
-| `drive/` | Sharing a pack through the user's **own** Google Drive: the desktop OAuth flow with PKCE on a loopback redirect (`oauth.rs`), the connection in `google.json` (`tokens.rs`), and the Drive calls a share is made of (`api.rs`). Every endpoint is injectable, because there is no account here to test against and must never be one. |
 | `remote.rs` | The `geoded` hosts this copy can reach: the list and token in `hosts.json` (owner-only, and `HostView` has no token field, so nothing crosses the IPC boundary), the address normaliser, and the thin client for the routes a transfer uses. Not to be confused with `share/host.rs`, which is the listener *players* reach. |
 | `logs.rs` | Minecraft's own log files (`logs/latest.log`, gzipped archives) listed, read back and pruned. Deliberately ignorant of whether it is looking at a server or an instance: the caller supplies the directory. |
 | `diagnostics.rs` | Bundling "here is what went wrong" — context first, log second, because a crash in `rendering` means nothing until you know the pack is Fabric 1.21 with Sodium and Iris in it. |
@@ -55,7 +54,7 @@ a `net::Progress` handle created with an id, and the frontend keys off that id.
 Ids are namespaced by prefix — `install:`, `plan:`, `plan-build:`, `plan-server:`,
 `server:`, `server-content:`, `server-backup:`, `pack:`, `pack-read:`,
 `pack-server:`, `export:`, `import:`, `join:`, `link:`, `java:`, `launch:`,
-`updates:`, `drive-upload:`, the bare `pack-link` and the bare `git` — so grep for `Progress::new` rather than trusting
+`updates:`, the bare `pack-link` and the bare `git` — so grep for `Progress::new` rather than trusting
 this list to stay complete.
 
 - `Progress` emits `ProgressEvent { id, stage, detail, current, total, done,
@@ -126,9 +125,10 @@ library with no webview in its dependency tree at all.
   Forge/NeoForge. The canonical example of reading support from what upstream
   actually publishes, as *pairs*, rather than trusting the union of two arrays.
 - **`auth/`** is the four-hop Microsoft chain (MSA device code → Xbox Live →
-  XSTS → Minecraft token), with `import.rs` adopting a session from Prism,
-  MultiMC, ATLauncher or the official launcher, and `store.rs` persisting
-  accounts.
+  XSTS → Minecraft token) and `store.rs` persisting accounts. It is the only
+  way to sign in: Geode used to adopt a live session from another launcher on
+  the machine, which existed solely because signing in needed an application id
+  Mojang had not yet approved, and went when that approval arrived.
 
 ## Content: `providers/`
 
@@ -245,15 +245,19 @@ The player's side:
 - `code.rs` — the code itself, Crockford Base32. It is now a server's password.
 
 And a third path, for a pack that is not a file you hand over and not a server
-you can reach: **the sharer's own Google Drive**. `drive/` uploads the pack and
-makes that one file readable by anyone with the link; `link.rs`'s `Opened`
-chooses between the two kinds of link; `packlink.rs` is `geode://pack`, which
-carries where the bytes are and the SHA-256 they must hash to and nothing else;
+you can reach: **an address the sharer chose**. They put the file wherever they
+already put files, and Geode writes the link. `link.rs`'s `Opened` chooses
+between the two kinds of link; `packlink.rs` is `geode://pack`, which carries
+where the bytes are and the SHA-256 they must hash to and nothing else;
 `fetch.rs` downloads them with no credentials at all, refuses a web page four
-ways, and verifies that hash before the existing importer sees the archive. The
-honest part is in those module headers: the endpoint a recipient downloads from
-is undocumented by Google, so it is judged rather than trusted, and it refuses
-to the plain Drive link when Drive answers with its warning page.
+ways, and verifies that hash before the existing importer sees the archive.
+`commands.rs`'s `build_pack_link` is the other half: it fingerprints the file
+on disk, so the link promises the bytes that were exported rather than whatever
+the address serves later, and `fetch::probe` fetches that address once from the
+sharer's own machine, signed out, because pasting the page a file sits on
+instead of a link that downloads it is the usual mistake and is invisible to
+the person pasting. Geode hosts nothing and holds no account anywhere, so there
+is no host it depends on and none it can be cut off from.
 
 `deeplink.rs` gets the link into the app, which is fiddlier than it sounds: the
 OS may start a fresh Geode with the link as its only argument, or hand it to the

@@ -191,18 +191,22 @@ by the same strict parser as a link off the internet. The sharing traps in
 any of it.
 
 **The keys ship, and the fork notice is what makes that legitimate.**
-`DEFAULT_CURSEFORGE_KEY` in `config.rs` is committed, the way Prism Launcher
-and PolyMC commit theirs, and the Microsoft client id will join it once Mojang
-approves one. There is no box to paste a key into anywhere in the app — that
+`DEFAULT_CURSEFORGE_KEY` in `config.rs` and `DEFAULT_CLIENT_ID` in
+`auth/mod.rs` are both committed, the way Prism Launcher and PolyMC commit
+theirs. Mojang approved the application id on 30 October 2026, first
+submission; that approval is keyed to the id rather than to the name, which is
+why a fork needs its own *approved*, not merely registered. There is no box to paste a key into anywhere in the app — that
 was removed on purpose, because a person who wants to play Minecraft should
 never read the word "key" — so withholding one would not protect it, it would
 only mean the feature did not work in any build that is still this software.
 
 Three things hold that together, and all three are load-bearing:
 
-- **The comment above each key is a fork notice**, not decoration. A key was
+- **The comment above each key is a fork notice**, not decoration. Both were
   issued for Geode; CurseForge's terms require a derivative work to use its
-  own, and Mojang approves an application id for one application. Rewrite the
+  own, and Mojang approves an application id for one application. An id that
+  is not on the allow list walks the whole OAuth chain correctly and is
+  refused at `login_with_xbox` with a 403, so "registered" is not "approved". Rewrite the
   notice away and what is left is a licence violation with no warning attached.
 - **`""` must keep compiling.** It is how a fork builds before its own key
   arrives, and `effective_curseforge_key` / `effective_client_id` layer a

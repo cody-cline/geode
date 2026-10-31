@@ -444,7 +444,7 @@ floor Geode supports, so say in the release notes that it moved.
    `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`.
    The installers are named from the one in `tauri.conf.json`, so a tag that
    disagrees with it produces assets labelled with the old version.
-2. Commit and push to `main`. Pushing builds nothing and checks Linux only.
+2. Commit and push to `main`. Pushing checks all three platforms and builds nothing.
 3. **Actions → build → Run workflow**, tick **release**, and put the version
    in **tag** as `vX.Y.Z`. The action makes the tag itself, from whatever is
    on `main` when the run starts, so there is nothing to tag by hand.
