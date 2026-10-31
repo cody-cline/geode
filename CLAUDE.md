@@ -15,9 +15,9 @@ Knowing which of these a change belongs to is most of navigating this codebase.
 | Thing | Rust | What it is |
 |---|---|---|
 | **Instances** | `instance/`, `install/`, `launch/`, `meta/`, `auth/`, `java.rs` | A playable client: a Minecraft version, a loader, mods, worlds. Installed, then launched as a JVM. |
-| **Servers** | `server/` (15 files) | A server Geode installs, runs, and talks to over stdin. 14 kinds (`ServerKind`), backups, scheduled tasks, `server.properties`, the whitelist, ops and bans, a command probe. |
+| **Servers** | `server/` (16 files) | A server Geode installs, runs, and talks to over stdin. 14 kinds (`ServerKind`), backups, scheduled tasks, `server.properties`, the whitelist, ops and bans, a command probe. |
 | **Plans** | `plan/` | A *versionless* list of mods. You collect mods first; the resolver works out afterwards which loader and Minecraft version can run all of them. |
-| **Shares** | `share/` (13 files), `drive/`, `deeplink.rs` | Three shapes: a `.geodepack` file you hand over, a server serving its pack to its own players over TLS (`geode://join`), and a pack put in the sharer's own Google Drive (`geode://pack`). Carries provider content **by reference**, not by copying bytes. |
+| **Shares** | `share/` (13 files), `deeplink.rs` | Three shapes: a `.geodepack` file you hand over, a server serving its pack to its own players over TLS (`geode://join`), and a pack the sharer uploaded wherever they already put files, whose `geode://pack?url=…&h=…` carries the address and the SHA-256 and nothing else (`share/packlink.rs`). Geode hosts nothing and holds no account anywhere. Carries provider content **by reference**, not by copying bytes. |
 
 Content for both instances and servers comes from `providers/` — Modrinth,
 CurseForge and SpigotMC (via Spiget), federated at query time into one list.
@@ -38,14 +38,15 @@ cargo test --lib           # unit tests — offline, fast, the ones that gate a 
 cargo clippy --all-targets # expected to be clean; treat a warning as a failure
 ```
 
-`npm test` runs `node --test src/lib/*.test.mjs` — today that is three files,
-`src/lib/share.test.mjs`, `src/lib/blocked.test.mjs` and
-`src/lib/pack-update.test.mjs`. All three also check a few invariants by
-reading the `.tsx` that holds them, because there is no DOM or React renderer
-under `npm test`. Everything else on the frontend is gated by `tsc`
-alone, which is strict (`noUnusedLocals`, `verbatimModuleSyntax`); there is no
-ESLint or Prettier config. `npm run dev` on its own serves a UI with no backend
-to talk to, which is why the palette page at `?palette` exists.
+`npm test` runs `node --test src/lib/*.test.mjs` — today that is four files,
+`src/lib/share.test.mjs`, `src/lib/blocked.test.mjs`,
+`src/lib/pack-update.test.mjs` and `src/lib/update.test.mjs`. All four also
+check a few invariants by reading the `.tsx` that holds them, because there is
+no DOM or React renderer under `npm test`. Everything else on the frontend is
+gated by `tsc` alone, which is strict (`noUnusedLocals`,
+`verbatimModuleSyntax`); there is no ESLint or Prettier config. `npm run dev`
+on its own serves a UI with no backend to talk to, which is why the palette
+page at `?palette` exists.
 
 Integration tests live in `src-tauri/tests/`. Three of the files run offline in a
 normal `cargo test` — `backup_roundtrip.rs` (five tests that write and restore a
@@ -80,7 +81,7 @@ reads Sinytra Connector's real files for exactly this reason. The same trap in
 reverse: a server kind's mod loader is a fact about that software, not a guess
 (Banner is Fabric-based, not NeoForge — `ServerKind::mod_loader`).
 
-**`commands.rs` stays thin: validate, delegate, return.** 161 of the 162
+**`commands.rs` stays thin: validate, delegate, return.** 154 of the 155
 `#[tauri::command]` functions live there (the odd one out is
 `deeplink::take_pending_join`), and logic belongs in the module that owns it so
 the headless path can reach it too. A new command must be added in **two**
@@ -314,31 +315,38 @@ anywhere, it is stale.
 
 ## Platform reality
 
-Linux is the only platform tested. The macOS and Windows code paths are written
-and their rule evaluation is unit-tested, but neither has been run — say so
-rather than implying otherwise. `main.rs` works around WebKitGTK's DMABUF
-renderer aborting on NVIDIA under Wayland by setting
+Linux is the only platform Geode has ever been run on. The macOS and Windows
+code paths compile and the whole check suite passes on both — it first did on
+30 October, nine days after CI was added — but nobody has launched the app on
+either one, and that is the claim to make rather than implying otherwise:
+tests passing is not somebody having used it. `main.rs` works around
+WebKitGTK's DMABUF renderer aborting on NVIDIA under Wayland by setting
 `WEBKIT_DISABLE_DMABUF_RENDERER=1` for itself.
 
 All three are now **built** by `.github/workflows/build.yml`, and that is a
-different claim. On a `v*` tag it bundles the Linux three, a Windows `nsis`
-installer and a universal macOS dmg, and on every push it runs the whole check
-suite on all three runners. A green Windows job means the code compiled, the
-offline tests passed and an installer came out; it does not mean anyone has
-launched Geode on Windows, clicked a `geode://` link there, or seen the
-`Info.plist` the macOS bundler wrote. Keep the two apart in anything you write
-— "built by CI" is not "tested on Windows". What each platform does and does
-not prove, and which secrets signing needs, is
-[docs/releasing.md](docs/releasing.md).
+different claim. A release is asked for, never triggered: pushing a tag builds
+nothing, and the bundles — the Linux three, a Windows `nsis` installer and a
+universal macOS dmg — come from a `workflow_dispatch` run with `release` ticked
+and the version typed into `tag`, which is also what makes the git tag. Every
+push and pull request runs the whole check suite on all three runners. A green
+Windows job means the code compiled, the offline tests passed and an installer
+came out; it does not mean anyone has launched Geode on Windows, clicked a
+`geode://` link there, or seen the `Info.plist` the macOS bundler wrote.
+Keep the two apart in anything you write — "built by CI" is not "tested on
+Windows". What each platform does and does not prove, and which secrets
+signing needs, is [docs/releasing.md](docs/releasing.md).
 
-Each platform claims `geode://` from a different thing, and only from a
-bundle: the desktop entry on Linux, `Software\Classes\geode` written by the
-NSIS installer on Windows, `CFBundleURLTypes` in the `.app`'s `Info.plist` on
-macOS. That is why `tauri.windows.conf.json` and `tauri.macos.conf.json` exist
-beside `tauri.conf.json` — the bundler drops targets that do not belong to the
-platform it runs on, so without them a build there produces nothing to
-register. The MSI writes no such registry key, and macOS cannot register a
-scheme at runtime at all, so neither is a free substitute.
+Each platform claims `geode://` from a different thing. Linux claims it twice —
+the packaged desktop entry, and a handler entry `deeplink::start` writes on
+every launch, because an AppImage or a dev build has no installer to do it.
+Windows and macOS claim it once each and only from a bundle:
+`Software\Classes\geode` written by the NSIS installer, `CFBundleURLTypes` in
+the `.app`'s `Info.plist`. That is why `tauri.windows.conf.json` and
+`tauri.macos.conf.json` exist beside `tauri.conf.json` — the bundler drops
+targets that do not belong to the platform it runs on, so without them a build
+there produces nothing to register. The MSI writes no such registry key, and
+macOS cannot register a scheme at runtime at all, so neither is a free
+substitute.
 
 ## The deeper docs
 
