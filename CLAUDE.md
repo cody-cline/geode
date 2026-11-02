@@ -221,14 +221,31 @@ This licenses no *other* shared key. A Google client was ruled out for exactly
 these reasons and the feature was removed rather than shipped — see
 [docs/sharing-and-hosting.md](docs/sharing-and-hosting.md).
 
-**The queue lives in a shared doc, and its status is yours to keep true.**
-What to build next is tracked at
+**The queue lives in a shared doc, and keeping it true is part of the work —
+not a thing to do afterwards.** What to build next is tracked at
 <https://claude.ai/code/artifact/2cb49bb1-98b1-44b8-8646-bd91f006d25f>, one row
-per item with a status chip: Done, In progress, Not started. Move the chip when
-the work moves — to In progress when you pick an item up, to Done when it is
-merged — in the same sitting, not at the end of a long session. A row whose chip
-disagrees with the code is worse than no row, because it is read as fact. An
-item the owner asks for that has no row gets one.
+per item with a status chip: Done, In progress, Not started. It is read by the
+owner as a statement of fact about this repository, so a row that disagrees
+with the code is worse than no row.
+
+Edit it through the Claude Docs connector — `read` to see the current state,
+`update` to change it. It is not a file in this repository and cannot be
+grepped; if you have not read it this session, you do not know what it says.
+
+What that means in practice:
+
+- **Move the chip in the same sitting the work moves**, to In progress when
+  you pick an item up and to Done when it is merged. Not at the end of a long
+  session, where it is the thing that gets dropped.
+- **A change that invalidates a row's prose invalidates the row**, even when
+  the chip is already Done. Half of what goes stale here is a Done row still
+  describing how something used to work — Drive sharing survived in this doc
+  for two days after it was deleted from the code.
+- **An item the owner asks for that has no row gets one**, with the same
+  reasoning the rest carry: what was wrong, what it cost, what was decided.
+- **Finishing something does not only mean marking it Done.** Read the rows
+  near it. The ones that described the old behaviour are now wrong, and so are
+  the notes under *Left on purpose* that the work has since explained.
 
 **The theme is the blue-slate palette** in `src/styles/global.css`
 (`--bg: #0b0f14`). It was rethemed once and reverted; do not change it
