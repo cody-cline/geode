@@ -224,9 +224,15 @@ these reasons and the feature was removed rather than shipped — see
 **The queue lives in a shared doc, and keeping it true is part of the work —
 not a thing to do afterwards.** What to build next is tracked at
 <https://claude.ai/code/artifact/2cb49bb1-98b1-44b8-8646-bd91f006d25f>, one row
-per item with a status chip: Done, In progress, Not started. It is read by the
-owner as a statement of fact about this repository, so a row that disagrees
-with the code is worse than no row.
+per *open* item: a status chip, a short title, a sentence or two of why, a
+size. It is read by the owner as a statement of fact about this repository, so
+a row that disagrees with the code is worse than no row.
+
+It is read on a phone, so it stays small — three columns, a couple of
+sentences a row, and no history. The shipped record is the git log, which
+cannot go stale, so an item that is done leaves the doc rather than sitting
+in it marked Done. Nothing is lost by that: the doc keeps every revision, and
+an `atRev` read brings back anything removed.
 
 Edit it through the Claude Docs connector — `read` to see the current state,
 `update` to change it. It is not a file in this repository and cannot be
@@ -234,16 +240,16 @@ grepped; if you have not read it this session, you do not know what it says.
 
 What that means in practice:
 
-- **Move the chip in the same sitting the work moves**, to In progress when
-  you pick an item up and to Done when it is merged. Not at the end of a long
-  session, where it is the thing that gets dropped.
-- **A change that invalidates a row's prose invalidates the row**, even when
-  the chip is already Done. Half of what goes stale here is a Done row still
-  describing how something used to work — Drive sharing survived in this doc
-  for two days after it was deleted from the code.
-- **An item the owner asks for that has no row gets one**, with the same
-  reasoning the rest carry: what was wrong, what it cost, what was decided.
-- **Finishing something does not only mean marking it Done.** Read the rows
+- **Move the row in the same sitting the work moves**, to In progress when you
+  pick an item up and out of the doc when it is merged. Not at the end of a
+  long session, where it is the thing that gets dropped.
+- **A change that invalidates a row's prose invalidates the row.** Half of
+  what goes stale here is a row still describing how something used to work —
+  Drive sharing survived in this doc for two days after it was deleted from
+  the code.
+- **An item the owner asks for that has no row gets one**, in the same shape
+  as the rest: what is wrong, what it costs, and a size.
+- **Finishing something does not only mean removing its row.** Read the rows
   near it. The ones that described the old behaviour are now wrong, and so are
   the notes under *Left on purpose* that the work has since explained.
 
