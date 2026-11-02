@@ -48,7 +48,11 @@ desktop = [
 tauri-build = { version = "2", features = [], optional = true }
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset"], optional = true }
+# `tray-icon` is what makes `TrayIconBuilder` exist *and* what makes the Tauri
+# CLI declare the appindicator library to the deb, the rpm and the AppImage —
+# see `tray.rs`. Inside the optional dependency, so a `--no-default-features`
+# build still has no `tauri` crate at all.
+tauri = { version = "2", features = ["protocol-asset", "tray-icon"], optional = true }
 tauri-plugin-dialog = { version = "2", optional = true }
 tauri-plugin-opener = { version = "2", optional = true }
 # `geode://` links. Single-instance must be registered first, and its

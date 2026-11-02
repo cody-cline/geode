@@ -779,6 +779,14 @@ export interface Config {
   theme: string;
   accent: string;
   hideOnLaunch: boolean;
+  /** Closing the window leaves Geode in the tray instead of exiting it. */
+  closeToTray: boolean;
+  /**
+   * Whether the one-time "Geode will keep running in the tray" question has
+   * been answered. Rust writes it; nothing in the UI reads or sets it, and it
+   * is mirrored here only because this interface is the mirror.
+   */
+  trayExplained: boolean;
   concurrentDownloads: number;
   showSnapshots: boolean;
   /** The one Geode version "Skip this one" was pressed for, if any. */

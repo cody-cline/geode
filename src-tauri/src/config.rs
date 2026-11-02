@@ -74,6 +74,19 @@ pub struct Config {
     pub accent: String,
     /// Hide the launcher window while the game runs.
     pub hide_on_launch: bool,
+    /// Leave Geode in the system tray when its window is closed, instead of
+    /// exiting.
+    pub close_to_tray: bool,
+    /// Whether the one-time "Geode will keep running in the tray" question has
+    /// been answered.
+    ///
+    /// Not a setting anybody sets: [`crate::tray`] writes it the first time a
+    /// close would hide the window, and never clears it. It is in `config.json`
+    /// rather than in memory because a question asked once a session is a
+    /// question asked for ever, and because the case it exists for — a tray
+    /// icon no host renders, which cannot be detected — is one the person has
+    /// to be able to answer before the window goes anywhere.
+    pub tray_explained: bool,
     pub concurrent_downloads: usize,
     /// Show snapshots and other non-release versions in the version picker.
     pub show_snapshots: bool,
@@ -149,6 +162,15 @@ impl Default for Config {
             theme: default_theme(),
             accent: default_accent(),
             hide_on_launch: false,
+            // On, so the everyday "I'm done with the launcher" click stops
+            // nothing. With no appindicator library there is no tray, and
+            // `tray::close_should_hide` then falls through to exiting with the
+            // warning, exactly as before this existed — but a library that
+            // loads is not a tray anyone can see, and that case cannot be
+            // detected, so the default is only safe because of the field
+            // below: the first close asks before it hides anything.
+            close_to_tray: true,
+            tray_explained: false,
             concurrent_downloads: default_concurrency(),
             show_snapshots: false,
             skipped_update: None,
@@ -349,6 +371,39 @@ mod tests {
     #[test]
     fn the_build_time_client_id_is_never_written_into_the_config() {
         assert_eq!(Config::default().client_id, None);
+    }
+
+    /// The default the owner asked for, pinned so a later afternoon cannot
+    /// quietly flip it to false "to be safe" — that would ship the feature off
+    /// and bury it three levels down in Settings where nobody finds it.
+    ///
+    /// The second half is what makes the first half safe: a tray icon nothing
+    /// renders is indistinguishable from a working one, so the default is on
+    /// *and* the first close asks before it hides anything.
+    #[test]
+    fn closing_the_window_keeps_geode_running_by_default_and_asks_first() {
+        assert!(Config::default().close_to_tray);
+        assert!(!Config::default().tray_explained);
+    }
+
+    /// The serde migration, proved rather than reasoned about: the container
+    /// `#[serde(default)]` on `Config` fills an absent field from
+    /// `Config::default()`, not from `bool::default()`, so every config.json
+    /// already on disk gets the new behaviour and there is no silent split
+    /// between old and new installs. Fails loudly if anyone ever adds a
+    /// field-level `#[serde(default)]` or moves the container attribute, which
+    /// is the change that would hand old installs `false`.
+    #[test]
+    fn a_config_written_before_the_tray_existed_still_closes_to_the_tray() {
+        let config: Config =
+            serde_json::from_str(r#"{"memoryMb": 2048, "theme": "dark", "showSnapshots": true}"#)
+                .expect("a config.json from before close-to-tray existed");
+        assert!(config.close_to_tray);
+        // And is asked about it, once, like a fresh install: an existing
+        // config.json is exactly the case where the window would otherwise
+        // disappear into a tray the person has never thought about.
+        assert!(!config.tray_explained);
+        assert_eq!(config.memory_mb, 2048);
     }
 
     #[test]

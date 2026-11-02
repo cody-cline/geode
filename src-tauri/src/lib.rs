@@ -38,6 +38,10 @@ pub mod server;
 pub mod settings;
 pub mod share;
 pub mod state;
+/// Geode in the system tray, and the dialogs before a real exit. App shell,
+/// like `deeplink`: it is allowed to know a window exists.
+#[cfg(feature = "desktop")]
+pub mod tray;
 pub mod update;
 
 #[cfg(feature = "desktop")]
@@ -57,10 +61,26 @@ pub fn run() {
         // First, before any other plugin starts anything: a second Geode, run
         // by the OS to open a `geode://` link, hands its arguments to this one
         // and exits instead of becoming a second launcher. The `deep-link`
-        // feature passes the link on to the plugin below; this callback only
-        // brings the window forward, which is all a plain second launch needs.
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        // feature passes the link on to the plugin below; this callback brings
+        // the window forward, which is all a plain second launch needs, and
+        // says where the window went when that launch was somebody looking for
+        // it.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             deeplink::bring_forward(app);
+            // And the one place the tray notice belongs. Somebody whose window
+            // went into a tray they cannot see gets back in by launching Geode
+            // again, which is exactly this callback; every other way the window
+            // comes forward — the tray's own menu, a `geode://` link — is
+            // somebody who plainly reached it another way, and telling them
+            // their tray icon might be invisible is advice about a problem they
+            // have not got. A forwarded link arrives through this callback too,
+            // because the `deep-link` feature triggers the link plugin and then
+            // calls this, and the link plugin's own handler runs as a Tauri
+            // event listener rather than inline — so the argument is read here
+            // rather than waiting to see whether the flag was cleared in time.
+            if !argv.iter().any(|arg| arg.starts_with("geode://")) {
+                tray::said_where_the_window_went(app);
+            }
         }))
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
@@ -131,6 +151,10 @@ pub fn run() {
             ));
             // Only once the state is managed: links are parked in it.
             deeplink::start(app);
+            // And after that, because the tray's Show item brings the same
+            // window forward. A tray that cannot be created leaves closing the
+            // window meaning exactly what it meant before — see `tray::start`.
+            tray::start(app);
             // A server shared when Geode last closed is shared again now,
             // without anyone having to reopen it — its players' links point
             // here and should keep working.
@@ -145,14 +169,12 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::Destroyed = event {
-                // Leaving orphaned JVMs behind is worse than a hard stop.
-                if let Some(state) = window.app_handle().try_state::<AppState>() {
-                    state.games.stop_all();
-                    // Servers get the same treatment: an orphaned server still
-                    // holds its port and its world files.
-                    state.servers.stop_all();
-                }
+            // `CloseRequested` and not `Destroyed`, because a close can now be
+            // turned into a hide — and because the stopping that used to live
+            // here has moved to the exit path, which every exit reaches and
+            // `Destroyed` does not. See `tray`.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                tray::on_close_requested(window, api);
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -314,12 +336,9 @@ pub fn run() {
         .expect("error while building Geode")
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
-                // Give the router its port back. Bounded inside, so a router
-                // that has stopped answering cannot hold the exit up; if this
-                // never runs — a crash — the mapping's lease runs out instead.
-                if let Some(state) = app.try_state::<AppState>() {
-                    tauri::async_runtime::block_on(state.share.shutdown());
-                }
+                // The one place everything is stopped: games, servers and the
+                // pack host. Every exit path arrives here, and only here.
+                tray::teardown(app);
             }
         });
 }

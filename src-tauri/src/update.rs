@@ -220,41 +220,25 @@ pub fn offer(current: &str, announced: &str, skipped: Option<&str>) -> Result<()
 /// and a restart takes every one of those pipes with it.
 ///
 /// Which way that lands is not something to gamble a world on. Geode already
-/// kills running games when its window goes away, so the restart may well
-/// SIGKILL a game mid-save; and if the process exits before that teardown runs,
-/// the JVM is instead reparented and plays on with no launcher attached, so
-/// nothing shows its log, nothing can stop it, and its exit is heard by nobody.
+/// kills running games when it exits — closing its window may now only hide it
+/// to the system tray, but an exit still takes every child with it — so the
+/// restart may well SIGKILL a game mid-save; and if the process exits before
+/// that teardown runs, the JVM is instead reparented and plays on with no
+/// launcher attached, so nothing shows its log, nothing can stop it, and its
+/// exit is heard by nobody.
 /// Both are worse than waiting, so an install is refused while anything runs —
 /// not queued, not forced.
 ///
 /// A process is not the only thing worth protecting. A launch spends minutes
 /// before there is any JVM to find — updating the instance from its server,
 /// downloading libraries, rewriting `.minecraft` — and an install is writing
-/// the same files for the same reasons. Neither appears in a process registry,
-/// and a restart through either leaves an instance half written, so both count
-/// here too.
+/// the same files for the same reasons. A server's start is the longest of the
+/// lot: a Spigot one builds its own jar for five to fifteen minutes. None of
+/// them appears in a process registry, and a restart through any of them
+/// leaves something half written, so they all count here too — see
+/// [`AppState::what_is_running`], which is also what the exit warning reads.
 pub fn restart_would_interrupt(state: &AppState) -> Option<String> {
-    let mut what = Vec::new();
-    match state.games.running_ids().len() {
-        0 => {}
-        1 => what.push("Minecraft".to_string()),
-        n => what.push(format!("{n} copies of Minecraft")),
-    }
-    match state.servers.running_ids().len() {
-        0 => {}
-        1 => what.push("a server".to_string()),
-        n => what.push(format!("{n} servers")),
-    }
-    match state.launching_count() {
-        0 => {}
-        1 => what.push("a launch that is still preparing".to_string()),
-        n => what.push(format!("{n} launches that are still preparing")),
-    }
-    match state.installs_in_flight() {
-        0 => {}
-        1 => what.push("an install that is still running".to_string()),
-        n => what.push(format!("{n} installs that are still running")),
-    }
+    let what = state.what_is_running();
     if what.is_empty() {
         return None;
     }

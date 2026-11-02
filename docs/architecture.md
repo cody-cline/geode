@@ -25,9 +25,22 @@ Rust core                        src-tauri/src/
 
 Every command is registered in a single `generate_handler!` in `lib.rs`, which
 also owns app setup: it creates `Paths`, loads `Config`, manages `AppState`,
-starts the server scheduler ticker, registers the deep-link handler, and on
-`WindowEvent::Destroyed` stops every running game and server — an orphaned JVM
-still holds a port and a world.
+starts the server scheduler ticker, registers the deep-link handler, and puts
+Geode in the system tray. Its `WindowEvent::CloseRequested` arm only hands the
+close to `tray::on_close_requested`, which hides the window, exits quietly, or
+warns first.
+
+Stopping every running game and server is `tray::teardown`, called from
+`RunEvent::Exit` and from nowhere else. That is not a tidying-up: `RunEvent::Exit`
+is the only event on *every* exit path, and `WindowEvent::Destroyed` — where this
+used to live — is not. `app.exit()` sends `Message::RequestExit`, which sets the
+event loop's control flow to Exit without touching the window store, so nothing
+is destroyed and `Destroyed` never fires; the tray's own "Exit Geode" goes that
+way. A window close takes the other route — the window is removed, the store is
+empty, and the loop exits — and both converge on `RunEvent::Exit`. Hang teardown
+off `Destroyed` again and a tray exit leaves every JVM and every Minecraft server
+alive, each one holding a port and writing a world, with nothing attached to read
+its log or stop it.
 
 ## Foundations
 
@@ -41,6 +54,7 @@ Everything else is built on these, so read them before anything else.
 | `events.rs` | The `Events` trait and `EventSink`. The library is meant to emit here rather than to a Tauri handle, "so the same events go to a WebSocket instead" when running headless — see the caveat below. Includes a `Recorder` sink for tests. |
 | `desktop.rs` | The desktop app's `EventSink`: one adapter, and the only part of the crate allowed to know a window exists. |
 | `deeplink.rs` | Getting a `geode://join` link into the app, whichever of three ways the OS delivers it. Holds the one `#[tauri::command]` that lives outside `commands.rs`, `take_pending_join`. |
+| `tray.rs` | Geode in the system tray: the icon and its menu, what closing the window means, the two dialogs that stand between a close and a dead server, and `teardown` — the single place games, servers and the pack host are stopped, reached only from `RunEvent::Exit`. App shell, like `deeplink.rs`, and allowed to know a window exists for the same reason. |
 | `state.rs` | `AppState`: `Paths`, the HTTP client, the running-game and running-server registries, and the caches (version manifests, Connector support, jar metadata, plan support tables, plan twins). |
 | `config.rs` | `config.json` — global defaults, API keys, settings. |
 | `remote.rs` | The `geoded` hosts this copy can reach: the list and token in `hosts.json` (owner-only, and `HostView` has no token field, so nothing crosses the IPC boundary), the address normaliser, and the thin client for the routes a transfer uses. Not to be confused with `share/host.rs`, which is the listener *players* reach. |

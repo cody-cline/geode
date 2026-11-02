@@ -38,9 +38,15 @@ cargo test --lib           # unit tests — offline, fast, the ones that gate a 
 cargo clippy --all-targets # expected to be clean; treat a warning as a failure
 ```
 
-`npm test` runs `node --test src/lib/*.test.mjs` — today that is four files,
+`npm test` runs `node --test src/lib/*.test.mjs` — today that is five files,
 `src/lib/share.test.mjs`, `src/lib/blocked.test.mjs`,
-`src/lib/pack-update.test.mjs` and `src/lib/update.test.mjs`. All four also
+`src/lib/pack-update.test.mjs`, `src/lib/update.test.mjs` and
+`src/lib/types.test.mjs`. The last one is the only check anywhere that
+`types.ts` really mirrors the Rust struct it claims to — it reads the text of
+`types.ts` and `Settings.tsx` and asserts that the `close_to_tray` field
+arrived in both, because a field left out of the hand-written mirror reads as
+`undefined`, which is falsy, so a toggle renders off while Rust has the
+setting on and `tsc` sees nothing wrong. All five also
 check a few invariants by reading the `.tsx` that holds them, because there is
 no DOM or React renderer under `npm test`. Everything else on the frontend is
 gated by `tsc` alone, which is strict (`noUnusedLocals`,
@@ -103,16 +109,23 @@ the `EventSink` trait in `events.rs`, never a Tauri `AppHandle` directly — tha
 is the one thing standing between this code and running headless in a container.
 The migration is done, and the compiler now keeps it that way: Tauri is behind
 the **`desktop` feature**, so a build with `--no-default-features` has no
-`tauri` crate at all and code that reaches for one does not compile. Six files
-mention `tauri`, and the distinction between them still matters: `lib.rs`,
-`commands.rs`, `desktop.rs` and `deeplink.rs` are the app shell, every one of
-them `#[cfg(feature = "desktop")]`; `rt.rs` is in both builds and names Tauri in
-a single `cfg`'d line, because spawning a background task from a plain function
-goes through it — which is what `share/portmap.rs` and `share/service.rs` used
-`tauri::async_runtime` for; and `update.rs` imports none of it, naming
-`tauri.conf.json` in a test and saying in prose which of its neighbours holds
-the updater plugin, which is the shape to copy — the decisions on this side of
-the seam, the app shell on the other.
+`tauri` crate at all and code that reaches for one does not compile. Eight
+files answer `grep -rln tauri src-tauri/src --include='*.rs'`, and the
+distinction between them still matters: `lib.rs`, `commands.rs`, `desktop.rs`,
+`deeplink.rs` and `tray.rs` are the app shell, every one of them
+`#[cfg(feature = "desktop")]` — `tray.rs` is the newest and, like
+`deeplink.rs`, is allowed to know a window exists, because what closing one
+means is the whole subject of the file, so it is the sanctioned place to touch
+a window rather than an exception somebody got away with; `rt.rs` is in both
+builds and names Tauri in a single `cfg`'d line, because spawning a background
+task from a plain function goes through it — which is what `share/portmap.rs`
+and `share/service.rs` used `tauri::async_runtime` for; `update.rs` imports
+none of it, naming `tauri.conf.json` in a test and saying in prose which of its
+neighbours holds the updater plugin, which is the shape to copy; and
+`daemon/mod.rs` matches that grep only because one test's failure message names
+the `npm run tauri dev` command, which is to say the headless build mentions
+the crate nowhere that compiles — the decisions on this side of the seam, the
+app shell on the other.
 
 **Check both builds.** `cargo test --lib` and `cargo clippy --all-targets`
 compile the desktop app, and a change can be clean there and still break the
@@ -328,8 +341,12 @@ to ship `ops.json`.
   is asked for rather than inferred, because restoring whatever happened to be
   running would also restore one stopped deliberately a minute before the
   machine went down. The app ignores that setting entirely: opening Geode is
-  not a machine booting, and closing it stops its servers on purpose. Moving
-  or copying a whole
+  not a machine booting, and *exiting* it stops its servers on purpose —
+  closing its window only leaves Geode in the system tray, where they keep
+  running (`tray.rs`), and the same rule as the shutdown above holds in the
+  other direction: nothing starts after the registry is marked closing, which
+  is why `server/run.rs` asks again immediately before it spawns a JVM.
+  Moving or copying a whole
   server between the app and a host is `server/transfer.rs` with two routes in
   `daemon/api.rs`; its rules — verify by digest, delete nothing until the other
   side is proved complete, and what happens to the server's sharing — are at

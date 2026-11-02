@@ -202,6 +202,21 @@ function Appearance({ update }: { update: Updater }) {
             </span>
           </span>
         </label>
+        <label className={styles.toggleRow}>
+          <input
+            type="checkbox"
+            checked={config.closeToTray}
+            onChange={(e) => update({ closeToTray: e.target.checked })}
+          />
+          <span>
+            <strong>Keep Geode in the tray when the window closes</strong>
+            <span className={styles.toggleHint}>
+              Running servers and games keep going. Open the tray icon&rsquo;s menu to
+              bring the window back, or to exit Geode and stop them. Turn this off if
+              your desktop does not show tray icons.
+            </span>
+          </span>
+        </label>
       </section>
 
       <section className={styles.section}>

@@ -49,7 +49,10 @@ pub const JOIN_LINK: &str = "geode://join-link";
 
 /// The label of the only window Geode opens. tauri.conf.json gives it none,
 /// and a window without one is `main`.
-const MAIN_WINDOW: &str = "main";
+///
+/// Shared with [`crate::tray`], which needs it to hide the window and to give
+/// its dialogs a parent.
+pub(crate) const MAIN_WINDOW: &str = "main";
 
 /// Start taking links. Call from `setup`, once [`AppState`] is managed: every
 /// link is parked there.
@@ -93,6 +96,10 @@ pub fn open(app: &AppHandle, raw: &str) {
     };
     let sink = crate::desktop::sink(app.clone());
     deliver(&app.state::<AppState>().pending_join, sink.as_ref(), link);
+    // Whatever a close-to-tray hide armed, this person is not the one it is
+    // for: they clicked a link to join a server, and never went looking for a
+    // window at all. See [`crate::tray::said_where_the_window_went`].
+    crate::tray::reached_the_window_another_way();
     bring_forward(app);
 }
 

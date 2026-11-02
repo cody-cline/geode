@@ -199,6 +199,53 @@ impl AppState {
     pub fn installs_in_flight(&self) -> usize {
         self.cancels.lock().map(|map| map.len()).unwrap_or(0)
     }
+
+    /// Everything that would be interrupted if this process went away now,
+    /// named the way a person reads it: `["2 servers", "Minecraft"]`.
+    ///
+    /// Here rather than in either caller because there are two —
+    /// [`crate::update::restart_would_interrupt`] refusing an update, and the
+    /// warning before Geode exits — and two counters would drift within a
+    /// month about what "running" means. State owns both registries and both
+    /// counters, and is in the headless build as well.
+    ///
+    /// Servers lead: a server may have other people on it, and a region file
+    /// killed mid-save is somebody else's loss. A game is the owner's own
+    /// session on their own machine, so it is counted but not named.
+    pub fn what_is_running(&self) -> Vec<String> {
+        let mut what = Vec::new();
+        match self.games.running_ids().len() {
+            0 => {}
+            1 => what.push("Minecraft".to_string()),
+            n => what.push(format!("{n} copies of Minecraft")),
+        }
+        match self.servers.running_ids().len() {
+            0 => {}
+            1 => what.push("a server".to_string()),
+            n => what.push(format!("{n} servers")),
+        }
+        // A start that has not spawned yet is in neither registry, and it is
+        // the worst thing to walk into: a Spigot server is five to fifteen
+        // minutes of BuildTools, a Paper one a 50 MB download, and closing the
+        // window used to warn about nothing and then kill it. See
+        // [`crate::server::run::ServerRegistry::starting_count`].
+        match self.servers.starting_count() {
+            0 => {}
+            1 => what.push("a server that is still starting".to_string()),
+            n => what.push(format!("{n} servers that are still starting")),
+        }
+        match self.launching_count() {
+            0 => {}
+            1 => what.push("a launch that is still preparing".to_string()),
+            n => what.push(format!("{n} launches that are still preparing")),
+        }
+        match self.installs_in_flight() {
+            0 => {}
+            1 => what.push("an install that is still running".to_string()),
+            n => what.push(format!("{n} installs that are still running")),
+        }
+        what
+    }
 }
 
 /// One instance's launch, held from [`AppState::claim_launch`] until dropped.
@@ -251,5 +298,33 @@ mod tests {
         drop(first);
         assert!(!state.is_launching("survival"));
         assert!(state.claim_launch("survival").is_some());
+    }
+
+    /// A start that has not spawned yet was invisible here, and that is the
+    /// one nobody can get back: a Spigot build is fifteen minutes of
+    /// BuildTools, and closing the window said there was nothing to interrupt
+    /// and then killed it. Both callers read this one list, so an update is
+    /// refused during a build for the same reason.
+    #[test]
+    fn a_server_part_way_through_starting_is_something_to_interrupt() {
+        let scratch = crate::paths::Scratch::new("state-what-is-running");
+        let state = AppState::new(scratch.paths.clone(), crate::config::Config::default());
+        assert!(state.what_is_running().is_empty());
+
+        let claim = state.servers.claim_start("survival").expect("nothing holds it");
+        assert_eq!(
+            state.what_is_running(),
+            vec!["a server that is still starting".to_string()]
+        );
+
+        // And once there is a process it is counted once, not twice: the
+        // claim outlives the registry insert by a few statements.
+        let (_typed, _console) = state
+            .servers
+            .fake_start("survival", crate::server::ServerKind::Paper);
+        assert_eq!(state.what_is_running(), vec!["a server".to_string()]);
+
+        drop(claim);
+        assert_eq!(state.what_is_running(), vec!["a server".to_string()]);
     }
 }

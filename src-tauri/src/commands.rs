@@ -40,6 +40,7 @@ pub struct ConfigPatch {
     pub theme: Option<String>,
     pub accent: Option<String>,
     pub hide_on_launch: Option<bool>,
+    pub close_to_tray: Option<bool>,
     pub concurrent_downloads: Option<usize>,
     pub show_snapshots: Option<bool>,
     /// "Skip this one", and `Some(None)` for "stop skipping it".
@@ -92,6 +93,9 @@ pub async fn set_config(
     }
     if let Some(v) = patch.hide_on_launch {
         config.hide_on_launch = v;
+    }
+    if let Some(v) = patch.close_to_tray {
+        config.close_to_tray = v;
     }
     if let Some(v) = patch.concurrent_downloads {
         config.concurrent_downloads = v.clamp(1, 64);

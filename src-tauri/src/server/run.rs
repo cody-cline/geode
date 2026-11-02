@@ -366,6 +366,33 @@ impl ServerRegistry {
             .unwrap_or_default()
     }
 
+    /// How many servers are part-way through a start, with no process yet.
+    ///
+    /// [`Self::running_ids`] cannot see these, and they are the longest and
+    /// least recoverable work the app does: a Spigot server builds its own jar
+    /// with BuildTools for five to fifteen minutes, and a Paper one downloads
+    /// 50 MB. Anything that asks "would going away now interrupt something?"
+    /// has to count them, or it says nothing at all and then kills a build —
+    /// see [`crate::state::AppState::what_is_running`].
+    ///
+    /// Already-running ids are left out because a start is briefly in both:
+    /// the process is registered inside [`spawn`] while the start still holds
+    /// its [`StartClaim`], which would otherwise be read out as "a server and
+    /// a server that is still starting". The two maps are never locked at the
+    /// same time — one snapshot, then the lookups — because nothing else here
+    /// nests them and this is not the place to start.
+    pub fn starting_count(&self) -> usize {
+        let starting: Vec<String> = self
+            .starting
+            .lock()
+            .map(|starting| starting.iter().cloned().collect())
+            .unwrap_or_default();
+        starting
+            .into_iter()
+            .filter(|id| !self.is_running(id))
+            .count()
+    }
+
     /// Send one console command. False when nothing is running.
     pub fn send(&self, id: &str, command: &str) -> bool {
         self.inner
@@ -988,6 +1015,23 @@ async fn spawn(
     } else {
         None
     };
+
+    // Asked a second time, here, as the last thing before the process exists.
+    // `start` asks at the top, and between the two are the minutes this start
+    // spends downloading a 50 MB jar, installing a JDK, building a Spigot
+    // server or waiting on a port — any of which an exit can land in the
+    // middle of. Closing stops what the registry holds *at the moment it
+    // runs*, so a JVM that appears afterwards has nothing watching it, no kill
+    // coming, and a port and a world to itself. CLAUDE.md names the same rule
+    // for the host's shutdown, in the other direction: mark the registry
+    // closing before asking anything to stop, because a restart that raced a
+    // `docker stop` would bring a server back with nothing left to watch it.
+    // Same rule, the other direction — nothing starts after the mark either.
+    if registry.is_closing() {
+        return Err(Error::msg(
+            "Geode is stopping, so it is not starting anything new",
+        ));
+    }
 
     let mut child = tokio::process::Command::new(&java)
         .args(build_args(server, agent.as_deref()))
@@ -1617,6 +1661,66 @@ mod tests {
             recorder.events().is_empty(),
             "it should refuse before touching the server: {:?}",
             recorder.topics()
+        );
+    }
+
+    /// And once more at the far end, because the check above is minutes away
+    /// from the spawn: a start that got past it while Geode was still up must
+    /// not put a JVM down after the exit has already stopped everything the
+    /// registry held. Asked of [`spawn`] directly, which is the only way to
+    /// stand where a jar has arrived and a process has not — and asked twice,
+    /// so the refusal is the closing one and not one of the checks above it.
+    #[tokio::test]
+    async fn a_start_that_outran_the_exit_puts_no_jvm_down() {
+        let scratch = crate::paths::Scratch::new("run-closing-late");
+        let mut server = super::super::create(
+            &scratch.paths,
+            "Survival".into(),
+            ServerKind::Paper,
+            "1.21.1".into(),
+        )
+        .await
+        .unwrap();
+        // Everything a start would have left behind by the time it reaches
+        // the spawn: a jar on disk, an accepted EULA, and no agent to fetch.
+        server.jar = "server.jar".into();
+        server.eula_accepted = true;
+        server.settings.read_commands = false;
+        tokio::fs::write(scratch.paths.server_run(&server.id).join("server.jar"), b"")
+            .await
+            .unwrap();
+
+        let registry = ServerRegistry::default();
+        let recorder = std::sync::Arc::new(crate::events::Recorder::default());
+        let sink: EventSink = recorder.clone();
+        // A java that does not exist, so the only thing left between the
+        // check and the end of this function is the spawn itself.
+        let java = std::path::PathBuf::from("/nonexistent/geode-test-java");
+        let http = crate::net::client();
+        let attempt = || {
+            spawn(
+                &sink,
+                &scratch.paths,
+                &http,
+                &server,
+                java.clone(),
+                &registry,
+                None,
+                0,
+            )
+        };
+
+        let reached = attempt().await.expect_err("there is no java there");
+        assert!(
+            reached.to_string().contains("could not start Java"),
+            "while Geode is up the start should get all the way to the spawn: {reached}"
+        );
+
+        registry.close();
+        let refused = attempt().await.expect_err("Geode is on its way out");
+        assert!(
+            refused.to_string().contains("stopping"),
+            "it should give up rather than spawn into a closed registry: {refused}"
         );
     }
 
