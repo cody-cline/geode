@@ -661,6 +661,59 @@ export interface BuildReport {
   skipped: string[];
 }
 
+/** One mod now pointing at a file built for an instance's new target. */
+export interface RepointedMod {
+  name: string;
+  /** The file on disk, which is also what its record says. */
+  fileName: string;
+  versionNumber: string;
+  /** A Fabric build, running on (Neo)Forge through Sinytra Connector. */
+  throughConnector: boolean;
+  /** Dependencies of this mod that did not land, with the reason. */
+  skipped?: string[];
+}
+
+/**
+ * One mod the new target has no file for. Turned off, never deleted — a
+ * version bump that could not find a build is no reason to throw away a mod.
+ */
+export interface StrandedMod {
+  name: string;
+  fileName: string;
+  reason: string;
+  /** The jar is off, so the game will not try to load it. */
+  off: boolean;
+}
+
+/**
+ * One file in `mods/` nothing could be looked up for: a jar added by hand, or
+ * one a server's pack owns. Left exactly as it is, and named rather than
+ * counted as fine.
+ */
+export interface UncheckedFile {
+  fileName: string;
+  reason: string;
+}
+
+/** What re-targeting an instance did. */
+export interface RetargetReport {
+  /** The instance it landed on: the one asked about, or the copy. */
+  instanceId: string;
+  instanceName: string;
+  mcVersion: string;
+  loader: string;
+  loaderVersion: string;
+  /** It landed on a copy, and the instance asked about is exactly as it was. */
+  appliedToCopy: boolean;
+  /** Why a copy was Geode's own choice, when it was. */
+  copiedBecause?: string;
+  repointed: RepointedMod[];
+  stranded: StrandedMod[];
+  unchecked: UncheckedFile[];
+  /** Sinytra Connector and its companions, when the new target needs them. */
+  connector?: string[];
+}
+
 /**
  * The same, for a plan built as a server. Client-only mods are installed into
  * the server's Client mods, so `skipped` is only what failed.

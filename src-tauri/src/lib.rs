@@ -170,6 +170,7 @@ pub fn run() {
             commands::update_instance,
             commands::delete_instance,
             commands::duplicate_instance,
+            commands::retarget_instance,
             commands::instance_folder,
             commands::list_content,
             commands::set_content_enabled,

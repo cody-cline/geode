@@ -7,6 +7,7 @@ pub mod multiplayer;
 pub mod pack_update;
 pub mod prism;
 pub mod replan;
+pub mod retarget;
 
 use serde::{Deserialize, Serialize};
 

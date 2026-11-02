@@ -14,7 +14,7 @@ use crate::instance::{self, Instance};
 use crate::meta::Loader;
 use crate::net::Progress;
 use crate::paths::Paths;
-use crate::providers::{self, Provider};
+use crate::providers::{self, Project, Provider, Version};
 
 use super::resolve::{Fit, Target};
 use super::Plan;
@@ -28,6 +28,30 @@ pub struct BuildReport {
     pub installed: Vec<String>,
     /// What could not be installed, with the reason.
     pub skipped: Vec<String>,
+}
+
+/// The newest loader build for a target, which is what an instance created at
+/// it runs.
+///
+/// A loader build is Minecraft-specific — a NeoForge or Forge version names
+/// the game version it was built for — so it is resolved from what the loader
+/// actually publishes rather than carried over from somewhere else.
+pub(crate) async fn newest_loader_build(
+    client: &reqwest::Client,
+    loader: Loader,
+    game_version: &str,
+    progress: &Progress,
+) -> Result<String> {
+    progress.stage("Finding a loader build", 1).await;
+    let builds = crate::meta::loader_versions(client, loader, game_version).await?;
+    let build = builds.first().cloned().ok_or_else(|| {
+        Error::msg(format!(
+            "no {} build exists for Minecraft {game_version}",
+            loader.display_name(),
+        ))
+    })?;
+    progress.advance(1, &build).await;
+    Ok(build)
 }
 
 /// Which loaders to ask for this mod's files, in order of preference.
@@ -63,16 +87,8 @@ pub async fn build(
         .filter(|l| l.supports_mods())
         .ok_or_else(|| Error::msg(format!("'{}' is not a mod loader", target.loader)))?;
 
-    progress.stage("Finding a loader build", 1).await;
-    let builds = crate::meta::loader_versions(client, loader, &target.game_version).await?;
-    let loader_version = builds.first().cloned().ok_or_else(|| {
-        Error::msg(format!(
-            "no {} build exists for Minecraft {}",
-            loader.display_name(),
-            target.game_version
-        ))
-    })?;
-    progress.advance(1, &loader_version).await;
+    let loader_version =
+        newest_loader_build(client, loader, &target.game_version, progress).await?;
 
     let display_name = name
         .map(|n| n.trim().to_string())
@@ -164,19 +180,25 @@ pub async fn build(
     Ok(report)
 }
 
+/// The project, the file and the loader that file is built for: one mod's
+/// answer at one target.
+///
+/// `Ok(None)` is an answer — the provider was asked and publishes nothing that
+/// would run here — while `Err` is the absence of one, a question that could
+/// not be put at all. Keeping those apart is the whole reason this is not
+/// folded back into [`install_one`]: re-targeting an installed instance turns
+/// a mod off when the answer is no, and must never do that because a request
+/// failed.
 #[allow(clippy::too_many_arguments)] // one mod's coordinates, travelling together
-async fn install_one(
+pub(crate) async fn file_for(
     client: &reqwest::Client,
-    paths: &Paths,
-    inst: &mut Instance,
     fit: Fit,
     target_loader: &str,
     provider: &str,
     project_id: &str,
     game_version: &str,
     curseforge_key: Option<&str>,
-    progress: &Progress,
-) -> Result<Vec<String>> {
+) -> Result<Option<(Project, Version, &'static str)>> {
     let provider = Provider::parse(provider).ok_or_else(|| Error::msg("unknown provider"))?;
     let project = providers::project(client, provider, project_id, curseforge_key).await?;
 
@@ -191,33 +213,61 @@ async fn install_one(
         )
         .await?;
 
-        let Some(best) = crate::install::content::pick_best(&versions) else {
-            continue;
-        };
-
-        let report = crate::install::content::install_with_dependencies(
-            client,
-            paths,
-            inst,
-            best,
-            &project,
-            // Dependencies follow the mod, not the instance: a Fabric mod
-            // running through Connector needs its Fabric dependencies.
-            game_version,
-            loader,
-            curseforge_key,
-            progress,
-        )
-        .await?;
-
-        let mut names = report.installed;
-        names.extend(report.skipped.into_iter().map(|s| format!("(skipped) {s}")));
-        return Ok(names);
+        if let Some(best) = crate::install::content::pick_best(&versions) {
+            return Ok(Some((project, best.clone(), loader)));
+        }
     }
 
-    Err(Error::msg(format!(
-        "no installable build for Minecraft {game_version}"
-    )))
+    Ok(None)
+}
+
+#[allow(clippy::too_many_arguments)] // one mod's coordinates, travelling together
+async fn install_one(
+    client: &reqwest::Client,
+    paths: &Paths,
+    inst: &mut Instance,
+    fit: Fit,
+    target_loader: &str,
+    provider: &str,
+    project_id: &str,
+    game_version: &str,
+    curseforge_key: Option<&str>,
+    progress: &Progress,
+) -> Result<Vec<String>> {
+    let found = file_for(
+        client,
+        fit,
+        target_loader,
+        provider,
+        project_id,
+        game_version,
+        curseforge_key,
+    )
+    .await?;
+    let Some((project, version, loader)) = found else {
+        return Err(Error::msg(format!(
+            "no installable build for Minecraft {game_version}"
+        )));
+    };
+
+    let report = crate::install::content::install_with_dependencies(
+        client,
+        paths,
+        inst,
+        &version,
+        &project,
+        // Dependencies follow the mod, not the instance: a Fabric mod
+        // running through Connector needs its Fabric dependencies.
+        game_version,
+        loader,
+        curseforge_key,
+        progress,
+    )
+    .await?;
+
+    let mut names = report.installed;
+    names.extend(report.skipped.into_iter().map(|s| format!("(skipped) {s}")));
+    Ok(names)
 }
 
 #[cfg(test)]
