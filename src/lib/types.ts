@@ -636,7 +636,12 @@ export interface PlanTarget {
 }
 
 export interface UnresolvedMod {
-  provider: Provider;
+  /**
+   * Empty for a jar no platform knows — one dropped into an instance's mods
+   * folder by hand. Those have no identity to report, only a name and the
+   * reason nothing could be asked about them.
+   */
+  provider: Provider | "";
   projectId: string;
   name: string;
   reason: string;

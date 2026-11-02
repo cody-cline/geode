@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { Copy, Loader2, PackageOpen, Trash2 } from "lucide-react";
+import { Copy, Loader2, PackageOpen, Route, Trash2 } from "lucide-react";
 
 import ExportModal from "../../components/ExportModal";
 import ImageField from "../../components/ImageField";
 import Modal from "../../components/Modal";
+import ReplanModal from "../../components/ReplanModal";
 import StatusNote from "../../components/StatusNote";
 import { api } from "../../lib/api";
 import {
@@ -86,6 +87,8 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
   const [duplicating, setDuplicating] = useState(false);
   const [changingServerSide, setChangingServerSide] = useState(false);
   const [changingSettings, setChangingSettings] = useState(false);
+  /** The read-only "where else could this run?" answer, open or not. */
+  const [asking, setAsking] = useState(false);
   const [systemMemory, setSystemMemory] = useState<number | null>(null);
   /**
    * What the last update from this instance's server changed in its settings
@@ -384,10 +387,28 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
               </div>
             )}
           </div>
+          {/* The Minecraft version used to be dead text here. It is the one
+              thing on this screen nobody can change without re-checking every
+              mod, so it asks that question instead of offering a dropdown. */}
           <p className="hint">
-            Minecraft {instance.mcVersion}. Changing the loader keeps your mods
-            folder as-is — mods built for a different loader will not load.
+            Minecraft{" "}
+            <button
+              className={styles.askVersion}
+              onClick={() => setAsking(true)}
+              title="See which Minecraft versions and loaders this instance's mods could run on"
+            >
+              {instance.mcVersion}
+            </button>
+            . Changing the loader keeps your mods folder as-is — mods built for
+            a different loader will not load.
           </p>
+          <button
+            className={`btn btn-sm ${styles.ask}`}
+            onClick={() => setAsking(true)}
+          >
+            <Route size={14} />
+            Where else could this run?
+          </button>
         </section>
 
         <section className={styles.section}>
@@ -735,6 +756,10 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
 
       {exporting && (
         <ExportModal instance={instance} onClose={() => setExporting(false)} />
+      )}
+
+      {asking && (
+        <ReplanModal instance={instance} onClose={() => setAsking(false)} />
       )}
 
       {confirmDelete && (

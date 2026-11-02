@@ -1467,7 +1467,53 @@ pub async fn resolve_plan(
 
     let result = crate::plan::resolve::resolve(
         &state.http,
-        &plan,
+        &plan.mods,
+        &matrix,
+        &state.plan_support,
+        config.effective_curseforge_key().as_deref(),
+        &progress,
+    )
+    .await;
+
+    state.clear_cancel(progress.id());
+    match result {
+        Ok(resolution) => {
+            progress.finish().await;
+            Ok(resolution)
+        }
+        Err(e) => {
+            progress.fail(&e.to_string()).await;
+            Err(e)
+        }
+    }
+}
+
+/// The same question, asked of an installed instance: which loaders and
+/// Minecraft versions could run the mods it already has, and what would each
+/// one cost.
+///
+/// Read-only. It applies nothing — no download, no rename, and nothing written
+/// to `instance.json`.
+#[tauri::command]
+pub async fn resolve_instance(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<crate::plan::resolve::Resolution> {
+    let inst = instance::load(&state.paths, &id).await?;
+    let config = state.config().await;
+    let progress = Progress::new(crate::desktop::sink(app), format!("replan:{id}"));
+    state.register_cancel(progress.id(), progress.cancel_flag());
+
+    // As above: an unreadable Connector matrix costs the Connector option, not
+    // the answer.
+    let matrix = state.connector.get(&state.http).await.unwrap_or_default();
+
+    let result = instance::replan::resolve(
+        &state.http,
+        &state.paths,
+        &inst,
+        &state.jars,
         &matrix,
         &state.plan_support,
         config.effective_curseforge_key().as_deref(),
@@ -1515,7 +1561,7 @@ async fn resolved_target(
         let matrix = state.connector.get(&state.http).await.unwrap_or_default();
         let resolution = crate::plan::resolve::resolve(
             &state.http,
-            plan,
+            &plan.mods,
             &matrix,
             &state.plan_support,
             cf_key,

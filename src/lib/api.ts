@@ -265,6 +265,13 @@ export const api = {
   savePlan: (plan: Plan) => invoke<Plan>("save_plan", { plan }),
   deletePlan: (id: string) => invoke<void>("delete_plan", { id }),
   resolvePlan: (id: string) => invoke<PlanResolution>("resolve_plan", { id }),
+  /**
+   * The same question asked of an installed instance: which loaders and
+   * Minecraft versions could run the mods it already has. Read-only — it
+   * answers and applies nothing.
+   */
+  resolveInstance: (id: string) =>
+    invoke<PlanResolution>("resolve_instance", { id }),
   buildPlan: (
     id: string,
     loader: string,
