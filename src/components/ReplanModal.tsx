@@ -3,10 +3,19 @@ import clsx from "clsx";
 import { AlertTriangle, Blocks, Loader2 } from "lucide-react";
 
 import Modal from "./Modal";
+import StatusNote from "./StatusNote";
 import { api, errorMessage } from "../lib/api";
 import { titleCase } from "../lib/format";
+import { sentence } from "../lib/share";
+import type { StatusLine } from "../lib/share";
+import { useStore } from "../lib/store";
 import { LOADERS } from "../lib/types";
-import type { Instance, PlanResolution, PlanTarget } from "../lib/types";
+import type {
+  Instance,
+  PlanResolution,
+  PlanTarget,
+  RetargetReport,
+} from "../lib/types";
 
 import planStyles from "../views/PlanView.module.css";
 import styles from "./ReplanModal.module.css";
@@ -16,27 +25,68 @@ function loaderLabel(id: string): string {
   return LOADERS.find((l) => l.id === id)?.label ?? titleCase(id);
 }
 
+/** Which instance a re-target lands on. `""` leaves the choice to Geode. */
+type LandOn = "" | "here" | "copy";
+
+/** What a finished re-target amounts to, in one line. */
+function retargetLine(report: RetargetReport): StatusLine {
+  const moved = `${report.repointed.length} mod${report.repointed.length === 1 ? "" : "s"} now built for ${loaderLabel(report.loader)} ${report.mcVersion}`;
+  const left = [
+    report.stranded.length > 0 && `${report.stranded.length} turned off`,
+    report.unchecked.length > 0 && `${report.unchecked.length} not checked`,
+  ].filter(Boolean) as string[];
+  return {
+    tone: report.stranded.length > 0 ? "warn" : "ok",
+    title: report.appliedToCopy ? `Applied to ${report.instanceName}` : "Target changed",
+    detail: [
+      report.copiedBecause && `A copy was made because ${report.copiedBecause}.`,
+      sentence(left.length > 0 ? `${moved}, ${left.join(" and ")}` : moved),
+    ]
+      .filter(Boolean)
+      .join(" "),
+  };
+}
+
 /**
- * What moving this instance to another loader or Minecraft version would cost.
+ * What moving this instance to another loader or Minecraft version would cost,
+ * and the one place that move is made.
  *
  * The same answer the Plans view gives a versionless plan, asked of something
  * already installed — and drawn with the same target cards, so the two screens
  * cannot drift into saying one thing two ways.
  *
- * Read-only on purpose. It applies nothing, and the version is not editable
- * from here: a bare version dropdown is the footgun this replaces, since it
- * would leave a mods folder full of jars built for the version before.
+ * Looking is free: the ranking is read from what every mod here publishes, and
+ * nothing moves until a target is applied. Applying is the end of that reading
+ * rather than a way past it, which is why there is no bare version dropdown
+ * anywhere — one would leave a mods folder full of jars built for the version
+ * before and say nothing about it. A move applied to this instance cannot be
+ * undone, so a copy is Geode's own answer whenever there is anything to lose,
+ * and the report says which happened and why.
  */
 export default function ReplanModal({
   instance,
+  onApplied,
   onClose,
 }: {
   instance: Instance;
+  /**
+   * A re-target landed. The report names the instance it landed on, so the
+   * screen behind this dialog can put its own copy of the pair back in step.
+   */
+  onApplied: (report: RetargetReport) => void;
   onClose: () => void;
 }) {
+  const navigate = useStore((s) => s.navigate);
+  const toast = useStore((s) => s.toast);
+  const reportError = useStore((s) => s.reportError);
+  const refreshInstances = useStore((s) => s.refreshInstances);
+
   const [resolution, setResolution] = useState<PlanResolution | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [chosen, setChosen] = useState(0);
+  const [landOn, setLandOn] = useState<LandOn>("");
+  const [applying, setApplying] = useState(false);
+  const [moved, setMoved] = useState<RetargetReport | null>(null);
 
   useEffect(() => {
     let dropped = false;
@@ -57,9 +107,35 @@ export default function ReplanModal({
   const target: PlanTarget | undefined = resolution?.targets[chosen];
   const blockers = (target?.fits ?? []).filter((f) => f.fit === "missing");
 
+  /**
+   * Move this instance — or a copy of it — to the chosen target. Nothing is
+   * staged and nothing is reversible: it downloads files and renames jars, so
+   * the report it comes back with is the only account of what happened.
+   */
+  async function apply() {
+    if (!target) return;
+    setApplying(true);
+    try {
+      const report = await api.retargetInstance(
+        instance.id,
+        target.loader,
+        target.gameVersion,
+        landOn === "" ? null : landOn === "copy",
+      );
+      setMoved(report);
+      onApplied(report);
+      await refreshInstances();
+      toast({ kind: "success", title: retargetLine(report).title });
+    } catch (e) {
+      reportError("Could not change the target", e);
+    } finally {
+      setApplying(false);
+    }
+  }
+
   return (
     <Modal
-      title="Where else could this run?"
+      title={moved ? "What happened" : "Where else could this run?"}
       subtitle={`${instance.name} — ${
         instance.loader === "vanilla"
           ? "no mod loader"
@@ -68,9 +144,34 @@ export default function ReplanModal({
       onClose={onClose}
       width={560}
       footer={
-        <button className="btn" onClick={onClose}>
-          Close
-        </button>
+        <>
+          <button className="btn" onClick={onClose}>
+            Close
+          </button>
+          {moved
+            ? moved.instanceId !== instance.id && (
+                <button
+                  className="btn btn-primary"
+                  onClick={() => {
+                    onClose();
+                    navigate({ view: "instance", id: moved.instanceId });
+                  }}
+                >
+                  Open {moved.instanceName}
+                </button>
+              )
+            : target && (
+                <button
+                  className="btn btn-primary"
+                  onClick={apply}
+                  disabled={applying || instance.running}
+                  title={instance.running ? "Stop the game first" : undefined}
+                >
+                  {applying && <Loader2 size={14} className="spin" />}
+                  Apply {loaderLabel(target.loader)} {target.gameVersion}
+                </button>
+              )}
+        </>
       }
     >
       {error && <p className={styles.error}>{error}</p>}
@@ -82,13 +183,70 @@ export default function ReplanModal({
         </div>
       )}
 
-      {resolution && (
+      {/* What the move did, in place of the ranking that led to it: the files
+          have moved, so a ranking read before they did is no longer an answer
+          about this instance. */}
+      {moved && (
+        <div className={styles.result}>
+          <StatusNote line={retargetLine(moved)} />
+
+          {moved.connector && moved.connector.length > 0 && (
+            <p className={styles.note}>
+              Installed for the Fabric mods that need it:{" "}
+              {moved.connector.join(", ")}.
+            </p>
+          )}
+
+          {moved.stranded.length > 0 && (
+            <section className={planStyles.blockers}>
+              {/* The same words the preview used, in the past tense: what it
+                  said would be left behind is what was. */}
+              <h3 className={planStyles.blockTitle}>Left behind</h3>
+              {moved.stranded.map((one) => (
+                <div key={one.fileName} className={planStyles.blocker}>
+                  <span className={planStyles.blockText}>
+                    <span className={planStyles.blockName}>{one.name}</span>
+                    <span
+                      className={clsx(planStyles.blockWhere, styles.wraps)}
+                    >
+                      {sentence(one.reason)}{" "}
+                      {one.off
+                        ? "Turned off; the jar is still in your mods folder."
+                        : "It could not be turned off — move it out of the mods folder yourself."}
+                    </span>
+                  </span>
+                </div>
+              ))}
+            </section>
+          )}
+
+          {moved.unchecked.length > 0 && (
+            <section className={planStyles.blockers}>
+              <h3 className={planStyles.blockTitle}>Could not be checked</h3>
+              {moved.unchecked.map((one) => (
+                <div key={one.fileName} className={planStyles.blocker}>
+                  <span className={planStyles.blockText}>
+                    <span className={planStyles.blockName}>{one.fileName}</span>
+                    <span
+                      className={clsx(planStyles.blockWhere, styles.wraps)}
+                    >
+                      {sentence(one.reason)} Left exactly as it was.
+                    </span>
+                  </span>
+                </div>
+              ))}
+            </section>
+          )}
+        </div>
+      )}
+
+      {resolution && !moved && (
         <>
           {resolution.targets.length > 0 && (
             <p className={styles.reads}>
-              Nothing here changes this instance. It is what the mods you
-              already have would allow, read from what each one actually
-              publishes.
+              Read from what the mods you already have actually publish, best
+              first. Nothing moves until you apply one, and a move applied to
+              this instance cannot be undone.
             </p>
           )}
 
@@ -251,6 +409,43 @@ export default function ReplanModal({
               <span>{warning}</span>
             </p>
           ))}
+
+          {/* The action at the end of the reading, below everything that was
+              read. A mod with no build for the new pair is turned off rather
+              than deleted, and a jar nothing can be looked up for is left
+              alone — the report says what happened to each. */}
+          {target && (
+            <section className={styles.apply}>
+              <p className={styles.note}>
+                Applying {loaderLabel(target.loader)} {target.gameVersion}{" "}
+                re-points every mod this instance tracks at a build for that
+                pair. A mod with no build for it is turned off, never deleted,
+                and a jar you added by hand is left alone — the report says
+                what happened to each.
+              </p>
+              <div>
+                <label className="label" htmlFor="replan-land-on">
+                  Apply to
+                </label>
+                <select
+                  id="replan-land-on"
+                  className="select"
+                  value={landOn}
+                  onChange={(e) => setLandOn(e.target.value as LandOn)}
+                >
+                  <option value="">A copy if there is anything to lose</option>
+                  <option value="here">This instance</option>
+                  <option value="copy">A copy</option>
+                </select>
+                <p className="hint">
+                  Minecraft upgrades a world the first time a newer version
+                  opens it and never puts it back, so a copy is the default for
+                  an instance with worlds in it. Picking this instance applies
+                  it here anyway, and nothing puts that back.
+                </p>
+              </div>
+            </section>
+          )}
         </>
       )}
     </Modal>

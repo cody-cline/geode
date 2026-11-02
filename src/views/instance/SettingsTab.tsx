@@ -10,15 +10,12 @@ import { api } from "../../lib/api";
 import {
   forbiddenPlayerHint,
   lastSyncLine,
-  sentence,
   serverSettingsHint,
   yourSetting,
 } from "../../lib/share";
-import type { StatusLine } from "../../lib/share";
 import { useStore } from "../../lib/store";
 import { LOADERS } from "../../lib/types";
 import type {
-  GameVersion,
   Instance,
   InstanceOverrides,
   LastServerSync,
@@ -28,35 +25,6 @@ import type {
 
 import viewStyles from "../ServerView.module.css";
 import styles from "./SettingsTab.module.css";
-
-/**
- * Loaders a re-target can move to. Vanilla is not one: the operation is about
- * finding each mod a build for the new pair, and vanilla loads no mods at all.
- */
-const MOD_LOADERS = LOADERS.filter((l) => l.id !== "vanilla");
-
-/** Which instance a re-target lands on. `""` leaves the choice to Geode. */
-type LandOn = "" | "here" | "copy";
-
-/** What a finished re-target amounts to, in one line. */
-function retargetLine(report: RetargetReport): StatusLine {
-  const loader = LOADERS.find((l) => l.id === report.loader)?.label ?? report.loader;
-  const moved = `${report.repointed.length} mod${report.repointed.length === 1 ? "" : "s"} now built for ${loader} ${report.mcVersion}`;
-  const left = [
-    report.stranded.length > 0 && `${report.stranded.length} turned off`,
-    report.unchecked.length > 0 && `${report.unchecked.length} not checked`,
-  ].filter(Boolean) as string[];
-  return {
-    tone: report.stranded.length > 0 ? "warn" : "ok",
-    title: report.appliedToCopy ? `Applied to ${report.instanceName}` : "Target changed",
-    detail: [
-      report.copiedBecause && `A copy was made because ${report.copiedBecause}.`,
-      sentence(left.length > 0 ? `${moved}, ${left.join(" and ")}` : moved),
-    ]
-      .filter(Boolean)
-      .join(" "),
-  };
-}
 
 /** Empty inputs mean "inherit the global default", not "set to zero". */
 function numberOrNull(value: string): number | null {
@@ -114,25 +82,13 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
   const [loader, setLoader] = useState(instance.loader);
   const [loaderVersion, setLoaderVersion] = useState(instance.loaderVersion);
 
-  // Re-targeting is its own operation and has its own copy of the pair: the
-  // Save button above changes what the instance says, this changes the files
-  // underneath it, and typing into one must not look like editing the other.
-  const [gameVersions, setGameVersions] = useState<GameVersion[]>([]);
-  const [targetVersion, setTargetVersion] = useState(instance.mcVersion);
-  const [targetLoader, setTargetLoader] = useState(
-    instance.loader === "vanilla" ? MOD_LOADERS[0].id : instance.loader,
-  );
-  const [landOn, setLandOn] = useState<LandOn>("");
-  const [retargeting, setRetargeting] = useState(false);
-  const [moved, setMoved] = useState<RetargetReport | null>(null);
-
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [duplicating, setDuplicating] = useState(false);
   const [changingServerSide, setChangingServerSide] = useState(false);
   const [changingSettings, setChangingSettings] = useState(false);
-  /** The read-only "where else could this run?" answer, open or not. */
+  /** The "where else could this run?" dialog, open or not. */
   const [asking, setAsking] = useState(false);
   const [systemMemory, setSystemMemory] = useState<number | null>(null);
   /**
@@ -147,20 +103,6 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
   useEffect(() => {
     api.systemMemoryMb().then(setSystemMemory).catch(() => setSystemMemory(null));
   }, []);
-
-  // Snapshots follow the global setting, the same list the new-instance dialog
-  // offers. Failing leaves the instance's own version as the only option,
-  // which is the one target that is certainly real.
-  useEffect(() => {
-    let cancelled = false;
-    api
-      .listGameVersions(config?.showSnapshots ?? false)
-      .then((list) => !cancelled && setGameVersions(list))
-      .catch(() => !cancelled && setGameVersions([]));
-    return () => {
-      cancelled = true;
-    };
-  }, [config?.showSnapshots]);
 
   // Read for a joined instance only: nothing else has a server to have
   // changed anything.
@@ -295,35 +237,17 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
   }
 
   /**
-   * Move this instance — or a copy of it — to another Minecraft version or
-   * loader. Applied on the spot rather than with Save: it downloads files and
-   * renames jars, so there is nothing here a Discard button could put back.
+   * A re-target applied from the "where else could this run?" dialog has
+   * landed. The Mod loader section below holds its own copy of the pair, taken
+   * when this tab opened; left alone after a move landed *here*, it would read
+   * as an unsaved change and Save would write the old loader back over the one
+   * every jar was just rebuilt for. A move that landed on a copy left this
+   * instance exactly as it was, so there is nothing to put back.
    */
-  async function retarget() {
-    setRetargeting(true);
-    setMoved(null);
-    try {
-      const report = await api.retargetInstance(
-        instance.id,
-        targetLoader,
-        targetVersion,
-        landOn === "" ? null : landOn === "copy",
-      );
-      setMoved(report);
-      // The Mod loader section above holds its own copy of the pair, taken
-      // when this tab opened. Left alone after a move landed here, it would
-      // read as an unsaved change and Save would write the old loader back
-      // over the one the files were just rebuilt for.
-      if (!report.appliedToCopy) {
-        setLoader(report.loader as typeof loader);
-        setLoaderVersion(report.loaderVersion);
-      }
-      await refreshInstances();
-      toast({ kind: "success", title: retargetLine(report).title });
-    } catch (e) {
-      reportError("Could not change the target", e);
-    } finally {
-      setRetargeting(false);
+  function retargetLanded(report: RetargetReport) {
+    if (!report.appliedToCopy) {
+      setLoader(report.loader as typeof loader);
+      setLoaderVersion(report.loaderVersion);
     }
   }
 
@@ -501,133 +425,6 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
             <Route size={14} />
             Where else could this run?
           </button>
-        </section>
-
-        <section className={styles.section}>
-          <h2 className={styles.sectionTitle}>Change the target</h2>
-          <p className="hint">
-            Move this instance to another Minecraft version or loader and
-            re-point every mod it tracks at a build for the new pair. A mod with
-            no build for it is turned off, never deleted, and a jar you added by
-            hand is left alone — the result below says what happened to each.
-          </p>
-          <div className={styles.grid3}>
-            <div>
-              <label className="label" htmlFor="inst-target-version">
-                Minecraft
-              </label>
-              <select
-                id="inst-target-version"
-                className="select"
-                value={targetVersion}
-                onChange={(e) => setTargetVersion(e.target.value)}
-              >
-                {gameVersions.length === 0 && (
-                  <option value={targetVersion}>{targetVersion}</option>
-                )}
-                {gameVersions.map((v) => (
-                  <option key={v.id} value={v.id}>
-                    {v.id}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="label" htmlFor="inst-target-loader">
-                Loader
-              </label>
-              <select
-                id="inst-target-loader"
-                className="select"
-                value={targetLoader}
-                onChange={(e) => setTargetLoader(e.target.value as typeof targetLoader)}
-              >
-                {MOD_LOADERS.map((l) => (
-                  <option key={l.id} value={l.id}>
-                    {l.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <button
-              className="btn btn-primary"
-              onClick={retarget}
-              disabled={retargeting || instance.running}
-              title={instance.running ? "Stop the game first" : undefined}
-            >
-              {retargeting && <Loader2 size={14} className="spin" />}
-              Apply
-            </button>
-          </div>
-
-          <div>
-            <label className="label" htmlFor="inst-target-where">
-              Apply to
-            </label>
-            <select
-              id="inst-target-where"
-              className="select"
-              value={landOn}
-              onChange={(e) => setLandOn(e.target.value as LandOn)}
-            >
-              <option value="">A copy if there is anything to lose</option>
-              <option value="here">This instance</option>
-              <option value="copy">A copy</option>
-            </select>
-            <p className="hint">
-              Minecraft upgrades a world the first time a newer version opens it
-              and never puts it back, so a copy is the default for an instance
-              with worlds in it. Picking this instance applies it here anyway.
-            </p>
-          </div>
-
-          {moved && (
-            <div className={styles.lastSync}>
-              <StatusNote line={retargetLine(moved)} />
-              {moved.connector && moved.connector.length > 0 && (
-                <p className="hint">
-                  Installed for the Fabric mods that need it:{" "}
-                  {moved.connector.join(", ")}.
-                </p>
-              )}
-              {moved.stranded.length > 0 && (
-                <ul className={styles.settings}>
-                  {moved.stranded.map((one) => (
-                    <li key={one.fileName} className={styles.setting}>
-                      <span className={styles.settingWhat}>
-                        <strong>{one.name}</strong> — {one.reason}.{" "}
-                        {one.off
-                          ? "Turned off; the jar is still in your mods folder."
-                          : "It could not be turned off — move it out of the mods folder yourself."}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-              {moved.unchecked.length > 0 && (
-                <ul className={styles.settings}>
-                  {moved.unchecked.map((one) => (
-                    <li key={one.fileName} className={styles.setting}>
-                      <span className={styles.settingWhat}>
-                        <strong>{one.fileName}</strong> — {one.reason}. Left
-                        exactly as it was.
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-              {moved.instanceId !== instance.id && (
-                <div className={styles.manageRow}>
-                  <button
-                    className="btn"
-                    onClick={() => navigate({ view: "instance", id: moved.instanceId })}
-                  >
-                    Open {moved.instanceName}
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
         </section>
 
         <section className={styles.section}>
@@ -978,7 +775,11 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
       )}
 
       {asking && (
-        <ReplanModal instance={instance} onClose={() => setAsking(false)} />
+        <ReplanModal
+          instance={instance}
+          onApplied={retargetLanded}
+          onClose={() => setAsking(false)}
+        />
       )}
 
       {confirmDelete && (
