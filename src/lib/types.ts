@@ -346,6 +346,52 @@ export interface BackupInfo {
   createdAt: number;
 }
 
+/**
+ * One singleplayer world in an instance's `saves/` folder.
+ *
+ * `folder` and `name` are two different things and are allowed to disagree:
+ * Minecraft derives the folder from the name once, at creation, and suffixes
+ * it when it is taken, so a world called "New World" can live in
+ * `New World (1)`. `name` is `LevelName`, which is what the game shows;
+ * `folder` is this world's identity for every operation, because two worlds
+ * can share a name and only one can have a folder.
+ */
+export interface World {
+  folder: string;
+  name: string;
+  /** Milliseconds since the epoch — the game's own unit, not seconds. */
+  lastPlayed?: number;
+  /** 0 survival, 1 creative, 2 adventure, 3 spectator. */
+  gameMode?: number;
+  hardcore: boolean;
+  /** The Minecraft version this world was last opened with. */
+  version?: string;
+  size: number;
+  /**
+   * Why this folder is not a world Geode can read. Set for a folder with no
+   * `level.dat`, or one whose `level.dat` does not parse — it is still listed,
+   * because it is sitting in the player's `saves/`.
+   */
+  trouble?: string;
+}
+
+/** A zipped copy of one world, kept outside `.minecraft` beside the instance. */
+export interface WorldBackup {
+  /** The world this is a copy of, by folder name. */
+  world: string;
+  name: string;
+  size: number;
+  createdAt: number;
+}
+
+/** What Minecraft calls each `GameType`, for the badge on a world's row. */
+export const GAME_MODES: Record<number, string> = {
+  0: "Survival",
+  1: "Creative",
+  2: "Adventure",
+  3: "Spectator",
+};
+
 export interface Server {
   id: string;
   name: string;

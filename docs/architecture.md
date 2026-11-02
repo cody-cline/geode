@@ -121,10 +121,22 @@ library with no webview in its dependency tree at all.
   of file groups every writer takes), `logs.rs`,
   `multiplayer.rs` (the player's own `servers.dat`, added to without losing a
   byte of it — the same rule as `server/properties.rs`, in binary),
-  `retarget.rs` (moving an installed instance to another Minecraft version or
-  loader: each mod's file found through `plan/build.rs`, a mod with none turned
-  off rather than deleted, a jar nothing can be looked up for named rather than
-  assumed, and a copy by default when there are worlds to lose).
+  `replan.rs` (asking the plan resolver which loader and Minecraft version an
+  installed instance's mods could run on, which applies nothing), `retarget.rs`
+  (actually moving it there: each mod's file found through `plan/build.rs`, a
+  mod with none turned off rather than deleted, a jar nothing can be looked up
+  for named rather than assumed, and a copy by default when there are worlds to
+  lose), and `worlds.rs` (the `saves/` folder: listing, importing, copying,
+  renaming, backing up and deleting a world) with `nbt.rs`, the byte-level NBT
+  walk it and `multiplayer.rs` share. A world's folder name and its `LevelName`
+  are two different things — the game derives the folder once and thereafter
+  changes only the name — so a rename writes `LevelName` and leaves the folder
+  alone, and the screen shows both. Every operation that reads or writes a
+  world refuses while the instance is running, because Minecraft holds the
+  world open and writes `level.dat` only when it saves; a server can be asked
+  to flush first, a client cannot be asked anything. And unlike a server's, a
+  world backup is the *whole* world: none of it is re-downloadable, so
+  `server/backup.rs`'s thinning rule deliberately does not apply.
 - **`connector.rs`** is Sinytra Connector support — running Fabric mods on
   Forge/NeoForge. The canonical example of reading support from what upstream
   actually publishes, as *pairs*, rather than trusting the union of two arrays.
@@ -298,8 +310,8 @@ React 19 + TypeScript + Vite, zustand for state, CSS modules for styling.
   tab.
 - **Views** in `views/`: `Library`, `Browse`, `Settings`, `Plans`, `PlanView`,
   `PlanPacks`, `Servers`, `ServerView`, `InstanceView`. Instance tabs are files
-  in `views/instance/` (`ContentTab`, `GraphTab`, `LogsTab`, `PackTab`,
-  `SettingsTab`). A server's are not, mostly: `ServerView` renders console,
+  in `views/instance/` (`ContentTab`, `WorldsTab`, `GraphTab`, `LogsTab`,
+  `PackTab`, `SettingsTab`). A server's are not, mostly: `ServerView` renders console,
   automation and settings inline, which is why it is large, and only `ContentTab`
   and `Properties` live in `views/server/` — plus `ShareTab`, the admin's
   sharing screen, and `PlayersTab`, which shows who is online and manages the

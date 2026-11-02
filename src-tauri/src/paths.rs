@@ -64,6 +64,29 @@ impl Paths {
     pub fn instance_sync(&self, id: &str) -> PathBuf {
         self.instance(id).join("last-sync.json")
     }
+    /// The instance's singleplayer worlds — what vanilla calls `saves/`.
+    ///
+    /// One directory per world, each holding `level.dat` and the region files
+    /// beside it. The directory name and the world's own `LevelName` are two
+    /// different things and routinely disagree: Minecraft derives the folder
+    /// from the name once, at creation, and suffixes it when it is taken, so a
+    /// world called "New World" can live in `New World (1)`. See
+    /// [`crate::instance::worlds`].
+    pub fn instance_saves(&self, id: &str) -> PathBuf {
+        self.game_dir(id).join("saves")
+    }
+    /// Zipped copies of this instance's worlds, one directory per world.
+    ///
+    /// Outside `.minecraft` altogether, which is the same placement a server's
+    /// `backups/` has beside its `run/` and for the stronger version of the
+    /// same reason. Inside `saves/` the next backup of a world would contain
+    /// the last one; anywhere else under `.minecraft` an export, a duplicate
+    /// or a pack walk would sweep up gigabytes of archive. Out here a world
+    /// can be deleted and its copies still exist — which is what lets delete
+    /// take one first.
+    pub fn instance_world_backups(&self, id: &str) -> PathBuf {
+        self.instance(id).join("world-backups")
+    }
     /// Modpack plans. Not under `instances/` because a plan is not one: nothing
     /// is downloaded for it, and the same plan can be built more than once.
     pub fn plans(&self) -> PathBuf {

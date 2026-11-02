@@ -166,6 +166,16 @@ pair has to stay a pair: thinning the backup without the reinstall is a backup
 that restores to a server which will not boot. The same rule governs a pack —
 a mod that a provider can name travels as a reference, never as bytes.
 
+The inverse is just as load-bearing, and `instance/worlds.rs` is where it
+bites: a **world** backup carries the whole world. There is no upstream to
+re-fetch a region file from and nothing that could promise to put a missing one
+back, so there is no equivalent of that reinstall and therefore no thinning.
+Deleting a world takes a backup first, which is why `world-backups/` sits
+outside `.minecraft` — a copy has to outlive the world it is a copy of. And a
+*client's* world cannot be flushed the way a server's can be asked to
+`save-all flush`: there is nothing to type at, so every operation on a world is
+refused outright while the game is running.
+
 **A transfer deletes nothing until the other side is proved complete.** Moving
 a server (`server/transfer.rs`) is a copy that is verified *by content* — a
 per-file digest list written as the bundle's last entry, checked against what
@@ -267,7 +277,7 @@ hundreds.
 
 ```
 config.json  accounts.json  hosts.json
-instances/<id>/         instance.json, media/, .minecraft/
+instances/<id>/         instance.json, media/, world-backups/, .minecraft/
 servers/<id>/           server.json, share.json, media/, run/, backups/
 plans/<id>.json         versionless mod lists
 versions/<id>/          merged (mc + loader) manifest and jar
