@@ -30,7 +30,7 @@ use crate::error::Result;
 use crate::net::Progress;
 use crate::providers::{self, Provider, Version};
 
-use super::{Plan, PlanMod};
+use super::PlanMod;
 
 /// Loaders a plan can target, most preferred first.
 ///
@@ -394,9 +394,13 @@ pub fn rank(mods: &[(PlanMod, Support)], matrix: &SupportMatrix, limit: usize) -
 const TARGET_LIMIT: usize = 6;
 
 /// Read every mod's file list, then rank the targets they allow.
+///
+/// Takes the mods rather than the plan holding them: an installed instance's
+/// mods are the same question asked of a list that was never a plan on disk —
+/// see [`crate::instance::replan`].
 pub async fn resolve(
     client: &reqwest::Client,
-    plan: &Plan,
+    mods: &[PlanMod],
     matrix: &SupportMatrix,
     cache: &SupportCache,
     curseforge_key: Option<&str>,
@@ -406,7 +410,7 @@ pub async fn resolve(
     let mut unresolved = Vec::new();
     let mut resolved: Vec<(PlanMod, Support)> = Vec::new();
 
-    if plan.mods.is_empty() {
+    if mods.is_empty() {
         return Ok(Resolution {
             targets: Vec::new(),
             unresolved,
@@ -415,16 +419,16 @@ pub async fn resolve(
     }
 
     progress
-        .stage("Reading published versions", plan.mods.len() as u64)
+        .stage("Reading published versions", mods.len() as u64)
         .await;
 
     // Bounded concurrency: Modrinth is generous but a 60-mod plan firing 60
     // simultaneous requests is rude and gets rate-limited for it.
     const CONCURRENCY: usize = 8;
-    let mut pending = plan.mods.iter().cloned();
+    let mut pending = mods.iter().cloned();
     let mut inflight = FuturesUnordered::new();
 
-    for _ in 0..CONCURRENCY.min(plan.mods.len()) {
+    for _ in 0..CONCURRENCY.min(mods.len()) {
         if let Some(plan_mod) = pending.next() {
             inflight.push(support_for(client, cache, plan_mod, curseforge_key));
         }
@@ -456,8 +460,7 @@ pub async fn resolve(
     }
 
     if curseforge_key.is_none()
-        && plan
-            .mods
+        && mods
             .iter()
             .any(|m| m.provider.eq_ignore_ascii_case("curseforge"))
     {

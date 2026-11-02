@@ -91,6 +91,27 @@
   flex-wrap: wrap;
 }
 
+/* The section is a column, so a bare button would stretch the whole form. */
+.ask {
+  align-self: flex-start;
+}
+
+/* The Minecraft version, inside the hint that names it. Underlined rather than
+   made a button-shape: it reads as part of the sentence, and what it opens is
+   an answer, not a change. */
+.askVersion {
+  padding: 0;
+  color: var(--text-dim);
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+  transition: color 0.12s var(--ease);
+}
+
+.askVersion:hover {
+  color: var(--accent);
+}
+
 .saveBar {
   position: sticky;
   bottom: 0;

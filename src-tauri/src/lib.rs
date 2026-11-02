@@ -199,6 +199,7 @@ pub fn run() {
             commands::save_plan,
             commands::delete_plan,
             commands::resolve_plan,
+            commands::resolve_instance,
             commands::build_plan,
             commands::pack_contents,
             commands::server_kinds,

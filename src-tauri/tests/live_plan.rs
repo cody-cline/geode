@@ -66,7 +66,7 @@ async fn resolve_plan(slugs: &[&str]) -> Resolution {
 
     resolve::resolve(
         &client,
-        &plan_of(slugs),
+        &plan_of(slugs).mods,
         &matrix,
         &resolve::SupportCache::new(),
         None,
@@ -364,7 +364,7 @@ async fn builds_a_versionless_plan_into_a_real_instance() {
     let matrix = SupportCache::new().get(&client).await.expect("matrix");
     let resolution = resolve::resolve(
         &client,
-        &plan,
+        &plan.mods,
         &matrix,
         &resolve::SupportCache::new(),
         None,
