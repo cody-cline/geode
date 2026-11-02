@@ -25,6 +25,7 @@ import GraphTab from "./instance/GraphTab";
 import LogsTab from "./instance/LogsTab";
 import PackTab from "./instance/PackTab";
 import SettingsTab from "./instance/SettingsTab";
+import WorldsTab from "./instance/WorldsTab";
 import { api } from "../lib/api";
 import { useBackHandler } from "../lib/useBackHandler";
 import { launchInstance, stopInstance } from "../lib/actions";
@@ -38,6 +39,7 @@ import styles from "./InstanceView.module.css";
 
 const TABS = [
   { id: "content", label: "Content" },
+  { id: "worlds", label: "Worlds" },
   { id: "graph", label: "Dependencies" },
   { id: "pack", label: "Pack" },
   { id: "logs", label: "Logs" },
@@ -248,6 +250,7 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
         {active === "content" && (
           <ContentTab instance={instance} onBrowse={() => setBrowsing(true)} />
         )}
+        {active === "worlds" && <WorldsTab instance={instance} />}
         {active === "graph" && (
           <GraphTab id={instance.id} source="instance" folders={MODS_ONLY} />
         )}

@@ -73,6 +73,8 @@ import type {
   UpdateCandidate,
   UpdateStatus,
   WantedSetting,
+  World,
+  WorldBackup,
 } from "./types";
 
 /** Backend errors arrive as plain strings; normalise them for the toast layer. */
@@ -344,6 +346,38 @@ export const api = {
    * once, since nothing outside a running server knows a mod's commands.
    */
   serverCommands: (id: string) => invoke<CommandNode[]>("server_commands", { id }),
+  // Worlds. Every one of these but the two listings refuses while the game is
+  // running, because Minecraft holds its world open and only writes level.dat
+  // when it saves. The refusal is the backend's and says so in words, so
+  // nothing here has to repeat the reason.
+  listWorlds: (id: string) => invoke<World[]>("list_worlds", { id }),
+  /**
+   * Change the name the game shows for a world — `LevelName` inside its
+   * `level.dat`. The folder it lives in is deliberately left alone, which is
+   * what Minecraft itself does when a world is renamed in-game.
+   */
+  renameWorld: (id: string, folder: string, name: string) =>
+    invoke<World>("rename_world", { id, folder, name }),
+  copyWorld: (id: string, folder: string, name: string) =>
+    invoke<World>("copy_world", { id, folder, name }),
+  /** Take a world from a zip or a folder. Refused if it holds no `level.dat`. */
+  importWorld: (id: string, path: string) =>
+    invoke<World>("import_world", { id, path }),
+  /**
+   * Delete a world, after backing it up. The backup is not optional and the
+   * one returned is the copy that was kept — tell the player where it is.
+   */
+  deleteWorld: (id: string, folder: string) =>
+    invoke<WorldBackup>("delete_world", { id, folder }),
+  listWorldBackups: (id: string) =>
+    invoke<WorldBackup[]>("list_world_backups", { id }),
+  backUpWorld: (id: string, folder: string) =>
+    invoke<WorldBackup>("back_up_world", { id, folder }),
+  restoreWorld: (id: string, folder: string, name: string) =>
+    invoke<World>("restore_world", { id, folder, name }),
+  deleteWorldBackup: (id: string, folder: string, name: string) =>
+    invoke<void>("delete_world_backup", { id, folder, name }),
+
   // Log files. An instance's and a server's are the same files in different
   // folders, so the two sets of bindings are deliberately identical in shape.
   listInstanceLogs: (id: string) => invoke<LogFile[]>("list_instance_logs", { id }),

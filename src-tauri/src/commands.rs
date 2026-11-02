@@ -1870,6 +1870,159 @@ pub async fn create_server_from_plan(
 }
 
 // ---------------------------------------------------------------------------
+// Worlds
+// ---------------------------------------------------------------------------
+
+/// Refuse a world operation while this instance's launch is still preparing.
+///
+/// [`instance::worlds`] itself refuses while a game is *running*, which is the
+/// rule that must never be skipped and so lives where no caller — including
+/// the headless host — can go round it. This is the window just before that: a
+/// launch that has not spawned a process yet is about to open the world, and a
+/// copy begun now finishes underneath it. Only the command layer can see it,
+/// because only the command layer has the app state the claim is held in.
+fn not_while_starting(state: &AppState, id: &str) -> Result<()> {
+    if state.is_launching(id) {
+        return Err(Error::msg(
+            "Wait for the game to finish starting — it is about to open this instance's worlds.",
+        ));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn list_worlds(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<instance::worlds::World>> {
+    instance::worlds::list(&state.paths, &id).await
+}
+
+/// Change the name Minecraft shows for a world. The folder it lives in is left
+/// alone — see [`instance::worlds::rename`] for why those are two things.
+#[tauri::command]
+pub async fn rename_world(
+    state: State<'_, AppState>,
+    id: String,
+    folder: String,
+    name: String,
+) -> Result<instance::worlds::World> {
+    not_while_starting(&state, &id)?;
+    instance::worlds::rename(&state.paths, &state.games, &id, &folder, &name).await
+}
+
+#[tauri::command]
+pub async fn copy_world(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    folder: String,
+    name: String,
+) -> Result<instance::worlds::World> {
+    not_while_starting(&state, &id)?;
+    let progress = Progress::new(crate::desktop::sink(app), format!("world-copy:{id}"));
+    let result =
+        instance::worlds::copy(&state.paths, &state.games, &id, &folder, &name, &progress).await;
+    finish(&progress, result).await
+}
+
+#[tauri::command]
+pub async fn list_world_backups(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<instance::worlds::WorldBackup>> {
+    instance::worlds::list_backups(&state.paths, &id).await
+}
+
+#[tauri::command]
+pub async fn back_up_world(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    folder: String,
+) -> Result<instance::worlds::WorldBackup> {
+    not_while_starting(&state, &id)?;
+    let progress = Progress::new(crate::desktop::sink(app), format!("world-backup:{id}"));
+    let result =
+        instance::worlds::back_up(&state.paths, &state.games, &id, &folder, &progress).await;
+    finish(&progress, result).await
+}
+
+#[tauri::command]
+pub async fn restore_world(
+    state: State<'_, AppState>,
+    id: String,
+    folder: String,
+    name: String,
+) -> Result<instance::worlds::World> {
+    not_while_starting(&state, &id)?;
+    instance::worlds::restore(&state.paths, &state.games, &id, &folder, &name).await
+}
+
+#[tauri::command]
+pub async fn delete_world_backup(
+    state: State<'_, AppState>,
+    id: String,
+    folder: String,
+    name: String,
+) -> Result<()> {
+    instance::worlds::delete_backup(&state.paths, &id, &folder, &name).await
+}
+
+/// Take a world from a zip or a folder the player picked.
+#[tauri::command]
+pub async fn import_world(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    path: String,
+) -> Result<instance::worlds::World> {
+    not_while_starting(&state, &id)?;
+    let progress = Progress::new(crate::desktop::sink(app), format!("world-import:{id}"));
+    let result = instance::worlds::import(
+        &state.paths,
+        &state.games,
+        &id,
+        std::path::Path::new(&path),
+        &progress,
+    )
+    .await;
+    finish(&progress, result).await
+}
+
+/// Delete a world, after backing it up.
+///
+/// The backup is not optional and the returned one is what the screen tells
+/// the player it kept; [`instance::worlds::delete`] has the reasoning.
+#[tauri::command]
+pub async fn delete_world(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    folder: String,
+) -> Result<instance::worlds::WorldBackup> {
+    not_while_starting(&state, &id)?;
+    let progress = Progress::new(crate::desktop::sink(app), format!("world-delete:{id}"));
+    let result =
+        instance::worlds::delete(&state.paths, &state.games, &id, &folder, &progress).await;
+    finish(&progress, result).await
+}
+
+/// Close out a job in the dock, whichever way it went.
+async fn finish<T>(progress: &Progress, result: Result<T>) -> Result<T> {
+    match result {
+        Ok(value) => {
+            progress.finish().await;
+            Ok(value)
+        }
+        Err(e) => {
+            progress.fail(&e.to_string()).await;
+            Err(e)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Log files, and handing them to somebody who can read them
 // ---------------------------------------------------------------------------
 
