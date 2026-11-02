@@ -3237,12 +3237,9 @@ pub async fn begin_microsoft_login(
     state: State<'_, AppState>,
 ) -> Result<crate::auth::DeviceCodeStart> {
     let config = state.config().await;
-    let client_id = config.effective_client_id().ok_or_else(|| {
-        Error::msg(
-            "Microsoft sign-in is unavailable in this copy of Geode. Signing \
-             in through another launcher on this machine still works.",
-        )
-    })?;
+    let client_id = config
+        .effective_client_id()
+        .ok_or_else(|| Error::msg("Microsoft sign-in is unavailable in this copy of Geode."))?;
     crate::auth::begin_device_code(&state.http, &client_id).await
 }
 
@@ -3294,9 +3291,7 @@ pub async fn add_offline_account(
     if !file.owns_the_game() {
         return Err(Error::msg(
             "Add a Microsoft account first. An offline account plays a copy of \
-             Minecraft you already own, so Geode asks once who owns it — \
-             signing in with Microsoft does it, and so does importing a \
-             session from another launcher on this machine.",
+             Minecraft you already own, so Geode asks once who owns it.",
         ));
     }
 
