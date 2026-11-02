@@ -3269,6 +3269,7 @@ pub async fn complete_microsoft_login(
         mc_access_token: Some(token),
         mc_expires_at: expires_at,
         msa_refresh_token: msa.refresh_token,
+        msa_rejected: false,
         added_at: chrono::Utc::now().timestamp(),
         source_path: None,
         source_label: None,
@@ -3344,6 +3345,21 @@ pub async fn set_active_account(
     file.active = Some(id);
     file.save(&state.paths).await?;
     Ok(file.views())
+}
+
+/// The name this account would play under offline, when that is worth
+/// offering, and nothing when it is not.
+///
+/// Asked after a launch failed, so the choice is the player's rather than a
+/// fallback Geode made quietly on their behalf. Reads `accounts.json` and
+/// nothing else — see [`crate::auth::store::offline_offer`] for why the
+/// answer is a fact about the account and not a reading of the error text.
+#[tauri::command]
+pub async fn offline_play_offer(
+    state: State<'_, AppState>,
+    account_id: Option<String>,
+) -> Result<Option<String>> {
+    crate::auth::store::offline_offer(&state.paths, account_id.as_deref()).await
 }
 
 // ---------------------------------------------------------------------------
@@ -3835,6 +3851,7 @@ pub async fn launch_instance(
     state: State<'_, AppState>,
     id: String,
     account_id: Option<String>,
+    offline: bool,
 ) -> Result<LaunchResult> {
     if state.games.is_running(&id) {
         return Err(Error::msg("that instance is already running"));
@@ -3852,13 +3869,22 @@ pub async fn launch_instance(
 
     // Resolve the account first: a sign-in problem should surface before we
     // spend minutes downloading.
-    let session = crate::auth::store::session_for(
-        &state.http,
-        &state.paths,
-        config.effective_client_id().as_deref(),
-        account_id.as_deref(),
-    )
-    .await
+    //
+    // `offline` is a choice the player made on a dialog, never something
+    // reached by falling back: a launch that quietly played offline when a
+    // renewal failed would tell somebody they are signed in when they are
+    // not, and leave them wondering why no server will have them.
+    let session = if offline {
+        crate::auth::store::offline_session_for(&state.paths, account_id.as_deref()).await
+    } else {
+        crate::auth::store::session_for(
+            &state.http,
+            &state.paths,
+            config.effective_client_id().as_deref(),
+            account_id.as_deref(),
+        )
+        .await
+    }
     .inspect_err(|e| {
         let progress = progress.clone();
         let msg = e.to_string();

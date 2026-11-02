@@ -587,6 +587,15 @@ export const api = {
   removeAccount: (id: string) => invoke<Account[]>("remove_account", { id }),
   setActiveAccount: (id: string) =>
     invoke<Account[]>("set_active_account", { id }),
+  /**
+   * The name this account would play under offline, or null when there is
+   * nothing to offer. Asked after a launch failed, so playing offline stays a
+   * choice the player makes rather than something Geode does for them.
+   */
+  offlinePlayOffer: (accountId?: string) =>
+    invoke<string | null>("offline_play_offer", {
+      accountId: accountId ?? null,
+    }),
 
   // Java
   detectJava: () => invoke<JavaInstall[]>("detect_java"),
@@ -594,11 +603,19 @@ export const api = {
     invoke<JavaInstall>("install_java", { major }),
 
   // Launch
-  /** `notices` are for after the game is on its way: what an update from the server changed, or why it could not be checked for. */
-  launchInstance: (id: string, accountId?: string) =>
+  /**
+   * `notices` are for after the game is on its way: what an update from the
+   * server changed, or why it could not be checked for.
+   *
+   * `offline` plays as the account's own name and UUID with no sign-in behind
+   * it. Only ever true because the player said so on the dialog
+   * `offlinePlayOffer` raises.
+   */
+  launchInstance: (id: string, accountId?: string, offline = false) =>
     invoke<{ pid: number; instanceId: string; notices: string[] }>("launch_instance", {
       id,
       accountId: accountId ?? null,
+      offline,
     }),
   prepareInstance: (id: string) => invoke<void>("prepare_instance", { id }),
   stopInstance: (id: string) => invoke<boolean>("stop_instance", { id }),

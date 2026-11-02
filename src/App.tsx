@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 
 import JoinModal from "./components/JoinModal";
+import OfflinePlayModal from "./components/OfflinePlayModal";
 import PackLinkModal from "./components/PackLinkModal";
 import Sidebar from "./components/Sidebar";
 import ProgressDock from "./components/ProgressDock";
@@ -24,6 +25,8 @@ export default function App() {
   const closeJoin = useStore((s) => s.closeJoin);
   const pack = useStore((s) => s.pack);
   const closePack = useStore((s) => s.closePack);
+  const offlinePlay = useStore((s) => s.offlinePlay);
+  const closeOfflinePlay = useStore((s) => s.closeOfflinePlay);
 
   useEffect(() => {
     void init();
@@ -75,6 +78,15 @@ export default function App() {
           instead of stacking a second one or inheriting the first's state. */}
       {join && <JoinModal key={join.seq} request={join} onClose={closeJoin} />}
       {pack && <PackLinkModal key={pack.seq} request={pack} onClose={closePack} />}
+      {/* Play is on four screens; the offer a failed sign-in raises is here, so
+          it reaches the player wherever they pressed it. */}
+      {offlinePlay && (
+        <OfflinePlayModal
+          key={offlinePlay.seq}
+          request={offlinePlay}
+          onClose={closeOfflinePlay}
+        />
+      )}
       <Toasts />
     </div>
   );

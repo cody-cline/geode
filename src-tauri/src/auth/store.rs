@@ -40,6 +40,20 @@ pub struct Account {
     pub mc_expires_at: i64,
     #[serde(default)]
     pub msa_refresh_token: Option<String>,
+    /// Whether Microsoft has refused to renew this sign-in.
+    ///
+    /// Set only when Microsoft answered and the answer was no — the
+    /// `invalid_grant` of [`crate::auth::refresh_msa`] — and never when a
+    /// renewal simply could not reach it. Without this, an account whose
+    /// token was revoked server-side still holds the string on disk and the
+    /// Accounts screen calls it healthy while every launch fails.
+    ///
+    /// The refresh token itself is deliberately left alone: a stored flag
+    /// cleared by the next successful renewal costs nothing, where throwing
+    /// the token away is unrecoverable, and a renewal is the only thing that
+    /// can tell the difference.
+    #[serde(default)]
+    pub msa_rejected: bool,
     #[serde(default)]
     pub added_at: i64,
     /// Left on the struct so an old file still parses; never written.
@@ -58,6 +72,7 @@ impl Account {
             mc_access_token: None,
             mc_expires_at: 0,
             msa_refresh_token: None,
+            msa_rejected: false,
             added_at: chrono::Utc::now().timestamp(),
             source_path: None,
             source_label: None,
@@ -134,7 +149,13 @@ impl AccountsFile {
                 username: a.username.clone(),
                 kind: a.kind,
                 active: self.active.as_deref() == Some(a.id.as_str()),
-                needs_reauth: a.kind == AccountKind::Microsoft && a.msa_refresh_token.is_none(),
+                // Two ways a Microsoft account needs signing in again, and the
+                // second is the common one: a token that was never there, and
+                // one Microsoft has since refused. Reading only the first
+                // called a revoked account healthy, badge and all, while every
+                // launch it made failed.
+                needs_reauth: a.kind == AccountKind::Microsoft
+                    && (a.msa_refresh_token.is_none() || a.msa_rejected),
             })
             .collect()
     }
@@ -206,6 +227,46 @@ pub struct Session {
     pub user_type: &'static str,
 }
 
+/// The account a launch is for: the one it named, else the active one.
+fn resolve(file: &AccountsFile, account_id: Option<&str>) -> Result<Account> {
+    let id = account_id
+        .map(str::to_string)
+        .or_else(|| file.active.clone())
+        .ok_or(Error::NoAccount)?;
+    file.accounts
+        .iter()
+        .find(|a| a.id == id)
+        .cloned()
+        .ok_or(Error::NoAccount)
+}
+
+/// A session that plays as this account without a sign-in behind it.
+///
+/// Minecraft identifies a player by UUID and by nothing else — a world's
+/// character lives at `playerdata/<uuid>.dat` — so this substitutes the token
+/// and leaves the UUID exactly as it is. For a Microsoft account
+/// [`Account::id`] *is* the real dashed Mojang UUID, which is what makes this
+/// the player walking back into their own world as themselves.
+///
+/// The alternative, and the bug: adding an offline account instead hands them
+/// `super::offline_uuid(name)`, derived from the name rather than taken from
+/// the profile. That is a different player. Their own character is still in
+/// the same world, keyed by the real UUID, intact and unreachable. Prism
+/// Launcher substitutes name and token and leaves the UUID alone; so does
+/// this.
+pub fn offline_session(account: &Account) -> Session {
+    Session {
+        username: account.username.clone(),
+        uuid: account.id.clone(),
+        // Vanilla accepts any placeholder here; the session server is never
+        // contacted because there is nothing to validate.
+        access_token: "0".into(),
+        // Matching the offline accounts this sits beside. There is no valid
+        // token, so there is nothing for "msa" to claim.
+        user_type: "legacy",
+    }
+}
+
 /// Resolve the active account into a launchable session, silently refreshing an
 /// expired Microsoft token when we still hold a refresh token.
 pub async fn session_for(
@@ -215,28 +276,10 @@ pub async fn session_for(
     account_id: Option<&str>,
 ) -> Result<Session> {
     let mut file = AccountsFile::load(paths).await?;
-
-    let id = account_id
-        .map(str::to_string)
-        .or_else(|| file.active.clone())
-        .ok_or(Error::NoAccount)?;
-
-    let account = file
-        .accounts
-        .iter()
-        .find(|a| a.id == id)
-        .cloned()
-        .ok_or(Error::NoAccount)?;
+    let account = resolve(&file, account_id)?;
 
     if account.kind == AccountKind::Offline {
-        return Ok(Session {
-            username: account.username,
-            uuid: account.id,
-            // Vanilla accepts any placeholder here; the session server is never
-            // contacted because there is nothing to validate.
-            access_token: "0".into(),
-            user_type: "legacy",
-        });
+        return Ok(offline_session(&account));
     }
 
     if !account.token_expired() {
@@ -257,7 +300,10 @@ pub async fn session_for(
     let client_id = client_id
         .ok_or_else(|| Error::msg("This account cannot be refreshed in this copy of Geode."))?;
 
-    let msa = super::refresh_msa(client, client_id, &refresh).await?;
+    let msa = match super::refresh_msa(client, client_id, &refresh).await {
+        Ok(msa) => msa,
+        Err(e) => return Err(renewal_failed(&mut file, paths, &account.id, e).await),
+    };
     let (token, expires_at, profile) = super::minecraft_session(client, &msa.access_token).await?;
 
     let mut updated = account.clone();
@@ -267,6 +313,9 @@ pub async fn session_for(
     if msa.refresh_token.is_some() {
         updated.msa_refresh_token = msa.refresh_token.clone();
     }
+    // A renewal that worked settles any earlier refusal, so the badge goes
+    // away on its own rather than waiting for somebody to sign in again.
+    updated.msa_rejected = false;
     let uuid = updated.id.clone();
     let username = updated.username.clone();
     file.upsert(updated);
@@ -278,6 +327,68 @@ pub async fn session_for(
         access_token: token,
         user_type: "msa",
     })
+}
+
+/// Apply a failed renewal to the stored account, and hand back the error the
+/// player reads.
+///
+/// This is the one place that decides what a failure to renew *means*.
+/// [`Error::AuthExpired`] is Microsoft's own refusal and the only thing worth
+/// remembering; everything else is Geode not having reached Microsoft and must
+/// leave the account exactly as it was, token and all. Marking a good account
+/// because somebody's wifi blipped would sign them out until they noticed,
+/// which is a worse bug than the one that brought us here.
+async fn renewal_failed(file: &mut AccountsFile, paths: &Paths, id: &str, e: Error) -> Error {
+    if matches!(e, Error::AuthExpired) {
+        // `iter_mut` rather than `upsert`, which would also make this the
+        // active account as a side effect of recording bad news about it.
+        if let Some(account) = file.accounts.iter_mut().find(|a| a.id == id) {
+            account.msa_rejected = true;
+        }
+        // If this cannot be written the player still has to read about the
+        // sign-in, which is the problem they can do something about.
+        let _ = file.save(paths).await;
+    }
+    e
+}
+
+/// A launchable session for an account whose Microsoft sign-in could not be
+/// renewed, keeping that account's own name and UUID.
+///
+/// Only ever reached because somebody asked for it: see
+/// [`crate::commands::launch_instance`]. Falling back here on a failure would
+/// tell a player they are signed in when they are not, and let them believe
+/// they can join servers they cannot.
+pub async fn offline_session_for(paths: &Paths, account_id: Option<&str>) -> Result<Session> {
+    let file = AccountsFile::load(paths).await?;
+    Ok(offline_session(&resolve(&file, account_id)?))
+}
+
+/// Whether playing offline is worth offering for this account, and the name it
+/// would play under.
+///
+/// `Some` only for a Microsoft account that cannot produce an online session
+/// without the network: no Minecraft token, or an expired one. That is exactly
+/// the state in which [`session_for`] had to go to Microsoft, so this answers
+/// "the launch failed at the sign-in" without the frontend reading error text.
+/// A launch that got past that step left a fresh token behind — good for a day
+/// — so a failure further on, in Java or a download, answers `None` and the
+/// player is offered nothing.
+///
+/// An offline account answers `None` too: it already is one.
+///
+/// No [`AccountsFile::owns_the_game`] check, and none is missing: the account
+/// being offered is itself the Microsoft sign-in that proof is made of. This
+/// opens nothing that was shut — it lets somebody who signed in here play the
+/// copy they signed in with, as themselves, while the network is down.
+pub async fn offline_offer(paths: &Paths, account_id: Option<&str>) -> Result<Option<String>> {
+    let file = AccountsFile::load(paths).await?;
+    let Ok(account) = resolve(&file, account_id) else {
+        return Ok(None);
+    };
+    let stuck = account.kind == AccountKind::Microsoft
+        && (account.mc_access_token.is_none() || account.token_expired());
+    Ok(stuck.then(|| account.username.clone()))
 }
 
 /// Minecraft profile ids come back undashed; the game wants them dashed.
@@ -402,6 +513,150 @@ mod tests {
     fn leaves_dashed_uuid_alone() {
         let already = "069a79f4-44e9-4726-a5be-fca90e38aaf5";
         assert_eq!(dash_uuid(already), already);
+    }
+
+    /// A Microsoft account as it sits on disk: `id` is the real dashed Mojang
+    /// UUID, which is the whole reason the fix below is possible.
+    fn signed_in(username: &str, uuid: &str) -> Account {
+        Account {
+            id: uuid.to_string(),
+            username: username.to_string(),
+            kind: AccountKind::Microsoft,
+            mc_access_token: None,
+            mc_expires_at: 0,
+            msa_refresh_token: Some("refresh".into()),
+            msa_rejected: false,
+            added_at: 0,
+            source_path: None,
+            source_label: None,
+        }
+    }
+
+    /// **The point of all of this.** Minecraft knows a player by UUID and by
+    /// nothing else: a world's character lives at `playerdata/<uuid>.dat`. An
+    /// offline session for a Microsoft account whose sign-in could not be
+    /// renewed must therefore come back as *that player* — real name, real
+    /// UUID — or the player opens their own world as a stranger with an empty
+    /// inventory while their character sits in the same world, unreachable.
+    #[test]
+    fn an_offline_session_keeps_the_accounts_own_uuid() {
+        let real = "069a79f4-44e9-4726-a5be-fca90e38aaf5";
+        let session = offline_session(&signed_in("Notch", real));
+
+        assert_eq!(session.uuid, real, "the session must carry the real UUID");
+        assert_eq!(session.username, "Notch");
+        assert_ne!(
+            session.uuid,
+            super::super::offline_uuid("Notch"),
+            "this is the bug: a name-derived UUID is a different player in the same world"
+        );
+        assert_eq!(session.user_type, "legacy");
+        assert!(
+            !session.access_token.is_empty(),
+            "vanilla wants a placeholder, not an empty string"
+        );
+    }
+
+    /// An offline account is unchanged by any of this: its id was always
+    /// name-derived, and that is correct for it.
+    #[test]
+    fn an_offline_account_still_plays_as_its_derived_uuid() {
+        let account = Account::offline("Steve".into());
+        let session = offline_session(&account);
+        assert_eq!(session.uuid, super::super::offline_uuid("Steve"));
+    }
+
+    /// Microsoft answered, and the answer was no. That is worth remembering:
+    /// it is the only thing that can make `needs_reauth` true for an account
+    /// that still holds a refresh token, and without it the Accounts screen
+    /// shows a revoked account as healthy while every launch fails.
+    #[tokio::test]
+    async fn microsofts_own_refusal_is_remembered_and_shows_on_the_account() {
+        let scratch = crate::paths::Scratch::new("accounts-refused");
+        let mut file = AccountsFile::default();
+        file.upsert(signed_in("Notch", "069a79f4-44e9-4726-a5be-fca90e38aaf5"));
+        tokio::fs::create_dir_all(&scratch.paths.root).await.unwrap();
+
+        let id = file.accounts[0].id.clone();
+        assert!(!file.views()[0].needs_reauth, "healthy before the refusal");
+
+        let back = renewal_failed(&mut file, &scratch.paths, &id, Error::AuthExpired).await;
+        assert!(matches!(back, Error::AuthExpired), "the error is passed on");
+
+        let reread = AccountsFile::load(&scratch.paths).await.unwrap();
+        assert!(
+            reread.views()[0].needs_reauth,
+            "the Accounts screen has to say this account needs signing in again"
+        );
+        assert_eq!(
+            reread.accounts[0].msa_refresh_token.as_deref(),
+            Some("refresh"),
+            "the token stays on disk — a flag is reversible, throwing it away is not"
+        );
+    }
+
+    /// The bug not to introduce while fixing the other one. Geode could not
+    /// reach Microsoft; Microsoft did not say anything. Nothing about the
+    /// account is known, so nothing about it may be written — marking it here
+    /// would sign somebody out over a wifi blip.
+    #[tokio::test]
+    async fn a_renewal_that_never_reached_microsoft_changes_nothing() {
+        let scratch = crate::paths::Scratch::new("accounts-unreachable");
+        let mut file = AccountsFile::default();
+        file.upsert(signed_in("Notch", "069a79f4-44e9-4726-a5be-fca90e38aaf5"));
+        tokio::fs::create_dir_all(&scratch.paths.root).await.unwrap();
+        file.save(&scratch.paths).await.unwrap();
+
+        let id = file.accounts[0].id.clone();
+        let transport = Error::msg(
+            "could not reach Microsoft to renew this sign-in: error sending request for url",
+        );
+        renewal_failed(&mut file, &scratch.paths, &id, transport).await;
+
+        assert!(!file.accounts[0].msa_rejected, "nothing in memory either");
+        let reread = AccountsFile::load(&scratch.paths).await.unwrap();
+        assert!(
+            !reread.views()[0].needs_reauth,
+            "an unreachable Microsoft is not a verdict on the account"
+        );
+        assert!(reread.accounts[0].msa_refresh_token.is_some());
+    }
+
+    /// Who gets offered a choice, and who does not. The offer is derived from
+    /// the account's own state rather than from the text of a launch error.
+    #[tokio::test]
+    async fn playing_offline_is_offered_only_where_it_would_help() {
+        let scratch = crate::paths::Scratch::new("accounts-offer");
+        tokio::fs::create_dir_all(&scratch.paths.root).await.unwrap();
+
+        let mut file = AccountsFile::default();
+        let stale = signed_in("Notch", "069a79f4-44e9-4726-a5be-fca90e38aaf5");
+        file.upsert(stale.clone());
+        file.save(&scratch.paths).await.unwrap();
+        assert_eq!(
+            offline_offer(&scratch.paths, None).await.unwrap().as_deref(),
+            Some("Notch"),
+            "an expired Microsoft token is exactly the state this is for"
+        );
+
+        // A launch that got past the sign-in left a token good for a day, so a
+        // Java or download failure after it offers nothing.
+        let mut fresh = stale.clone();
+        fresh.mc_access_token = Some("token".into());
+        fresh.mc_expires_at = chrono::Utc::now().timestamp() + 86_400;
+        file.upsert(fresh);
+        file.save(&scratch.paths).await.unwrap();
+        assert_eq!(offline_offer(&scratch.paths, None).await.unwrap(), None);
+
+        // An offline account already is one.
+        let mut offline = AccountsFile::default();
+        offline.upsert(Account::offline("Steve".into()));
+        offline.save(&scratch.paths).await.unwrap();
+        assert_eq!(offline_offer(&scratch.paths, None).await.unwrap(), None);
+
+        // And an install with no accounts has nobody to offer.
+        AccountsFile::default().save(&scratch.paths).await.unwrap();
+        assert_eq!(offline_offer(&scratch.paths, None).await.unwrap(), None);
     }
 
     #[test]
