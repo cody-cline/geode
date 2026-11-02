@@ -30,7 +30,10 @@
 //! machine runs before anything on disk changes, and the installer fetches a
 //! mod's new file before it removes the old one. A failure after a copy has
 //! been made takes the copy with it, so there is no plausible-looking instance
-//! left in the library whose mods are built for a version it is not.
+//! left in the library whose mods are built for a version it is not. In place
+//! there is no copy to take away, so from the first file that moves nothing
+//! fails the move at all — it is absorbed into the report — bar writing the
+//! instance's own file at the end, which is [`not_written_down`].
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -42,7 +45,7 @@ use crate::error::{Context, Error, Result};
 use crate::meta::{Loader, ManifestCache};
 use crate::net::Progress;
 use crate::paths::Paths;
-use crate::plan::resolve::Fit;
+use crate::plan::resolve::{self, Fit, SupportCache};
 use crate::providers::{Project, Version};
 
 use super::content::{self, ContentKind, ContentRecord, Origin};
@@ -51,13 +54,19 @@ use super::Instance;
 /// One mod now pointing at a file built for the new target.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Repointed {
+pub struct RepointedMod {
     pub name: String,
     /// The file on disk, which is also what its record says.
     pub file_name: String,
     pub version_number: String,
     /// A Fabric build, running on (Neo)Forge through Sinytra Connector.
     pub through_connector: bool,
+    /// The Minecraft version this build is for, when it is not the instance's
+    /// new one — the neighbouring patch the preview named. Said rather than
+    /// rounded off to the target, because "3 mods now built for 1.21.1" over a
+    /// jar built for 1.21.3 is the same lie in a quieter voice.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via_version: Option<String>,
     /// Dependencies of this mod that did not land, with the reason.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<String>,
@@ -66,7 +75,7 @@ pub struct Repointed {
 /// One mod the new target has no file for.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Stranded {
+pub struct StrandedMod {
     pub name: String,
     pub file_name: String,
     /// Why nothing could be pointed at, in words a person can read.
@@ -82,7 +91,7 @@ pub struct Stranded {
 /// One file in `mods/` that nothing could be looked up for.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Unchecked {
+pub struct UncheckedFile {
     pub file_name: String,
     pub reason: String,
 }
@@ -104,12 +113,12 @@ pub struct RetargetReport {
     /// than something the caller asked for.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub copied_because: Option<String>,
-    pub repointed: Vec<Repointed>,
+    pub repointed: Vec<RepointedMod>,
     /// Mods with no file for the new target. Turned off, never deleted.
-    pub stranded: Vec<Stranded>,
+    pub stranded: Vec<StrandedMod>,
     /// Files left exactly as they are, because there was nothing to ask about
     /// them. Never a claim that they are fine.
-    pub unchecked: Vec<Unchecked>,
+    pub unchecked: Vec<UncheckedFile>,
     /// Sinytra Connector and its companions, when the new target needs them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connector: Vec<String>,
@@ -127,6 +136,7 @@ pub async fn retarget(
     paths: &Paths,
     manifests: &ManifestCache,
     matrix: &SupportMatrix,
+    support: &SupportCache,
     id: &str,
     target_loader: &str,
     game_version: &str,
@@ -179,6 +189,7 @@ pub async fn retarget(
         paths,
         manifests,
         matrix,
+        support,
         &mut inst,
         loader,
         &loader_version,
@@ -221,6 +232,7 @@ async fn apply(
     paths: &Paths,
     manifests: &ManifestCache,
     matrix: &SupportMatrix,
+    support: &SupportCache,
     inst: &mut Instance,
     loader: Loader,
     loader_version: &str,
@@ -247,7 +259,8 @@ async fn apply(
         let placement = placement(
             client,
             matrix,
-            loader.as_str(),
+            support,
+            loader,
             game_version,
             &record,
             curseforge_key,
@@ -286,6 +299,10 @@ async fn apply(
     .await
     .ctx("installing Minecraft for the new target")?;
 
+    // What the instance said before this line, for the one failure below that
+    // cannot be undone or absorbed — see [`not_written_down`].
+    let was = format!("{} {}", inst.loader.display_name(), inst.mc_version);
+
     // The instance is the new target from here on, in memory. `ensure_stack`
     // and every dependency walk below read these three fields off it, so they
     // have to move before the installs do; the one save at the end is what
@@ -302,9 +319,25 @@ async fn apply(
         // mod in a NeoForge mods folder does nothing on its own, and a failure
         // here should stop before the folder fills up with jars that cannot
         // load.
-        report.connector = crate::connector::ensure_stack(client, paths, inst, progress)
-            .await
-            .ctx("installing Sinytra Connector for the new target")?;
+        match crate::connector::ensure_stack(client, paths, inst, progress).await {
+            Ok(added) => report.connector = added,
+            // Absorbed rather than returned, which is this function's own rule
+            // and was not being kept here. `ensure_stack` installs jar by jar,
+            // so a failure part-way has already put files in the folder — and
+            // in place there is no copy to delete, so returning left an
+            // instance whose `instance.json` named the old target over a
+            // folder that no longer matched it. The move finishes instead: the
+            // mods that needed the layer are turned off and say why, which is
+            // the same answer this gives a mod with nowhere to go.
+            Err(e) => without_connector(
+                &mut placements,
+                &format!(
+                    "Sinytra Connector could not be installed, so a Fabric build cannot run on \
+                     {} {game_version}: {e}",
+                    loader.display_name()
+                ),
+            ),
+        }
     }
 
     // Mods whose record is about to be wrong, so the jar they name can be
@@ -328,21 +361,15 @@ async fn apply(
 
         let found = match placement {
             Placement::Found(found) => *found,
-            Placement::Nowhere => {
-                stranded.push((
-                    record,
-                    format!(
-                        "nothing published runs on {} {game_version}",
-                        loader.display_name()
-                    ),
-                ));
+            Placement::Nowhere(reason) => {
+                stranded.push((record, reason));
                 continue;
             }
             // Nobody answered, so nothing is known and nothing is changed —
             // not the file, not the record, not whether it is on. Saying so is
             // the whole of what can honestly be done about it.
             Placement::Unanswered(reason) => {
-                report.unchecked.push(Unchecked {
+                report.unchecked.push(UncheckedFile {
                     file_name: record.file_name.clone(),
                     reason,
                 });
@@ -357,8 +384,10 @@ async fn apply(
             &found.version,
             &found.project,
             // Dependencies follow the mod, not the instance: a Fabric mod
-            // running on NeoForge through Connector needs its Fabric ones.
-            game_version,
+            // running on NeoForge through Connector needs its Fabric ones, and
+            // a mod carried over on a neighbouring patch's build needs the
+            // dependencies that build was published against.
+            &found.game_version,
             found.loader,
             curseforge_key,
             progress,
@@ -376,11 +405,12 @@ async fn apply(
                     .content
                     .iter()
                     .find(|r| r.file_name == landed && r.kind == ContentKind::Mod);
-                report.repointed.push(Repointed {
+                report.repointed.push(RepointedMod {
                     name: written.map(|r| r.name.clone()).unwrap_or(found.project.name),
                     file_name: landed,
                     version_number: written.map(|r| r.version_number.clone()).unwrap_or_default(),
                     through_connector: found.through_connector,
+                    via_version: (found.game_version != game_version).then_some(found.game_version),
                     skipped: installed.skipped,
                 });
             }
@@ -407,13 +437,57 @@ async fn apply(
     // Last, because nothing before it is worth keeping on its own, and before
     // a cancellation is answered, because what has already moved on disk has
     // to be what the instance says it holds.
-    inst.save(paths)
-        .await
-        .ctx("saving the instance's new target")?;
+    if let Err(e) = inst.save(paths).await {
+        return Err(not_written_down(&inst.name, &was, loader, game_version, e));
+    }
     if cancelled {
         return Err(Error::Cancelled);
     }
     Ok(report)
+}
+
+/// The one failure here that cannot be rolled back, absorbed into the report,
+/// or retried on the caller's behalf: the jars in `mods/` are the new target's
+/// and `instance.json` could not be made to say so.
+///
+/// `server/transfer.rs` states the rule this module holds to — every failure
+/// leaves the destination absent rather than plausible — and that is kept
+/// everywhere a step before this one can fail: nothing outside this machine is
+/// asked after the first file moves, a mod that cannot come along is turned off
+/// and reported, and Connector failing costs the mods that needed it rather
+/// than the move. Writing one small file to the instance's own directory is
+/// what is left, and a disk that refuses it cannot be undone by writing
+/// something else to the same disk — putting the old jars back would need the
+/// network that is no longer being asked.
+///
+/// So it is reported, in full and with the one thing to do about it. Both
+/// targets are named because the two halves now disagree and a person has to
+/// know which is which: the files are the new one, the file that describes them
+/// is the old one, and setting the version and loader in the instance's
+/// settings is what puts them back in step.
+fn not_written_down(name: &str, was: &str, loader: Loader, game_version: &str, e: Error) -> Error {
+    Error::msg(format!(
+        "{name}'s mods are now built for {} {game_version}, but Geode could not write that down: \
+         {e}. It still says {was}, so set its Minecraft version and loader to {} {game_version} in \
+         its settings — or run this again once there is room to save it.",
+        loader.display_name(),
+        loader.display_name(),
+    ))
+}
+
+/// Strand every mod that was going to run through Connector, with Connector's
+/// own failure as the reason.
+///
+/// A Fabric jar in a (Neo)Forge mods folder does nothing without the layer
+/// under it, so a mod whose only fit here was a Connector one has nowhere to
+/// go after all. Everything else keeps the placement it had: a native build is
+/// a native build whether Connector installed or not.
+fn without_connector(placements: &mut [(ContentRecord, Placement)], reason: &str) {
+    for (_, placement) in placements.iter_mut() {
+        if matches!(placement, Placement::Found(f) if f.through_connector) {
+            *placement = Placement::Nowhere(reason.to_string());
+        }
+    }
 }
 
 /// The file one mod wants at the new target: the project it belongs to, the
@@ -423,15 +497,23 @@ struct Found {
     version: Version,
     loader: &'static str,
     through_connector: bool,
+    /// The Minecraft version this file is built for, which is the instance's
+    /// new one except where the only build is from a neighbouring patch. Its
+    /// dependencies are resolved against this rather than the instance's, for
+    /// [`crate::plan::build`]'s reason: a dependency follows the mod.
+    game_version: String,
 }
 
 /// One mod's answer at the new target.
 enum Placement {
     /// Boxed because a project and a version together are most of a kilobyte,
-    /// while the other two answers are a word apiece.
+    /// while the other two answers are a sentence apiece.
     Found(Box<Found>),
-    /// Asked, and nothing that would run here is published.
-    Nowhere,
+    /// Asked, and nothing that would run here can be had — with the reason in
+    /// words, because "nothing is published for this pair" and "the layer that
+    /// would have run it could not be installed" are the same outcome for two
+    /// different reasons, and the mod is being turned off over it.
+    Nowhere(String),
     /// Could not ask at all: a CurseForge mod with no key for it, a project the
     /// platform no longer answers about, a connection that dropped.
     Unanswered(String),
@@ -439,58 +521,126 @@ enum Placement {
 
 /// Which file one mod wants at the new target, or why there is none.
 ///
-/// Native first, always: a mod that ships a build for this loader is never put
-/// through a compatibility layer. Only when there is no native build does
-/// Connector come into it, and only where Connector itself publishes a file
-/// for *this* pair — a project's `loaders` and `game_versions` are independent
-/// unions, so their product promises builds that do not exist. The matrix is
-/// read from Connector's own files, and it only ever holds the loaders
-/// Connector publishes for, so asking it is the whole test.
+/// Every fit the preview ranked, in the order it ranked them —
+/// [`crate::plan::resolve::ladder`] is that order, and this walks the whole of
+/// it rather than its first entry. Native first, always: a mod that ships a
+/// build for this loader is never put through a compatibility layer, and only
+/// where Connector itself publishes a file for *this* pair does that option
+/// exist at all — the matrix is read from Connector's own files and holds only
+/// the loaders it publishes for, so asking it is the whole test. Then the
+/// compromises the cost model rates as usable — a build from a neighbouring
+/// patch, and both at once.
+///
+/// This is the bug this function was rewritten for. It used to ask for two of
+/// the five fits, both at the target's own version, so a mod the screen had
+/// just shown as fitting "using its 1.21.3 build" was reported as having
+/// nowhere to go and turned off. The preview was the honest half: the resolver
+/// deliberately rates a near-version jar as usable, cheap on Fabric and dear
+/// on the Forge side, and a screen must never claim what the code did not do.
+///
+/// The ladder is read off the project's whole file list, out of the cache the
+/// preview filled, so the two cannot answer differently.
+#[allow(clippy::too_many_arguments)] // one mod's coordinates, travelling together
 async fn placement(
     client: &reqwest::Client,
     matrix: &SupportMatrix,
-    target_loader: &str,
+    support: &SupportCache,
+    loader: Loader,
     game_version: &str,
     record: &ContentRecord,
     curseforge_key: Option<&str>,
 ) -> Placement {
-    let ask = |fit| {
-        crate::plan::build::file_for(
-            client,
-            fit,
-            target_loader,
-            &record.provider,
-            &record.project_id,
-            game_version,
-            curseforge_key,
-        )
+    let target_loader = loader.as_str();
+    let table = match support
+        .support(client, &record.provider, &record.project_id, curseforge_key)
+        .await
+    {
+        Ok(table) => table,
+        Err(e) => return Placement::Unanswered(e.to_string()),
     };
 
-    fn found(
-        (project, version, loader): (Project, Version, &'static str),
-        through_connector: bool,
-    ) -> Placement {
-        Placement::Found(Box::new(Found {
-            project,
-            version,
-            loader,
-            through_connector,
-        }))
+    // A project whose file list holds nothing usable at all is the one empty
+    // answer that is more likely a gap in what a platform said than a fact
+    // about the mod — the resolver puts exactly this case in `unresolved`
+    // rather than giving it a verdict at a target. A gap must not turn
+    // somebody's mod off, so it is reported and the jar is left alone.
+    if table.is_empty() {
+        return Placement::Unanswered(
+            "this platform lists no downloadable file for it at all, so there was nothing to \
+             compare with the new target"
+                .to_string(),
+        );
     }
 
-    match ask(Fit::Native).await {
-        Ok(Some(native)) => return found(native, false),
-        Ok(None) => {}
-        Err(e) => return Placement::Unanswered(e.to_string()),
+    climb(
+        resolve::ladder(&table, target_loader, game_version, matrix),
+        game_version,
+        &format!(
+            "nothing published runs on {} {game_version}",
+            loader.display_name()
+        ),
+        |fit, at| async move {
+            crate::plan::build::file_for(
+                client,
+                fit,
+                target_loader,
+                &record.provider,
+                &record.project_id,
+                &at,
+                curseforge_key,
+            )
+            .await
+        },
+    )
+    .await
+}
+
+/// Ask for each rung of one mod's ladder in turn, and take the first file that
+/// comes back.
+///
+/// `ask` is [`crate::plan::build::file_for`] in every real call; it is a
+/// parameter so the whole of this decision — which rungs are asked, at which
+/// version, and what a failed request does to the answer — is a test that needs
+/// no provider. The three answers it can give are each load-bearing somewhere
+/// else in this file, and two of them were wrong before this existed.
+async fn climb<F, Fut>(
+    rungs: Vec<(Fit, Option<String>)>,
+    game_version: &str,
+    nowhere: &str,
+    ask: F,
+) -> Placement
+where
+    F: Fn(Fit, String) -> Fut,
+    Fut: std::future::Future<Output = Result<Option<(Project, Version, &'static str)>>>,
+{
+    // A request that failed is not an answer, and it outlives a later rung
+    // answering "nothing published": the mod must never be turned off because
+    // something could not be asked. Kept rather than returned on, so a rung
+    // further down still gets its chance to find a file.
+    let mut unanswered: Option<String> = None;
+
+    for (fit, via) in rungs {
+        let at = via.unwrap_or_else(|| game_version.to_string());
+        match ask(fit, at.clone()).await {
+            Ok(Some((project, version, loader))) => {
+                return Placement::Found(Box::new(Found {
+                    project,
+                    version,
+                    loader,
+                    through_connector: matches!(fit, Fit::Connector | Fit::ConnectorNear),
+                    game_version: at,
+                }))
+            }
+            Ok(None) => {}
+            Err(e) => unanswered = Some(e.to_string()),
+        }
     }
 
-    if !matrix.supports(game_version, target_loader) {
-        return Placement::Nowhere;
-    }
-    match ask(Fit::Connector).await {
-        Ok(Some(through)) => found(through, true),
-        Ok(None) => Placement::Nowhere,
-        Err(e) => Placement::Unanswered(e.to_string()),
+    match unanswered {
+        // No rungs at all lands here too, and rightly: the file list was in
+        // hand and held nothing that runs at this target.
+        None => Placement::Nowhere(nowhere.to_string()),
+        Some(reason) => Placement::Unanswered(reason),
     }
 }
 
@@ -505,9 +655,9 @@ async fn placement(
 async fn sort_the_mods_folder(
     dir: &Path,
     records: &[ContentRecord],
-) -> Result<(Vec<ContentRecord>, Vec<Unchecked>)> {
+) -> Result<(Vec<ContentRecord>, Vec<UncheckedFile>)> {
     let mut tracked: Vec<ContentRecord> = Vec::new();
-    let mut unchecked: Vec<Unchecked> = Vec::new();
+    let mut unchecked: Vec<UncheckedFile> = Vec::new();
     // A mod can be on disk under both its names at once, which is one mod.
     let mut seen: HashSet<String> = HashSet::new();
 
@@ -551,7 +701,7 @@ async fn sort_the_mods_folder(
             }
             None => "was added by hand, so there is no project to look a new build up from",
         };
-        unchecked.push(Unchecked {
+        unchecked.push(UncheckedFile {
             file_name: base,
             reason: reason.to_string(),
         });
@@ -569,14 +719,14 @@ async fn sort_the_mods_folder(
 /// click once there is a build to turn it on for. Nothing is deleted: a
 /// version bump that could not find a build is no reason to throw away
 /// somebody's mod, and the jar on disk may be the only copy of it left.
-async fn turn_off(dir: &Path, record: &ContentRecord, reason: String) -> Stranded {
+async fn turn_off(dir: &Path, record: &ContentRecord, reason: String) -> StrandedMod {
     let off = match content::either_name_in(dir, &record.file_name).await {
         Some((on_disk, true)) => content::set_enabled_in(dir, &on_disk, false).await.is_ok(),
         // Already off, or the record has outlived its file. Either way there
         // is nothing here for the game to load.
         _ => true,
     };
-    Stranded {
+    StrandedMod {
         name: record.name.clone(),
         file_name: record.file_name.clone(),
         reason,
@@ -616,8 +766,7 @@ async fn why_copy(paths: &Paths, inst: &Instance) -> Option<&'static str> {
 /// being wrong one way is a copy nobody needed, and the other way it is
 /// somebody's world converted by a version they did not choose to move to.
 async fn has_worlds(paths: &Paths, id: &str) -> bool {
-    let saves = paths.game_dir(id).join("saves");
-    let Ok(mut entries) = tokio::fs::read_dir(&saves).await else {
+    let Ok(mut entries) = tokio::fs::read_dir(paths.instance_saves(id)).await else {
         return false;
     };
     matches!(entries.next_entry().await, Ok(Some(_)))
@@ -627,6 +776,8 @@ async fn has_worlds(paths: &Paths, id: &str) -> bool {
 mod tests {
     use super::*;
     use crate::paths::Scratch;
+    use crate::providers::{Provider, ProjectKind, VersionFile};
+    use std::cell::RefCell;
 
     fn record(file: &str, name: &str) -> ContentRecord {
         ContentRecord {
@@ -786,7 +937,7 @@ mod tests {
         // to lose.
         assert!(why_copy(&paths, &inst).await.is_none());
 
-        tokio::fs::create_dir_all(paths.game_dir(&inst.id).join("saves").join("home"))
+        tokio::fs::create_dir_all(paths.instance_saves(&inst.id).join("home"))
             .await
             .unwrap();
         assert!(has_worlds(&paths, &inst.id).await);
@@ -840,6 +991,7 @@ mod tests {
             &paths,
             &ManifestCache::new(),
             &SupportMatrix::default(),
+            &SupportCache::new(),
             &inst.id,
             "neoforge",
             "1.21.1",
@@ -863,11 +1015,12 @@ mod tests {
     /// dropped connection would be deciding something nothing here knows.
     #[tokio::test]
     async fn a_request_that_failed_is_not_an_answer() {
-        let ask = |record| async move {
+        let ask = |record: ContentRecord| async move {
             placement(
                 &offline(),
                 &SupportMatrix::default(),
-                "fabric",
+                &SupportCache::new(),
+                Loader::Fabric,
                 "1.21.1",
                 &record,
                 None,
@@ -889,6 +1042,344 @@ mod tests {
             matches!(ask(nameless).await, Placement::Unanswered(_)),
             "a record with no provider was given a verdict",
         );
+
+        // Nor a project whose file list came back holding nothing usable,
+        // which the resolver calls unresolved rather than missing. Read from
+        // the cache here, so this is the decision and not a request.
+        let empty = crate::plan::resolve::SupportCache::new();
+        empty.seed("modrinth", "P", support(&[])).await;
+        let placed = placement(
+            &offline(),
+            &SupportMatrix::default(),
+            &empty,
+            Loader::Fabric,
+            "1.21.1",
+            &record("sodium.jar", "Sodium"),
+            None,
+        )
+        .await;
+        assert!(
+            matches!(placed, Placement::Unanswered(_)),
+            "a mod whose platform listed no file at all was turned off over it",
+        );
+
+        // Where the list is there and rules the target out, it is a verdict:
+        // the mod is stranded, and nothing was asked to find that out — this
+        // client could not have asked.
+        let elsewhere = crate::plan::resolve::SupportCache::new();
+        elsewhere
+            .seed("modrinth", "P", support(&[("forge", "1.12.2")]))
+            .await;
+        let placed = placement(
+            &offline(),
+            &SupportMatrix::default(),
+            &elsewhere,
+            Loader::Fabric,
+            "1.21.1",
+            &record("sodium.jar", "Sodium"),
+            None,
+        )
+        .await;
+        let Placement::Nowhere(reason) = placed else {
+            panic!("a mod with nothing for this target was not stranded");
+        };
+        assert!(reason.contains("Fabric 1.21.1"), "{reason}");
+    }
+
+    /// One mod's whole published history, as pairs.
+    fn support(pairs: &[(&str, &str)]) -> crate::plan::resolve::Support {
+        crate::plan::resolve::Support::from_pairs(
+            pairs
+                .iter()
+                .map(|(l, g)| (l.to_string(), g.to_string())),
+        )
+    }
+
+    /// Connector covering NeoForge on 1.21.1 only, like the real matrix.
+    fn connector_matrix() -> SupportMatrix {
+        SupportMatrix::from_pairs(vec![crate::connector::SupportPair {
+            loader: "neoforge".into(),
+            game_version: "1.21.1".into(),
+        }])
+    }
+
+    /// What a provider answers with when it has a file: a project, the version
+    /// built for `game`, and the loader that file is for.
+    fn published(game: &str, loader: &'static str) -> (Project, Version, &'static str) {
+        let project = Project {
+            provider: Provider::Modrinth,
+            id: "P".into(),
+            slug: "sodium".into(),
+            name: "Sodium".into(),
+            summary: String::new(),
+            icon_url: None,
+            downloads: 0,
+            follows: 0,
+            author: String::new(),
+            kind: ProjectKind::Mod,
+            categories: vec![],
+            loaders: vec![],
+            game_versions: vec![],
+            updated: None,
+            page_url: String::new(),
+            banner_url: None,
+            distribution_allowed: true,
+            client_side: None,
+            server_side: None,
+            also_on: vec![],
+        };
+        let version = Version {
+            provider: Provider::Modrinth,
+            id: "v".into(),
+            project_id: "P".into(),
+            name: game.into(),
+            version_number: "1.0".into(),
+            game_versions: vec![game.to_string()],
+            loaders: vec![loader.to_string()],
+            release_type: "release".into(),
+            published: None,
+            downloads: 0,
+            files: vec![VersionFile {
+                url: "https://example.invalid/a.jar".into(),
+                filename: "sodium.jar".into(),
+                sha1: None,
+                sha512: None,
+                size: None,
+                primary: true,
+            }],
+            dependencies: vec![],
+            blocked_reason: None,
+            blocked_sha1: None,
+        };
+        (project, version, loader)
+    }
+
+    /// **The rule a re-target exists to keep.** The preview ranks a mod whose
+    /// only build is for a neighbouring patch as fitting, and says so on screen
+    /// — "other version", "Using its 1.21.3 build". Applying that target has to
+    /// install that build.
+    ///
+    /// It did not. Two of the five fits were asked for, both at the target's
+    /// own version, so this mod came back with nowhere to go, landed in
+    /// `stranded`, and had its jar renamed `.disabled`. The screen promised the
+    /// target worked and applying it turned the mod off.
+    #[tokio::test]
+    async fn a_mod_whose_only_build_is_next_door_is_re_pointed_and_never_turned_off() {
+        let asked = RefCell::new(Vec::new());
+        let placed = climb(
+            resolve::ladder(
+                &support(&[("fabric", "1.21.3")]),
+                "fabric",
+                "1.21.1",
+                &SupportMatrix::default(),
+            ),
+            "1.21.1",
+            "nothing published runs on Fabric 1.21.1",
+            |fit, at| {
+                asked.borrow_mut().push((fit, at.clone()));
+                std::future::ready(Ok((at == "1.21.3").then(|| published("1.21.3", "fabric"))))
+            },
+        )
+        .await;
+
+        let Placement::Found(found) = placed else {
+            panic!("a mod the preview showed as fitting was given nowhere to go, and would be turned off");
+        };
+        assert_eq!(
+            found.game_version, "1.21.3",
+            "the build asked for was not the one the preview named",
+        );
+        assert!(!found.through_connector);
+        assert_eq!(
+            asked.into_inner(),
+            vec![(Fit::NearVersion, "1.21.3".to_string())],
+            "the only rung on this mod's ladder was never asked for",
+        );
+    }
+
+    /// Every fit the preview ranks is asked for, in the order it ranks them —
+    /// and a mod that genuinely has no file for this target is still stranded,
+    /// which is the half that was right.
+    #[tokio::test]
+    async fn every_fit_the_preview_ranks_is_asked_for_in_that_order() {
+        let asked = RefCell::new(Vec::new());
+        // A Fabric build for the target, another a patch along, and a NeoForge
+        // build a patch along — on a NeoForge target Connector covers. Nothing
+        // answers, so the whole ladder is walked.
+        let placed = climb(
+            resolve::ladder(
+                &support(&[
+                    ("fabric", "1.21.1"),
+                    ("fabric", "1.21.3"),
+                    ("neoforge", "1.21.4"),
+                ]),
+                "neoforge",
+                "1.21.1",
+                &connector_matrix(),
+            ),
+            "1.21.1",
+            "nothing published runs on NeoForge 1.21.1",
+            |fit, at| {
+                asked.borrow_mut().push((fit, at));
+                std::future::ready(Ok(None))
+            },
+        )
+        .await;
+
+        assert_eq!(
+            asked.into_inner(),
+            vec![
+                (Fit::Connector, "1.21.1".to_string()),
+                (Fit::NearVersion, "1.21.4".to_string()),
+                (Fit::ConnectorNear, "1.21.3".to_string()),
+            ],
+        );
+        // Asked everywhere and published nowhere: stranded, with the reason.
+        let Placement::Nowhere(reason) = placed else {
+            panic!("a mod with no file at this target was not stranded");
+        };
+        assert!(reason.contains("NeoForge 1.21.1"), "{reason}");
+
+        // And a mod whose file list rules this target out has no rungs, so
+        // nothing is asked for it at all — even here, where anything asked
+        // would be answered with a file.
+        let placed = climb(
+            resolve::ladder(
+                &support(&[("forge", "1.12.2")]),
+                "fabric",
+                "1.21.1",
+                &SupportMatrix::default(),
+            ),
+            "1.21.1",
+            "nothing published runs on Fabric 1.21.1",
+            |_, at| std::future::ready(Ok(Some(published(&at, "fabric")))),
+        )
+        .await;
+        assert!(matches!(placed, Placement::Nowhere(_)));
+    }
+
+    /// A Connector fit is installed as the Fabric build it is, and says so.
+    #[tokio::test]
+    async fn a_connector_fit_is_marked_as_one() {
+        let placed = climb(
+            resolve::ladder(
+                &support(&[("fabric", "1.21.1")]),
+                "neoforge",
+                "1.21.1",
+                &connector_matrix(),
+            ),
+            "1.21.1",
+            "nothing published runs on NeoForge 1.21.1",
+            |_, at| std::future::ready(Ok(Some(published(&at, "fabric")))),
+        )
+        .await;
+
+        let Placement::Found(found) = placed else {
+            panic!("a Fabric-only mod was not carried onto NeoForge");
+        };
+        assert!(found.through_connector);
+        assert_eq!(found.loader, "fabric");
+        assert_eq!(found.game_version, "1.21.1");
+    }
+
+    /// The distinction the safety of the whole thing rests on, now that more
+    /// than one rung is asked for: a request that failed is not an answer, and
+    /// it outlives a later rung saying "nothing published". Turning a mod off
+    /// because a connection dropped is the one mistake here that cannot be
+    /// undone from the screen that caused it.
+    #[tokio::test]
+    async fn a_request_that_failed_never_strands_a_mod() {
+        let rungs = || {
+            resolve::ladder(
+                &support(&[("fabric", "1.21.1"), ("fabric", "1.21.3")]),
+                "quilt",
+                "1.21.1",
+                &SupportMatrix::default(),
+            )
+        };
+        let dropped = || Error::msg("network request failed");
+
+        // The first rung could not be asked; the second answers. The file wins.
+        let placed = climb(rungs(), "1.21.1", "nowhere", |_, at| {
+            std::future::ready(if at == "1.21.1" {
+                Err(dropped())
+            } else {
+                Ok(Some(published(&at, "fabric")))
+            })
+        })
+        .await;
+        assert!(matches!(placed, Placement::Found(_)), "a rung after a failed request was not tried");
+
+        // The first rung could not be asked and the second publishes nothing.
+        // That is not "nothing runs here" — nobody knows — so nothing is
+        // turned off.
+        let placed = climb(rungs(), "1.21.1", "nowhere", |_, at| {
+            std::future::ready(if at == "1.21.1" {
+                Err(dropped())
+            } else {
+                Ok(None)
+            })
+        })
+        .await;
+        assert!(
+            matches!(placed, Placement::Unanswered(_)),
+            "a mod was turned off because a request failed",
+        );
+    }
+
+    /// Connector failing costs the mods that needed it, not the move.
+    ///
+    /// In place there is no copy to delete, and `ensure_stack` installs jar by
+    /// jar — so returning here left an instance whose `instance.json` named the
+    /// old target over a folder that had already changed.
+    #[test]
+    fn connector_failing_strands_only_the_mods_that_needed_it() {
+        let found = |through_connector| {
+            let (project, version, loader) = published("1.21.1", "fabric");
+            Placement::Found(Box::new(Found {
+                project,
+                version,
+                loader,
+                through_connector,
+                game_version: "1.21.1".into(),
+            }))
+        };
+        let mut placements = vec![
+            (record("sodium.jar", "Sodium"), found(false)),
+            (record("fabric-only.jar", "Fabric Only"), found(true)),
+            (
+                record("by-hand.jar", "By Hand"),
+                Placement::Unanswered("nobody answered".into()),
+            ),
+        ];
+
+        without_connector(&mut placements, "Sinytra Connector could not be installed: no build");
+
+        assert!(matches!(placements[0].1, Placement::Found(ref f) if !f.through_connector));
+        match &placements[1].1 {
+            Placement::Nowhere(reason) => assert!(reason.contains("Connector"), "{reason}"),
+            _ => panic!("a mod that needed Connector was left pointing at a Fabric build"),
+        }
+        assert!(matches!(placements[2].1, Placement::Unanswered(_)));
+    }
+
+    /// The one failure that cannot be rolled back says so, and names both
+    /// halves: what the files are now, and what the instance still claims.
+    #[test]
+    fn a_move_that_could_not_be_written_down_says_what_to_do_about_it() {
+        let err = not_written_down(
+            "Survival",
+            "Fabric 1.20.1",
+            Loader::NeoForge,
+            "1.21.1",
+            Error::msg("no space left on device"),
+        );
+        let text = err.to_string();
+        assert!(text.contains("Survival"), "{text}");
+        assert!(text.contains("NeoForge 1.21.1"), "{text}");
+        assert!(text.contains("Fabric 1.20.1"), "{text}");
+        assert!(text.contains("no space left on device"), "{text}");
+        assert!(text.contains("settings"), "{text}");
     }
 
     /// Nothing points anywhere: a client whose every request fails.
@@ -902,6 +1393,15 @@ mod tests {
     /// A run that cannot finish leaves the instance exactly as it was and no
     /// copy behind — whether it got as far as making one or not, the library
     /// holds one instance afterwards and it is the one that was there.
+    ///
+    /// This is the failure before anything moves, which is the only one a test
+    /// with no network can reach: everything after it needs a loader's version
+    /// list and a provider's files. What happens past that point is each
+    /// decision on its own —
+    /// [`connector_failing_strands_only_the_mods_that_needed_it`] for the
+    /// failure that used to return mid-move, and
+    /// [`a_move_that_could_not_be_written_down_says_what_to_do_about_it`] for
+    /// the one that cannot be absorbed.
     #[tokio::test]
     async fn a_failure_leaves_the_instance_as_it_was_and_no_copy_behind() {
         let scratch = Scratch::new("retarget-fail");
@@ -918,7 +1418,7 @@ mod tests {
         let dir = content::content_dir(&paths, &inst.id, ContentKind::Mod);
         write(&dir, "sodium.jar").await;
         // A world, so a copy is what this would land on by default.
-        tokio::fs::create_dir_all(paths.game_dir(&inst.id).join("saves").join("home"))
+        tokio::fs::create_dir_all(paths.instance_saves(&inst.id).join("home"))
             .await
             .unwrap();
 
@@ -928,6 +1428,7 @@ mod tests {
                 &paths,
                 &ManifestCache::new(),
                 &SupportMatrix::default(),
+                &SupportCache::new(),
                 &inst.id,
                 "neoforge",
                 "1.21.1",

@@ -389,14 +389,6 @@ export interface WorldBackup {
   createdAt: number;
 }
 
-/** What Minecraft calls each `GameType`, for the badge on a world's row. */
-export const GAME_MODES: Record<number, string> = {
-  0: "Survival",
-  1: "Creative",
-  2: "Adventure",
-  3: "Spectator",
-};
-
 export interface Server {
   id: string;
   name: string;
@@ -720,6 +712,12 @@ export interface RepointedMod {
   versionNumber: string;
   /** A Fabric build, running on (Neo)Forge through Sinytra Connector. */
   throughConnector: boolean;
+  /**
+   * The Minecraft version this build is for, when it is not the instance's new
+   * one — the neighbouring patch the preview named. Absent is the ordinary
+   * case: a build for the target itself.
+   */
+  viaVersion?: string;
   /** Dependencies of this mod that did not land, with the reason. */
   skipped?: string[];
 }

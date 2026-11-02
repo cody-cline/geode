@@ -82,7 +82,7 @@ reads Sinytra Connector's real files for exactly this reason. The same trap in
 reverse: a server kind's mod loader is a fact about that software, not a guess
 (Banner is Fabric-based, not NeoForge — `ServerKind::mod_loader`).
 
-**`commands.rs` stays thin: validate, delegate, return.** 154 of the 155
+**`commands.rs` stays thin: validate, delegate, return.** 165 of the 166
 `#[tauri::command]` functions live there (the odd one out is
 `deeplink::take_pending_join`), and logic belongs in the module that owns it so
 the headless path can reach it too. A new command must be added in **two**
@@ -92,7 +92,14 @@ that they agree, and a command missing from the list simply fails at runtime.
 **Error text is user-facing copy.** `Error` serialises to its `Display` string
 for the frontend, so write variants a person can read, not a debug dump. Use
 `.ctx("what I was doing")` (the `Context` trait in `error.rs`) so a failure deep
-in the download pipeline still says which file or step it came from.
+in the download pipeline still says which file or step it came from. Two
+registers, and the screens mix them badly when a third appears: a refusal that
+states a fact is a lowercase fragment with no full stop ("no backup called
+`{name}`"), and one that tells somebody what to do first is a capitalised
+sentence, punctuated, with its reason as a second sentence ("Stop the game
+before backing up a world. Minecraft keeps…"). Nothing a provider or an OS
+handed back is quoted into either — see `describe_oauth_error`, where 300
+characters of a 503's HTML used to become the toast.
 
 **Secrets never cross the IPC boundary.** `Config::redacted()` replaces the
 CurseForge key with booleans before the frontend sees it (there is a test named

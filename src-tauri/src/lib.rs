@@ -282,7 +282,7 @@ pub fn run() {
             commands::add_offline_account,
             commands::remove_account,
             commands::set_active_account,
-            commands::offline_play_offer,
+            commands::take_offline_play_offer,
             commands::detect_java,
             commands::install_java,
             commands::launch_instance,

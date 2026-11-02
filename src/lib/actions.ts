@@ -34,9 +34,10 @@ export async function launchInstance(instance: Instance, offline = false) {
   } catch (e) {
     // A launch that could not sign in has a way past it: play as this account
     // offline, keeping its own name and UUID. Asked as a dialog rather than
-    // taken quietly, and only when there is something to offer — the backend
-    // answers that from the account's own state, so nothing here reads error
-    // text to guess what went wrong.
+    // taken quietly, and only when there is something to offer — the launch
+    // leaves that behind at the step that could not renew the sign-in, so
+    // nothing here reads error text to guess what went wrong, and a failure
+    // about something else leaves nothing to take.
     if (!offline && (await offlinePlayOffered(instance, errorMessage(e)))) {
       await refreshInstances();
       return;
@@ -46,14 +47,14 @@ export async function launchInstance(instance: Instance, offline = false) {
   }
 }
 
-/** Raise the dialog if this account could play offline, and say whether it did. */
+/** Raise the dialog if this launch left an offer behind, and say whether it did. */
 async function offlinePlayOffered(
   instance: Instance,
   reason: string,
 ): Promise<boolean> {
   let username: string | null = null;
   try {
-    username = await api.offlinePlayOffer();
+    username = await api.takeOfflinePlayOffer(instance.id);
   } catch {
     // Nothing to add: the launch failure below is the news.
     return false;

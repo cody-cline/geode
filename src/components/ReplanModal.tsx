@@ -30,7 +30,16 @@ type LandOn = "" | "here" | "copy";
 
 /** What a finished re-target amounts to, in one line. */
 function retargetLine(report: RetargetReport): StatusLine {
-  const moved = `${report.repointed.length} mod${report.repointed.length === 1 ? "" : "s"} now built for ${loaderLabel(report.loader)} ${report.mcVersion}`;
+  // The preview said "using its 1.21.3 build" about some of these, and the
+  // install did exactly that — so the count says so rather than rounding every
+  // jar off to the target's own version.
+  const near = report.repointed.filter((one) => one.viaVersion);
+  const versions = [...new Set(near.map((one) => one.viaVersion))];
+  const moved =
+    `${report.repointed.length} mod${report.repointed.length === 1 ? "" : "s"} now built for ${loaderLabel(report.loader)} ${report.mcVersion}` +
+    (near.length > 0
+      ? `, ${near.length} of them on its ${versions.join(" and ")} build`
+      : "");
   const left = [
     report.stranded.length > 0 && `${report.stranded.length} turned off`,
     report.unchecked.length > 0 && `${report.unchecked.length} not checked`,
@@ -440,9 +449,22 @@ export default function ReplanModal({
                 <p className="hint">
                   Minecraft upgrades a world the first time a newer version
                   opens it and never puts it back, so a copy is the default for
-                  an instance with worlds in it. Picking this instance applies
-                  it here anyway, and nothing puts that back.
+                  an instance with worlds in it.
                 </p>
+                {/* Said in full on the one choice that cannot be undone, and
+                    only on it: "nothing puts that back" in a hint under a
+                    dropdown is a sentence somebody reads after. What it costs
+                    is a world, so the words are the cost and the way to keep
+                    one. */}
+                {landOn === "here" && (
+                  <StatusNote
+                    line={{
+                      tone: "warn",
+                      title: `This cannot be undone for the worlds in ${instance.name}`,
+                      detail: `Playing at ${loaderLabel(target.loader)} ${target.gameVersion} opens every world here with that version, and a world's data format is upgraded the first time a newer Minecraft opens it — no version puts it back, and these are the only copy of them. Back up the ones you care about from the Worlds tab first if you want to be able to play them at ${instance.mcVersion} again.`,
+                    }}
+                  />
+                )}
               </div>
             </section>
           )}

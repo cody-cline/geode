@@ -700,6 +700,9 @@ pub async fn retarget_instance(
         &state.paths,
         &state.manifests,
         &matrix,
+        // The same cache the preview filled, so applying a target reads the
+        // file lists it was ranked on rather than asking again for its own.
+        &state.plan_support,
         &id,
         &loader,
         &game_version,
@@ -711,16 +714,7 @@ pub async fn retarget_instance(
     .await;
 
     state.clear_cancel(progress.id());
-    match result {
-        Ok(report) => {
-            progress.finish().await;
-            Ok(report)
-        }
-        Err(e) => {
-            progress.fail(&e.to_string()).await;
-            Err(e)
-        }
-    }
+    finish(&progress, result).await
 }
 
 #[tauri::command]
@@ -1600,16 +1594,7 @@ pub async fn resolve_instance(
     .await;
 
     state.clear_cancel(progress.id());
-    match result {
-        Ok(resolution) => {
-            progress.finish().await;
-            Ok(resolution)
-        }
-        Err(e) => {
-            progress.fail(&e.to_string()).await;
-            Err(e)
-        }
-    }
+    finish(&progress, result).await
 }
 
 /// Resolve a plan and find the target that was asked for, as its index into
@@ -2005,10 +1990,16 @@ pub async fn create_server_from_plan(
 /// launch that has not spawned a process yet is about to open the world, and a
 /// copy begun now finishes underneath it. Only the command layer can see it,
 /// because only the command layer has the app state the claim is held in.
+///
+/// Worded like [`instance::worlds::only_when_stopped`] on purpose, since the
+/// two appear on the same screen: an imperative that says what to do first, and
+/// then the reason as its own sentence. A statement of fact — "no backup called
+/// …" — is the other register, a lowercase fragment with no full stop, which is
+/// what nearly every refusal in this codebase is.
 fn not_while_starting(state: &AppState, id: &str) -> Result<()> {
     if state.is_launching(id) {
         return Err(Error::msg(
-            "Wait for the game to finish starting — it is about to open this instance's worlds.",
+            "Wait for the game to finish starting. It is about to open this instance's worlds.",
         ));
     }
     Ok(())
@@ -3619,19 +3610,22 @@ pub async fn set_active_account(
     Ok(file.views())
 }
 
-/// The name this account would play under offline, when that is worth
-/// offering, and nothing when it is not.
+/// The name this instance's account would play under offline, when its launch
+/// just failed at the sign-in, and nothing otherwise.
 ///
 /// Asked after a launch failed, so the choice is the player's rather than a
-/// fallback Geode made quietly on their behalf. Reads `accounts.json` and
-/// nothing else — see [`crate::auth::store::offline_offer`] for why the
-/// answer is a fact about the account and not a reading of the error text.
+/// fallback Geode made quietly on their behalf. The answer comes from the
+/// launch itself — [`launch_instance`] leaves it on the way out of the one step
+/// playing offline is the way past, and this takes it. Nothing here reads error
+/// text, and nothing here guesses from the account either: an instance that was
+/// already running fails before a sign-in is attempted, and used to be told its
+/// sign-in could not be renewed.
 #[tauri::command]
-pub async fn offline_play_offer(
+pub async fn take_offline_play_offer(
     state: State<'_, AppState>,
-    account_id: Option<String>,
+    id: String,
 ) -> Result<Option<String>> {
-    crate::auth::store::offline_offer(&state.paths, account_id.as_deref()).await
+    Ok(state.take_offline_play_offer(&id))
 }
 
 // ---------------------------------------------------------------------------
@@ -4125,6 +4119,10 @@ pub async fn launch_instance(
     account_id: Option<String>,
     offline: bool,
 ) -> Result<LaunchResult> {
+    // Before the first thing that can refuse: whatever an earlier launch left
+    // for the window to pick up is not an answer about this one.
+    state.clear_offline_offer();
+
     if state.games.is_running(&id) {
         return Err(Error::msg("that instance is already running"));
     }
@@ -4146,7 +4144,7 @@ pub async fn launch_instance(
     // reached by falling back: a launch that quietly played offline when a
     // renewal failed would tell somebody they are signed in when they are
     // not, and leave them wondering why no server will have them.
-    let session = if offline {
+    let session = match if offline {
         crate::auth::store::offline_session_for(&state.paths, account_id.as_deref()).await
     } else {
         crate::auth::store::session_for(
@@ -4156,12 +4154,26 @@ pub async fn launch_instance(
             account_id.as_deref(),
         )
         .await
-    }
-    .inspect_err(|e| {
-        let progress = progress.clone();
-        let msg = e.to_string();
-        tauri::async_runtime::spawn(async move { progress.fail(&msg).await });
-    })?;
+    } {
+        Ok(session) => session,
+        Err(e) => {
+            // The one failure playing offline is the way past, so the offer is
+            // left here rather than worked out afterwards from the account's
+            // state: this is the step that could not reach Microsoft, and
+            // every other way a launch fails is about something else. Not
+            // offered to somebody who already chose to play offline — this is
+            // where they chose it.
+            if !offline {
+                if let Ok(Some(username)) =
+                    crate::auth::store::offline_offer(&state.paths, account_id.as_deref()).await
+                {
+                    state.offer_offline_play(id.clone(), username);
+                }
+            }
+            progress.fail(&e.to_string()).await;
+            return Err(e);
+        }
+    };
 
     // Before the Java and version work: an update can move the instance to
     // another Minecraft or loader version, and that is the one to install.
@@ -5523,6 +5535,48 @@ mod tests {
             .nth(1)
             .unwrap_or_else(|| panic!("{signature} is not in commands.rs"));
         &after[..after.find("\n}\n").unwrap_or(after.len())]
+    }
+
+    /// The offline-play dialog has to belong to the failure it appears beside.
+    ///
+    /// Two shapes, read the way the update tests below read theirs, because
+    /// `launch_instance` takes an `AppHandle` a unit test has no window for.
+    /// The offer slot is cleared before the first thing that can refuse, and
+    /// filled only in the arm where resolving the account failed. Both halves
+    /// matter: pressing Play on an instance that is already running fails
+    /// above the sign-in entirely, and used to be answered with a dialog
+    /// headed "Geode could not renew Notch's Microsoft sign-in" — two
+    /// contradictory reasons on screen at once.
+    #[test]
+    fn a_launch_offers_offline_play_only_for_the_sign_in_it_could_not_renew() {
+        let body = body_of("pub async fn launch_instance(");
+
+        let cleared = body
+            .find("clear_offline_offer()")
+            .expect("launch_instance no longer clears an earlier launch's offer");
+        let refuses = body
+            .find("is_running(")
+            .expect("launch_instance no longer refuses a running instance");
+        assert!(
+            cleared < refuses,
+            "a launch can refuse before clearing the offer, so a dialog about a sign-in can \
+             appear next to an error about something else",
+        );
+
+        let signing_in = body
+            .find("session_for(")
+            .expect("launch_instance no longer resolves the account");
+        let offered = body
+            .find("offer_offline_play(")
+            .expect("nothing leaves an offline-play offer, so the dialog can never be raised");
+        let next_step = body
+            .find("bring_up_to_date(")
+            .expect("launch_instance no longer updates from the server");
+        assert!(
+            signing_in < offered && offered < next_step,
+            "the offer is left somewhere other than the sign-in's own failure, so it answers \
+             for failures that are about something else",
+        );
     }
 
     /// A version this build cannot verify is a version it must not fetch, and

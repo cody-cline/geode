@@ -284,15 +284,45 @@ pub(crate) fn oauth_error_code(body: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// What an OAuth endpoint said went wrong, in something a player can read.
+///
+/// Only ever from the shape these endpoints promise: a JSON object with an
+/// `error` code, and usually an `error_description` beside it. The description
+/// is genuinely worth passing on — "AADSTS700082: the refresh token has
+/// expired" is the whole answer — so it is, down to its first line, which is
+/// the sentence; the rest is a trace id and a timestamp.
+///
+/// Anything else is not read out. This used to put 300 characters of the body
+/// in, and a 5xx from Microsoft is frequently an HTML page, so the toast a
+/// player saw was markup: it said nothing and looked broken. Error text here is
+/// user-facing copy, and a body that is not the documented shape has nothing in
+/// it to quote — so it says that, and what to do about it.
 pub(crate) fn describe_oauth_error(body: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|v| {
-            v.get("error_description")
-                .and_then(|d| d.as_str())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| body.chars().take(300).collect())
+    let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
+    let code = parsed
+        .as_ref()
+        .and_then(|v| v.get("error"))
+        .and_then(|e| e.as_str());
+    let Some(code) = code else {
+        return "Microsoft did not say why, which is usually temporary — try again in a few \
+                minutes."
+            .to_string();
+    };
+
+    let described = parsed
+        .as_ref()
+        .and_then(|v| v.get("error_description"))
+        .and_then(|d| d.as_str())
+        .and_then(|d| d.lines().next())
+        .map(str::trim)
+        .filter(|d| !d.is_empty());
+
+    match described {
+        // Microsoft's own sentence, bounded: it is copy on a screen, not a log
+        // line, and nothing says how long one of these can be.
+        Some(d) => d.chars().take(300).collect(),
+        None => format!("Microsoft called it '{code}'."),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -629,5 +659,50 @@ mod tests {
                 "HTTP {code} was read as Microsoft refusing the account"
             );
         }
+    }
+
+    /// What a player reads when a sign-in fails. An OAuth endpoint's own
+    /// description is the useful half and goes through; a body that is not one
+    /// is not quoted at a person, because a 503 from Microsoft is an HTML page
+    /// and 300 characters of it made the toast a sheet of markup.
+    #[test]
+    fn only_a_real_oauth_error_is_read_out_to_the_player() {
+        // The shape these endpoints promise: the sentence, without the trace
+        // id and timestamp Microsoft appends on the lines below it.
+        assert_eq!(
+            describe_oauth_error(
+                "{\"error\":\"invalid_grant\",\"error_description\":\"AADSTS700082: The refresh \
+                 token has expired.\\r\\nTrace ID: 0000\\r\\nTimestamp: now\"}"
+            ),
+            "AADSTS700082: The refresh token has expired.",
+        );
+        // A code with no description still says something specific.
+        assert_eq!(
+            describe_oauth_error(r#"{"error":"temporarily_unavailable"}"#),
+            "Microsoft called it 'temporarily_unavailable'.",
+        );
+
+        for body in [
+            "<html><head><title>503</title></head><body>Service Unavailable</body></html>",
+            "",
+            "null",
+            r#"{"error_description":"no code beside it"}"#,
+            r#"{"error":{"code":5}}"#,
+        ] {
+            let said = describe_oauth_error(body);
+            assert!(
+                !said.contains('<') && !said.contains("no code beside it"),
+                "a response body reached a player's screen: {said}"
+            );
+            assert!(said.contains("try again"), "{said}");
+        }
+
+        // And however long Microsoft's own sentence is, what lands on screen
+        // is bounded.
+        let long = format!(
+            "{{\"error\":\"invalid_grant\",\"error_description\":\"{}\"}}",
+            "a".repeat(900)
+        );
+        assert_eq!(describe_oauth_error(&long).chars().count(), 300);
     }
 }

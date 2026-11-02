@@ -368,12 +368,12 @@ pub async fn offline_session_for(paths: &Paths, account_id: Option<&str>) -> Res
 /// would play under.
 ///
 /// `Some` only for a Microsoft account that cannot produce an online session
-/// without the network: no Minecraft token, or an expired one. That is exactly
-/// the state in which [`session_for`] had to go to Microsoft, so this answers
-/// "the launch failed at the sign-in" without the frontend reading error text.
-/// A launch that got past that step left a fresh token behind — good for a day
-/// — so a failure further on, in Java or a download, answers `None` and the
-/// player is offered nothing.
+/// without the network: no Minecraft token, or an expired one. That is a fact
+/// about the account and not a verdict on anything that just happened, which
+/// is why the only caller is [`session_for`]'s own failure path in
+/// `launch_instance`: asked there, it answers "could this account have played
+/// offline instead" about the step that actually failed. Asked after any
+/// failure it answered for launches that never reached a sign-in at all.
 ///
 /// An offline account answers `None` too: it already is one.
 ///
@@ -622,8 +622,9 @@ mod tests {
         assert!(reread.accounts[0].msa_refresh_token.is_some());
     }
 
-    /// Who gets offered a choice, and who does not. The offer is derived from
-    /// the account's own state rather than from the text of a launch error.
+    /// Who could be offered a choice, and who could not. Read off the
+    /// account's own state rather than the text of a launch error — and asked
+    /// only where a sign-in has just failed, which is the caller's half of it.
     #[tokio::test]
     async fn playing_offline_is_offered_only_where_it_would_help() {
         let scratch = crate::paths::Scratch::new("accounts-offer");
@@ -639,8 +640,9 @@ mod tests {
             "an expired Microsoft token is exactly the state this is for"
         );
 
-        // A launch that got past the sign-in left a token good for a day, so a
-        // Java or download failure after it offers nothing.
+        // A launch that got past the sign-in left a token good for a day, so
+        // even if this were asked after a later failure there would be nothing
+        // to offer.
         let mut fresh = stale.clone();
         fresh.mc_access_token = Some("token".into());
         fresh.mc_expires_at = chrono::Utc::now().timestamp() + 86_400;

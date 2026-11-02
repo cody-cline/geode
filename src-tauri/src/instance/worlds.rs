@@ -81,6 +81,15 @@ pub struct World {
     /// Play.
     pub version: Option<String>,
     /// Everything in the directory, in bytes.
+    ///
+    /// A recursive walk per row, which is the shape the mod-count work found
+    /// worth checking rather than assuming — a folder scan there was 0.31 ms
+    /// where opening each jar was 117 ms. Measured here: the ten real worlds on
+    /// this machine hold 39 to 101 files each and cost 0.9 to 1.9 ms apiece, so
+    /// a full list is some 15 ms; a built-up world of 3,461 region files costs
+    /// 25 to 32 ms. It stats, never opens, so the ceiling is the file count and
+    /// not the gigabytes. Kept at that price because a world's size is what
+    /// somebody deciding whether to back one up is looking for.
     pub size: u64,
     /// Why this folder is not a world Geode can read, if it is not. A folder
     /// with no `level.dat`, or one whose `level.dat` does not parse, is
@@ -495,11 +504,17 @@ pub async fn rename(
 /// carried through.
 ///
 /// The whole reason nothing here goes through a value model. `fml`, the other
-/// 46 keys in `Data`, their order, unknown tag types and a mod's own additions
-/// all survive because none of them is looked at — the bytes either side of
-/// `Data` are copied, and inside it every key but one is copied as the slice it
-/// arrived as. It is [`super::multiplayer::ensure`]'s rule applied to the other
-/// file.
+/// 46 keys in `Data`, their order and a mod's own additions all survive because
+/// none of them is looked at — the bytes either side of `Data` are copied, and
+/// inside it every key but one is copied as the slice it arrived as. It is
+/// [`super::multiplayer::ensure`]'s rule applied to the other file.
+///
+/// A tag type the walk does not know is the one thing it will not carry: a
+/// value is stepped over by measuring it, and an unknown tag cannot be
+/// measured, so [`super::nbt`] calls the file unreadable and this returns that
+/// — the world keeps the name it had. One world that cannot be renamed here is
+/// a better answer than a `level.dat` rewritten around a guess at where the
+/// next key starts.
 ///
 /// What is about to be written is read back before it goes anywhere near the
 /// world, because the cost of a bug in the walk is somebody's world and this
@@ -1333,10 +1348,24 @@ mod tests {
             gz.finish().unwrap()
         };
 
+        // A key whose tag type this walk does not know. Every other value in
+        // `Data` is stepped over by measuring it, and there is no length to be
+        // worked out for one of these — so the file is refused rather than
+        // rewritten around a guess at where `LevelName` ends up. The module's
+        // own prose used to say an unknown tag "survives because none is ever
+        // interpreted", which is the copying rule read one step too far.
+        let unknown_tag = {
+            let mut extra = vec![99u8];
+            put_text(&mut extra, b"FromTheFuture");
+            extra.extend_from_slice(&7i64.to_be_bytes());
+            level_dat("Home", 1, &extra)
+        };
+
         for (what, bytes) in [
             ("truncated gzip", truncated),
             ("trailing bytes", trailing),
             ("no Data compound", no_data),
+            ("an unknown tag type", unknown_tag),
             ("not compressed at all", gunzip(&good).unwrap()),
             ("not NBT at all", b"hello there".to_vec()),
         ] {

@@ -2213,6 +2213,32 @@ project-id = 1649197
             fresh.last_played, None,
             "never played is not the same as played at the epoch"
         );
+
+        // The reader itself, because 0 is the imported field's own default and
+        // an assertion on the instance alone holds whether or not anything was
+        // read. `None` is "Prism never wrote the key"; a `totalTimePlayed=0`
+        // Prism did write is a measured zero, and the two have to be told apart
+        // here for `play_seconds` to mean anything.
+        let absent = from_folder(&never).unwrap().expect("a Prism instance");
+        assert_eq!(
+            absent.play_seconds, None,
+            "a key Prism never wrote was read as a session of no length"
+        );
+
+        let zero = scratch.paths.root.join("zero");
+        write_tree(
+            &zero,
+            &[
+                ("instance.cfg", &cfg(&["totalTimePlayed=0"])),
+                ("mmc-pack.json", &profile),
+                ("minecraft/mods/a.jar", "jar"),
+            ],
+        );
+        assert_eq!(
+            from_folder(&zero).unwrap().expect("a Prism instance").play_seconds,
+            Some(0),
+            "a zero Prism did write was read as no answer at all"
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -16,9 +16,8 @@ import {
 
 import Modal from "../../components/Modal";
 import { api } from "../../lib/api";
-import { fileSize, relativeTime } from "../../lib/format";
+import { GAME_MODES, fileSize, relativeTime } from "../../lib/format";
 import { useStore } from "../../lib/store";
-import { GAME_MODES } from "../../lib/types";
 import type { Instance, World, WorldBackup } from "../../lib/types";
 
 import styles from "./WorldsTab.module.css";

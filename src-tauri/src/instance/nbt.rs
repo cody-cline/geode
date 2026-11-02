@@ -9,11 +9,19 @@
 //! It is deliberately not an NBT library. There is no value model and no
 //! decoder: a file is walked by tag type, the bytes of anything we are not
 //! rewriting are kept as the slice they arrived as, and a rewrite is our one
-//! key plus everything else verbatim. That is what makes unknown keys, unknown
-//! tag types, key order and Java's own string encoding all survive — none of
-//! them is ever interpreted. Both callers hold the same rule: the file is
-//! somebody else's, so anything we do not understand is copied through
-//! untouched.
+//! key plus everything else verbatim. That is what makes unknown keys, key
+//! order and Java's own string encoding all survive — none of them is ever
+//! interpreted, only measured and copied.
+//!
+//! A tag *type* this walk does not know is the one thing it cannot carry
+//! through, and it says so rather than guessing. Stepping over a value means
+//! knowing how many bytes it is, and an unknown tag has no length anything here
+//! could work out — so [`Reader::skip`] answers `unreadable`, the caller
+//! reports it, and the edit does not happen: a world whose `level.dat` holds
+//! one cannot be renamed, rather than being rewritten around a guess at where
+//! the next key starts. That is the same rule as the copying, not an exception
+//! to it — the file is somebody else's, so what is not understood is either
+//! copied untouched or left alone entirely.
 //!
 //! Every error here says what is wrong with the *bytes*; the caller names the
 //! file, because "this instance's multiplayer list" and "this world's

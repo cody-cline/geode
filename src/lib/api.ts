@@ -652,14 +652,17 @@ export const api = {
   setActiveAccount: (id: string) =>
     invoke<Account[]>("set_active_account", { id }),
   /**
-   * The name this account would play under offline, or null when there is
-   * nothing to offer. Asked after a launch failed, so playing offline stays a
-   * choice the player makes rather than something Geode does for them.
+   * The name this instance's account would play under offline, or null when
+   * there is nothing to offer. Asked after a launch of it failed, so playing
+   * offline stays a choice the player makes rather than something Geode does
+   * for them.
+   *
+   * Only ever an answer about the failure just seen: the launch leaves this
+   * behind when it is the sign-in it could not renew, and nothing is left for
+   * a failure that is about anything else.
    */
-  offlinePlayOffer: (accountId?: string) =>
-    invoke<string | null>("offline_play_offer", {
-      accountId: accountId ?? null,
-    }),
+  takeOfflinePlayOffer: (id: string) =>
+    invoke<string | null>("take_offline_play_offer", { id }),
 
   // Java
   detectJava: () => invoke<JavaInstall[]>("detect_java"),
@@ -673,7 +676,7 @@ export const api = {
    *
    * `offline` plays as the account's own name and UUID with no sign-in behind
    * it. Only ever true because the player said so on the dialog
-   * `offlinePlayOffer` raises.
+   * `takeOfflinePlayOffer` raises.
    */
   launchInstance: (id: string, accountId?: string, offline = false) =>
     invoke<{ pid: number; instanceId: string; notices: string[] }>("launch_instance", {

@@ -54,10 +54,20 @@ test("a re-target that lands here puts the loader section back in step", async (
   // own indent inside the component.
   const handler = tab.slice(start, tab.indexOf("\n  }", start));
 
+  // Both halves of the section, because the save bar's `dirty` check reads
+  // both: `loader !== instance.loader || loaderVersion !== instance.loaderVersion`.
+  // A move that put the loader back in step and left its build behind is the
+  // same bug with a narrower blast radius — Save would write the old Fabric
+  // build over the one every jar was just rebuilt for.
   assert.match(
     handler,
     /setLoader\(/,
     "a re-target applied to this instance leaves the loader section showing the old loader, and the save bar will write it back",
+  );
+  assert.match(
+    handler,
+    /setLoaderVersion\(/,
+    "a re-target applied to this instance leaves the loader section showing the old loader build, and the save bar will write it back",
   );
   assert.match(
     handler,
