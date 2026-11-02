@@ -120,7 +120,11 @@ library with no webview in its dependency tree at all.
   the export dialog is shown before anything is written — and the `Selection`
   of file groups every writer takes), `logs.rs`,
   `multiplayer.rs` (the player's own `servers.dat`, added to without losing a
-  byte of it — the same rule as `server/properties.rs`, in binary).
+  byte of it — the same rule as `server/properties.rs`, in binary),
+  `retarget.rs` (moving an installed instance to another Minecraft version or
+  loader: each mod's file found through `plan/build.rs`, a mod with none turned
+  off rather than deleted, a jar nothing can be looked up for named rather than
+  assumed, and a copy by default when there are worlds to lose).
 - **`connector.rs`** is Sinytra Connector support — running Fabric mods on
   Forge/NeoForge. The canonical example of reading support from what upstream
   actually publishes, as *pairs*, rather than trusting the union of two arrays.

@@ -645,6 +645,79 @@ pub async fn duplicate_instance(
     Ok(view(copy, &state))
 }
 
+/// Move an instance to a different Minecraft version or loader, re-pointing
+/// every mod it tracks at a file built for the new pair.
+///
+/// `to_copy` is which instance it lands on: `true` for a copy, `false` for
+/// this one, and `null` to leave the choice to Geode — which is a copy
+/// whenever there is something a one-way change would cost. The report says
+/// which happened, what moved, what had to be turned off and what was never
+/// examined.
+#[tauri::command]
+pub async fn retarget_instance(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    loader: String,
+    game_version: String,
+    to_copy: Option<bool>,
+) -> Result<crate::instance::retarget::RetargetReport> {
+    // The game has its mods and its version open, and moving them under it
+    // would mislead the player about what is running at best.
+    if state.games.is_running(&id) {
+        return Err(Error::msg(
+            "Stop the game before changing this instance's Minecraft version or loader",
+        ));
+    }
+    if state.is_launching(&id) {
+        return Err(Error::msg("Wait for the game to finish starting"));
+    }
+
+    let config = state.config().await;
+    let inst = instance::load(&state.paths, &id).await?;
+    let java_override = inst
+        .overrides
+        .java_path
+        .clone()
+        .or_else(|| config.java_path.clone())
+        .map(PathBuf::from);
+
+    let progress = Progress::new(crate::desktop::sink(app), format!("retarget:{id}"));
+    state.register_cancel(progress.id(), progress.cancel_flag());
+
+    // Being unable to read Connector's matrix costs the Connector option, not
+    // the answer: a Fabric-only mod is then reported as having nowhere to go on
+    // a NeoForge target, which is what it has without Connector.
+    let matrix = state.connector.get(&state.http).await.unwrap_or_default();
+
+    let result = crate::instance::retarget::retarget(
+        &state.http,
+        &state.paths,
+        &state.manifests,
+        &matrix,
+        &id,
+        &loader,
+        &game_version,
+        to_copy,
+        java_override.as_deref(),
+        config.effective_curseforge_key().as_deref(),
+        &progress,
+    )
+    .await;
+
+    state.clear_cancel(progress.id());
+    match result {
+        Ok(report) => {
+            progress.finish().await;
+            Ok(report)
+        }
+        Err(e) => {
+            progress.fail(&e.to_string()).await;
+            Err(e)
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn instance_folder(state: State<'_, AppState>, id: String) -> Result<String> {
     Ok(state.paths.game_dir(&id).to_string_lossy().to_string())

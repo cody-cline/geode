@@ -53,6 +53,7 @@ import type {
   Provider,
   RemoteHost,
   RemoteServer,
+  RetargetReport,
   Schedule,
   SearchQuery,
   SearchResults,
@@ -133,6 +134,27 @@ export const api = {
   deleteInstance: (id: string) => invoke<void>("delete_instance", { id }),
   duplicateInstance: (id: string, name: string) =>
     invoke<Instance>("duplicate_instance", { id, name }),
+  /**
+   * Move an instance to a different Minecraft version or loader, re-pointing
+   * its mods at files built for it.
+   *
+   * `toCopy` says which instance it lands on: `true` a copy, `false` this one,
+   * and `null` leaves it to Geode, which copies whenever there is something a
+   * one-way change would cost — worlds in it, or a server that decides its
+   * version. The report says which happened and why.
+   */
+  retargetInstance: (
+    id: string,
+    loader: string,
+    gameVersion: string,
+    toCopy: boolean | null,
+  ) =>
+    invoke<RetargetReport>("retarget_instance", {
+      id,
+      loader,
+      gameVersion,
+      toCopy,
+    }),
   instanceFolder: (id: string) => invoke<string>("instance_folder", { id }),
   /**
    * Set or clear an instance's icon or banner. `source` is a path on disk; the
