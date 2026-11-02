@@ -157,6 +157,11 @@ export interface Instance {
   joinedListingClaimed?: boolean;
   /** Added by the backend view layer. */
   running: boolean;
+  /**
+   * How many mods the instance holds: the jars in its `mods/` folder, the ones
+   * turned off included, whether or not Geode knows where any of them came
+   * from. Resource packs and shaders are not in it.
+   */
   modCount: number;
 }
 
@@ -755,7 +760,6 @@ export interface Account {
   kind: "microsoft" | "offline";
   active: boolean;
   needsReauth: boolean;
-  /** Which launcher an imported session came from. */
 }
 
 export interface DeviceCodeStart {
@@ -1298,6 +1302,18 @@ export interface PackPreview {
   /** Which of the three things Geode can read this is. */
   format: "mrpack" | "curseforge" | "prism";
   needsCurseforgeKey: boolean;
+}
+
+/**
+ * One importable instance inside a folder that is not itself an instance —
+ * Prism's own `instances/` directory, most often. `path` is what an import is
+ * then asked for, so the picker hands it straight back.
+ */
+export interface FolderInstance {
+  path: string;
+  name: string;
+  mcVersion: string;
+  loader: Loader;
 }
 
 // ---------------------------------------------------------------------------

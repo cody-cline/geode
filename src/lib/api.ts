@@ -17,6 +17,7 @@ import type {
   GameVersion,
   GitStatus,
   Forbidden,
+  FolderInstance,
   Group,
   GroupTally,
   InstallReport,
@@ -608,6 +609,14 @@ export const api = {
   // Modpacks
   previewModpack: (path: string) =>
     invoke<PackPreview>("preview_modpack", { path }),
+  /**
+   * The instances inside a folder that is not itself one, so a person who
+   * picked Prism's `instances/` directory is offered its ten rather than
+   * refused. Empty when the folder is an instance or holds none; both leave
+   * `previewModpack` to answer for the folder as it stands.
+   */
+  instancesInFolder: (path: string) =>
+    invoke<FolderInstance[]>("instances_in_folder", { path }),
   /** Makes the instance and reports what it could not fetch beside it. Progress id `import:<instance id>`. */
   importModpack: (path: string, name?: string) =>
     invoke<PackImport>("import_modpack", { path, name: name ?? null }),

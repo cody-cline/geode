@@ -279,6 +279,7 @@ pub fn run() {
             commands::running_instances,
             commands::cancel_task,
             commands::preview_modpack,
+            commands::instances_in_folder,
             commands::import_modpack,
             commands::export_groups,
             commands::export_plan,

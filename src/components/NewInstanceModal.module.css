@@ -136,3 +136,56 @@
   color: var(--text-faint);
   font-variant-numeric: tabular-nums;
 }
+
+/* The instances found inside a folder that was not itself one. Built from the
+   version list above it: same frame, same hover, one row per instance. */
+.foundList {
+  max-height: 324px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+
+.foundRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 13px;
+  color: var(--text-dim);
+  text-align: left;
+  border-left: 2px solid transparent;
+}
+
+.foundRow + .foundRow {
+  border-top: 1px solid var(--border);
+}
+
+.foundRow:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-left-color: var(--accent);
+  color: var(--text);
+}
+
+.foundRow:disabled {
+  opacity: 0.55;
+}
+
+.foundName {
+  font-weight: 500;
+  color: var(--text);
+}
+
+.foundMeta {
+  flex: 1;
+  font-size: 12px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.foundHint {
+  font-size: 12px;
+  color: var(--accent);
+}
