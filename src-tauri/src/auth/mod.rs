@@ -405,8 +405,7 @@ pub async fn minecraft_session(
     // `docs/releasing.md` for what actually causes it.
     if resp.status() == reqwest::StatusCode::FORBIDDEN {
         return Err(Error::msg(
-            "Microsoft sign-in is unavailable in this copy of Geode. Signing \
-             in through another launcher on this machine still works.",
+            "Microsoft sign-in is unavailable in this copy of Geode.",
         ));
     }
     if !resp.status().is_success() {
