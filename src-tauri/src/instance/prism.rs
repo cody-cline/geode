@@ -103,6 +103,16 @@ pub struct PrismInstance {
     pub game_dir: String,
     /// How many files that directory holds, so the import can say.
     pub file_count: usize,
+    /// Seconds of play, which is the unit `totalTimePlayed` is written in.
+    ///
+    /// `None` when the key is absent, and the difference matters: Prism not
+    /// having recorded a session is not the same answer as a session of no
+    /// length, and an instance played for forty hours that imports as never
+    /// played sorts last on a screen that sorts by play time.
+    pub play_seconds: Option<u64>,
+    /// When it was last launched, in seconds since the epoch — converted from
+    /// the milliseconds `lastLaunchTime` holds. `None` when the key is absent.
+    pub last_played: Option<i64>,
 }
 
 impl PrismInstance {
@@ -185,6 +195,79 @@ pub fn from_folder(dir: &Path) -> Result<Option<PrismInstance>> {
     instance.game_dir = game_dir.to_string();
     instance.file_count = count_files(&dir.join(game_dir));
     Ok(Some(instance))
+}
+
+/// One importable instance found inside a folder somebody pointed at.
+///
+/// Enough to tell the instances in a list apart and no more. The import that
+/// follows is handed [`Found::path`] and reads that folder for itself, so this
+/// never becomes a second description of an instance that could come to
+/// disagree with the one the import works from.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Found {
+    /// The instance folder itself, which is what an import is then asked for.
+    pub path: String,
+    pub name: String,
+    pub mc_version: String,
+    pub loader: Loader,
+}
+
+/// The instances sitting directly inside a folder that is not itself one.
+///
+/// Prism's `instances/` directory is the folder a person thinks of as "my
+/// instances", so pointing at it is the obvious thing to do — and it holds ten
+/// importable instances, which is a worse thing to refuse than to offer. The
+/// caller offers them and the person picks; nothing here imports anything.
+///
+/// Recognised by the two files [`from_folder`] reads and parsed by the same
+/// `from_texts`, so this cannot offer a folder the import would then turn
+/// down. What it leaves out is the rest of what reading one instance does —
+/// the game directory's name and its file count, which a list has no use for
+/// and which would cost a walk of every file in every instance there: forty
+/// thousand of them in a real Prism directory, for nine answers nobody asked
+/// for.
+///
+/// Empty for a folder that *is* an instance: that one is imported as it
+/// stands, and what sits inside it is its game directory rather than more
+/// instances. Empty, too, for a folder holding none — the caller's existing
+/// refusal is still the right answer there. One level down and no further:
+/// Prism does not nest instances, and searching somebody's home directory is
+/// not what they asked for by picking a folder.
+///
+/// A folder that cannot be read, or that the parser refuses, is one row
+/// missing rather than a list refused: a sibling Prism itself would not open
+/// says nothing about the nine beside it.
+pub async fn instances_inside(dir: &Path) -> Vec<Found> {
+    if dir.join(CFG).is_file() {
+        return Vec::new();
+    }
+    let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        let Ok(cfg) = tokio::fs::read_to_string(path.join(CFG)).await else {
+            continue;
+        };
+        let Ok(pack) = tokio::fs::read_to_string(path.join(PACK)).await else {
+            continue;
+        };
+        let Ok(instance) = from_texts(&cfg, &pack, &fallback_name(&path)) else {
+            continue;
+        };
+        found.push(Found {
+            path: path.to_string_lossy().to_string(),
+            name: instance.name,
+            mc_version: instance.mc_version,
+            loader: instance.loader,
+        });
+    }
+    // Prism's own order is its group file's, which is not read here; by name is
+    // the order the list is shown in either way.
+    found.sort_by_key(|f| f.name.to_lowercase());
+    found
 }
 
 /// Every file the instance's packwiz index names, read out of the game
@@ -404,6 +487,29 @@ fn from_texts(cfg: &str, pack: &str, fallback_name: &str) -> Result<PrismInstanc
     // `JavaPath` is never read, gate or no gate: a path to somebody else's
     // runtime means nothing on this machine, and Geode picks its own.
 
+    // Play time, which is not an override and so is read without a gate.
+    // `OverrideGameTime` governs whether this instance keeps its own answer to
+    // *whether to go on counting*, not whether what it already counted is
+    // true: every instance in a real Prism directory has that gate off and a
+    // `totalTimePlayed` beside it all the same.
+    //
+    // `totalTimePlayed` counts seconds, which is what Geode holds too — and
+    // reading it as milliseconds is the mistake worth naming, because it turns
+    // forty hours into forty seconds and shows an instance somebody lived in
+    // as one they never opened. `lastLaunchTime` is the other way round: a
+    // QDateTime millisecond stamp where Geode keeps a plain epoch second.
+    //
+    // `lastTimePlayed`, the length of the last session, is left where it is:
+    // Geode has nothing that means it.
+    let play_seconds = general.get("totalTimePlayed").and_then(|v| v.parse().ok());
+    // Prism stamps this when a launch *starts* where Geode stamps it when a
+    // session ends. Within one session of each other, which is all the screen
+    // showing it claims — "Played 3 days ago".
+    let last_played = general
+        .get("lastLaunchTime")
+        .and_then(|v| v.parse::<i64>().ok())
+        .map(|ms| ms / 1000);
+
     Ok(PrismInstance {
         name: general
             .get("name")
@@ -418,6 +524,8 @@ fn from_texts(cfg: &str, pack: &str, fallback_name: &str) -> Result<PrismInstanc
         prefix: String::new(),
         game_dir: GAME_DIR.to_string(),
         file_count: 0,
+        play_seconds,
+        last_played,
     })
 }
 
@@ -1981,6 +2089,130 @@ project-id = 1649197
             assert!(game.join("mods/VulkanMod-0.6.8+26.1.2.jar").exists(), "{id}");
             assert!(game.join("config/mine.toml").exists(), "{id}");
         }
+    }
+
+    /// Pointing at Prism's `instances/` directory — the folder a person thinks
+    /// of as "my instances" — offers what is in it instead of refusing it,
+    /// while a folder that is neither an instance nor a parent of one still
+    /// gets the refusal that says what was expected.
+    #[tokio::test]
+    async fn a_folder_of_instances_offers_the_instances_in_it() {
+        let scratch = Scratch::new("prism-parent");
+        let parent = scratch.paths.root.join("instances");
+        for (dir, name, mc, loader) in [
+            ("Survival", "Survival", "1.21.1", Some(("net.neoforged", "21.1.248"))),
+            ("creative-folder", "Creative", "1.20.4", None),
+        ] {
+            write_tree(
+                &parent.join(dir),
+                &[
+                    ("instance.cfg", &cfg(&[&format!("name={name}")])),
+                    ("mmc-pack.json", &mmc(mc, loader)),
+                    ("minecraft/mods/a.jar", "jar"),
+                ],
+            );
+        }
+        // Three folders that are not instances, beside the two that are: one
+        // empty, one holding an `instance.cfg` with no version profile beside
+        // it, and `instgroups.json`, which Prism keeps in this very folder.
+        std::fs::create_dir_all(parent.join("Empty")).unwrap();
+        write_tree(
+            &parent.join("Halfwritten"),
+            &[("instance.cfg", &cfg(&[]))],
+        );
+        write_tree(&parent, &[("instgroups.json", "{}")]);
+
+        let found = instances_inside(&parent).await;
+        assert_eq!(
+            found.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            ["Creative", "Survival"],
+            "by name, and only the folders that are instances"
+        );
+        assert_eq!(found[0].mc_version, "1.20.4");
+        assert_eq!(found[1].loader, Loader::NeoForge);
+
+        // The path offered is the path an import is then handed, so importing
+        // it has to work with nothing added to it.
+        let imported = import(&scratch.paths, "picked", Path::new(&found[1].path))
+            .await
+            .unwrap();
+        assert_eq!(imported.name, "Survival");
+        assert_eq!(imported.mc_version, "1.21.1");
+
+        // An instance folder is imported as it stands: what is inside it is
+        // its game directory, not more instances.
+        assert!(
+            instances_inside(&parent.join("Survival")).await.is_empty(),
+            "an instance folder offered its own insides"
+        );
+
+        // And a folder that is neither still gets the refusal it got before,
+        // which is the one that says what was expected.
+        let err = preview(parent.join("Empty")).await.expect_err("accepted");
+        assert!(err.to_string().contains("not an instance"), "{err}");
+        assert!(instances_inside(&parent.join("Empty")).await.is_empty());
+    }
+
+    /// Prism counts play time in seconds and stamps the last launch in
+    /// milliseconds, and an instance lived in for days has to arrive looking
+    /// like one. Reading `totalTimePlayed` as milliseconds would turn
+    /// seventy-seven hours into five minutes, and sort an instance somebody
+    /// played all year last on a screen that sorts by play time.
+    ///
+    /// A key Prism never wrote leaves the field where a new instance starts:
+    /// not having been measured is a different answer from no time played.
+    #[tokio::test]
+    async fn prism_play_time_arrives_at_the_magnitude_prism_recorded() {
+        let scratch = Scratch::new("prism-played");
+        let profile = mmc("1.21.1", Some(("net.fabricmc.fabric-loader", "0.16.9")));
+
+        // The numbers of a real, heavily played instance, read out of one.
+        let played = scratch.paths.root.join("played");
+        write_tree(
+            &played,
+            &[
+                (
+                    "instance.cfg",
+                    &cfg(&[
+                        "lastLaunchTime=1788728604093",
+                        "lastTimePlayed=9462",
+                        "totalTimePlayed=278255",
+                        // Off, as it is on every real instance, and no reason
+                        // not to read what was already counted.
+                        "OverrideGameTime=false",
+                    ]),
+                ),
+                ("mmc-pack.json", &profile),
+                ("minecraft/mods/a.jar", "jar"),
+            ],
+        );
+
+        let instance = import(&scratch.paths, "played", &played).await.unwrap();
+        assert_eq!(instance.play_seconds, 278_255);
+        assert_eq!(
+            instance.play_seconds / 3600,
+            77,
+            "seventy-seven hours, not five minutes"
+        );
+        // Seconds since the epoch, from the milliseconds the file holds.
+        assert_eq!(instance.last_played, Some(1_788_728_604));
+
+        // An instance Prism never recorded a session for.
+        let never = scratch.paths.root.join("never");
+        write_tree(
+            &never,
+            &[
+                ("instance.cfg", &cfg(&[])),
+                ("mmc-pack.json", &profile),
+                ("minecraft/mods/a.jar", "jar"),
+            ],
+        );
+        let fresh = import(&scratch.paths, "never", &never).await.unwrap();
+        assert_eq!(fresh.play_seconds, 0);
+        assert_eq!(
+            fresh.last_played, None,
+            "never played is not the same as played at the epoch"
+        );
     }
 
     // -----------------------------------------------------------------------

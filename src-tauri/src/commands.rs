@@ -391,6 +391,9 @@ pub struct InstanceView {
     #[serde(flatten)]
     pub instance: Instance,
     pub running: bool,
+    /// How many mods the instance holds: the jars in its `mods/` folder, the
+    /// ones turned off included, whether or not Geode knows where any of them
+    /// came from. Resource packs and shaders are not mods and are not in it.
     pub mod_count: usize,
     /// Absolute paths to the uploaded images, or `None` when none is set or the
     /// file has since gone. Resolved here so the UI never builds a path or
@@ -406,15 +409,17 @@ fn media_path(dir: &std::path::Path, name: &Option<String>) -> Option<String> {
     path.is_file().then(|| path.to_string_lossy().to_string())
 }
 
-fn view(instance: Instance, state: &AppState) -> InstanceView {
+/// Costs one folder read per instance and opens nothing: the mod count is a
+/// count of files. [`instance::content::list`] joins those same files with
+/// what is recorded about each one and would answer it too, but it opens every
+/// jar in the instance for its manifest to do it — right for one instance's
+/// page, and measured at a few hundred times the cost on a screen that builds
+/// a view for every instance there is.
+async fn view(instance: Instance, state: &AppState) -> InstanceView {
     let media = state.paths.instance_media(&instance.id);
     InstanceView {
         running: state.games.is_running(&instance.id),
-        mod_count: instance
-            .content
-            .iter()
-            .filter(|c| c.kind == ContentKind::Mod)
-            .count(),
+        mod_count: instance::content::count(&state.paths, &instance.id, ContentKind::Mod).await,
         icon_path: media_path(&media, &instance.icon),
         banner_path: media_path(&media, &instance.banner),
         instance,
@@ -462,16 +467,16 @@ async fn store_image(dir: &std::path::Path, slot: &str, source: &str) -> Result<
 
 #[tauri::command]
 pub async fn list_instances(state: State<'_, AppState>) -> Result<Vec<InstanceView>> {
-    Ok(instance::list(&state.paths)
-        .await?
-        .into_iter()
-        .map(|i| view(i, &state))
-        .collect())
+    let mut views = Vec::new();
+    for instance in instance::list(&state.paths).await? {
+        views.push(view(instance, &state).await);
+    }
+    Ok(views)
 }
 
 #[tauri::command]
 pub async fn get_instance(state: State<'_, AppState>, id: String) -> Result<InstanceView> {
-    Ok(view(instance::load(&state.paths, &id).await?, &state))
+    Ok(view(instance::load(&state.paths, &id).await?, &state).await)
 }
 
 #[tauri::command]
@@ -496,7 +501,7 @@ pub async fn create_instance(
 
     let created =
         instance::create(&state.paths, name, game_version, loader, loader_version).await?;
-    Ok(view(created, &state))
+    Ok(view(created, &state).await)
 }
 
 #[derive(Debug, Deserialize)]
@@ -547,7 +552,7 @@ pub async fn update_instance(
     }
 
     inst.save(&state.paths).await?;
-    Ok(view(inst, &state))
+    Ok(view(inst, &state).await)
 }
 
 /// Set or clear an instance's icon or banner.
@@ -588,7 +593,7 @@ pub async fn set_instance_image(
         inst.banner = next;
     }
     inst.save(&state.paths).await?;
-    Ok(view(inst, &state))
+    Ok(view(inst, &state).await)
 }
 
 /// The same for a server.
@@ -642,7 +647,7 @@ pub async fn duplicate_instance(
     name: String,
 ) -> Result<InstanceView> {
     let copy = instance::duplicate(&state.paths, &id, name.trim().to_string()).await?;
-    Ok(view(copy, &state))
+    Ok(view(copy, &state).await)
 }
 
 /// Move an instance to a different Minecraft version or loader, re-pointing
@@ -1189,7 +1194,7 @@ pub async fn install_modpack(
     match result {
         Ok(missing) if missing.is_empty() => {
             progress.finish().await;
-            Ok(view(inst, &state))
+            Ok(view(inst, &state).await)
         }
         // The instance exists and holds most of the pack, so what needs the
         // user is said through the job rather than returned instead of the
@@ -1203,7 +1208,7 @@ pub async fn install_modpack(
                     missing.join(", ")
                 ))
                 .await;
-            Ok(view(inst, &state))
+            Ok(view(inst, &state).await)
         }
         Err(e) => {
             progress.fail(&e.to_string()).await;
@@ -1300,7 +1305,7 @@ pub async fn apply_pack_update(
         Ok(problems) if problems.is_empty() => {
             progress.finish().await;
             Ok(PackImport {
-                instance: view(inst, &state),
+                instance: view(inst, &state).await,
                 problems,
             })
         }
@@ -1313,7 +1318,7 @@ pub async fn apply_pack_update(
             );
             progress.fail(&detail).await;
             Ok(PackImport {
-                instance: view(inst, &state),
+                instance: view(inst, &state).await,
                 problems,
             })
         }
@@ -4316,6 +4321,14 @@ pub async fn preview_modpack(path: String) -> Result<instance::modpack::PackPrev
     share::pack::preview(&PathBuf::from(path)).await
 }
 
+/// The instances inside a folder that is not itself one, for the picker that
+/// offers them. Empty when the folder is an instance or holds none, which both
+/// leave the import to answer for the folder as it stands.
+#[tauri::command]
+pub async fn instances_in_folder(path: String) -> Result<Vec<instance::prism::Found>> {
+    Ok(instance::prism::instances_inside(&PathBuf::from(path)).await)
+}
+
 /// Import a pack file, and report what it could not fetch *beside* the
 /// instance rather than instead of it.
 ///
@@ -4377,7 +4390,7 @@ pub async fn import_modpack(
         Ok(missing) if missing.is_empty() => {
             progress.finish().await;
             Ok(PackImport {
-                instance: view(inst, &state),
+                instance: view(inst, &state).await,
                 problems: Vec::new(),
             })
         }
@@ -4394,7 +4407,7 @@ pub async fn import_modpack(
             );
             progress.fail(&detail).await;
             Ok(PackImport {
-                instance: view(inst, &state),
+                instance: view(inst, &state).await,
                 problems: vec![detail],
             })
         }
@@ -5214,7 +5227,7 @@ pub async fn relink_joined_instance(
     link: share::link::Link,
 ) -> Result<InstanceView> {
     let inst = relink(&state.paths, &id, link).await?;
-    Ok(view(inst, &state))
+    Ok(view(inst, &state).await)
 }
 
 /// A join that got as far as creating the instance.
@@ -5270,7 +5283,7 @@ pub async fn join_server(
                 progress.fail(&problems.join("; ")).await;
             }
             Ok(JoinOutcome {
-                instance: view(inst, &state),
+                instance: view(inst, &state).await,
                 problems,
             })
         }

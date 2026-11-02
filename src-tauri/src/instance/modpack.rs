@@ -376,7 +376,10 @@ enum PackKind {
     /// A Prism / MultiMC instance, as a zip or as the folder itself. Not a
     /// pack at all: it carries its files rather than naming them, and what it
     /// does name it names in a packwiz index — see [`prism`].
-    Prism(prism::PrismInstance),
+    ///
+    /// Boxed because it is twice the size of either manifest beside it, and
+    /// this enum is returned by value from every reader below.
+    Prism(Box<prism::PrismInstance>),
 }
 
 /// The most a pack's index or manifest may inflate to.
@@ -470,7 +473,7 @@ fn read_pack(archive: &Path) -> Result<PackKind> {
     // A folder is an instance somebody pointed at — only a file can be a pack.
     if archive.is_dir() {
         return prism::from_folder(archive)?
-            .map(PackKind::Prism)
+            .map(|instance| PackKind::Prism(Box::new(instance)))
             .ok_or_else(|| {
                 Error::msg(
                     "that folder is not an instance — expected an instance.cfg inside it, as a \
@@ -521,7 +524,7 @@ fn read_pack(archive: &Path) -> Result<PackKind> {
     // would read it: the two pack manifests are matched at the exact root and
     // win, and `instance.cfg` is matched at any depth.
     if let Some(instance) = prism::from_zip(&mut zip, archive)? {
-        return Ok(PackKind::Prism(instance));
+        return Ok(PackKind::Prism(Box::new(instance)));
     }
 
     Err(Error::msg(
@@ -1233,6 +1236,16 @@ pub async fn import_into_at(
             }
 
             instance.notes = prism_instance.notes;
+            // Prism's own record of play, where it kept one. A key it never
+            // wrote leaves the field at what a new instance starts with rather
+            // than writing a confident zero over it: not having been measured
+            // is a different answer from having been played for no time.
+            if let Some(seconds) = prism_instance.play_seconds {
+                instance.play_seconds = seconds;
+            }
+            if let Some(at) = prism_instance.last_played {
+                instance.last_played = Some(at);
+            }
             // Only the values whose gate `instance.cfg` set, one by one: the
             // rest of an instance's overrides are this machine's business.
             instance.overrides.memory_mb = prism_instance.overrides.memory_mb;
