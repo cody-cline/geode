@@ -75,3 +75,34 @@ test("a re-target that lands here puts the loader section back in step", async (
     "the loader section is put back in step unconditionally, including for a move that landed on a copy and left this instance alone",
   );
 });
+
+// The warning under "This instance" is the only place the dialog says what a
+// move costs, and it is shown without knowing whether there is anything to
+// lose: `ReplanModal` reads no world data at all, so it cannot state as a fact
+// that this instance has worlds. It did — "This cannot be undone for the
+// worlds in Survival" over an instance with an empty `saves`.
+//
+// Nor is the target necessarily newer. A re-target goes either way, and a
+// warning that only describes an upgrade is wrong on half of them.
+test("the world warning claims only what the dialog knows", async () => {
+  const modal = await source("../components/ReplanModal.tsx");
+
+  const start = modal.indexOf('landOn === "here" && (');
+  assert.ok(start > 0, "the dialog no longer warns about the choice that cannot be undone");
+  const warning = modal.slice(start, modal.indexOf("\n                )}", start));
+
+  assert.ok(
+    !/worlds in \$\{instance\.name\}/.test(warning),
+    "the warning states that this instance has worlds, which nothing here read",
+  );
+  assert.match(
+    warning,
+    /Any world in this instance/,
+    "the warning asserts there are worlds rather than saying what happens to any there are",
+  );
+  assert.match(
+    warning,
+    /older/,
+    "the warning only describes moving to a newer Minecraft, and a re-target goes either way",
+  );
+});

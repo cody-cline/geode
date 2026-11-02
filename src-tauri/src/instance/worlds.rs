@@ -84,12 +84,16 @@ pub struct World {
     ///
     /// A recursive walk per row, which is the shape the mod-count work found
     /// worth checking rather than assuming — a folder scan there was 0.31 ms
-    /// where opening each jar was 117 ms. Measured here: the ten real worlds on
-    /// this machine hold 39 to 101 files each and cost 0.9 to 1.9 ms apiece, so
-    /// a full list is some 15 ms; a built-up world of 3,461 region files costs
-    /// 25 to 32 ms. It stats, never opens, so the ceiling is the file count and
-    /// not the gigabytes. Kept at that price because a world's size is what
-    /// somebody deciding whether to back one up is looking for.
+    /// where opening each jar was 117 ms. No timing is quoted for this walk,
+    /// because none of it was taken: the figures that used to stand here
+    /// described worlds nobody counted, and a figure in a comment reads as
+    /// freshly measured whether it was or not. What is true of the shape is
+    /// enough to keep it, and that is all that is said — this stats and
+    /// never opens, so the cost is the file count and not the gigabytes, and a
+    /// world runs from a few dozen files when it is made to tens of thousands
+    /// once it has been played, which is what to measure if it ever matters.
+    /// Kept at that price because a world's size is what somebody deciding
+    /// whether to back one up is looking for.
     pub size: u64,
     /// Why this folder is not a world Geode can read, if it is not. A folder
     /// with no `level.dat`, or one whose `level.dat` does not parse, is

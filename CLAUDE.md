@@ -97,9 +97,13 @@ registers, and the screens mix them badly when a third appears: a refusal that
 states a fact is a lowercase fragment with no full stop ("no backup called
 `{name}`"), and one that tells somebody what to do first is a capitalised
 sentence, punctuated, with its reason as a second sentence ("Stop the game
-before backing up a world. Minecraft keeps…"). Nothing a provider or an OS
-handed back is quoted into either — see `describe_oauth_error`, where 300
-characters of a 503's HTML used to become the toast.
+before backing up a world. Minecraft keeps…"). A provider's own structured
+error field may be read out when the body really parsed as that shape — a raw
+response body never is. `describe_oauth_error` is both halves: it passes
+Microsoft's documented `error_description` through, first line only and capped,
+because "AADSTS700082: the refresh token has expired" is the whole answer, and
+it says nothing of a body that is not that shape, after 300 characters of a
+503's HTML used to become the toast.
 
 **Secrets never cross the IPC boundary.** `Config::redacted()` replaces the
 CurseForge key with booleans before the frontend sees it (there is a test named

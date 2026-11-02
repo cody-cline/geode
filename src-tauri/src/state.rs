@@ -240,13 +240,20 @@ impl AppState {
     /// Taken rather than read, because it answers one failure once: a dialog
     /// that could be raised twice from one sign-in problem is a dialog that
     /// outlives the thing it is about.
+    ///
+    /// Compared before it is taken, because there is one slot for every
+    /// instance. Taking first meant a question about any other instance threw
+    /// the offer away: the dialog the failed launch left it for never came up,
+    /// because something else on screen had asked first.
     pub fn take_offline_play_offer(&self, instance_id: &str) -> Option<String> {
         let mut slot = self.offline_offer.lock().ok()?;
-        let offer = slot.take()?;
-        if offer.instance_id == instance_id {
-            return Some(offer.username);
+        if !slot
+            .as_ref()
+            .is_some_and(|offer| offer.instance_id == instance_id)
+        {
+            return None;
         }
-        None
+        slot.take().map(|offer| offer.username)
     }
 }
 
@@ -334,10 +341,13 @@ mod tests {
         state.offer_offline_play("survival".into(), "Notch".into());
         // Not the instance the dialog would be about.
         assert_eq!(state.take_offline_play_offer("creative"), None);
+        // And asking about one is a question, not an answer: there is one slot
+        // for every instance, and taking from it before reading whose it was
+        // meant a row nobody failed to launch could destroy a live offer.
         assert_eq!(
             state.take_offline_play_offer("survival"),
-            None,
-            "an offer survived being asked about another instance",
+            Some("Notch".to_string()),
+            "an offer was destroyed by a question about another instance",
         );
 
         // Answered once, and not again: the error it belongs to is on screen

@@ -32,8 +32,13 @@
 //! been made takes the copy with it, so there is no plausible-looking instance
 //! left in the library whose mods are built for a version it is not. In place
 //! there is no copy to take away, so from the first file that moves nothing
-//! fails the move at all — it is absorbed into the report — bar writing the
-//! instance's own file at the end, which is [`not_written_down`].
+//! fails the move at all — it is absorbed into the report — bar two things.
+//! One is writing the instance's own file at the end, which is
+//! [`not_written_down`]. The other is somebody cancelling: that is not an
+//! answer about any mod, so it is never absorbed into the report as one.
+//! The move stops where it stands, what already moved is written down so the
+//! instance says what its folder holds, and the account of it goes back in the
+//! error instead of a report — [`stopped_part_way`].
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -191,6 +196,7 @@ pub async fn retarget(
         matrix,
         support,
         &mut inst,
+        to_copy,
         loader,
         &loader_version,
         game_version,
@@ -226,6 +232,11 @@ pub async fn retarget(
 /// it was. After that nothing fails the whole operation: a mod that cannot be
 /// moved is reported and turned off, which is a finished answer rather than a
 /// half-done one.
+///
+/// `to_copy` is not used to decide anything about a mod — `inst` is already
+/// whichever instance this lands on. It is what the two failures that cannot be
+/// absorbed say, because on a copy the caller takes the destination away and
+/// there is nothing left for a person to go and fix.
 #[allow(clippy::too_many_arguments)] // one target's coordinates, travelling together
 async fn apply(
     client: &reqwest::Client,
@@ -234,6 +245,7 @@ async fn apply(
     matrix: &SupportMatrix,
     support: &SupportCache,
     inst: &mut Instance,
+    to_copy: bool,
     loader: Loader,
     loader_version: &str,
     game_version: &str,
@@ -326,17 +338,11 @@ async fn apply(
             // so a failure part-way has already put files in the folder — and
             // in place there is no copy to delete, so returning left an
             // instance whose `instance.json` named the old target over a
-            // folder that no longer matched it. The move finishes instead: the
-            // mods that needed the layer are turned off and say why, which is
-            // the same answer this gives a mod with nowhere to go.
-            Err(e) => without_connector(
-                &mut placements,
-                &format!(
-                    "Sinytra Connector could not be installed, so a Fabric build cannot run on \
-                     {} {game_version}: {e}",
-                    loader.display_name()
-                ),
-            ),
+            // folder that no longer matched it. The move finishes instead, and
+            // what it tells the mods that needed the layer depends on which
+            // failure this was — see [`without_connector`], which is where
+            // that stopped being one answer for all three.
+            Err(e) => without_connector(&mut placements, &e, loader, game_version),
         }
     }
 
@@ -438,10 +444,18 @@ async fn apply(
     // a cancellation is answered, because what has already moved on disk has
     // to be what the instance says it holds.
     if let Err(e) = inst.save(paths).await {
-        return Err(not_written_down(&inst.name, &was, loader, game_version, e));
+        return Err(not_written_down(
+            &inst.name, to_copy, &was, loader, game_version, e,
+        ));
     }
     if cancelled {
-        return Err(Error::Cancelled);
+        return Err(stopped_part_way(
+            &report,
+            to_copy,
+            &was,
+            loader,
+            game_version,
+        ));
     }
     Ok(report)
 }
@@ -465,7 +479,24 @@ async fn apply(
 /// know which is which: the files are the new one, the file that describes them
 /// is the old one, and setting the version and loader in the instance's
 /// settings is what puts them back in step.
-fn not_written_down(name: &str, was: &str, loader: Loader, game_version: &str, e: Error) -> Error {
+///
+/// All of that is the in-place path. On a copy this failure *can* be rolled
+/// back, and is: the caller deletes the copy, so the plain failure goes back
+/// and nothing is left for anybody to fix. Advice about an instance's settings
+/// would be advice about a copy that stopped existing a moment later — the name
+/// here is whichever instance the move landed on, which on that path is the
+/// copy.
+fn not_written_down(
+    name: &str,
+    to_copy: bool,
+    was: &str,
+    loader: Loader,
+    game_version: &str,
+    e: Error,
+) -> Error {
+    if to_copy {
+        return Error::msg(format!("writing the copy's own instance file: {e}"));
+    }
     Error::msg(format!(
         "{name}'s mods are now built for {} {game_version}, but Geode could not write that down: \
          {e}. It still says {was}, so set its Minecraft version and loader to {} {game_version} in \
@@ -475,17 +506,98 @@ fn not_written_down(name: &str, was: &str, loader: Loader, game_version: &str, e
     ))
 }
 
-/// Strand every mod that was going to run through Connector, with Connector's
-/// own failure as the reason.
+/// What a move somebody stopped part way comes back as.
+///
+/// The report is the only account of what it had already done, and a
+/// cancellation has nowhere to put one: the caller asked for a target and is
+/// getting an error instead. So the account goes in the error, because the one
+/// thing a person has to know is that the instance is the new target and some
+/// of its jars are not. Running the move again finishes it, which is said.
+///
+/// Nothing in here was turned off by the cancellation — cancelling is not an
+/// answer about a mod, so what this names is only what the move genuinely did:
+/// the mods it had re-pointed, and the ones it found no build for on the way.
+///
+/// On a copy there is nothing to account for, the same way there is nothing to
+/// fix: the caller takes the copy away, so a plain cancellation is the whole
+/// truth and naming a copy about to stop existing would not be.
+fn stopped_part_way(
+    report: &RetargetReport,
+    to_copy: bool,
+    was: &str,
+    loader: Loader,
+    game_version: &str,
+) -> Error {
+    if to_copy {
+        return Error::Cancelled;
+    }
+    let to = format!("{} {game_version}", loader.display_name());
+    Error::msg(format!(
+        "Moving {} to {to} was stopped part way through. {} of its mods had been re-pointed at a \
+         build for {to} and {} turned off for having none; the rest are still built for {was}. \
+         The instance itself now says {to}, so run this again to finish the move.",
+        report.instance_name,
+        report.repointed.len(),
+        report.stranded.len(),
+    ))
+}
+
+/// Take the Connector option away from every mod the ladder placed on one,
+/// with Connector's own failure as the reason.
 ///
 /// A Fabric jar in a (Neo)Forge mods folder does nothing without the layer
-/// under it, so a mod whose only fit here was a Connector one has nowhere to
-/// go after all. Everything else keeps the placement it had: a native build is
-/// a native build whether Connector installed or not.
-fn without_connector(placements: &mut [(ContentRecord, Placement)], reason: &str) {
+/// under it, so a mod whose chosen fit was a Connector one has no file here
+/// after all. The rungs below that one are not climbed again: Minecraft is
+/// installed by the time this is called, and from the first file that moves
+/// this module asks nothing outside the machine. Everything else keeps the
+/// placement it had — a native build is a native build whether Connector
+/// installed or not.
+///
+/// Which answer those mods get is the whole of this function, and it is not one
+/// answer for three failures. Being told otherwise is how a dropped connection
+/// came to turn mods off again:
+///
+/// * [`Error::Unpublished`] — a project in the stack publishes nothing for this
+///   pair. An answer, as much as the support matrix read off Connector's own
+///   files is, so the mod has nowhere to go and is turned off.
+/// * Anything else — a provider that did not answer, a download that dropped.
+///   That is an answer about nothing, and a mod is never turned off because
+///   something could not be asked. Reported unchecked, jar untouched.
+/// * [`Error::Cancelled`] — not an answer about any mod at all, so no mod's
+///   placement is touched. [`apply`]'s own mod loop reads the same flag, breaks
+///   before the first mod, and [`stopped_part_way`] says what the move had
+///   done: cancelling here is cancelling at the first mod, and there is no
+///   honest second reading of it.
+fn without_connector(
+    placements: &mut [(ContentRecord, Placement)],
+    failure: &Error,
+    loader: Loader,
+    game_version: &str,
+) {
+    if matches!(failure, Error::Cancelled) {
+        return;
+    }
+    let answered = matches!(failure, Error::Unpublished(_));
+    let reason = if answered {
+        format!(
+            "a Fabric build needs Sinytra Connector to run on {} {game_version}, and {failure}",
+            loader.display_name()
+        )
+    } else {
+        format!(
+            "Sinytra Connector could not be installed, so whether a Fabric build runs on {} \
+             {game_version} was never settled: {failure}",
+            loader.display_name()
+        )
+    };
+
     for (_, placement) in placements.iter_mut() {
         if matches!(placement, Placement::Found(f) if f.through_connector) {
-            *placement = Placement::Nowhere(reason.to_string());
+            *placement = if answered {
+                Placement::Nowhere(reason.clone())
+            } else {
+                Placement::Unanswered(reason.clone())
+            };
         }
     }
 }
@@ -1327,13 +1439,9 @@ mod tests {
         );
     }
 
-    /// Connector failing costs the mods that needed it, not the move.
-    ///
-    /// In place there is no copy to delete, and `ensure_stack` installs jar by
-    /// jar — so returning here left an instance whose `instance.json` named the
-    /// old target over a folder that had already changed.
-    #[test]
-    fn connector_failing_strands_only_the_mods_that_needed_it() {
+    /// Three mods with three placements, for the three ways the Connector
+    /// runtime can fail to go in.
+    fn connector_placements() -> Vec<(ContentRecord, Placement)> {
         let found = |through_connector| {
             let (project, version, loader) = published("1.21.1", "fabric");
             Placement::Found(Box::new(Found {
@@ -1344,16 +1452,30 @@ mod tests {
                 game_version: "1.21.1".into(),
             }))
         };
-        let mut placements = vec![
+        vec![
             (record("sodium.jar", "Sodium"), found(false)),
             (record("fabric-only.jar", "Fabric Only"), found(true)),
             (
                 record("by-hand.jar", "By Hand"),
                 Placement::Unanswered("nobody answered".into()),
             ),
-        ];
+        ]
+    }
 
-        without_connector(&mut placements, "Sinytra Connector could not be installed: no build");
+    /// Connector failing costs the mods that needed it, not the move.
+    ///
+    /// In place there is no copy to delete, and `ensure_stack` installs jar by
+    /// jar — so returning here left an instance whose `instance.json` named the
+    /// old target over a folder that had already changed.
+    #[test]
+    fn connector_failing_strands_only_the_mods_that_needed_it() {
+        let mut placements = connector_placements();
+        without_connector(
+            &mut placements,
+            &Error::Unpublished("Connector Extras has no build for Minecraft 1.21.1".into()),
+            Loader::NeoForge,
+            "1.21.1",
+        );
 
         assert!(matches!(placements[0].1, Placement::Found(ref f) if !f.through_connector));
         match &placements[1].1 {
@@ -1363,12 +1485,152 @@ mod tests {
         assert!(matches!(placements[2].1, Placement::Unanswered(_)));
     }
 
+    /// **The rule the previous fix broke putting it back.** `ensure_stack` is
+    /// three Modrinth calls and an install, so a dropped connection comes out
+    /// of it — and every failure was being read as "Connector is not available
+    /// for this pair", which is what turns a mod off. A request that failed is
+    /// not an answer here either.
+    ///
+    /// The mod is reported unchecked instead, which is what leaves its jar
+    /// alone: the loop that would have renamed it `.disabled` only sees
+    /// `Nowhere`.
+    #[test]
+    fn a_connector_request_that_failed_never_strands_a_mod() {
+        let mut placements = connector_placements();
+        without_connector(
+            &mut placements,
+            &Error::msg("network request failed: connection closed before message completed"),
+            Loader::NeoForge,
+            "1.21.1",
+        );
+
+        assert!(matches!(placements[0].1, Placement::Found(ref f) if !f.through_connector));
+        match &placements[1].1 {
+            Placement::Unanswered(reason) => {
+                assert!(reason.contains("never settled"), "{reason}");
+                assert!(reason.contains("NeoForge 1.21.1"), "{reason}");
+            }
+            Placement::Nowhere(reason) => {
+                panic!("a mod was turned off because a request failed: {reason}")
+            }
+            _ => panic!("a native build lost its placement"),
+        }
+        assert!(matches!(placements[2].1, Placement::Unanswered(_)));
+    }
+
+    /// Cancelling is not an answer about any mod, so no mod's placement
+    /// changes: not to nowhere, which turns it off, and not to unchecked
+    /// either, which would report a mod nobody asked about as examined.
+    ///
+    /// What happens to the move instead is
+    /// [`a_cancelled_move_says_what_it_already_did`].
+    #[test]
+    fn cancelling_while_connector_installs_decides_nothing_about_a_mod() {
+        let mut placements = connector_placements();
+        let before: Vec<&'static str> = placements
+            .iter()
+            .map(|(_, p)| match p {
+                Placement::Found(_) => "found",
+                Placement::Nowhere(_) => "nowhere",
+                Placement::Unanswered(_) => "unanswered",
+            })
+            .collect();
+
+        without_connector(&mut placements, &Error::Cancelled, Loader::NeoForge, "1.21.1");
+
+        let after: Vec<&'static str> = placements
+            .iter()
+            .map(|(_, p)| match p {
+                Placement::Found(_) => "found",
+                Placement::Nowhere(_) => "nowhere",
+                Placement::Unanswered(_) => "unanswered",
+            })
+            .collect();
+        assert_eq!(
+            after, before,
+            "a mod was given a verdict because somebody pressed cancel",
+        );
+        assert!(matches!(placements[1].1, Placement::Found(ref f) if f.through_connector));
+    }
+
+    /// A cancellation is not absorbed into the report as though it were an
+    /// answer, and it does not throw away what the move had already done
+    /// either: the instance is the new target and some of its jars are not, so
+    /// the error says so and says how to finish it.
+    ///
+    /// On a copy there is nothing to say. The caller deletes the copy, so
+    /// naming it — or telling somebody to run the move again on it — would be
+    /// about an instance that no longer exists.
+    #[test]
+    fn a_cancelled_move_says_what_it_already_did() {
+        let mut report = RetargetReport {
+            instance_id: "i".into(),
+            instance_name: "Survival".into(),
+            mc_version: "1.21.1".into(),
+            loader: "neoforge".into(),
+            loader_version: "21.1.80".into(),
+            applied_to_copy: false,
+            copied_because: None,
+            repointed: Vec::new(),
+            stranded: Vec::new(),
+            unchecked: Vec::new(),
+            connector: Vec::new(),
+        };
+        report.repointed.push(RepointedMod {
+            name: "Sodium".into(),
+            file_name: "sodium.jar".into(),
+            version_number: "1.0".into(),
+            through_connector: false,
+            via_version: None,
+            skipped: Vec::new(),
+        });
+        report.stranded.push(StrandedMod {
+            name: "Old Mod".into(),
+            file_name: "oldmod.jar".into(),
+            reason: "nothing published runs on NeoForge 1.21.1".into(),
+            off: true,
+        });
+
+        let text = stopped_part_way(&report, false, "Fabric 1.20.1", Loader::NeoForge, "1.21.1")
+            .to_string();
+        assert!(text.contains("Survival"), "{text}");
+        assert!(text.contains("NeoForge 1.21.1"), "{text}");
+        assert!(text.contains("Fabric 1.20.1"), "{text}");
+        // What it had done, counted off the report rather than guessed at.
+        assert!(
+            text.contains("1 of its mods had been re-pointed"),
+            "the one mod that moved went unaccounted for: {text}",
+        );
+        assert!(
+            text.contains("1 turned off"),
+            "the one mod turned off went unaccounted for: {text}",
+        );
+        assert!(
+            text.contains("run this again"),
+            "a half-finished move said nothing about finishing it: {text}",
+        );
+
+        // On a copy: the copy goes, so there is nothing to account for and
+        // nothing to tell anybody to do.
+        let on_copy = stopped_part_way(&report, true, "Fabric 1.20.1", Loader::NeoForge, "1.21.1");
+        assert!(
+            matches!(on_copy, Error::Cancelled),
+            "a cancellation named a copy the caller was about to delete: {on_copy}",
+        );
+    }
+
     /// The one failure that cannot be rolled back says so, and names both
     /// halves: what the files are now, and what the instance still claims.
+    ///
+    /// Only in place, because only there is it unrollbackable. On the copy path
+    /// — which this is reached on too — the caller deletes the copy, and the
+    /// message was being built from the copy's own name and then telling
+    /// somebody to open its settings, moments before it stopped existing.
     #[test]
     fn a_move_that_could_not_be_written_down_says_what_to_do_about_it() {
         let err = not_written_down(
             "Survival",
+            false,
             "Fabric 1.20.1",
             Loader::NeoForge,
             "1.21.1",
@@ -1380,6 +1642,25 @@ mod tests {
         assert!(text.contains("Fabric 1.20.1"), "{text}");
         assert!(text.contains("no space left on device"), "{text}");
         assert!(text.contains("settings"), "{text}");
+
+        let on_copy = not_written_down(
+            "Survival (NeoForge 1.21.1)",
+            true,
+            "Fabric 1.20.1",
+            Loader::NeoForge,
+            "1.21.1",
+            Error::msg("no space left on device"),
+        )
+        .to_string();
+        assert!(on_copy.contains("no space left on device"), "{on_copy}");
+        assert!(
+            !on_copy.contains("settings"),
+            "a copy that is about to be deleted was something to go and fix: {on_copy}",
+        );
+        assert!(
+            !on_copy.contains("Survival (NeoForge 1.21.1)"),
+            "a copy that is about to be deleted was named: {on_copy}",
+        );
     }
 
     /// Nothing points anywhere: a client whose every request fails.

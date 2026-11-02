@@ -455,13 +455,23 @@ export default function ReplanModal({
                     only on it: "nothing puts that back" in a hint under a
                     dropdown is a sentence somebody reads after. What it costs
                     is a world, so the words are the cost and the way to keep
-                    one. */}
+                    one.
+
+                    Worded for what this screen actually knows, which is not
+                    whether there are any worlds — nothing here reads an
+                    instance's `saves`, and a dialog that fetched a world list
+                    to decide which sentence to print would be reading the disk
+                    to choose wording. It headed itself "the worlds in
+                    Survival" over an instance that had none. Nor is the target
+                    necessarily newer than the instance: a re-target goes
+                    either way, and each direction costs a world something
+                    different. */}
                 {landOn === "here" && (
                   <StatusNote
                     line={{
                       tone: "warn",
-                      title: `This cannot be undone for the worlds in ${instance.name}`,
-                      detail: `Playing at ${loaderLabel(target.loader)} ${target.gameVersion} opens every world here with that version, and a world's data format is upgraded the first time a newer Minecraft opens it — no version puts it back, and these are the only copy of them. Back up the ones you care about from the Worlds tab first if you want to be able to play them at ${instance.mcVersion} again.`,
+                      title: `Applying this to ${instance.name} itself cannot be undone`,
+                      detail: `Any world in this instance is opened at ${loaderLabel(target.loader)} ${target.gameVersion} from now on, and it is the only copy there is. That is one-way either way: a world's data format is upgraded the first time a newer Minecraft opens it and no version puts it back, and a Minecraft older than the one a world was last saved by may not open it at all. Back up the worlds you care about from the Worlds tab first if you want to be able to play them at ${instance.mcVersion} again — or apply this to a copy, which leaves this instance exactly as it is.`,
                     }}
                   />
                 )}
