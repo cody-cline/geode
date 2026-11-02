@@ -129,6 +129,16 @@ library with no webview in its dependency tree at all.
   way to sign in: Geode used to adopt a live session from another launcher on
   the machine, which existed solely because signing in needed an application id
   Mojang had not yet approved, and went when that approval arrived.
+  Two things in here are about identity rather than sign-in. A sign-in that
+  cannot be renewed can still be played *as itself* — `offline_session` keeps
+  the account's own UUID, because Minecraft knows a player by UUID and a
+  world's character lives at `playerdata/<uuid>.dat`, so adding an offline
+  account instead hands you a name-derived UUID and a stranger in your own
+  world. It is never reached by falling back; the player is asked. And
+  `refresh_msa` keeps "Microsoft says this grant is gone" (`invalid_grant`,
+  the one thing that marks the account) apart from "Geode could not reach
+  Microsoft" (a 5xx, a timeout, no wifi — which changes nothing on disk),
+  because collapsing the two signs people out over a blip.
 
 ## Content: `providers/`
 

@@ -39,6 +39,17 @@ export interface Toast {
   body?: string;
 }
 
+/** What the offline-play dialog needs to ask its question. */
+export interface OfflinePlayRequest {
+  seq: number;
+  instanceId: string;
+  instanceName: string;
+  /** The account's real name, which is also the name it would play under. */
+  username: string;
+  /** Why the sign-in did not work, in Geode's own words. */
+  reason: string;
+}
+
 /** Keep the console bounded — a modded startup can emit tens of thousands of
  *  lines and unbounded retention is how a launcher ends up using a gigabyte. */
 const MAX_LOG_LINES = 3000;
@@ -121,12 +132,23 @@ interface State {
   /** Dispatch a `geode://` link to whichever dialog it belongs to. */
   openLink: (raw: string) => void;
 
+  /**
+   * The offer to play offline, raised by a launch that could not sign in.
+   *
+   * Here rather than in a view because Play is on four screens, and a dialog
+   * because this is a choice: nothing plays offline unless the player says so.
+   */
+  offlinePlay: OfflinePlayRequest | null;
+  offerOfflinePlay: (offer: Omit<OfflinePlayRequest, "seq">) => void;
+  closeOfflinePlay: () => void;
+
   init: () => Promise<void>;
 }
 
 let toastSeq = 0;
 let joinSeq = 0;
 let packSeq = 0;
+let offlinePlaySeq = 0;
 
 /**
  * Whether the one-time setup has run.
@@ -267,6 +289,11 @@ export const useStore = create<State>((set, get) => ({
     // user clicked one link, so one thing should be asking them about it.
     set({ pack, join: null });
   },
+
+  offlinePlay: null,
+  offerOfflinePlay: (offer) =>
+    set({ offlinePlay: { ...offer, seq: ++offlinePlaySeq } }),
+  closeOfflinePlay: () => set({ offlinePlay: null }),
 
   init: async () => {
     // React's StrictMode mounts, unmounts and mounts again in development, so

@@ -16,7 +16,7 @@ pub mod store;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::error::{Error, Result};
+use crate::error::{Context, Error, Result};
 
 const DEVICE_CODE_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode";
 const TOKEN_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
@@ -199,6 +199,20 @@ pub async fn poll_device_code(
     }
 }
 
+/// Renew a Microsoft sign-in.
+///
+/// The two ways this fails are not the same fact and must never be collapsed
+/// into one error, because a caller acts differently on each:
+///
+/// * [`Error::AuthExpired`] means Microsoft answered, and the answer was that
+///   this grant is gone — revoked, expired, or signed out somewhere else.
+///   That is a verdict on the account, and only a new sign-in fixes it.
+/// * Anything else means Geode never got an answer: no network, DNS, a
+///   timeout, a 5xx, a 429, a captive portal. It says nothing at all about
+///   the token, which may well work again in ten minutes.
+///
+/// This used to return `AuthExpired` for every non-success status, which made
+/// a Microsoft outage indistinguishable from a revoked token.
 pub async fn refresh_msa(
     client: &reqwest::Client,
     client_id: &str,
@@ -213,13 +227,41 @@ pub async fn refresh_msa(
             ("scope", SCOPE),
         ])
         .send()
-        .await?;
+        .await
+        .ctx("could not reach Microsoft to renew this sign-in")?;
 
-    if !resp.status().is_success() {
-        return Err(Error::AuthExpired);
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .ctx("could not read Microsoft's answer while renewing this sign-in")?;
+
+    if !status.is_success() {
+        return Err(refresh_refusal(status, &text));
     }
-    let t: TokenResponse = resp.json().await?;
+    let t: TokenResponse =
+        serde_json::from_str(&text).map_err(|e| Error::json("token response", e))?;
     Ok(to_msa_tokens(t))
+}
+
+/// What a non-success answer from the token endpoint actually means.
+///
+/// `invalid_grant` is the one authoritative "this token is finished" in RFC
+/// 6749, and Microsoft returns it with a 4xx. Everything else — a 5xx, a 429,
+/// a body that is not even JSON, `invalid_client` (this build's own problem,
+/// not the player's) — is read as Microsoft not having answered the question,
+/// so the account is left alone. Erring this way round is deliberate: being
+/// told to sign in again when the token was fine is an annoyance, while
+/// marking a good account because a server wobbled signs somebody out until
+/// they notice.
+fn refresh_refusal(status: reqwest::StatusCode, body: &str) -> Error {
+    if status.is_client_error() && oauth_error_code(body).as_deref() == Some("invalid_grant") {
+        return Error::AuthExpired;
+    }
+    Error::msg(format!(
+        "Microsoft could not renew this sign-in right now ({status}). {}",
+        describe_oauth_error(body)
+    ))
 }
 
 fn to_msa_tokens(t: TokenResponse) -> MsaTokens {
@@ -553,5 +595,39 @@ mod tests {
     fn offline_uuid_is_stable() {
         assert_eq!(offline_uuid("Steve"), offline_uuid("Steve"));
         assert_ne!(offline_uuid("Steve"), offline_uuid("Alex"));
+    }
+
+    /// Microsoft's own verdict: this grant is gone and nothing but a fresh
+    /// sign-in brings it back.
+    #[test]
+    fn microsoft_saying_the_grant_is_gone_is_a_sign_in_to_redo() {
+        let body = r#"{"error":"invalid_grant","error_description":"AADSTS700082: The refresh token has expired."}"#;
+        assert!(matches!(
+            refresh_refusal(reqwest::StatusCode::BAD_REQUEST, body),
+            Error::AuthExpired
+        ));
+    }
+
+    /// The bug this separation exists for. None of these is Microsoft saying
+    /// no — they are Microsoft not answering, or answering about something
+    /// other than the player's token — and treating any of them as a verdict
+    /// would sign somebody out over a wifi blip.
+    #[test]
+    fn microsoft_having_a_bad_day_is_not_a_verdict_on_the_account() {
+        let cases: [(u16, &str); 5] = [
+            (500, r#"{"error":"temporarily_unavailable"}"#),
+            (503, "<html><body>Service Unavailable</body></html>"),
+            (429, r#"{"error":"slow_down"}"#),
+            // The application id, not the player: nothing they can re-sign to fix.
+            (400, r#"{"error":"invalid_client"}"#),
+            (502, ""),
+        ];
+        for (code, body) in cases {
+            let status = reqwest::StatusCode::from_u16(code).unwrap();
+            assert!(
+                !matches!(refresh_refusal(status, body), Error::AuthExpired),
+                "HTTP {code} was read as Microsoft refusing the account"
+            );
+        }
     }
 }
