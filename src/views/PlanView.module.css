@@ -171,7 +171,11 @@
     color 0.12s var(--ease);
 }
 
-.row:hover .remove {
+/* Shown when the row is pointed at — and when the keyboard lands on it, or a
+   tab stop is a destructive button nobody can see. `opacity: 0` takes the
+   focus ring with it, so the global one is no help on its own. */
+.row:hover .remove,
+.remove:focus-visible {
   opacity: 1;
 }
 

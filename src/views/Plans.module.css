@@ -106,13 +106,24 @@
     color 0.12s var(--ease);
 }
 
-.card:hover .remove {
+/* Shown when the card is pointed at — and when the keyboard lands on it, or a
+   tab stop is a destructive button nobody can see. `opacity: 0` takes the
+   focus ring with it, so the global one is no help on its own. */
+.card:hover .remove,
+.remove:focus-visible {
   opacity: 1;
 }
 
 .remove:hover {
   background: color-mix(in srgb, var(--danger) 14%, transparent);
   color: var(--danger);
+}
+
+/* The second half of what the delete dialog has to say, under its question. */
+.note {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-dim);
 }
 
 .empty {

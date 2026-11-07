@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { ClipboardList, Loader2, Package, Plus, Trash2 } from "lucide-react";
 
+import Modal from "../components/Modal";
 import { api } from "../lib/api";
 import { relativeTime } from "../lib/format";
 import { useStore } from "../lib/store";
@@ -10,10 +11,13 @@ import styles from "./Plans.module.css";
 
 export default function Plans() {
   const navigate = useStore((s) => s.navigate);
+  const toast = useStore((s) => s.toast);
   const reportError = useStore((s) => s.reportError);
 
   const [plans, setPlans] = useState<Plan[] | null>(null);
   const [creating, setCreating] = useState(false);
+  /** The plan the delete dialog is asking about, if it is open. */
+  const [asking, setAsking] = useState<Plan | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -41,9 +45,13 @@ export default function Plans() {
   }
 
   async function remove(plan: Plan) {
+    // The question has been answered, so the dialog goes before the work
+    // starts — that also means the button cannot be pressed twice.
+    setAsking(null);
     try {
       await api.deletePlan(plan.id);
       await load();
+      toast({ kind: "success", title: `Deleted ${plan.name}` });
     } catch (e) {
       reportError(`Could not delete ${plan.name}`, e);
     }
@@ -111,7 +119,7 @@ export default function Plans() {
                 </button>
                 <button
                   className={styles.remove}
-                  onClick={() => remove(plan)}
+                  onClick={() => setAsking(plan)}
                   title={`Delete ${plan.name}`}
                   aria-label={`Delete ${plan.name}`}
                 >
@@ -122,6 +130,44 @@ export default function Plans() {
           </div>
         )}
       </div>
+
+      {/* A plan is an evening's collecting and there is nothing anywhere that
+          could put it back, so the trash icon asks rather than acts — and it
+          says how many mods are on the one it is asking about, because the
+          cards are small and a press can land on the wrong name. */}
+      {asking && (
+        <Modal
+          title={`Delete ${asking.name}?`}
+          subtitle={
+            asking.mods.length === 0
+              ? "This removes the plan. It cannot be undone."
+              : `This removes the plan and the ${asking.mods.length} mod${
+                  asking.mods.length === 1 ? "" : "s"
+                } collected on it. It cannot be undone.`
+          }
+          onClose={() => setAsking(null)}
+          width={420}
+          footer={
+            <>
+              <button className="btn" onClick={() => setAsking(null)}>
+                Cancel
+              </button>
+              <button
+                className="btn btn-danger"
+                onClick={() => void remove(asking)}
+              >
+                Delete plan
+              </button>
+            </>
+          }
+        >
+          <p className={styles.note}>
+            A plan is only the list, so nothing was downloaded for it and no
+            files are removed. Any instance or server you have already built
+            from it has its own copy of the mods and is untouched.
+          </p>
+        </Modal>
+      )}
     </>
   );
 }
