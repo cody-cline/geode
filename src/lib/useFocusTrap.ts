@@ -21,9 +21,9 @@ import { useEffect, useRef } from "react";
  * so there is nothing to key on.
  *
  * Escape is deliberately not here. Which key dismisses an overlay stays with
- * the overlay, next to the back handler it belongs with. `Modal` still carries
- * an inline copy of the Tab half in the same effect as its own Escape; folding
- * it onto this hook would leave one copy instead of two.
+ * the overlay, next to the back handler that is the same question asked of a
+ * different device: `Modal` dismisses on it, `ProjectPanel` dismisses on it,
+ * and a third overlay might not. Both of them call this hook for the rest.
  */
 export function useFocusTrap<T extends HTMLElement>() {
   const panel = useRef<T>(null);

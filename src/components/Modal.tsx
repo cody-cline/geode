@@ -1,7 +1,8 @@
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 import { X } from "lucide-react";
 
 import { useBackHandler } from "../lib/useBackHandler";
+import { useFocusTrap } from "../lib/useFocusTrap";
 
 import styles from "./Modal.module.css";
 
@@ -20,50 +21,28 @@ export default function Modal({
   footer?: React.ReactNode;
   width?: number;
 }) {
-  const panel = useRef<HTMLDivElement>(null);
+  // Focus moves in when the dialog opens, stays in while it is open, and goes
+  // back to whatever opened it when it closes. Shared with `ProjectPanel`
+  // rather than written twice: the second copy of this is how one of them ends
+  // up with the rule the other has — which is not hypothetical, since the
+  // loader tiles inside `NewInstanceModal` hand their unchosen options
+  // `tabindex="-1"` and the hook's selector is the one that does not treat
+  // those as an end of the cycle.
+  const panel = useFocusTrap<HTMLDivElement>();
 
   // A dialog is dismissed by back, never navigated past — and nothing else
   // may change the screen under it either, because this is drawn outside the
   // view and would be left floating over whatever replaced it.
   useBackHandler(true, onClose, "overlay");
 
-  // Move focus in so Escape and Tab act on the dialog, not whatever was behind
-  // it, and hand it back to whatever opened this when the dialog goes. Its own
-  // effect, with no dependencies, because it must happen once: parents pass
-  // `onClose` as an inline arrow, so an effect keyed on it re-runs whenever the
-  // parent renders — and re-running this one would pull focus out of the field
-  // somebody is typing in.
-  useEffect(() => {
-    const opener = document.activeElement;
-    panel.current?.focus();
-    return () => {
-      if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
-    };
-  }, []);
-
+  // Which key dismisses a dialog stays here, beside the back handler that is
+  // the same question asked of a different device. Keyed on `onClose` and so
+  // re-registered whenever a parent renders, which costs nothing: adding and
+  // removing a listener does not move the keyboard, which is exactly why the
+  // focus half above cannot live in this effect.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        onClose();
-        return;
-      }
-      if (e.key !== "Tab" || !panel.current) return;
-      // Tab stays inside. A dialog that lets it out leaves the keyboard on a
-      // screen the dialog is covering, pressing things nobody can see.
-      const stops = panel.current.querySelectorAll<HTMLElement>(
-        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-      );
-      if (stops.length === 0) return;
-      const first = stops[0];
-      const last = stops[stops.length - 1];
-      const here = document.activeElement;
-      if (e.shiftKey && (here === first || here === panel.current)) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && here === last) {
-        e.preventDefault();
-        first.focus();
-      }
+      if (e.key === "Escape") onClose();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
