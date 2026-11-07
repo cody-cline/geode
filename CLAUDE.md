@@ -38,12 +38,13 @@ cargo test --lib           # unit tests — offline, fast, the ones that gate a 
 cargo clippy --all-targets # expected to be clean; treat a warning as a failure
 ```
 
-`npm test` runs `node --test src/lib/*.test.mjs` — today that is eight files,
+`npm test` runs `node --test src/lib/*.test.mjs` — today that is nine files,
 `src/lib/share.test.mjs`, `src/lib/blocked.test.mjs`,
 `src/lib/pack-update.test.mjs`, `src/lib/update.test.mjs`,
 `src/lib/types.test.mjs`, `src/lib/retarget.test.mjs`,
 `src/lib/ignore-version.test.mjs` and
-`src/lib/shortcuts.test.mjs`. Four of those are worth knowing apart. `types.test.mjs` is the only check anywhere that
+`src/lib/shortcuts.test.mjs` and `src/lib/contrast.test.mjs`. Five of those
+are worth knowing apart. `types.test.mjs` is the only check anywhere that
 `types.ts` really mirrors the Rust struct it claims to — it reads the text of
 `types.ts` and `Settings.tsx` and asserts that the `close_to_tray` field
 arrived in both, because a field left out of the hand-written mirror reads as
@@ -60,7 +61,11 @@ over is never listed there as one it will leave behind.
 `shortcuts.test.mjs` holds the rule that makes a keyboard shortcut worth
 adding — that every binding in `shortcuts.ts` is printed beside the thing it
 opens, since the sidebar is the only place these are discoverable and one
-nobody can find is dead weight. All eight also
+nobody can find is dead weight. `contrast.test.mjs` measures every colour
+this app writes text in against every surface it writes it on, in both
+themes, because the light one shipped for months unmeasured — it inherited
+colours picked to read on `#0b0f14` and put them on white, where the accent
+came out at 1.7:1. Nothing caught it because nothing looked. All nine also
 check a few invariants by reading the `.tsx` that holds them, because there is
 no DOM or React renderer under `npm test`. Everything else on the frontend is
 gated by `tsc` alone, which is strict (`noUnusedLocals`,
