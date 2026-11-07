@@ -5,7 +5,7 @@ import { AlertTriangle, Blocks, Loader2 } from "lucide-react";
 import Modal from "./Modal";
 import StatusNote from "./StatusNote";
 import { api, errorMessage } from "../lib/api";
-import { titleCase } from "../lib/format";
+import { releaseDates, titleCase } from "../lib/format";
 import { sentence } from "../lib/share";
 import type { StatusLine } from "../lib/share";
 import { useStore } from "../lib/store";
@@ -29,17 +29,41 @@ function loaderLabel(id: string): string {
 type LandOn = "" | "here" | "copy";
 
 /**
+ * What pressing the primary button will do, named for the mode that is chosen.
+ *
+ * It read "Move to Minecraft …" whatever the select said, while the select's
+ * own default copies — so the one thing this dialog calls impossible to undo
+ * was the label on the choice that leaves the instance alone, and whichever of
+ * the two somebody wanted they had to be told afterwards which they got.
+ *
+ * The default names neither verb on purpose. Whether it moves or copies is
+ * settled when it runs, by whether there is anything to lose, and a button
+ * cannot promise one of the two before that is read; "apply" is the word the
+ * rest of this screen uses for the operation either way.
+ */
+function applyVerb(landOn: LandOn): string {
+  if (landOn === "here") return "Move to";
+  if (landOn === "copy") return "Copy to";
+  return "Apply";
+}
+
+/**
  * How much of this instance a target covers, in one line on its card.
  *
  * `fits` is what the resolver could look up, which is not the folder: a jar
  * with no project id was never checked. Counting only against `fits` printed
  * "All 2 mods run here" on a card in a dialog whose own header said "3 mods",
  * which is the one mod nobody can say anything about rounded quietly out of
- * the denominator. So when something went unchecked the whole folder is the
- * denominator and the word "checked" is on screen — the jar itself is named
- * under "Could not be checked" below, and this only makes the count agree
- * with it. When everything was checked there is no exclusion to show and the
- * shorter line stands.
+ * the denominator. So the whole folder is the denominator and the jar that
+ * went unchecked is a clause of its own — it is named under "Could not be
+ * checked" below, and this only makes the count agree with it.
+ *
+ * A clause of its own because it used to be folded into the count, as "2 of 3
+ * checked — all run here": a progress report and a verdict in one sentence,
+ * reading as "2 of 3 done" and "all of them fine" at once, with the reader
+ * left to work out that the third mod was not a failure but a question nobody
+ * asked. Every number on this line is now a count of mods out of the same
+ * denominator, said one at a time, and they add up to it.
  *
  * A mod carried over on a ticked box is neither of the two things this line
  * used to be able to say. It is not left out — applying installs a file for
@@ -47,22 +71,21 @@ type LandOn = "" | "here" | "copy";
  * named in its own clause and kept out of both: `blocked` is what somebody is
  * being asked to accept, and `missing` is still what the resolver found
  * nothing for, which is why "all run here" is only printed when there is
- * neither.
+ * neither that nor anything unchecked.
  */
 function coverageLine(option: PlanTarget, unchecked: number): string {
-  const left = [
+  const whole = option.fits.length + unchecked;
+  const runs = option.fits.length - option.missing;
+  const rest = [
     option.blocked > 0 && `${option.blocked} left out`,
     option.carried > 0 && `${option.carried} carried over`,
+    unchecked > 0 && `${unchecked} not checked`,
   ].filter(Boolean) as string[];
-  if (unchecked === 0) {
-    return left.length === 0
-      ? `All ${option.fits.length} mods run here`
-      : `${option.fits.length - option.missing} of ${option.fits.length} — ${left.join(", ")}`;
-  }
-  const whole = option.fits.length + unchecked;
-  return left.length === 0
-    ? `${option.fits.length} of ${whole} checked — all run here`
-    : `${option.fits.length} of ${whole} checked — ${left.join(", ")}`;
+  const head =
+    runs === whole
+      ? `All ${whole} mods run here`
+      : `${runs} of ${whole} mods run here`;
+  return rest.length === 0 ? head : `${head} — ${rest.join(", ")}`;
 }
 
 /** What a finished re-target amounts to, in one line. */
@@ -142,6 +165,7 @@ export default function ReplanModal({
 
   const [resolution, setResolution] = useState<PlanResolution | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [dates, setDates] = useState<Map<string, string>>(new Map());
   const [chosen, setChosen] = useState(0);
   const [landOn, setLandOn] = useState<LandOn>("");
   const [applying, setApplying] = useState(false);
@@ -157,6 +181,22 @@ export default function ReplanModal({
       dropped = true;
     };
   }, [instance.id]);
+
+  // Snapshots included, because the resolver offers whatever the mods publish
+  // for and some of them publish for a snapshot — a candidate with no date
+  // beside it is the one row nobody can place in time. The manifest not
+  // answering costs the dates and nothing else, so it is not reported: a toast
+  // about the version list over a dialog whose own answer arrived is noise.
+  useEffect(() => {
+    let dropped = false;
+    api
+      .listGameVersions(true)
+      .then((versions) => !dropped && setDates(releaseDates(versions)))
+      .catch(() => {});
+    return () => {
+      dropped = true;
+    };
+  }, []);
 
   /** Where the instance already is, so one card can be read as "you are here". */
   const isHere = (option: PlanTarget) =>
@@ -199,6 +239,72 @@ export default function ReplanModal({
     }
   }
 
+  /**
+   * One candidate, drawn the way the Plans rail draws it so the two screens
+   * cannot say one thing two ways.
+   *
+   * Only the best one is on screen until somebody asks for the rest. Six rows
+   * reading "2 of 3 checked — all run here" under six version numbers is the
+   * loader-and-version decision handed back to the person this screen exists
+   * to make it for, and the ranking that made the first row first is the part
+   * worth showing.
+   */
+  function targetCard(option: PlanTarget, index: number) {
+    const date = dates.get(option.gameVersion);
+    return (
+      <button
+        key={`${option.loader}:${option.gameVersion}`}
+        className={clsx(
+          planStyles.target,
+          index === 0 && planStyles.targetLead,
+          index === chosen && planStyles.targetChosen,
+          option.missing > 0 && planStyles.targetIncomplete,
+        )}
+        onClick={() => setChosen(index)}
+      >
+        {/* Version first: it is what differs between these rows, because they
+            all offer the loader this instance already has. The release date
+            follows it because the number alone no longer says which way round
+            two of them go — 26.3 is newer than 1.21.11, and nothing about the
+            two strings tells anybody that. */}
+        <span className={planStyles.targetHead}>
+          <span className={planStyles.targetVersion}>{option.gameVersion}</span>
+          <span className={planStyles.targetLoader}>
+            {loaderLabel(option.loader)}
+          </span>
+          {date && <span className={planStyles.targetDate}>{date}</span>}
+          {index === 0 && <span className={planStyles.best}>best</span>}
+          {isHere(option) && <span className={styles.here}>installed</span>}
+        </span>
+
+        <span
+          className={clsx(
+            planStyles.coverage,
+            option.missing === 0 && planStyles.coverageFull,
+          )}
+        >
+          {coverageLine(option, resolution?.unresolved.length ?? 0)}
+        </span>
+
+        {(option.connector > 0 || option.near > 0) && (
+          <span className={planStyles.compromises}>
+            {option.connector > 0 && (
+              <span className={clsx(planStyles.fit, planStyles.connector)}>
+                <Blocks size={10} />
+                {option.connector} via Connector
+              </span>
+            )}
+            {option.near > 0 && (
+              <span className={clsx(planStyles.fit, planStyles.nearVersion)}>
+                {option.near} other version
+              </span>
+            )}
+          </span>
+        )}
+      </button>
+    );
+  }
+
   return (
     <Modal
       title={moved ? "What happened" : "Where else could this run?"}
@@ -234,14 +340,15 @@ export default function ReplanModal({
                   title={instance.running ? "Stop the game first" : undefined}
                 >
                   {applying && <Loader2 size={14} className="spin" />}
-                  {/* Named for what changes. It read "Apply Fabric 1.21.3",
-                      leading with the loader — which on most of these rows is
-                      the loader the instance already has, so the button named
-                      the half of the pair that was staying put. The loader is
-                      still named when it is genuinely moving: a re-target can
-                      cross loaders, and then it is half of what is about to
-                      happen. */}
-                  Move to Minecraft {target.gameVersion}
+                  {/* Named for what changes, and for which of the three things
+                      in "Apply to" is about to happen — see `applyVerb`. It
+                      read "Apply Fabric 1.21.3", leading with the loader —
+                      which on most of these rows is the loader the instance
+                      already has, so the button named the half of the pair
+                      that was staying put. The loader is still named when it
+                      is genuinely moving: a re-target can cross loaders, and
+                      then it is half of what is about to happen. */}
+                  {applyVerb(landOn)} Minecraft {target.gameVersion}
                   {target.loader !== instance.loader &&
                     ` on ${loaderLabel(target.loader)}`}
                 </button>
@@ -357,6 +464,90 @@ export default function ReplanModal({
             </p>
           )}
 
+          {/* What a move does and where it lands, above the candidates rather
+              than under them. This explainer, the select and the warning it
+              can raise are everything the dialog says about what applying
+              costs, and all three used to sit below six candidate rows — read
+              only by somebody who scrolled, while the primary button was live
+              from the first screen. A choice that cannot be undone is not a
+              detail to be found. It also comes first because it is the less
+              involved half of the question: which instance this lands on is
+              answerable before reading anything, and which target to land on
+              is what the rest of the dialog is for.
+
+              A mod with no build for the new pair is turned off rather than
+              deleted, and a jar nothing can be looked up for is left alone —
+              the report says what happened to each. */}
+          {target && (
+            <section className={styles.apply}>
+              <p className={styles.note}>
+                Applying {loaderLabel(target.loader)} {target.gameVersion}{" "}
+                re-points every mod this instance tracks at a build for that
+                pair. A mod with no build for it is turned off, never deleted
+                &mdash; unless you have told that mod to ignore its Minecraft
+                version, and then it is carried over on the newest build its
+                author has published. A jar you added by hand is left alone.
+                The report says what happened to each.
+              </p>
+              <div>
+                <label className="label" htmlFor="replan-land-on">
+                  Apply to
+                </label>
+                {/* Three destinations, each settling the same condition. The
+                    default was the only one phrased as a rule — a place, a
+                    place, and then "a copy if there is anything to lose" — so
+                    the list read as two choices and a policy, and which of the
+                    two the policy would pick was the one thing it did not
+                    say. The condition cannot be dropped from the default,
+                    because deciding it is what the default is for, so the
+                    other two answer it instead. */}
+                <select
+                  id="replan-land-on"
+                  className="select"
+                  value={landOn}
+                  onChange={(e) => setLandOn(e.target.value as LandOn)}
+                >
+                  <option value="">A copy if there is anything to lose</option>
+                  <option value="here">
+                    This instance, even if there is something to lose
+                  </option>
+                  <option value="copy">
+                    A copy, even if there is nothing to lose
+                  </option>
+                </select>
+                <p className="hint">
+                  Minecraft upgrades a world the first time a newer version
+                  opens it and never puts it back, so a copy is the default for
+                  an instance with worlds in it.
+                </p>
+                {/* Said in full on the one choice that cannot be undone, and
+                    only on it: "nothing puts that back" in a hint under a
+                    dropdown is a sentence somebody reads after. What it costs
+                    is a world, so the words are the cost and the way to keep
+                    one.
+
+                    Worded for what this screen actually knows, which is not
+                    whether there are any worlds — nothing here reads an
+                    instance's `saves`, and a dialog that fetched a world list
+                    to decide which sentence to print would be reading the disk
+                    to choose wording. It headed itself "the worlds in
+                    Survival" over an instance that had none. Nor is the target
+                    necessarily newer than the instance: a re-target goes
+                    either way, and each direction costs a world something
+                    different. */}
+                {landOn === "here" && (
+                  <StatusNote
+                    line={{
+                      tone: "warn",
+                      title: `Applying this to ${instance.name} itself cannot be undone`,
+                      detail: `Any world in this instance is opened at ${loaderLabel(target.loader)} ${target.gameVersion} from now on, and it is the only copy there is. That is one-way either way: a world's data format is upgraded the first time a newer Minecraft opens it and no version puts it back, and a Minecraft older than the one a world was last saved by may not open it at all. Back up the worlds you care about from the Worlds tab first if you want to be able to play them at ${instance.mcVersion} again — or apply this to a copy, which leaves this instance exactly as it is.`,
+                    }}
+                  />
+                )}
+              </div>
+            </section>
+          )}
+
           {resolution.targets.length === 0 ? (
             <p className={styles.note}>
               {resolution.unresolved.length === 0
@@ -366,70 +557,28 @@ export default function ReplanModal({
           ) : (
             <>
               <div className={planStyles.targets}>
-                {resolution.targets.map((option, index) => (
-                  <button
-                    key={`${option.loader}:${option.gameVersion}`}
-                    className={clsx(
-                      planStyles.target,
-                      index === chosen && planStyles.targetChosen,
-                      option.missing > 0 && planStyles.targetIncomplete,
-                    )}
-                    onClick={() => setChosen(index)}
-                  >
-                    {/* Version first: it is what differs between these rows,
-                        because they all offer the loader this instance
-                        already has. */}
-                    <span className={planStyles.targetHead}>
-                      <span className={planStyles.targetVersion}>
-                        {option.gameVersion}
-                      </span>
-                      <span className={planStyles.targetLoader}>
-                        {loaderLabel(option.loader)}
-                      </span>
-                      {index === 0 && (
-                        <span className={planStyles.best}>best</span>
-                      )}
-                      {isHere(option) && (
-                        <span className={styles.here}>installed</span>
-                      )}
-                    </span>
+                {targetCard(resolution.targets[0], 0)}
 
-                    <span
-                      className={clsx(
-                        planStyles.coverage,
-                        option.missing === 0 && planStyles.coverageFull,
-                      )}
-                    >
-                      {coverageLine(option, resolution.unresolved.length)}
-                    </span>
-
-                    {(option.connector > 0 || option.near > 0) && (
-                      <span className={planStyles.compromises}>
-                        {option.connector > 0 && (
-                          <span
-                            className={clsx(
-                              planStyles.fit,
-                              planStyles.connector,
-                            )}
-                          >
-                            <Blocks size={10} />
-                            {option.connector} via Connector
-                          </span>
-                        )}
-                        {option.near > 0 && (
-                          <span
-                            className={clsx(
-                              planStyles.fit,
-                              planStyles.nearVersion,
-                            )}
-                          >
-                            {option.near} other version
-                          </span>
-                        )}
-                      </span>
-                    )}
-                  </button>
-                ))}
+                {/* Every candidate is still reachable — this is a summary, not
+                    a filter, and a target left off a list is a target nobody
+                    can choose. Collapsed rather than scrolled, and counted in
+                    the summary so the number of other answers is readable
+                    without opening it. A card can only be chosen while it is
+                    on screen, so the chosen one is never hidden behind this. */}
+                {resolution.targets.length > 1 && (
+                  <details className={planStyles.others}>
+                    <summary>
+                      {resolution.targets.length - 1} other
+                      {resolution.targets.length === 2 ? "" : "s"} this instance
+                      could run on
+                    </summary>
+                    <div className={planStyles.othersList}>
+                      {resolution.targets
+                        .slice(1)
+                        .map((option, index) => targetCard(option, index + 1))}
+                    </div>
+                  </details>
+                )}
               </div>
 
               {target && target.connector > 0 && (
@@ -561,67 +710,6 @@ export default function ReplanModal({
             </p>
           ))}
 
-          {/* The action at the end of the reading, below everything that was
-              read. A mod with no build for the new pair is turned off rather
-              than deleted, and a jar nothing can be looked up for is left
-              alone — the report says what happened to each. */}
-          {target && (
-            <section className={styles.apply}>
-              <p className={styles.note}>
-                Applying {loaderLabel(target.loader)} {target.gameVersion}{" "}
-                re-points every mod this instance tracks at a build for that
-                pair. A mod with no build for it is turned off, never deleted
-                &mdash; unless you have told that mod to ignore its Minecraft
-                version, and then it is carried over on the newest build its
-                author has published. A jar you added by hand is left alone.
-                The report says what happened to each.
-              </p>
-              <div>
-                <label className="label" htmlFor="replan-land-on">
-                  Apply to
-                </label>
-                <select
-                  id="replan-land-on"
-                  className="select"
-                  value={landOn}
-                  onChange={(e) => setLandOn(e.target.value as LandOn)}
-                >
-                  <option value="">A copy if there is anything to lose</option>
-                  <option value="here">This instance</option>
-                  <option value="copy">A copy</option>
-                </select>
-                <p className="hint">
-                  Minecraft upgrades a world the first time a newer version
-                  opens it and never puts it back, so a copy is the default for
-                  an instance with worlds in it.
-                </p>
-                {/* Said in full on the one choice that cannot be undone, and
-                    only on it: "nothing puts that back" in a hint under a
-                    dropdown is a sentence somebody reads after. What it costs
-                    is a world, so the words are the cost and the way to keep
-                    one.
-
-                    Worded for what this screen actually knows, which is not
-                    whether there are any worlds — nothing here reads an
-                    instance's `saves`, and a dialog that fetched a world list
-                    to decide which sentence to print would be reading the disk
-                    to choose wording. It headed itself "the worlds in
-                    Survival" over an instance that had none. Nor is the target
-                    necessarily newer than the instance: a re-target goes
-                    either way, and each direction costs a world something
-                    different. */}
-                {landOn === "here" && (
-                  <StatusNote
-                    line={{
-                      tone: "warn",
-                      title: `Applying this to ${instance.name} itself cannot be undone`,
-                      detail: `Any world in this instance is opened at ${loaderLabel(target.loader)} ${target.gameVersion} from now on, and it is the only copy there is. That is one-way either way: a world's data format is upgraded the first time a newer Minecraft opens it and no version puts it back, and a Minecraft older than the one a world was last saved by may not open it at all. Back up the worlds you care about from the Worlds tab first if you want to be able to play them at ${instance.mcVersion} again — or apply this to a copy, which leaves this instance exactly as it is.`,
-                    }}
-                  />
-                )}
-              </div>
-            </section>
-          )}
         </>
       )}
     </Modal>

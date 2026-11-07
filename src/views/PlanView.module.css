@@ -298,6 +298,42 @@
   border-style: dashed;
 }
 
+/* The answer, said once. The others are behind the disclosure below it, so
+   this card is the only one on screen until somebody asks for them — which is
+   what makes it a statement rather than the first of six rows that read
+   alike. */
+.targetLead {
+  padding: 13px 14px;
+}
+
+.targetLead .targetVersion {
+  font-size: 16px;
+}
+
+/* The alternatives. Collapsed, not dropped: every candidate stays reachable,
+   and the count is in the summary so how many there are can be read without
+   opening it. */
+.others {
+  font-size: 12px;
+}
+
+.others summary {
+  cursor: pointer;
+  padding: 4px 0;
+  color: var(--text-dim);
+}
+
+.others summary:hover {
+  color: var(--text);
+}
+
+.othersList {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 7px;
+}
+
 .targetHead {
   display: flex;
   align-items: baseline;
@@ -319,6 +355,17 @@
 .targetLoader {
   font-size: 13px;
   color: var(--text-dim);
+}
+
+/* When this version came out. Minecraft's own numbers stopped saying which of
+   two is newer — 26.3 against 1.21.11 — so the date is the only thing on these
+   rows that ranks them, which is why the New instance list prints one beside
+   every version it offers. */
+.targetDate {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .best {

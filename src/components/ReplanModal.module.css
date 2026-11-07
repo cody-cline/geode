@@ -40,14 +40,17 @@
   color: var(--text-faint);
 }
 
-/* The action at the end of the reading, ruled off from it so that picking a
-   target and applying one cannot be read as the same gesture. */
+/* Where a move lands, above the ranking and ruled off from it so that choosing
+   a destination and choosing a target cannot be read as the same gesture. The
+   rule was along the top when this sat at the foot of the dialog; it follows
+   the section rather than staying where it was, or it would fence this off
+   from the explainer above it instead of from the candidates below. */
 .apply {
   display: flex;
   flex-direction: column;
   gap: 11px;
-  padding-top: 13px;
-  border-top: 1px solid var(--border);
+  padding-bottom: 13px;
+  border-bottom: 1px solid var(--border);
 }
 
 /* What the move did. Replaces the ranking rather than sitting under it. */
