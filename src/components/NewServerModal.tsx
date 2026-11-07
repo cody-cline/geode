@@ -196,6 +196,16 @@ export default function NewServerModal({
                     servers you already have and passes players between them.
                   </p>
                 )}
+                {/* Said once above the three rather than three times on the
+                    tiles. It is the caveat that applies to all of them and the
+                    reason not to reach for one by default. */}
+                {group.key === "both" && (
+                  <p className={styles.groupNote}>
+                    These bolt the two worlds together, and both sides say so:
+                    a mod or a plugin that works alone can still break here.
+                    Pick one only if you need both at once.
+                  </p>
+                )}
                 <div className={styles.kinds}>
                   {group.kinds.map((option) => (
                     <button
@@ -206,7 +216,8 @@ export default function NewServerModal({
                       )}
                       onClick={() => setKind(option.id)}
                     >
-                      {option.name}
+                      <span className={styles.kindName}>{option.name}</span>
+                      <span className={styles.kindBlurb}>{option.blurb}</span>
                     </button>
                   ))}
                 </div>

@@ -115,6 +115,56 @@ impl ServerKind {
         }
     }
 
+    /// One line saying what separates this kind from the others beside it in
+    /// the picker.
+    ///
+    /// Here rather than in the frontend because `server_kinds` is fetched at
+    /// runtime: a table keyed by kind id in TypeScript is not checked by
+    /// anything, so a kind added here would render with no description and
+    /// nothing would fail. This `match` is exhaustive, so the compiler asks
+    /// for the sentence at the same time it asks for the name.
+    ///
+    /// The group heading above the tile already says what the kind *runs*
+    /// (`takes_plugins`, `takes_mods`, `is_proxy`), so these do not repeat it
+    /// — each one answers "why this one and not its neighbour". Capability
+    /// claims agree with `mod_loader` and `plugin_loaders` above; nothing here
+    /// names a Minecraft version, because which versions a kind supports is
+    /// read from what the upstream publishes, never written down.
+    pub fn blurb(self) -> &'static str {
+        match self {
+            ServerKind::Paper => {
+                "The usual choice. Faster than Spigot, fixes more, and nearly every plugin targets it."
+            }
+            ServerKind::Purpur => {
+                "Paper with a long list of extra settings to tune. Runs Paper's plugins unchanged."
+            }
+            ServerKind::Folia => {
+                "Paper spread across CPU cores for very large player counts. A plugin has to be written for it specially."
+            }
+            ServerKind::Spigot => {
+                "The older server Paper is built on. Worth choosing only if a plugin asks for it by name."
+            }
+            ServerKind::Vanilla => "Mojang's own server, exactly as they ship it.",
+            ServerKind::Fabric => "Light, quick to update, and what most new mods are built for.",
+            ServerKind::Quilt => "A fork of Fabric that runs most Fabric mods as well as its own.",
+            ServerKind::NeoForge => "A fork of Forge, and where much of Forge's mod development went.",
+            ServerKind::Forge => {
+                "The oldest modding platform. Many long-running packs are still built on it."
+            }
+            ServerKind::Mohist => "Forge mods beside Bukkit plugins. The best known of the three.",
+            ServerKind::Arclight => {
+                "The same idea as Mohist, built a different way. Worth trying if something misbehaves there."
+            }
+            ServerKind::Banner => "Fabric mods beside Bukkit plugins.",
+            ServerKind::Velocity => {
+                "The current proxy, and the one to pick unless something needs the older one."
+            }
+            ServerKind::Waterfall => {
+                "The older BungeeCord-based proxy. Velocity has largely replaced it."
+            }
+        }
+    }
+
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s.to_ascii_lowercase().as_str() {
             "vanilla" => ServerKind::Vanilla,

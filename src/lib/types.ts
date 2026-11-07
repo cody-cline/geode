@@ -506,6 +506,13 @@ export interface CommandNode {
 export interface ServerKindInfo {
   id: string;
   name: string;
+  /**
+   * What separates this kind from the others in its group. Written in Rust
+   * (`ServerKind::blurb`) rather than here: this list is fetched at runtime,
+   * so a table keyed by kind id on this side would be checked by nothing and a
+   * kind added to the backend would render with no description.
+   */
+  blurb: string;
   takesPlugins: boolean;
   takesMods: boolean;
   isProxy: boolean;

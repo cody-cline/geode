@@ -1963,6 +1963,9 @@ async fn server_view(server: crate::server::Server, state: &AppState) -> ServerV
 pub struct ServerKindInfo {
     pub id: String,
     pub name: String,
+    /// What separates this kind from the others in its group, from
+    /// `ServerKind::blurb` — the software's own fact, not the dialog's.
+    pub blurb: String,
     pub takes_plugins: bool,
     pub takes_mods: bool,
     pub is_proxy: bool,
@@ -1972,6 +1975,7 @@ fn kind_info(kind: crate::server::ServerKind) -> ServerKindInfo {
     ServerKindInfo {
         id: kind.as_str().to_string(),
         name: kind.display_name().to_string(),
+        blurb: kind.blurb().to_string(),
         takes_plugins: kind.takes_plugins(),
         takes_mods: kind.takes_mods(),
         is_proxy: kind.is_proxy(),

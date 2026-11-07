@@ -55,23 +55,40 @@
   line-height: 1.5;
 }
 
+/* Two columns at this dialog's width. The tiles were 96px wide and held a
+   name alone, which made the two biggest groups four interchangeable words:
+   "Runs Bukkit-style plugins" says what Paper, Purpur, Folia and Spigot have
+   in common and nothing about which of them to press. A tile wide enough for
+   a sentence is the whole point of the change. */
 .kinds {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(216px, 1fr));
   gap: 6px;
 }
 
 .kind {
-  padding: 7px 10px;
+  display: grid;
+  gap: 2px;
+  padding: 8px 11px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
   background: var(--bg);
-  font-size: 13px;
-  font-weight: 600;
   text-align: left;
   transition:
     border-color 0.12s var(--ease),
     background 0.12s var(--ease);
+}
+
+.kindName {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.kindBlurb {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-dim);
+  line-height: 1.4;
 }
 
 .kind:hover {
