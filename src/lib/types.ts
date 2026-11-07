@@ -450,6 +450,12 @@ export interface Server {
    */
   hasWorld: boolean;
   /**
+   * Whether Mojang's EULA has to be accepted before this server will start.
+   * The same boolean as `hasWorld` today and deliberately not the same field:
+   * one is about where a world lives, the other about whose licence applies.
+   */
+  needsEula: boolean;
+  /**
    * The loader its mods are built for — `forge` for a Mohist server, not
    * `mohist`. `null` when it takes no mods at all.
    */

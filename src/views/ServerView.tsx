@@ -299,7 +299,10 @@ export default function ServerView({ id }: { id: string }) {
   async function start(server: Server) {
     // Mojang's EULA is the user's to accept, and asking before the first start
     // means the answer is not a failed boot followed by a second one.
-    if (!server.eulaAccepted && server.kind !== "velocity" && server.kind !== "waterfall") {
+    // Asked of the server rather than of a list of kind names written here:
+    // which software needs Mojang's licence accepted is a fact about that
+    // software, and `ServerKind::needs_eula` is the one place that holds it.
+    if (!server.eulaAccepted && server.needsEula) {
       setAskEula(true);
       return;
     }

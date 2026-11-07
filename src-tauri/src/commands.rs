@@ -1907,6 +1907,15 @@ pub struct ServerView {
     /// Whether it hosts a world of its own. A proxy does not, so it has no
     /// place to put datapacks and no level to configure.
     pub has_world: bool,
+    /// Whether Mojang's EULA has to be accepted before it will start. A proxy
+    /// reads its own config format and never writes `eula.txt`.
+    ///
+    /// Its own field rather than read off [`Self::has_world`], which is the
+    /// same boolean today for the same reason: one is about where a world
+    /// lives and the other about whose licence applies, and a screen that
+    /// asked the first question to answer the second would be right by
+    /// coincidence. `ServerKind::needs_eula` is where the fact is decided.
+    pub needs_eula: bool,
     /// The loader its mods are built for — "forge" for a Mohist server, not
     /// "mohist". Sent rather than derived in the UI so the hybrids stay right
     /// in one place: this is what a search has to be narrowed to, and getting
@@ -1938,6 +1947,7 @@ async fn server_view(server: crate::server::Server, state: &AppState) -> ServerV
         can_add_cardboard: server.can_add_cardboard(),
         installed: server.is_installed(),
         kind_name: server.kind.display_name().to_string(),
+        needs_eula: server.kind.needs_eula(),
         has_world: !server.kind.is_proxy(),
         mod_loader: server.kind.mod_loader().map(str::to_string),
         last_link_address: crate::server::share::shared_link_address(&state.paths, &server.id)
