@@ -29,6 +29,7 @@ type Asking =
   | { kind: "copy"; world: World }
   | { kind: "delete"; world: World }
   | { kind: "backups"; world: World }
+  | { kind: "deleteBackup"; world: World; backup: WorldBackup }
   | null;
 
 
@@ -109,6 +110,38 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
       if (said) toast({ kind: "success", ...said(result) });
     } catch (e) {
       reportError(whenItFails, e);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /**
+   * Delete one backup, and come back to the list rather than closing it.
+   *
+   * Every other operation here ends in `close()`, which is right when the
+   * dialog was about the thing that just changed. This one is about one row of
+   * several: closing would take away the only place the rest can be read, so
+   * the single visible consequence of the delete would be the whole dialog
+   * disappearing. It closes only when that was the last backup, because an
+   * empty list says nothing — which is the same reason the button that opens
+   * the dialog is disabled when there are none.
+   */
+  async function deleteBackup(world: World, backup: WorldBackup) {
+    const last = backupsFor(world.folder).length <= 1;
+    setBusy(backup.name);
+    try {
+      await api.deleteWorldBackup(instance.id, world.folder, backup.name);
+      await load();
+      setAsking(last ? null : { kind: "backups", world });
+      toast({
+        kind: "success",
+        title: `Deleted ${backup.name}`,
+        body: last
+          ? `${world.name} has no backups left.`
+          : `The other backups of ${world.name} are untouched.`,
+      });
+    } catch (e) {
+      reportError(`Could not delete ${backup.name}`, e);
     } finally {
       setBusy(null);
     }
@@ -553,19 +586,25 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
                   )}
                   Restore
                 </button>
+                {/* Guarded on `running` like Restore beside it, though for a
+                    different reason. The backend does not refuse this one —
+                    a zip in `world-backups/` is not a file the game holds
+                    open — but while Minecraft runs, Restore is off and Back
+                    up is off, so this is the one moment when a backup is the
+                    only state you could get back to and you can neither use
+                    it nor take another. It is also what the banner above
+                    already promises: stop the game to change anything here. */}
                 <button
                   className="btn btn-ghost btn-icon btn-sm"
                   onClick={() =>
-                    void run(backup.name, `Could not delete ${backup.name}`, () =>
-                      api.deleteWorldBackup(
-                        instance.id,
-                        asking.world.folder,
-                        backup.name,
-                      ),
-                    )
+                    setAsking({ kind: "deleteBackup", world: asking.world, backup })
                   }
-                  disabled={busy === backup.name}
-                  title="Delete this backup"
+                  disabled={running || busy === backup.name}
+                  title={
+                    running
+                      ? "Stop the game to delete a backup"
+                      : "Delete this backup"
+                  }
                   aria-label={`Delete backup ${backup.name}`}
                 >
                   <Trash2 size={14} />
@@ -573,6 +612,50 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
               </div>
             ))}
           </div>
+        </Modal>
+      )}
+
+      {/* Asked as a dialog of its own rather than one nested in the list,
+          because two Modals open at once both listen for Escape on the
+          document and one press would dismiss both. Cancel comes straight
+          back to the list, and so does a successful delete. */}
+      {asking?.kind === "deleteBackup" && (
+        <Modal
+          title={`Delete this backup of ${asking.world.name}?`}
+          subtitle="Nothing is taken first this time. The backup is the copy."
+          onClose={() => setAsking({ kind: "backups", world: asking.world })}
+          width={460}
+          footer={
+            <>
+              <button
+                className="btn"
+                onClick={() => setAsking({ kind: "backups", world: asking.world })}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn btn-danger"
+                onClick={() => void deleteBackup(asking.world, asking.backup)}
+                disabled={busy === asking.backup.name}
+              >
+                {busy === asking.backup.name && (
+                  <Loader2 size={14} className="spin" />
+                )}
+                Delete the backup
+              </button>
+            </>
+          }
+        >
+          <p className={styles.note}>
+            <code>{asking.backup.name}</code> is{" "}
+            {fileSize(asking.backup.size)} taken{" "}
+            {relativeTime(asking.backup.createdAt)}, and it is the only copy of{" "}
+            {asking.world.name} as it was then. A world has no upstream to
+            fetch a region file back from, so once this zip is gone that state
+            is nowhere — the file is removed outright, not moved to a trash.
+            {backupsFor(asking.world.folder).length <= 1 &&
+              ` It is also the last backup of ${asking.world.name}, which would be left with none.`}
+          </p>
         </Modal>
       )}
     </div>

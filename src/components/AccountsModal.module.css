@@ -215,6 +215,15 @@
   margin-bottom: 10px;
 }
 
+/* The body of the removal question. Same measure as the world dialogs' note,
+   because it is the same kind of sentence: what this costs, before it costs
+   it. */
+.confirm {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+
 .offlineRow {
   display: flex;
   gap: 7px;

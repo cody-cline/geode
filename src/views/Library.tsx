@@ -15,6 +15,7 @@ import {
 
 import AccountsModal from "../components/AccountsModal";
 import InstanceIcon from "../components/InstanceIcon";
+import Modal from "../components/Modal";
 import NewInstanceModal from "../components/NewInstanceModal";
 import { launchInstance, stopInstance } from "../lib/actions";
 import { formatDuration, useStore } from "../lib/store";
@@ -35,6 +36,12 @@ export default function Library() {
   const [sort, setSort] = useState<Sort>("recent");
   const [creating, setCreating] = useState(false);
   const [signingIn, setSigningIn] = useState(false);
+  // Which instance a card has asked to stop. Held here rather than in the card
+  // for the same reason `signingIn` is: a card is `overflow: hidden` and grows
+  // a `transform` on hover, which makes it the containing block for anything
+  // fixed inside it — a dialog opened from a card would be clipped into the
+  // card it was opened from.
+  const [stopping, setStopping] = useState<Instance | null>(null);
 
   const shown = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -154,6 +161,7 @@ export default function Library() {
                     instance={instance}
                     onOpen={() => navigate({ view: "instance", id: instance.id })}
                     onSignIn={() => setSigningIn(true)}
+                    onStop={() => setStopping(instance)}
                   />
                 ))}
               </div>
@@ -164,6 +172,48 @@ export default function Library() {
 
       {creating && <NewInstanceModal onClose={() => setCreating(false)} />}
       {signingIn && <AccountsModal onClose={() => setSigningIn(false)} />}
+
+      {/* Asked every time, even though stopping a hung game is sometimes
+          exactly what somebody wants. The press is one click and the cost is
+          unbounded, so the trade is a click against minutes of play — and the
+          dialog is also the only place this app says that quitting from
+          inside the game is the way to keep them. */}
+      {stopping && (
+        <Modal
+          title={`Stop ${stopping.name}?`}
+          subtitle="Minecraft is not asked to save first, because there is nothing here to ask."
+          onClose={() => setStopping(null)}
+          width={460}
+          footer={
+            <>
+              <button className="btn" onClick={() => setStopping(null)}>
+                Keep playing
+              </button>
+              <button
+                className="btn btn-danger"
+                onClick={() => {
+                  const instance = stopping;
+                  setStopping(null);
+                  void stopInstance(instance);
+                }}
+              >
+                <Square size={13} fill="currentColor" />
+                Stop the game
+              </button>
+            </>
+          }
+        >
+          <p className={styles.stopNote}>
+            Geode ends the process outright. A server can be told to{" "}
+            <code>save-all flush</code> and waited for; a client has no console
+            to type that at, so whatever has happened since Minecraft last
+            saved by itself goes with it — and a world is the one thing with no
+            upstream to fetch it back from. Quit from inside the game to save
+            first. Stop here when the game has stopped responding and that is
+            not an option.
+          </p>
+        </Modal>
+      )}
     </>
   );
 }
@@ -172,10 +222,12 @@ function InstanceCard({
   instance,
   onOpen,
   onSignIn,
+  onStop,
 }: {
   instance: Instance;
   onOpen: () => void;
   onSignIn: () => void;
+  onStop: () => void;
 }) {
   const progress = useStore((s) => s.progress[`launch:${instance.id}`]);
   const accounts = useStore((s) => s.accounts);
@@ -259,10 +311,7 @@ function InstanceCard({
         </span>
 
         {instance.running ? (
-          <button
-            className="btn btn-sm btn-danger"
-            onClick={() => void stopInstance(instance)}
-          >
+          <button className="btn btn-sm btn-danger" onClick={onStop}>
             <Square size={12} fill="currentColor" />
             Stop
           </button>
