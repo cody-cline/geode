@@ -85,7 +85,28 @@ export default function ProjectCard({
 
       <div className={styles.text}>
         <div className={styles.titleRow}>
-          <h3 className={styles.name}>{project.name}</h3>
+          {/* The row's keyboard route in. The library and server cards wrap
+              their whole text block in a `<button>`, and that shape cannot be
+              borrowed here: this row already holds controls of its own — the
+              loader chooser further along this very line, and the install
+              button in the column at the end — and a button inside a button is
+              neither valid nor operable. `role="button"` on the row is the same
+              trap by another route, since a button's content is presentational
+              to a screen reader and would swallow both. So the name is the
+              control: named by the project, opening what clicking the row
+              opens, with every other control left as its sibling. */}
+          <h3 className={styles.name}>
+            <button
+              type="button"
+              className={styles.nameBtn}
+              onClick={(e) => {
+                e.stopPropagation();
+                onOpen();
+              }}
+            >
+              {project.name}
+            </button>
+          </h3>
           {project.author && (
             <span className={styles.author}>by {project.author}</span>
           )}
