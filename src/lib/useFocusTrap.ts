@@ -32,7 +32,24 @@ export function useFocusTrap<T extends HTMLElement>() {
     const opener = document.activeElement;
     panel.current?.focus();
     return () => {
-      if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
+      if (opener instanceof HTMLElement && opener.isConnected) {
+        opener.focus();
+        return;
+      }
+      // The opener went with whatever the overlay did. That is the normal
+      // ending for a confirmation, not an edge case — the trash icon that
+      // asked "delete this backup?" is inside the row the answer removes — and
+      // doing nothing here leaves the keyboard on `<body>`, which is to say at
+      // the top of the document, several screens from what the person was
+      // working on. So the view gets it instead: the nearest thing that is
+      // still on screen and still means where they were.
+      const main = document.querySelector("main");
+      if (!(main instanceof HTMLElement)) return;
+      // A region is not focusable by default and should not join the tab
+      // order; `-1` lets it take focus from script alone. Setting it again on
+      // an element that already has it costs nothing.
+      main.tabIndex = -1;
+      main.focus();
     };
   }, []);
 
