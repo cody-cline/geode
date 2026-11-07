@@ -38,11 +38,11 @@ cargo test --lib           # unit tests — offline, fast, the ones that gate a 
 cargo clippy --all-targets # expected to be clean; treat a warning as a failure
 ```
 
-`npm test` runs `node --test src/lib/*.test.mjs` — today that is six files,
+`npm test` runs `node --test src/lib/*.test.mjs` — today that is seven files,
 `src/lib/share.test.mjs`, `src/lib/blocked.test.mjs`,
 `src/lib/pack-update.test.mjs`, `src/lib/update.test.mjs`,
-`src/lib/types.test.mjs` and `src/lib/retarget.test.mjs`. The last two are
-worth knowing apart. `types.test.mjs` is the only check anywhere that
+`src/lib/types.test.mjs`, `src/lib/retarget.test.mjs` and
+`src/lib/ignore-version.test.mjs`. Three of those are worth knowing apart. `types.test.mjs` is the only check anywhere that
 `types.ts` really mirrors the Rust struct it claims to — it reads the text of
 `types.ts` and `Settings.tsx` and asserts that the `close_to_tray` field
 arrived in both, because a field left out of the hand-written mirror reads as
@@ -51,7 +51,10 @@ setting on and `tsc` sees nothing wrong. `retarget.test.mjs` pins what spans
 two files: that a re-target applied in place puts the Settings tab's own copy
 of the loader back in step, or the save bar writes the old loader over the one
 every jar was just rebuilt for, and that the dialog's world warning claims
-only what the dialog actually knows. All six also
+only what the dialog actually knows. `ignore-version.test.mjs` holds the
+words the Minecraft-version override is allowed to say: that whether a
+carried mod runs is not knowable here, and which mod to turn off first when
+the game will not start. All seven also
 check a few invariants by reading the `.tsx` that holds them, because there is
 no DOM or React renderer under `npm test`. Everything else on the frontend is
 gated by `tsc` alone, which is strict (`noUnusedLocals`,
@@ -92,7 +95,7 @@ reads Sinytra Connector's real files for exactly this reason. The same trap in
 reverse: a server kind's mod loader is a fact about that software, not a guess
 (Banner is Fabric-based, not NeoForge — `ServerKind::mod_loader`).
 
-**`commands.rs` stays thin: validate, delegate, return.** 165 of the 166
+**`commands.rs` stays thin: validate, delegate, return.** 166 of the 167
 `#[tauri::command]` functions live there (the odd one out is
 `deeplink::take_pending_join`), and logic belongs in the module that owns it so
 the headless path can reach it too. A new command must be added in **two**
