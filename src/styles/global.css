@@ -359,6 +359,20 @@ h4 {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-text) 25%, transparent);
 }
 
+/* The same fade `.btn:disabled` gets, because it is the same fact and there
+   was no rule for it anywhere: a locked field looked exactly like one you
+   could type in, so clicking it and typing produced nothing and said nothing.
+   The cursor says it too — a field is the one control whose own cursor
+   (`text`, or the `pointer` `.select` sets below) otherwise keeps inviting the
+   press. Here rather than on each screen: every field locked while a game or a
+   server runs is the same case. */
+.input:disabled,
+.select:disabled,
+.textarea:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .input::placeholder,
 .textarea::placeholder {
   color: var(--text-faint);
