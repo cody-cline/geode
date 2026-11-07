@@ -33,7 +33,7 @@
 }
 
 .success .icon {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .error {

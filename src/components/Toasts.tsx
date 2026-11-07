@@ -14,14 +14,21 @@ export default function Toasts() {
   const toasts = useStore((s) => s.toasts);
   const dismiss = useStore((s) => s.dismissToast);
 
-  if (toasts.length === 0) return null;
-
+  // Rendered even with nothing in it. A live region has to be in the page
+  // before the news arrives or the first announcement is the one that gets
+  // missed, and an empty one costs nothing: the stack takes no space and no
+  // pointer events.
   return (
-    <div className={styles.stack} role="status" aria-live="polite">
+    <div className={styles.stack} aria-live="polite" aria-atomic="false">
       {toasts.map((toast) => {
         const Icon = ICONS[toast.kind];
         return (
-          <div key={toast.id} className={`${styles.toast} ${styles[toast.kind]}`}>
+          <div
+            key={toast.id}
+            className={`${styles.toast} ${styles[toast.kind]}`}
+            // A failure interrupts; everything else waits its turn.
+            role={toast.kind === "error" ? "alert" : "status"}
+          >
             <Icon size={16} className={styles.icon} />
             <div className={styles.text}>
               <p className={styles.title}>{toast.title}</p>

@@ -37,7 +37,7 @@
 .levelActive,
 .levelActive:hover {
   background: color-mix(in srgb, var(--accent) 14%, transparent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .tools {
@@ -48,7 +48,7 @@
 
 .followOn {
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .searchWrap {

@@ -54,7 +54,7 @@
   border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
   font-size: 12.5px;
   font-weight: 600;
-  color: var(--accent);
+  color: var(--accent-text);
   max-width: 240px;
   overflow: hidden;
   white-space: nowrap;
@@ -94,7 +94,7 @@
 .tabActive,
 .tabActive:hover {
   background: color-mix(in srgb, var(--accent) 14%, transparent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .body {
@@ -161,7 +161,7 @@
 }
 
 .linkBtn {
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: inherit;
   text-decoration: underline;
 }
@@ -211,7 +211,7 @@
 .categoryActive:hover {
   background: color-mix(in srgb, var(--accent) 15%, transparent);
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 /* Reads as the end of the chip list rather than another chip, which is why it

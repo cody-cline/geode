@@ -74,7 +74,7 @@
 }
 
 .check {
-  color: var(--accent);
+  color: var(--accent-text);
   flex-shrink: 0;
 }
 
@@ -106,7 +106,7 @@
 .modeActive,
 .modeActive:hover {
   background: color-mix(in srgb, var(--accent) 15%, transparent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 /* Greyed, but still clickable — metadata is often behind reality. */

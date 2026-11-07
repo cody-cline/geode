@@ -38,7 +38,7 @@
 }
 
 .link {
-  color: var(--accent);
+  color: var(--accent-text);
   font: inherit;
   background: none;
   border: none;
@@ -124,7 +124,7 @@
 }
 
 .check {
-  color: var(--accent);
+  color: var(--accent-text);
   flex-shrink: 0;
 }
 
@@ -176,7 +176,7 @@
 }
 
 .modeOn > :global(svg) {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .modeWhy {

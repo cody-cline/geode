@@ -42,7 +42,7 @@
 
 .keeps svg {
   flex: none;
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .refused {

@@ -6,6 +6,14 @@
   /* Accent is user-configurable; --accent is overwritten at runtime. */
   --accent: #4ade80;
   --accent-ink: #04140a;
+  /* The accent as *text*, which is a different question from the accent as a
+     fill. `--accent` is read as a colour to paint with; this is read as a
+     colour to be legible in, and on a light background the default green is
+     1.7:1 — a word you cannot make out. `applyTheme` recomputes it from the
+     chosen accent and the theme, next to `--accent-ink`, which answers the
+     mirror-image question. The value here is the default accent's answer in
+     this theme, so the stylesheet is right before any script runs. */
+  --accent-text: #4ade80;
 
   --bg: #0b0f14;
   --surface: #11171f;
@@ -16,7 +24,19 @@
 
   --text: #e6edf3;
   --text-dim: #99a6b5;
-  --text-faint: #667484;
+  /* Lightened from #667484, which was 3.8:1 on `--surface` and 2.9:1 on the
+     tinted background of whichever sidebar row is current — so the shortcut
+     hint was least readable on exactly the row being looked at. This clears
+     4.5:1 on every surface in this theme, that tint included. */
+  --text-faint: #8795a5;
+  /* Muted text sitting on a tint of the accent rather than on a surface. The
+     background there is a percentage of a colour the user chose, so its
+     lightness is not ours to know: a yellow accent lifts it far enough that
+     `--text-faint` lands at 4.44:1 while every plain surface is fine, and the
+     picker takes any colour at all. `applyTheme` recomputes it per accent;
+     this is that computation's answer for the default one, so the stylesheet
+     is right before any script runs. */
+  --text-on-tint: #93a0ae;
 
   --danger: #f87171;
   --warn: #fbbf24;
@@ -28,6 +48,18 @@
      for the one concept. Percentages below match the provider badges. */
   --connector: #a78bfa;
   --connector-text: #c4b5fd;
+
+  /* A provider's own brand colour, and the lighter cast of it that is legible
+     on this theme's tint of the first. Two values because a brand colour is
+     fixed and legibility is not: Modrinth's green reads at 1.6:1 on a white
+     page, so the light theme answers with its own cast below rather than
+     pretending one hex can do both. */
+  --modrinth: #1bd96a;
+  --modrinth-text: #4ade80;
+  --curseforge: #f16436;
+  --curseforge-text: #fb8f65;
+  --spiget: #e0a92c;
+  --spiget-text: #e8bd52;
 
   /* One monospace stack. It was hand-written 29 times in two variants — 13
      naming "Cascadia Code" and 16 not — and ServerView held both, so the
@@ -66,7 +98,23 @@
 
   --text: #131a22;
   --text-dim: #5a6772;
-  --text-faint: #86929e;
+  --text-faint: #5e6974;
+  --text-on-tint: #5e6974;
+
+  /* This theme had never been contrast-checked. Every one of these was a
+     colour picked to read on #0b0f14 and then left to fend for itself on
+     white: the accent came out at 1.7:1, the warning at 1.7, the error at
+     2.8. They are darkened here rather than in `:root`, so the dark theme —
+     which is the default, the one that was looked at, and already correct —
+     is untouched. */
+  --accent-text: #256f40;
+  --modrinth-text: #0f7539;
+  --curseforge-text: #ab4726;
+  --spiget-text: #806019;
+  --danger: #a64c4c;
+  --warn: #836313;
+  --info: #3c689d;
+  --connector-text: #6d5aa2;
 
   --accent-ink: #04140a;
   --shadow-sm: 0 1px 2px rgb(16 24 40 / 0.06);
@@ -131,7 +179,7 @@ button {
 }
 
 a {
-  color: var(--accent);
+  color: var(--accent-text);
   text-decoration: none;
 }
 
@@ -152,8 +200,12 @@ h4 {
   line-height: 1.25;
 }
 
+/* The ring is a thing to be seen rather than a thing to be painted, so it
+   takes the legible cast of the accent for the same reason text does: on a
+   white page the default green ring is 1.7:1 against the paper it is drawn
+   on, which is a focus indicator that cannot be located. */
 :focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--accent-text);
   outline-offset: 2px;
   border-radius: var(--radius-sm);
 }
@@ -303,8 +355,8 @@ h4 {
 .select:focus,
 .textarea:focus {
   outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+  border-color: var(--accent-text);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-text) 25%, transparent);
 }
 
 .input::placeholder,
@@ -362,27 +414,27 @@ h4 {
 .badge-accent {
   background: color-mix(in srgb, var(--accent) 14%, transparent);
   border-color: color-mix(in srgb, var(--accent) 32%, transparent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .badge-modrinth {
-  background: color-mix(in srgb, #1bd96a 14%, transparent);
-  border-color: color-mix(in srgb, #1bd96a 32%, transparent);
-  color: #4ade80;
+  background: color-mix(in srgb, var(--modrinth) 14%, transparent);
+  border-color: color-mix(in srgb, var(--modrinth) 32%, transparent);
+  color: var(--modrinth-text);
 }
 
 .badge-curseforge {
-  background: color-mix(in srgb, #f16436 14%, transparent);
-  border-color: color-mix(in srgb, #f16436 32%, transparent);
-  color: #fb8f65;
+  background: color-mix(in srgb, var(--curseforge) 14%, transparent);
+  border-color: color-mix(in srgb, var(--curseforge) 32%, transparent);
+  color: var(--curseforge-text);
 }
 
 /* Gold rather than orange, so SpigotMC does not read as CurseForge at a
    glance — the two sit side by side on plugin rows. */
 .badge-spiget {
-  background: color-mix(in srgb, #e0a92c 14%, transparent);
-  border-color: color-mix(in srgb, #e0a92c 32%, transparent);
-  color: #e8bd52;
+  background: color-mix(in srgb, var(--spiget) 14%, transparent);
+  border-color: color-mix(in srgb, var(--spiget) 32%, transparent);
+  color: var(--spiget-text);
 }
 
 .badge-warn {
