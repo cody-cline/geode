@@ -10,8 +10,10 @@ import {
   Square,
   Clock,
   Package,
+  UserRound,
 } from "lucide-react";
 
+import AccountsModal from "../components/AccountsModal";
 import InstanceIcon from "../components/InstanceIcon";
 import NewInstanceModal from "../components/NewInstanceModal";
 import { launchInstance, stopInstance } from "../lib/actions";
@@ -32,6 +34,7 @@ export default function Library() {
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<Sort>("recent");
   const [creating, setCreating] = useState(false);
+  const [signingIn, setSigningIn] = useState(false);
 
   const shown = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -137,6 +140,7 @@ export default function Library() {
                     key={instance.id}
                     instance={instance}
                     onOpen={() => navigate({ view: "instance", id: instance.id })}
+                    onSignIn={() => setSigningIn(true)}
                   />
                 ))}
               </div>
@@ -146,6 +150,7 @@ export default function Library() {
       </div>
 
       {creating && <NewInstanceModal onClose={() => setCreating(false)} />}
+      {signingIn && <AccountsModal onClose={() => setSigningIn(false)} />}
     </>
   );
 }
@@ -153,11 +158,14 @@ export default function Library() {
 function InstanceCard({
   instance,
   onOpen,
+  onSignIn,
 }: {
   instance: Instance;
   onOpen: () => void;
+  onSignIn: () => void;
 }) {
   const progress = useStore((s) => s.progress[`launch:${instance.id}`]);
+  const accounts = useStore((s) => s.accounts);
   const loaderLabel = LOADERS.find((l) => l.id === instance.loader)?.label;
   const preparing = Boolean(progress) && !instance.running;
 
@@ -244,6 +252,16 @@ function InstanceCard({
           >
             <Square size={12} fill="currentColor" />
             Stop
+          </button>
+        ) : accounts.length === 0 ? (
+          /* The same reasoning as the instance header's: the precondition is
+             known before the click, so the button says what is missing rather
+             than being a Play that fails into a corner. This card is the one
+             most people press, so fixing only the header left the common path
+             dead-ending. */
+          <button className="btn btn-sm btn-primary" onClick={onSignIn}>
+            <UserRound size={12} />
+            Sign in to play
           </button>
         ) : (
           <button
