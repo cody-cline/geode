@@ -176,6 +176,19 @@
   border-top: 1px solid var(--border);
 }
 
+/* The tabs on their own, so the element carrying `role="tablist"` owns tabs
+   and nothing else — the Clear button shares the row but is not one of them.
+   The 1px the active tab's underline needs to sit over the row's bottom
+   border is pulled here rather than on each tab, so the strip's own box is
+   the one the row lays out and the underline lands where it did before. */
+.tabStrip {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  margin-bottom: -1px;
+}
+
 .tab {
   display: flex;
   align-items: center;
@@ -185,7 +198,6 @@
   font-weight: 500;
   color: var(--text-dim);
   border-bottom: 2px solid transparent;
-  margin-bottom: -1px;
 }
 
 .tab:hover {
@@ -294,6 +306,15 @@
 }
 
 .thread {
+  color: var(--text-faint);
+}
+
+/* Which stream a line arrived on, printed only when the line carries no
+   `[thread/LEVEL]` of its own — so the level of a JVM crash is a word and not
+   just a colour. Geode's word rather than the server's, so it recedes with the
+   rest of the structure and keeps the console's own font size: a smaller one
+   would put every line after it off the monospace grid. */
+.stream {
   color: var(--text-faint);
 }
 
