@@ -106,3 +106,53 @@ test("the world warning claims only what the dialog knows", async () => {
     "the warning only describes moving to a newer Minecraft, and a re-target goes either way",
   );
 });
+
+// The primary button names the operation the "Apply to" select is set to. It
+// was the literal "Move to Minecraft …" whatever the select said, over a
+// default that copies — so the one action this dialog calls impossible to undo
+// was the label on the choice that leaves the instance alone, and whoever
+// wanted either of the two read the other's word and pressed it.
+test("the primary button names what the chosen mode will do", async () => {
+  const modal = await source("../components/ReplanModal.tsx");
+
+  const start = modal.indexOf("function applyVerb(");
+  assert.ok(start > 0, "the button's label is no longer worked out from the mode");
+  const verb = modal.slice(start, modal.indexOf("\n}", start));
+
+  assert.match(
+    verb,
+    /landOn === "here"/,
+    "a move applied to this instance is not named a move, so the one action that cannot be undone is labelled as something else",
+  );
+  assert.match(
+    verb,
+    /landOn === "copy"/,
+    "applying to a copy is not named a copy, so somebody who asked for one is told an instance is about to be replaced",
+  );
+
+  assert.match(
+    modal,
+    /\{applyVerb\(landOn\)\} Minecraft \{target\.gameVersion\}/,
+    "the primary button names an operation of its own rather than the one the Apply to select is set to",
+  );
+});
+
+// Minecraft's version numbers stopped sorting — 26.3 is newer than 1.21.11 —
+// so a rail of candidates with no dates is a ranking nobody can check. The
+// date is read from the version manifest, never from the version string and
+// never from a table in here: what Mojang shipped when is Mojang's to say.
+test("a candidate row dates itself from the manifest", async () => {
+  for (const path of ["../components/ReplanModal.tsx", "../views/PlanView.tsx"]) {
+    const screen = await source(path);
+    assert.match(
+      screen,
+      /api\s*\n?\s*\.listGameVersions\(/,
+      `${path} no longer asks what the published Minecraft versions are, so the dates beside its candidates come from somewhere this repo invented`,
+    );
+    assert.match(
+      screen,
+      /dates\.get\(option\.gameVersion\)/,
+      `${path} draws a candidate without the release date that is the only thing ranking it for a reader`,
+    );
+  }
+});
