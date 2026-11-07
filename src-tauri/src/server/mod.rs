@@ -1043,6 +1043,7 @@ fn a_choice_about(
         chosen_side: None,
         keep_on_server: false,
         server_off: false,
+        ignore_game_version: false,
     }
 }
 
@@ -1281,6 +1282,7 @@ mod tests {
             chosen_side: None,
             keep_on_server: false,
             server_off: false,
+            ignore_game_version: false,
         }
     }
 

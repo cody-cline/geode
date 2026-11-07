@@ -205,6 +205,15 @@ export interface ContentItem {
    * it, by any route. Only ever true for a server's own mods.
    */
   keepOnServer?: boolean;
+  /**
+   * This mod's files are looked for without asking which Minecraft version
+   * they are for: the box on the row, as the record has it.
+   *
+   * Only ever set on a mod installed from Modrinth or CurseForge that is the
+   * player's own — there is no provider query to relax for a jar added by
+   * hand, and a server's mod runs the version the server chose.
+   */
+  ignoreGameVersion?: boolean;
 }
 
 /**
@@ -718,6 +727,17 @@ export interface RepointedMod {
    * case: a build for the target itself.
    */
   viaVersion?: string;
+  /**
+   * Carried over on a build for a version this instance is not, because this
+   * mod's own box is ticked — nothing was published for the new target, and
+   * nothing the preview rated as a usable compromise either.
+   *
+   * Said apart from `viaVersion`, never folded into it. That one is the
+   * neighbouring patch the resolver deliberately rates as usable; this is a
+   * person's judgement overruling the only evidence there is, and it may not
+   * load at all.
+   */
+  ignoredGameVersion?: boolean;
   /** Dependencies of this mod that did not land, with the reason. */
   skipped?: string[];
 }
@@ -1399,6 +1419,8 @@ export interface InstallReport {
   skipped: string[];
   /** The folder it went into, which on a server may be Client mods rather than the one asked for. */
   kind: ContentKind;
+  /** Whether the Minecraft-version override carried this install, as against having been offered. */
+  ignoredGameVersion: boolean;
 }
 
 export interface PackPreview {

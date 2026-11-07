@@ -757,6 +757,27 @@ pub async fn set_content_enabled(
     instance::content::set_enabled(&state.paths, &id, kind, &file, enabled).await
 }
 
+/// Look for one mod's files without asking which Minecraft version they are
+/// for, or stop doing that.
+///
+/// Changes nothing on disk: the jar in the folder stays exactly as it is. What
+/// changes is the question Geode puts to the provider the next time it looks
+/// for a build of this mod — on an update check, and on a re-target, which
+/// without this turns a mod off when it cannot find one.
+#[tauri::command]
+pub async fn set_content_ignore_game_version(
+    state: State<'_, AppState>,
+    id: String,
+    kind: String,
+    file: String,
+    ignore: bool,
+) -> Result<()> {
+    let kind = parse_kind(&kind)?;
+    let mut inst = instance::load(&state.paths, &id).await?;
+    instance::content::set_ignore_game_version(&mut inst.content, kind, &file, ignore)?;
+    inst.save(&state.paths).await
+}
+
 /// Turn a joined instance's server-side mods on or off, and say how many
 /// changed.
 #[tauri::command]
@@ -932,6 +953,7 @@ pub async fn connector_support(
     crate::connector::support_for(&state.http, &state.connector, &game_version, &loader).await
 }
 
+#[allow(clippy::too_many_arguments)] // one mod to install, and how to look for it
 #[tauri::command]
 pub async fn install_content(
     app: AppHandle,
@@ -942,12 +964,25 @@ pub async fn install_content(
     version_id: Option<String>,
     // Install the mod's Fabric build and bring in the Connector runtime.
     via_connector: Option<bool>,
+    // Take the newest build whatever Minecraft version it declares, and record
+    // that choice against the mod — see
+    // `instance::content::ContentRecord::ignore_game_version`.
+    ignore_game_version: Option<bool>,
 ) -> Result<crate::install::content::InstallReport> {
     let provider = Provider::parse(&provider).ok_or_else(|| Error::msg("unknown provider"))?;
     let cf_key = state.cf_key().await;
 
     let mut inst = instance::load(&state.paths, &id).await?;
     let project = providers::project(&state.http, provider, &project_id, cf_key.as_deref()).await?;
+
+    let ignore_game_version = ignore_game_version.unwrap_or(false);
+    // Refused here as well as in the setter, because the two are reached
+    // separately and the rule belongs with the thing that enforces it.
+    if ignore_game_version && project.kind.install_kind() != Some(ContentKind::Mod) {
+        return Err(Error::msg(
+            "only a mod can be installed outside the Minecraft version it declares",
+        ));
+    }
 
     let via_connector = via_connector.unwrap_or(false);
     if via_connector {
@@ -977,7 +1012,7 @@ pub async fn install_content(
     } else {
         (project.kind.install_kind() == Some(ContentKind::Mod)).then(|| inst.loader.as_str())
     };
-    let versions = providers::versions(
+    let mut versions = providers::versions(
         &state.http,
         provider,
         &project_id,
@@ -987,18 +1022,58 @@ pub async fn install_content(
     )
     .await?;
 
+    // Whether the honest question has an answer: the exact file the person
+    // picked, or any file at all when they picked none.
+    let answered = |vs: &[crate::providers::Version]| match &version_id {
+        Some(want) => vs.iter().any(|v| &v.id == want),
+        None => crate::install::content::pick_best_or_blocked(vs).is_some(),
+    };
+    // Asked again with no Minecraft version only when it had none — a fallback
+    // everywhere it is read and a preference nowhere, so a mod that does have
+    // a build for this instance still gets that build. `ignored` is whether
+    // the override actually changed the question, which is not the same as
+    // having been offered: the box can be ticked on a mod that fits perfectly.
+    let mut ignored = false;
+    if ignore_game_version && !answered(&versions) {
+        let mut any = providers::versions(
+            &state.http,
+            provider,
+            &project_id,
+            None,
+            loader,
+            cf_key.as_deref(),
+        )
+        .await?;
+        crate::install::content::newest_first(&mut any);
+        versions = any;
+        ignored = true;
+    }
+
     let version = match &version_id {
         Some(want) => versions
             .iter()
             .find(|v| &v.id == want)
             .ok_or_else(|| Error::msg("that version is no longer available"))?,
         None => crate::install::content::pick_best_or_blocked(&versions).ok_or_else(|| {
-            Error::msg(format!(
-                "{} has no release for Minecraft {} on {}",
-                project.name,
-                inst.mc_version,
-                inst.loader.display_name()
-            ))
+            // Said without naming a Minecraft version when none was asked
+            // about: "no release for Minecraft 1.21.4" over a question that
+            // never mentioned 1.21.4 sends somebody looking in the wrong
+            // place.
+            Error::msg(if ignored {
+                format!(
+                    "{} has no build for {} at all — its Minecraft version was not asked about, \
+                     so this is not something ignoring it can fix",
+                    project.name,
+                    inst.loader.display_name()
+                )
+            } else {
+                format!(
+                    "{} has no release for Minecraft {} on {}",
+                    project.name,
+                    inst.mc_version,
+                    inst.loader.display_name()
+                )
+            })
         })?,
     };
 
@@ -1024,7 +1099,20 @@ pub async fn install_content(
     // A Connector install resolves the mod's dependencies as Fabric ones —
     // they run through the same layer, and asking for (Neo)Forge builds of them
     // would find nothing.
-    let dep_game_version = inst.mc_version.clone();
+    //
+    // A mod carried in outside the version it declares resolves its own
+    // the version it *is* built for, for the same reason and the one
+    // `plan::build` and `instance::retarget` both state: a dependency follows
+    // the mod. Only where the override actually fired — the build chosen
+    // otherwise lists this instance's version, and reading the newest version
+    // off it would resolve against one the instance is not.
+    let dep_game_version = match ignored
+        .then(|| crate::plan::resolve::newest_game_version(&version.game_versions))
+        .flatten()
+    {
+        Some(built_for) => built_for.clone(),
+        None => inst.mc_version.clone(),
+    };
     let dep_loader = if via_connector {
         "fabric"
     } else {
@@ -1047,12 +1135,38 @@ pub async fn install_content(
     state.clear_cancel(progress.id());
     match result {
         Ok(mut report) => {
+            // Written onto the record the install just made, and only when
+            // the override actually carried this mod — `ignored`, not the box.
+            // The box is a filter over a whole search: ticking it to find one
+            // mod and then installing a second from the same list must not
+            // leave that second mod wearing a permanent override it never
+            // needed. A per-mod choice is what was asked for.
+            //
+            // Only ever here: every later rewrite of that record carries the
+            // flag across by itself — see `install::content::install_into` —
+            // which is what makes it survive an update.
+            let recorded = match (ignored, report.installed.first()) {
+                (true, Some(landed)) => crate::instance::content::set_ignore_game_version(
+                    &mut inst.content,
+                    ContentKind::Mod,
+                    landed,
+                    true,
+                ),
+                _ => Ok(()),
+            };
+            // What actually happened, not what was asked for, so the toast
+            // can name a standing override only where one was recorded.
+            report.ignored_game_version = ignored;
             // Report the runtime alongside the mod so the toast can say what
             // else arrived and why.
             for name in connector_added {
                 report.installed.push(name);
             }
+            // Saved before that is answered: the jar is on disk either way, and
+            // records that disagree with the folder are worse than a box that
+            // did not stick.
             inst.save(&state.paths).await?;
+            recorded?;
             progress.finish().await;
             Ok(report)
         }
@@ -1400,7 +1514,24 @@ pub async fn apply_content_update(
     project_id: String,
     version_id: String,
 ) -> Result<crate::install::content::InstallReport> {
-    install_content(app, state, id, provider, project_id, Some(version_id), None).await
+    // Applied with what this mod's own record says, never with what a caller
+    // passed. An update offered for a flagged mod is a build the filtered
+    // question does not return — `check_updates` asked the wider one on
+    // purpose — so applying it without the override would refuse the very
+    // version it had just offered, with "that version is no longer available".
+    let inst = instance::load(&state.paths, &id).await?;
+    let ignore = instance::content::ignores_game_version(&inst.content, &provider, &project_id);
+    install_content(
+        app,
+        state,
+        id,
+        provider,
+        project_id,
+        Some(version_id),
+        None,
+        Some(ignore),
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------

@@ -378,6 +378,7 @@ fn record_from_index(kind: ContentKind, slug: &str, text: &str) -> Option<Conten
         chosen_side: None,
         keep_on_server: false,
         server_off: false,
+        ignore_game_version: false,
     })
 }
 
@@ -2336,6 +2337,7 @@ project-id = 1649197
             chosen_side: None,
             keep_on_server: false,
             server_off: false,
+            ignore_game_version: false,
         }
     }
 

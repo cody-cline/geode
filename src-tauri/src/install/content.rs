@@ -150,12 +150,18 @@ pub async fn install_into(
     // and every record this install is about to drop is a build of this mod.
     // Letting an update forget the side would quietly put a mod the admin had
     // corrected back on the side its listing claims; letting it forget the
-    // hold would send a jar they are keeping here to every player.
+    // hold would send a jar they are keeping here to every player; letting it
+    // forget the version override would turn the mod off at the next
+    // re-target, which is the exact thing the person ticked the box to stop.
     let replacing = |r: &&ContentRecord| {
         r.kind == kind && (r.file_name == file.filename || previous.contains(&r.file_name))
     };
     let chosen_side = records.iter().filter(replacing).find_map(|r| r.chosen_side);
     let keep_on_server = records.iter().filter(replacing).any(|r| r.keep_on_server);
+    let ignore_game_version = records
+        .iter()
+        .filter(replacing)
+        .any(|r| r.ignore_game_version);
 
     crate::net::fetch_one(
         client,
@@ -193,6 +199,7 @@ pub async fn install_into(
         chosen_side,
         keep_on_server,
         server_off: false,
+        ignore_game_version,
     });
 
     Ok(file.filename.clone())
@@ -251,6 +258,15 @@ pub struct InstallReport {
     /// The folder it went into. A server may send a mod asked for as a mod to
     /// its Client mods instead, and the UI says so.
     pub kind: ContentKind,
+    /// Whether the Minecraft-version override actually carried this install,
+    /// as against having merely been offered.
+    ///
+    /// The screen has to tell those apart: ticking the box to find one mod and
+    /// then installing a second that fits perfectly must not be announced as a
+    /// standing override, because no override was recorded for it. Set by
+    /// `commands::install_content`, which is the only place that knows.
+    #[serde(default)]
+    pub ignored_game_version: bool,
 }
 
 /// Install a version plus everything it requires.
@@ -323,6 +339,7 @@ pub async fn install_with_dependencies_into(
         installed: Vec::new(),
         skipped: Vec::new(),
         kind,
+            ignored_game_version: false,
     };
 
     progress.stage("Installing", 1).await;
@@ -518,6 +535,26 @@ pub fn pick_best_or_blocked(versions: &[Version]) -> Option<&Version> {
     pick_best(versions).or_else(|| versions.iter().find(|v| v.blocked_reason.is_some()))
 }
 
+/// Put a project's files newest first, so the pickers above choose the newest.
+///
+/// They take the first file they can use, which *is* the newest one only
+/// because a provider lists a project's files newest first. Asked about one
+/// Minecraft version that is a safe thing to lean on — the answer is a handful
+/// of builds from one season. Asked with no version at all, which is what
+/// [`crate::instance::content::ContentRecord::ignore_game_version`] does, the
+/// answer is the project's whole history, and "the newest build its author
+/// published" is a claim the screen makes. So the order is stated here rather
+/// than inherited from whatever a platform happened to return.
+///
+/// Both providers date every file — Modrinth's publish date and CurseForge's
+/// file date, both ISO 8601, so they sort as text. A file with no date sorts
+/// last rather than first: nothing is known about when it was published, and
+/// guessing that it is the newest is how the override would hand somebody a
+/// decade-old jar.
+pub fn newest_first(versions: &mut [Version]) {
+    versions.sort_by(|a, b| b.published.cmp(&a.published));
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateCandidate {
@@ -529,6 +566,51 @@ pub struct UpdateCandidate {
     pub new_version_id: String,
     pub new_version_number: String,
     pub kind: ContentKind,
+}
+
+/// Which of a project's files an update check should weigh for one mod.
+///
+/// The instance's own Minecraft version, and — for a mod whose box is ticked —
+/// every file the author has published for this loader, but only once the first
+/// question has come back with nothing to install. That order is the whole
+/// discipline of the override: the filtered question is the honest one, so a
+/// mod that does have a build for this instance is offered that build, and
+/// goes back to being offered them the moment its author publishes one. A mod
+/// carried on an old jar is never stuck on old jars.
+///
+/// Without the second ask the override lasted exactly as long as it took
+/// somebody to press Check updates: the filter it was ticked to escape is the
+/// same filter, so the answer was "nothing", indistinguishable from a mod
+/// nobody had updated.
+///
+/// `ask` is a parameter for the reason [`crate::instance::retarget`]'s `climb`
+/// gives for its own: which questions get asked, in which order, is then a test
+/// that needs no provider.
+async fn files_to_weigh<F, Fut>(
+    ignore_game_version: bool,
+    game_version: &str,
+    ask: F,
+) -> Result<Vec<Version>>
+where
+    F: Fn(Option<String>) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<Version>>>,
+{
+    let filtered = ask(Some(game_version.to_string())).await?;
+    // `pick_best_or_blocked`, matching the same question asked in
+    // `commands::install_content`: a file CurseForge will not serve is still
+    // an answer, because `install::blocked` can fetch it from the author's own
+    // Modrinth release. Gating on `pick_best` here made one rule into two, and
+    // a mod whose only build for this version is blocked read as unanswered
+    // on an update check and answered on an install.
+    if !ignore_game_version || pick_best_or_blocked(&filtered).is_some() {
+        return Ok(filtered);
+    }
+    let mut any = ask(None).await?;
+    // "Its newest build" is said on screen, so it is made true here rather
+    // than inherited from whatever order a platform answered a whole history
+    // in — see [`newest_first`].
+    newest_first(&mut any);
+    Ok(any)
 }
 
 /// Newer versions of whatever is installed.
@@ -574,14 +656,20 @@ pub async fn check_updates(
         let loader = matches!(record.kind, ContentKind::Mod | ContentKind::ClientMod)
             .then_some(mod_loader)
             .flatten();
-        let versions = match providers::versions(
-            client,
-            provider,
-            &record.project_id,
-            Some(game_version),
-            loader,
-            curseforge_key,
-        )
+        // Borrowed out here so the asker below captures a `&str` it can copy
+        // rather than moving the record it has to report on afterwards.
+        let project_id: &str = &record.project_id;
+        let versions = match files_to_weigh(record.ignore_game_version, game_version, |at| async move {
+            providers::versions(
+                client,
+                provider,
+                project_id,
+                at.as_deref(),
+                loader,
+                curseforge_key,
+            )
+            .await
+        })
         .await
         {
             Ok(v) => v,
@@ -616,6 +704,37 @@ pub async fn check_updates(
 mod tests {
     use super::*;
     use crate::paths::Scratch;
+
+    /// The text of one function in this file, for the test below.
+    ///
+    /// A shape rather than a value: reaching `check_updates` needs a provider
+    /// that answers, and a unit test has none. The first definition wins, so
+    /// this reads the real function rather than the literal asking for it.
+    fn body_of(signature: &str) -> &'static str {
+        let here = include_str!("content.rs");
+        let after = here
+            .split(signature)
+            .nth(1)
+            .unwrap_or_else(|| panic!("{signature} is not in install/content.rs"));
+        &after[..after.find("\n}\n").unwrap_or(after.len())]
+    }
+
+    /// The override is wired into the real update check, not only into the
+    /// helper the tests below call directly.
+    ///
+    /// Every one of those calls `files_to_weigh` itself, so reverting
+    /// `check_updates` to ask `providers::versions` with the instance's
+    /// version — never consulting the record at all — left all of them green
+    /// while the box silently stopped working at the first update.
+    #[test]
+    fn the_update_check_asks_with_the_records_own_override() {
+        let body = body_of("pub async fn check_updates(");
+        assert!(
+            body.contains("files_to_weigh(record.ignore_game_version"),
+            "the update check no longer asks with the record's own override, so a flagged \
+             mod is offered nothing and the box lasts only until the next update",
+        );
+    }
     use crate::providers::VersionFile;
 
     fn version(id: &str, release_type: &str, has_file: bool) -> Version {
@@ -666,6 +785,7 @@ mod tests {
             chosen_side: None,
             keep_on_server: false,
             server_off: false,
+            ignore_game_version: false,
         }
     }
 
@@ -1084,6 +1204,199 @@ mod tests {
         );
     }
 
+    /// The whole of "survives updates", at the one place it can be made to.
+    ///
+    /// An update deletes the old jar and writes a fresh record under the new
+    /// one's name. A fresh record says nobody has ticked anything — so without
+    /// the carry-forward the override lasted until the first update of the mod
+    /// and then silently reverted, which is the same mod turned off by the next
+    /// re-target and no sign anywhere of why.
+    #[tokio::test]
+    async fn an_update_keeps_the_version_override_a_person_set() {
+        let scratch = Scratch::new("install-keeps-override");
+        let dir = scratch.paths.root.clone();
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("old.jar"), b"the build in place")
+            .await
+            .unwrap();
+        // Already on disk with the right hash, so nothing is downloaded and the
+        // client points at a port nothing listens on.
+        tokio::fs::write(dir.join("a.jar"), b"the new build")
+            .await
+            .unwrap();
+        let mut newer = version("2.0", "release", true);
+        newer.files[0].sha1 = Some(crate::net::sha1_file(&dir.join("a.jar")).await.unwrap());
+        let offline = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:9").unwrap())
+            .build()
+            .unwrap();
+
+        let mut records = vec![ContentRecord {
+            origin: Default::default(),
+            ignore_game_version: true,
+            ..server_record("old.jar", "p")
+        }];
+        install_into(
+            &offline,
+            &dir,
+            &mut records,
+            &newer,
+            ContentKind::Mod,
+            "A Mod",
+            None,
+            None,
+            false,
+            None,
+            blocked::Fallback::live(&Progress::silent("t")),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].file_name, "a.jar", "the new build's name");
+        assert!(
+            records[0].ignore_game_version,
+            "the update forgot the box, so the next re-target turns this mod off: {records:?}"
+        );
+    }
+
+    /// A flagged mod is offered a build the version filter would have hidden —
+    /// and an unflagged one is not, nor is the wider question even asked about
+    /// it.
+    ///
+    /// Both halves matter. The first is the override working at all past the
+    /// install that set it. The second is it staying a fallback: a mod that
+    /// does have a build for this instance must be offered *that* build, so a
+    /// ticked box can never hand somebody an older jar than the one they could
+    /// have had.
+    #[tokio::test]
+    async fn only_a_flagged_mod_is_offered_a_build_from_outside_the_version() {
+        use std::cell::RefCell;
+
+        let dated = |id: &str, on: &str| {
+            let mut v = version(id, "release", true);
+            v.published = Some(on.to_string());
+            v
+        };
+
+        // Nothing published for this instance's version, and two builds for
+        // other versions — the shape of a mod whose author stopped at 1.21.1.
+        let asked = RefCell::new(Vec::new());
+        let answer = |at: Option<String>| {
+            asked.borrow_mut().push(at.clone());
+            let files = match at {
+                Some(_) => Vec::new(),
+                None => vec![
+                    dated("for-1.20", "2023-06-04T00:00:00Z"),
+                    dated("for-1.21.1", "2024-08-09T00:00:00Z"),
+                ],
+            };
+            std::future::ready(Ok(files))
+        };
+
+        let weighed = files_to_weigh(true, "1.21.4", answer).await.unwrap();
+        assert_eq!(
+            pick_best(&weighed).map(|v| v.id.as_str()),
+            Some("for-1.21.1"),
+            "a flagged mod was offered nothing, so the box lasted until the first update check"
+        );
+        assert_eq!(
+            asked.into_inner(),
+            vec![Some("1.21.4".to_string()), None],
+            "the honest question was not asked first",
+        );
+
+        // The same project, the same answers, box not ticked: nothing to
+        // offer, and the wider question is never put.
+        let asked = RefCell::new(Vec::new());
+        let answer = |at: Option<String>| {
+            asked.borrow_mut().push(at.clone());
+            let files = match at {
+                Some(_) => Vec::new(),
+                None => vec![dated("for-1.21.1", "2024-08-09T00:00:00Z")],
+            };
+            std::future::ready(Ok(files))
+        };
+        let weighed = files_to_weigh(false, "1.21.4", answer).await.unwrap();
+        assert!(
+            pick_best(&weighed).is_none(),
+            "a mod nobody overrode was offered a build for another version"
+        );
+        assert_eq!(
+            asked.into_inner(),
+            vec![Some("1.21.4".to_string())],
+            "the version filter was dropped for a mod nobody ticked",
+        );
+
+        // And a flagged mod that *does* have a build for this instance is
+        // answered from that build alone: the override is a fallback, never a
+        // preference, so the wider question is not asked at all.
+        let asked = RefCell::new(Vec::new());
+        let answer = |at: Option<String>| {
+            asked.borrow_mut().push(at.clone());
+            let files = match at {
+                Some(_) => vec![dated("native", "2024-02-02T00:00:00Z")],
+                None => vec![dated("much-newer-elsewhere", "2025-10-10T00:00:00Z")],
+            };
+            std::future::ready(Ok(files))
+        };
+        let weighed = files_to_weigh(true, "1.21.4", answer).await.unwrap();
+        assert_eq!(
+            pick_best(&weighed).map(|v| v.id.as_str()),
+            Some("native"),
+            "a ticked box reached past a build made for this instance"
+        );
+        assert_eq!(
+            asked.into_inner(),
+            vec![Some("1.21.4".to_string())],
+            "the wider question was asked although the honest one had an answer",
+        );
+    }
+
+    /// Newest by the date the author published, not by whatever order a
+    /// platform happened to answer in.
+    ///
+    /// Asked about one Minecraft version the two are the same thing; asked
+    /// about all of them — which is what the override does — the list is a
+    /// project's whole history, and "its newest build" is a claim the screen
+    /// makes out loud.
+    #[test]
+    fn the_newest_build_is_the_one_published_last() {
+        let dated = |id: &str, release: &str, on: Option<&str>| {
+            let mut v = version(id, release, true);
+            v.published = on.map(str::to_string);
+            v
+        };
+
+        // Handed back oldest first, which is the order that made the override
+        // install a years-old jar.
+        let mut versions = vec![
+            dated("1.0", "release", Some("2021-03-01T00:00:00Z")),
+            dated("3.0", "release", Some("2024-11-02T00:00:00Z")),
+            dated("2.0", "release", Some("2023-06-04T00:00:00Z")),
+        ];
+        newest_first(&mut versions);
+        assert_eq!(
+            pick_best(&versions).map(|v| v.id.as_str()),
+            Some("3.0"),
+            "the newest release was not chosen: {:?}",
+            versions.iter().map(|v| &v.id).collect::<Vec<_>>()
+        );
+
+        // A file with no date is not evidence that it is the newest, so it goes
+        // last rather than first.
+        let mut versions = vec![
+            dated("undated", "release", None),
+            dated("2.0", "release", Some("2023-06-04T00:00:00Z")),
+        ];
+        newest_first(&mut versions);
+        assert_eq!(
+            pick_best(&versions).map(|v| v.id.as_str()),
+            Some("2.0"),
+            "an undated file was treated as the newest build"
+        );
+    }
+
     /// A walk into Mods installs a library the server has only in Client mods,
     /// since the server never loads that folder. A walk into Client mods
     /// counts both folders, since players get the server's mods anyway.
@@ -1399,6 +1712,7 @@ pub async fn link_untracked_in(
                 chosen_side: None,
                 keep_on_server: false,
                 server_off: false,
+                ignore_game_version: false,
             },
         );
         identified += 1;
@@ -1525,6 +1839,7 @@ async fn ask_curseforge_about(
                 chosen_side: None,
                 keep_on_server: false,
                 server_off: false,
+                ignore_game_version: false,
             },
         );
         named += 1;
@@ -1686,6 +2001,7 @@ async fn name_from_catalogue(
                 chosen_side: None,
                 keep_on_server: false,
                 server_off: false,
+                ignore_game_version: false,
             }),
         }
     }
@@ -2009,6 +2325,7 @@ mod naming_tests {
             chosen_side: None,
             keep_on_server: false,
             server_off: true,
+            ignore_game_version: false,
         });
 
         let catalogue = catalogue_claiming(paths, &inst, &["theirs.jar"]).await;
@@ -2056,6 +2373,7 @@ mod naming_tests {
             chosen_side: None,
             keep_on_server: false,
             server_off: false,
+            ignore_game_version: false,
         });
 
         let catalogue = catalogue_claiming(paths, &inst, &["known.jar"]).await;
@@ -2172,6 +2490,7 @@ mod naming_tests {
             chosen_side: None,
             keep_on_server: false,
             server_off: false,
+            ignore_game_version: false,
         }
     }
 

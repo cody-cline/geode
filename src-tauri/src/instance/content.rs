@@ -158,6 +158,40 @@ pub struct ContentRecord {
     /// is the player undoing their own choice, never the server's.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub server_off: bool,
+    /// Look for this mod's files without asking which Minecraft version they
+    /// are for.
+    ///
+    /// Mod authors under-declare constantly — a jar built for 1.21.1 usually
+    /// runs on 1.21.4 — and every provider query Geode makes passes the
+    /// instance's version, so a mod the author has not listed it for has no
+    /// file to install and no update to offer. This is the person saying they
+    /// will take that risk for this one mod.
+    ///
+    /// Three things it deliberately is not, and all three are load-bearing:
+    ///
+    /// * **Not the loader.** A Fabric jar in a Forge `mods/` folder does
+    ///   nothing at all, so ignoring the loader buys a broken instance with no
+    ///   upside. The one case where crossing loaders works is Sinytra
+    ///   Connector, which [`crate::plan::resolve::Fit::Connector`] already
+    ///   models properly from Connector's own published files.
+    /// * **Not a preference.** It is asked only after the honest question has
+    ///   no answer, everywhere it is read. A mod that does have a build for
+    ///   this instance gets that build, and goes back to getting it the moment
+    ///   its author publishes one — so a mod carried on an old build is not
+    ///   stuck on it.
+    /// * **Not a compatibility claim.** Nothing here has looked inside the
+    ///   jar. A mod running outside what it declares can stop the game
+    ///   starting, which is why the screen that offers the box says so and why
+    ///   a flagged install that fails is still reported as failed.
+    ///
+    /// Only a mod, and only one with a provider: the override relaxes a
+    /// provider query and there is nothing to relax about a jar somebody
+    /// dropped in by hand. Never a server's own mod — the server chooses the
+    /// version its mods run at. Carried across installs, updates, pack updates
+    /// and re-targets, because none of those is the person changing their mind;
+    /// [`set_ignore_game_version`] is the only thing that clears it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ignore_game_version: bool,
 }
 
 /// Who said which side a mod belongs on.
@@ -313,6 +347,11 @@ pub struct ContentItem {
     /// it. Always false on an instance, which writes nobody a pack.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keep_on_server: bool,
+    /// This mod's files are looked for without asking which Minecraft version
+    /// they are for — see [`ContentRecord::ignore_game_version`]. What the box
+    /// on the row is showing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ignore_game_version: bool,
 }
 
 pub(crate) const DISABLED_SUFFIX: &str = ".disabled";
@@ -476,6 +515,7 @@ pub async fn list_in(
         };
         item.mod_ids = meta.as_ref().map(|m| m.primary.clone()).unwrap_or_default();
         item.keep_on_server = record.is_some_and(|r| r.keep_on_server);
+        item.ignore_game_version = record.is_some_and(|r| r.ignore_game_version);
         if matches!(kind, ContentKind::Mod | ContentKind::ClientMod) {
             // A server's file is the server's to classify, and a joined
             // instance takes its word rather than second-guessing it here.
@@ -798,9 +838,171 @@ pub async fn remove(
     remove_in(&dir, &mut instance.content, kind, file).await
 }
 
+/// Whether one project's mod here is installed with its Minecraft version
+/// ignored.
+///
+/// Keyed by the project, not the file, because the one caller asks while
+/// applying an update — which is exactly when the file name changes.
+pub fn ignores_game_version(records: &[ContentRecord], provider: &str, project_id: &str) -> bool {
+    records.iter().any(|r| {
+        r.kind == ContentKind::Mod
+            && r.provider == provider
+            && r.project_id == project_id
+            && r.ignore_game_version
+    })
+}
+
+/// Say whether one mod's files are looked for without asking which Minecraft
+/// version they are for — see [`ContentRecord::ignore_game_version`], which is
+/// where what this means is written down.
+///
+/// The only thing that ever clears the flag. Everything else that rewrites a
+/// record carries it across, because an update is not the person changing
+/// their mind about the mod.
+///
+/// Refused rather than quietly recorded for everything the override could not
+/// mean, because a box that reads as ticked while nothing acts on it is the
+/// kind of lie this file exists to avoid. A jar with no provenance has no
+/// provider query to relax; a server's own mod runs at the version the server
+/// chose. Mods only: this reaches the loader rules and the re-target stranding
+/// machinery, and both are about `mods/`.
+pub fn set_ignore_game_version(
+    records: &mut [ContentRecord],
+    kind: ContentKind,
+    file: &str,
+    ignore: bool,
+) -> Result<()> {
+    if kind != ContentKind::Mod {
+        return Err(Error::msg(
+            "only a mod can be installed outside the Minecraft version it declares",
+        ));
+    }
+    // Records are keyed by the enabled name, and the row offering the box may
+    // be a jar that is currently off.
+    let (base, _) = strip_disabled(file);
+    let Some(record) = records
+        .iter_mut()
+        .find(|r| r.kind == kind && r.file_name == base && !r.provider.is_empty())
+    else {
+        return Err(Error::msg(format!(
+            "{base} was not installed from Modrinth or CurseForge, so there is no version \
+             filter to drop — a jar in the mods folder is loaded exactly as it is"
+        )));
+    };
+    if record.origin == Origin::Server {
+        return Err(Error::msg(format!(
+            "{} came from the server's pack, so the server decides which version it runs",
+            record.name
+        )));
+    }
+    record.ignore_game_version = ignore;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::instance::jar::tests::fabric_jar;
+
+    /// The override has to survive `instance.json`, and every record already
+    /// on disk predates it.
+    ///
+    /// Both halves are the same bug from opposite ends. A field that does not
+    /// round-trip loses the choice at the next save — the person ticks the box,
+    /// the app restarts, and their mod is turned off by the next re-target
+    /// after all. A field without `#[serde(default)]` is worse: every existing
+    /// `instance.json` in the world stops parsing, and the instance is gone
+    /// from the library.
+    #[test]
+    fn the_override_survives_the_file_and_an_older_record_has_none() {
+        let flagged = ContentRecord {
+            ignore_game_version: true,
+            ..record("sodium.jar", ContentKind::Mod, "AANobbMI", &[])
+        };
+        let json = serde_json::to_string(&flagged).unwrap();
+        assert!(
+            json.contains("ignoreGameVersion"),
+            "the flag is not written out, so it is lost at the next save: {json}"
+        );
+        let read: ContentRecord = serde_json::from_str(&json).unwrap();
+        assert!(
+            read.ignore_game_version,
+            "the flag did not survive a round trip through instance.json"
+        );
+
+        // Not written at all when it is off, which is almost every record, and
+        // read back as off — the discipline `requires` states in this file:
+        // nobody having said anything is its own answer.
+        let plain = record("jei.jar", ContentKind::Mod, "u6dRKJwZ", &[]);
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(
+            !json.contains("ignoreGameVersion"),
+            "an untouched record carries the flag into every file: {json}"
+        );
+
+        let older = r#"{"fileName":"jei.jar","kind":"mod","provider":"modrinth",
+            "projectId":"p","versionId":"v","name":"JEI","versionNumber":"1.0"}"#;
+        let read: ContentRecord = serde_json::from_str(older).unwrap();
+        assert!(
+            !read.ignore_game_version,
+            "a record written before the box existed reads as ticked"
+        );
+    }
+
+    /// The box is refused everywhere it could not mean anything, rather than
+    /// recorded and ignored.
+    ///
+    /// A ticked box that nothing acts on is the lie this file exists to avoid:
+    /// the override relaxes a *provider* query, so a jar nobody can look up has
+    /// nothing to relax, and a server's mod runs the version the server chose —
+    /// the same rule `check_updates` and `replan::versionless` both keep.
+    #[test]
+    fn the_box_is_refused_where_it_would_mean_nothing() {
+        let mut records = vec![
+            record("sodium.jar", ContentKind::Mod, "AANobbMI", &[]),
+            ContentRecord {
+                origin: Origin::Server,
+                ..record("anticheat.jar", ContentKind::Mod, "AC", &[])
+            },
+            ContentRecord {
+                provider: String::new(),
+                project_id: String::new(),
+                ..record("by-hand.jar", ContentKind::Mod, "", &[])
+            },
+            record("faithful.zip", ContentKind::ResourcePack, "RP", &[]),
+        ];
+
+        set_ignore_game_version(&mut records, ContentKind::Mod, "sodium.jar", true).unwrap();
+        assert!(records[0].ignore_game_version, "the player's own mod");
+
+        // And off again: this is the only thing that clears it.
+        set_ignore_game_version(&mut records, ContentKind::Mod, "sodium.jar", false).unwrap();
+        assert!(!records[0].ignore_game_version, "the box would not untick");
+
+        // A jar currently turned off is the same mod, and its record is keyed
+        // by the name it goes by when it is on.
+        set_ignore_game_version(&mut records, ContentKind::Mod, "sodium.jar.disabled", true)
+            .unwrap();
+        assert!(
+            records[0].ignore_game_version,
+            "the box does nothing on a row whose jar is turned off"
+        );
+
+        for (kind, file, who) in [
+            (ContentKind::Mod, "anticheat.jar", "a server's own mod"),
+            (ContentKind::Mod, "by-hand.jar", "a jar with no provenance"),
+            (ContentKind::Mod, "not-here.jar", "a file that is not here"),
+            (ContentKind::ResourcePack, "faithful.zip", "a resource pack"),
+        ] {
+            assert!(
+                set_ignore_game_version(&mut records, kind, file, true).is_err(),
+                "{who} was given a version override that nothing would act on"
+            );
+        }
+        assert!(
+            !records[1].ignore_game_version && !records[2].ignore_game_version,
+            "a refusal still wrote the flag: {records:?}"
+        );
+    }
 
     /// A record written before origins existed is the player's own. Reading it
     /// back as the server's would lock somebody out of deleting their own mods.
@@ -895,6 +1097,7 @@ mod tests {
             chosen_side: None,
             keep_on_server: false,
             server_off: false,
+            ignore_game_version: false,
         };
         let json = serde_json::to_string(&record).unwrap();
         assert!(!json.contains("origin"), "{json}");
@@ -951,6 +1154,7 @@ mod tests {
             chosen_side: None,
             keep_on_server: false,
             server_off: false,
+            ignore_game_version: false,
         }
     }
 
@@ -1107,6 +1311,7 @@ mod tests {
             chosen_side: None,
             keep_on_server: false,
             server_off: false,
+            ignore_game_version: false,
         }];
         link(&mut items, &[None, None], &records);
 
@@ -1554,6 +1759,7 @@ mod tests {
             chosen_side: None,
             keep_on_server: false,
             server_off: false,
+            ignore_game_version: false,
         }];
         link(&mut items, &[None, None], &records);
         assert_eq!(items[1].required_by, vec!["mod.jar.disabled"]);

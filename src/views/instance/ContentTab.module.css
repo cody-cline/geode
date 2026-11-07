@@ -220,6 +220,13 @@
   color: var(--accent);
 }
 
+/* The ignore-the-Minecraft-version button while it is on. A warning colour and
+   not the accent above: this one is a choice that can stop the game starting,
+   which is a different thing from a choice about who gets a file. */
+.anyVersion {
+  color: var(--warn);
+}
+
 /* The offer above a server's Mods list: which jars look client-only, and the
    two presses. Accent-tinted like the update banner, since it is the same kind
    of thing — something waiting on the admin — but it holds rows. */

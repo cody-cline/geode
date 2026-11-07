@@ -86,6 +86,22 @@ fn version_key(v: &str) -> (u32, u32, u32) {
     )
 }
 
+/// The newest Minecraft release one file says it is for.
+///
+/// A single file commonly lists several, and which one it "is for" matters
+/// twice: it is what a report says the mod was carried over on, and it is the
+/// version the mod's own dependencies are resolved against, which everything
+/// that installs a mod against a pair other than the instance's already does.
+/// Snapshots are skipped the way [`is_release`] skips them everywhere else,
+/// and a list of nothing but snapshots answers `None` rather than picking one —
+/// the caller then has nothing to claim, which is the honest outcome.
+pub(crate) fn newest_game_version(game_versions: &[String]) -> Option<&String> {
+    game_versions
+        .iter()
+        .filter(|v| is_release(v))
+        .max_by_key(|v| version_key(v))
+}
+
 /// Every (loader, game version) pair one project ships a usable file for.
 #[derive(Debug, Clone, Default)]
 pub struct Support {
@@ -776,6 +792,30 @@ mod tests {
             .find(|t| t.game_version == "1.21.4")
             .expect("a 1.21.4 target");
         assert_eq!(at_4.fits[0].fit, Fit::Native);
+    }
+
+    /// Which version one file "is for", when it lists several.
+    ///
+    /// Read twice over by the version override: it is what a re-target report
+    /// says a carried mod was built for, and the version that mod's own
+    /// dependencies are resolved against. Both have to be a release — a
+    /// dependency walk at `24w14a` finds nothing, and a report naming a
+    /// snapshot tells somebody their mod is built for a version they have
+    /// never heard of.
+    #[test]
+    fn the_version_a_file_is_for_is_its_newest_release() {
+        let of = |vs: &[&str]| {
+            let owned: Vec<String> = vs.iter().map(|s| s.to_string()).collect();
+            newest_game_version(&owned).cloned()
+        };
+
+        assert_eq!(of(&["1.21.1", "1.21", "1.21.4"]), Some("1.21.4".into()));
+        // Numeric, not alphabetical: `1.21.10` is newer than `1.21.9`.
+        assert_eq!(of(&["1.21.9", "1.21.10"]), Some("1.21.10".into()));
+        assert_eq!(of(&["1.21.4", "24w14a", "1.21.5-pre1"]), Some("1.21.4".into()));
+        // Nothing to claim rather than a snapshot claimed as a release.
+        assert_eq!(of(&["24w14a"]), None);
+        assert_eq!(of(&[]), None);
     }
 
     #[test]

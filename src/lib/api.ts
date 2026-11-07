@@ -205,6 +205,7 @@ export const api = {
     projectId: string,
     versionId?: string,
     viaConnector?: boolean,
+    ignoreGameVersion?: boolean,
   ) =>
     invoke<InstallReport>("install_content", {
       id,
@@ -212,6 +213,24 @@ export const api = {
       projectId,
       versionId: versionId ?? null,
       viaConnector: viaConnector ?? null,
+      ignoreGameVersion: ignoreGameVersion ?? null,
+    }),
+  /**
+   * Look for one mod's files without asking which Minecraft version they are
+   * for, or stop doing that. Nothing on disk changes — the next question Geode
+   * puts to the provider does.
+   */
+  setContentIgnoreGameVersion: (
+    id: string,
+    kind: ContentKind,
+    file: string,
+    ignore: boolean,
+  ) =>
+    invoke<void>("set_content_ignore_game_version", {
+      id,
+      kind,
+      file,
+      ignore,
     }),
   connectorSupport: (gameVersion: string, loader: string) =>
     invoke<ConnectorSupport>("connector_support", { gameVersion, loader }),

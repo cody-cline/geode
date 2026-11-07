@@ -72,6 +72,19 @@ pub struct RepointedMod {
     /// jar built for 1.21.3 is the same lie in a quieter voice.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub via_version: Option<String>,
+    /// Carried over on a build for a version the new target is not, because
+    /// this mod's own box is ticked — nothing published for the new target,
+    /// and nothing the preview rated as a usable compromise either.
+    ///
+    /// Reported apart from the two above, and not folded into either. It is
+    /// genuinely re-pointed: a file was fetched and the record names it. But
+    /// `via_version` alone would read as the neighbouring patch the resolver
+    /// deliberately rates as usable, and this is not that — it is the person's
+    /// own judgement overruling the only evidence Geode has, and it may not
+    /// load at all. The screen says which of the two happened because they are
+    /// different promises.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ignored_game_version: bool,
     /// Dependencies of this mod that did not land, with the reason.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<String>,
@@ -417,6 +430,7 @@ async fn apply(
                     version_number: written.map(|r| r.version_number.clone()).unwrap_or_default(),
                     through_connector: found.through_connector,
                     via_version: (found.game_version != game_version).then_some(found.game_version),
+                    ignored_game_version: found.ignored_game_version,
                     skipped: installed.skipped,
                 });
             }
@@ -635,6 +649,9 @@ struct Found {
     /// dependencies are resolved against this rather than the instance's, for
     /// [`crate::plan::build`]'s reason: a dependency follows the mod.
     game_version: String,
+    /// Found only because this mod's version filter was dropped — see
+    /// [`RepointedMod::ignored_game_version`].
+    ignored_game_version: bool,
 }
 
 /// One mod's answer at the new target.
@@ -705,7 +722,7 @@ async fn placement(
         );
     }
 
-    climb(
+    let climbed = climb(
         resolve::ladder(&table, target_loader, game_version, matrix),
         game_version,
         &format!(
@@ -725,6 +742,25 @@ async fn placement(
             .await
         },
     )
+    .await;
+
+    // And, for a mod whose box is ticked, one rung below the ladder. After it,
+    // never in it: a `Fit` is something the resolver ranks when it decides
+    // which targets to offer for a whole instance, and this is not evidence
+    // about a target — it is one person's judgement about one mod. Put in the
+    // cost model it would start recommending versions on the strength of a box
+    // somebody ticked, which is the opposite of deriving support from what the
+    // upstream publishes.
+    anyway(climbed, record.ignore_game_version, game_version, || async {
+        crate::plan::build::newest_file_for(
+            client,
+            target_loader,
+            &record.provider,
+            &record.project_id,
+            curseforge_key,
+        )
+        .await
+    })
     .await
 }
 
@@ -762,6 +798,7 @@ where
                     loader,
                     through_connector: matches!(fit, Fit::Connector | Fit::ConnectorNear),
                     game_version: at,
+                    ignored_game_version: false,
                 }))
             }
             Ok(None) => {}
@@ -774,6 +811,76 @@ where
         // hand and held nothing that runs at this target.
         None => Placement::Nowhere(nowhere.to_string()),
         Some(reason) => Placement::Unanswered(reason),
+    }
+}
+
+/// The rung below the ladder, for a mod whose own box is ticked: the newest
+/// build its author published for this loader, whatever Minecraft version it
+/// is for.
+///
+/// Reached only from [`Placement::Nowhere`], which is the whole discipline of
+/// the override. `Nowhere` is the one answer that means "asked properly, and
+/// there is nothing" — so the only mod this changes anything for is one the
+/// re-target was about to turn off, which is the exact thing the box was
+/// ticked to prevent. The other two answers are passed straight through:
+/// [`Placement::Found`] means the ladder found a build for the target or a
+/// patch beside it, and that build is better than anything this could offer;
+/// [`Placement::Unanswered`] means nobody answered, and a mod must never be
+/// carried onto a mismatched build — any more than it may be turned off — on
+/// the strength of a question that failed.
+///
+/// A failed ask here is `Unanswered` for the same reason, which matters more
+/// than it looks: without it, a dropped connection while asking this would
+/// have stranded a flagged mod, turning off precisely the mod whose owner had
+/// said not to.
+///
+/// `ask` is a parameter for the reason [`climb`]'s is: the whole of this
+/// decision is then a test that needs no provider.
+async fn anyway<F, Fut>(
+    climbed: Placement,
+    ignore_game_version: bool,
+    game_version: &str,
+    ask: F,
+) -> Placement
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Option<(Project, Version, &'static str)>>>,
+{
+    let Placement::Nowhere(nowhere) = climbed else {
+        return climbed;
+    };
+    if !ignore_game_version {
+        return Placement::Nowhere(nowhere);
+    }
+
+    match ask().await {
+        Ok(Some((project, version, loader))) => {
+            // The build's own newest version, not the instance's. It is what
+            // the report says this mod was carried over on, and what its
+            // dependencies are resolved against — a dependency follows the
+            // mod, which is the rule every other mismatched pair here keeps.
+            // A file whose author listed no release version at all leaves this
+            // as the target's, and then the report claims no build version
+            // rather than inventing one.
+            let game_version = crate::plan::resolve::newest_game_version(&version.game_versions)
+                .cloned()
+                .unwrap_or_else(|| game_version.to_string());
+            Placement::Found(Box::new(Found {
+                project,
+                version,
+                loader,
+                through_connector: false,
+                game_version,
+                ignored_game_version: true,
+            }))
+        }
+        // Asked without a version filter and still nothing: the mod is
+        // stranded for a reason the box cannot help with, and the words say
+        // which so nobody goes looking for a setting that is already on.
+        Ok(None) => Placement::Nowhere(format!(
+            "{nowhere}, and nothing its author has published for this loader does either"
+        )),
+        Err(e) => Placement::Unanswered(e.to_string()),
     }
 }
 
@@ -924,6 +1031,22 @@ mod tests {
         &after[..after.find("\n}\n").unwrap_or(after.len())]
     }
 
+    /// The override is wired into the real `placement`, not only into
+    /// `anyway`, which every test below calls directly.
+    ///
+    /// Reverting `placement` to return `climbed` — never consulting the
+    /// record — left all of those green while a ticked box changed nothing
+    /// about a re-target, which is the one moment it exists for.
+    #[test]
+    fn placement_hands_the_records_own_override_to_the_fallback() {
+        let body = body_of("async fn placement(");
+        assert!(
+            body.contains("anyway(climbed, record.ignore_game_version"),
+            "placement no longer passes the record's own override into the fallback, so \
+             ticking the box changes nothing when a re-target cannot find a build",
+        );
+    }
+
     /// A cancel that lands mid-download decides nothing about a mod.
     ///
     /// The loop checks for a cancel at the top of each turn, but
@@ -976,6 +1099,7 @@ mod tests {
             chosen_side: None,
             keep_on_server: false,
             server_off: false,
+            ignore_game_version: false,
         }
     }
 
@@ -1506,6 +1630,144 @@ mod tests {
         );
     }
 
+    /// **The rule the box exists to keep.** A re-target turns off a mod it can
+    /// find no build for, and a flagged mod must never be turned off for a
+    /// *version* reason — that is the whole of what the person ticked it to
+    /// prevent.
+    ///
+    /// Four answers, because the override is only ever reached from one of
+    /// them, and the three it must not touch are each a different promise.
+    #[tokio::test]
+    async fn a_flagged_mod_is_carried_over_rather_than_turned_off() {
+        // Nowhere to go, box ticked: carried over on the build that does
+        // exist, and said to be exactly that.
+        let placed = anyway(
+            Placement::Nowhere("nothing published runs on NeoForge 1.21.4".into()),
+            true,
+            "1.21.4",
+            || std::future::ready(Ok(Some(published("1.21.1", "neoforge")))),
+        )
+        .await;
+        let Placement::Found(found) = placed else {
+            panic!("a flagged mod was left with nowhere to go, so the re-target turns it off");
+        };
+        assert!(
+            found.ignored_game_version,
+            "the mod was carried over without the report being able to say why"
+        );
+        assert_eq!(
+            found.game_version, "1.21.1",
+            "the build's own version is what a report names and what its dependencies follow",
+        );
+        assert!(
+            !found.through_connector,
+            "the override was recorded as a Connector fit, which is a different claim entirely",
+        );
+
+        // The same answer, box not ticked: still nowhere, still turned off.
+        let placed = anyway(
+            Placement::Nowhere("nothing published runs on NeoForge 1.21.4".into()),
+            false,
+            "1.21.4",
+            || std::future::ready(Ok(Some(published("1.21.1", "neoforge")))),
+        )
+        .await;
+        assert!(
+            matches!(placed, Placement::Nowhere(_)),
+            "a mod nobody ticked was carried onto a build for another version",
+        );
+
+        // A build for the target was found, box ticked: the ladder's answer
+        // stands, and the wider question is not even put. A fallback, never a
+        // preference.
+        let asked = std::cell::Cell::new(false);
+        let note = || {
+            asked.set(true);
+            std::future::ready(Ok(Some(published("1.21.1", "neoforge"))))
+        };
+        let placed = anyway(
+            Placement::Found(Box::new(Found {
+                project: published("1.21.4", "neoforge").0,
+                version: published("1.21.4", "neoforge").1,
+                loader: "neoforge",
+                through_connector: false,
+                game_version: "1.21.4".into(),
+                ignored_game_version: false,
+            })),
+            true,
+            "1.21.4",
+            note,
+        )
+        .await;
+        let Placement::Found(found) = placed else {
+            panic!("a mod with a build for the target lost it");
+        };
+        assert!(!found.ignored_game_version && found.game_version == "1.21.4");
+        assert!(
+            !asked.get(),
+            "the override reached past a build made for this target"
+        );
+
+        // Nobody answered, box ticked: still unanswered. A mod may no more be
+        // carried onto a mismatched jar on the strength of a question that
+        // failed than it may be turned off over one.
+        let asked = std::cell::Cell::new(false);
+        let note = || {
+            asked.set(true);
+            std::future::ready(Ok(Some(published("1.21.1", "neoforge"))))
+        };
+        let placed = anyway(
+            Placement::Unanswered("the connection dropped".into()),
+            true,
+            "1.21.4",
+            note,
+        )
+        .await;
+        assert!(matches!(placed, Placement::Unanswered(_)));
+        assert!(
+            !asked.get(),
+            "the override was asked although the first question never got an answer, so a \
+             dropped connection decides which build a mod runs",
+        );
+    }
+
+    /// The two ways the override's own question can come back, which are not
+    /// the same answer and were one before this test.
+    #[tokio::test]
+    async fn the_overrides_own_question_keeps_a_refusal_apart_from_a_failure() {
+        // Asked, and the author has published nothing for this loader at all.
+        // Stranded, with words that say the box is not what is missing.
+        let placed = anyway(
+            Placement::Nowhere("nothing published runs on Fabric 1.21.4".into()),
+            true,
+            "1.21.4",
+            || std::future::ready(Ok(None)),
+        )
+        .await;
+        let Placement::Nowhere(reason) = placed else {
+            panic!("a mod with no build anywhere was carried over as though one had been found");
+        };
+        assert!(
+            reason.contains("nothing its author has published for this loader"),
+            "the reason sends somebody looking for a setting that is already on: {reason}"
+        );
+
+        // The question failed. Not an answer, so the jar is left alone — not
+        // turned off, and not replaced either.
+        let placed = anyway(
+            Placement::Nowhere("nothing published runs on Fabric 1.21.4".into()),
+            true,
+            "1.21.4",
+            || std::future::ready(Err(Error::msg("CurseForge returned 500"))),
+        )
+        .await;
+        assert!(
+            matches!(placed, Placement::Unanswered(_)),
+            "a flagged mod was turned off because the override's own request failed — the one \
+             mod in the folder whose owner had said not to",
+        );
+    }
+
     /// Three mods with three placements, for the three ways the Connector
     /// runtime can fail to go in.
     fn connector_placements() -> Vec<(ContentRecord, Placement)> {
@@ -1517,6 +1779,7 @@ mod tests {
                 loader,
                 through_connector,
                 game_version: "1.21.1".into(),
+                ignored_game_version: false,
             }))
         };
         vec![
@@ -1649,6 +1912,7 @@ mod tests {
             version_number: "1.0".into(),
             through_connector: false,
             via_version: None,
+            ignored_game_version: false,
             skipped: Vec::new(),
         });
         report.stranded.push(StrandedMod {

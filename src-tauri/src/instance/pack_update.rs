@@ -668,6 +668,18 @@ async fn apply_ready(
     // itself, which is a name and a version and nothing to look an update up
     // by. The project this instance updates from is here, and is put back.
     let source = instance.pack.clone();
+    // Which mods the person had told Geode to ignore the Minecraft version of.
+    // The import writes a fresh record for every file the pack carries, and a
+    // fresh record says nobody has ticked anything — so without this a pack
+    // update would quietly clear a standing choice about a mod. A pack update
+    // is the pack's author changing the pack, not the player changing their
+    // mind, and only `content::set_ignore_game_version` is the latter.
+    //
+    // Restored rather than acted on: a pack names one exact file per mod, and
+    // nothing in this update asks a provider which version to fetch, so the
+    // override changes nothing about what lands here. What it has to survive
+    // for is the update check and the re-target afterwards, which do ask.
+    let ignoring = ignoring_the_game_version(instance);
 
     let outcome = async {
         for ((kind, name), arrival) in &ready.brings.named {
@@ -708,6 +720,10 @@ async fn apply_ready(
     // replacing them, which a first import into an empty instance never
     // noticed and a second one into the same instance would.
     dedupe_records(instance);
+    // After the dedupe, so the record this writes to is the one that survives
+    // it, and regardless of how the import ended: a half-finished update still
+    // rewrote the records of everything that did land.
+    restore_ignoring_the_game_version(instance, &ignoring);
 
     // Settled before the outcome is asked for, and not a line sooner, for the
     // reason `share::pack::update` gives: a half that failed or was cancelled
@@ -1130,6 +1146,35 @@ async fn recorded(
     out
 }
 
+/// The mods this instance has been told to ignore the Minecraft version of,
+/// keyed by the project rather than the file.
+///
+/// The project, because an update is exactly when the file name changes: a new
+/// build of a mod arrives under its own name, and a snapshot keyed by file name
+/// would restore nothing for precisely the mods the update touched. A flagged
+/// record always has a project id — `content::set_ignore_game_version` refuses
+/// a record without one — so there is no second key to keep.
+fn ignoring_the_game_version(instance: &Instance) -> HashSet<(ContentKind, String)> {
+    instance
+        .content
+        .iter()
+        .filter(|r| r.ignore_game_version)
+        .map(|r| (r.kind, r.project_id.clone()))
+        .collect()
+}
+
+/// Put those choices back onto whichever records now hold those projects.
+fn restore_ignoring_the_game_version(
+    instance: &mut Instance,
+    ignoring: &HashSet<(ContentKind, String)>,
+) {
+    for record in &mut instance.content {
+        if ignoring.contains(&(record.kind, record.project_id.clone())) {
+            record.ignore_game_version = true;
+        }
+    }
+}
+
 /// One record per file, keeping the last.
 ///
 /// The CurseForge arm of the import extends the record list rather than
@@ -1452,6 +1497,7 @@ mod tests {
             chosen_side: None,
             keep_on_server: false,
             server_off: false,
+            ignore_game_version: false,
         }
     }
 
@@ -1760,6 +1806,61 @@ mod tests {
         assert!(
             inst.content.iter().any(|r| r.file_name == "theirs.jar"),
             "and its record"
+        );
+    }
+
+    /// A pack arriving from a server must not quietly clear somebody's version
+    /// override.
+    ///
+    /// The import writes a fresh record for every file the pack carries, and a
+    /// fresh record says nobody has ticked anything — so the choice went with
+    /// the old record. `alpha` is the case that matters: the pack moves it from
+    /// `alpha-1.jar` to `alpha-2.jar`, which is exactly why the snapshot is
+    /// keyed by the project and not the file name. A snapshot keyed by file
+    /// name restores nothing for precisely the mods an update touched.
+    #[tokio::test]
+    async fn a_pack_update_does_not_clear_a_version_override() {
+        let scratch = Scratch::new("pu-override");
+        let mut inst = instance_on_v1(&scratch).await;
+        // One of the pack's own mods, and the mod the player installed
+        // themselves. The pack rebuilds the record of the first and never
+        // touches the second.
+        for file in ["alpha-1.jar", "theirs.jar"] {
+            content::set_ignore_game_version(&mut inst.content, ContentKind::Mod, file, true)
+                .unwrap();
+        }
+        let archive = v2(&scratch, &inst, true).await;
+
+        let problems = update(&scratch, &mut inst, &archive, "2.0").await.unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+
+        let flagged = |file: &str| {
+            inst.content
+                .iter()
+                .find(|r| r.file_name == file)
+                .unwrap_or_else(|| panic!("no record for {file}: {:?}", inst.content))
+                .ignore_game_version
+        };
+
+        assert!(
+            flagged("alpha-2.jar"),
+            "the pack's new build of a flagged mod came back unflagged, so the update \
+             silently undid a choice the player made: {:?}",
+            inst.content
+        );
+        assert!(
+            flagged("theirs.jar"),
+            "a flagged mod the pack never carried lost its override anyway"
+        );
+        // And nothing the person did not tick was given the override on the way
+        // through: restoring a snapshot must not turn into setting a default.
+        // `beta` is the other mod the pack rebuilt the record of, so it travels
+        // the same path as `alpha` and differs only in never having been
+        // ticked.
+        assert!(
+            !flagged("beta-2.jar"),
+            "a pack update handed the override to a mod nobody ticked: {:?}",
+            inst.content
         );
     }
 

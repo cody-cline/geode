@@ -33,19 +33,32 @@ function retargetLine(report: RetargetReport): StatusLine {
   // The preview said "using its 1.21.3 build" about some of these, and the
   // install did exactly that — so the count says so rather than rounding every
   // jar off to the target's own version.
-  const near = report.repointed.filter((one) => one.viaVersion);
+  // A mod carried across on a mismatched build is kept out of this count: the
+  // preview rated a neighbouring patch as usable, and nothing rated these.
+  // Counting them together would dress one person's override up as the
+  // resolver's judgement.
+  const near = report.repointed.filter(
+    (one) => one.viaVersion && !one.ignoredGameVersion,
+  );
   const versions = [...new Set(near.map((one) => one.viaVersion))];
+  const anyway = report.repointed.filter((one) => one.ignoredGameVersion);
   const moved =
     `${report.repointed.length} mod${report.repointed.length === 1 ? "" : "s"} now built for ${loaderLabel(report.loader)} ${report.mcVersion}` +
     (near.length > 0
       ? `, ${near.length} of them on its ${versions.join(" and ")} build`
+      : "") +
+    (anyway.length > 0
+      ? `, ${anyway.length} carried over on a build for another version because you asked Geode to ignore it`
       : "");
   const left = [
     report.stranded.length > 0 && `${report.stranded.length} turned off`,
     report.unchecked.length > 0 && `${report.unchecked.length} not checked`,
   ].filter(Boolean) as string[];
   return {
-    tone: report.stranded.length > 0 ? "warn" : "ok",
+    // A carried mod warns for the same reason a stranded one does: there is
+    // something here the person has to look at, and a tick saying it all went
+    // fine would be the screen deciding that for them.
+    tone: report.stranded.length > 0 || anyway.length > 0 ? "warn" : "ok",
     title: report.appliedToCopy ? `Applied to ${report.instanceName}` : "Target changed",
     detail: [
       report.copiedBecause && `A copy was made because ${report.copiedBecause}.`,
@@ -204,6 +217,38 @@ export default function ReplanModal({
               Installed for the Fabric mods that need it:{" "}
               {moved.connector.join(", ")}.
             </p>
+          )}
+
+          {/* Its own section, above the two below it, because it is the only
+              one naming mods that are switched *on* and may not load. Neither
+              re-pointed quietly nor left behind: a file did land, and it is
+              not a build for this target. */}
+          {moved.repointed.some((one) => one.ignoredGameVersion) && (
+            <section className={planStyles.blockers}>
+              <h3 className={planStyles.blockTitle}>Carried over anyway</h3>
+              {moved.repointed
+                .filter((one) => one.ignoredGameVersion)
+                .map((one) => (
+                  <div key={one.fileName} className={planStyles.blocker}>
+                    <span className={planStyles.blockText}>
+                      <span className={planStyles.blockName}>{one.name}</span>
+                      <span
+                        className={clsx(planStyles.blockWhere, styles.wraps)}
+                      >
+                        Nothing is published for {loaderLabel(moved.loader)}{" "}
+                        {moved.mcVersion}, so its{" "}
+                        {one.viaVersion
+                          ? `${one.viaVersion} build`
+                          : "newest build"}{" "}
+                        was installed because this mod ignores the Minecraft
+                        version. It is on, and whether it runs is not something
+                        Geode can tell you — if the game stops starting, this is
+                        the first thing to turn off.
+                      </span>
+                    </span>
+                  </div>
+                ))}
+            </section>
           )}
 
           {moved.stranded.length > 0 && (
@@ -428,9 +473,11 @@ export default function ReplanModal({
               <p className={styles.note}>
                 Applying {loaderLabel(target.loader)} {target.gameVersion}{" "}
                 re-points every mod this instance tracks at a build for that
-                pair. A mod with no build for it is turned off, never deleted,
-                and a jar you added by hand is left alone — the report says
-                what happened to each.
+                pair. A mod with no build for it is turned off, never deleted
+                &mdash; unless you have told that mod to ignore its Minecraft
+                version, and then it is carried over on the newest build its
+                author has published. A jar you added by hand is left alone.
+                The report says what happened to each.
               </p>
               <div>
                 <label className="label" htmlFor="replan-land-on">

@@ -1852,6 +1852,7 @@ pub(crate) async fn settle_server_files(
                 chosen_side: None,
                 keep_on_server: false,
                 server_off: arrival.off,
+                ignore_game_version: false,
             }),
         }
     }
@@ -2315,6 +2316,7 @@ async fn resolve_references(
             chosen_side: None,
             keep_on_server: false,
             server_off: false,
+            ignore_game_version: false,
         }));
     }
 
@@ -3712,6 +3714,7 @@ mod tests {
             chosen_side: None,
             keep_on_server: false,
             server_off: false,
+            ignore_game_version: false,
         }
     }
 
