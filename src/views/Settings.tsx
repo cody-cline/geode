@@ -23,6 +23,7 @@ import {
 import AccountAvatar from "../components/AccountAvatar";
 import AccountsModal from "../components/AccountsModal";
 import { api, errorMessage } from "../lib/api";
+import { radioGroupKey } from "../lib/radioGroup";
 import { DEFAULT_SHARE_PORT, parsePort } from "../lib/share";
 import { RELEASES_URL, panelHint, panelLine } from "../lib/update";
 import { useStore } from "../lib/store";
@@ -48,16 +49,31 @@ const TABS = [
 
 type TabId = (typeof TABS)[number]["id"];
 
+const THEMES = ["dark", "light"] as const;
+
+/**
+ * The eight accent presets, each with the word for it.
+ *
+ * The word is the whole point: a swatch named `Accent #4ade80` is read out as
+ * nine characters of hex, which tells nobody which colour they are on when the
+ * colour is the only thing the control is for. Plain words rather than the
+ * names a palette would use — somebody choosing an accent is picking green,
+ * not emerald-400. The hex stays on the `title` for anyone who wants it.
+ *
+ * Paired here rather than looked up from a table beside the list, the way
+ * `LOADER_BLURB` is a `Record` over the loaders: a swatch added with no word
+ * for it should fail the typecheck, not render as hex again.
+ */
 const ACCENTS = [
-  "#4ade80",
-  "#38bdf8",
-  "#a78bfa",
-  "#f472b6",
-  "#fb923c",
-  "#facc15",
-  "#f87171",
-  "#2dd4bf",
-];
+  { hex: "#4ade80", name: "Green" },
+  { hex: "#38bdf8", name: "Blue" },
+  { hex: "#a78bfa", name: "Violet" },
+  { hex: "#f472b6", name: "Pink" },
+  { hex: "#fb923c", name: "Orange" },
+  { hex: "#facc15", name: "Yellow" },
+  { hex: "#f87171", name: "Red" },
+  { hex: "#2dd4bf", name: "Teal" },
+] as const;
 
 /**
  * A `#rrggbb` to compare against `ACCENTS` and to hand `<input type="color">`.
@@ -71,7 +87,7 @@ const ACCENTS = [
  */
 function hexAccent(raw: string): string {
   const hex = raw.trim().toLowerCase();
-  return /^#[\da-f]{6}$/.test(hex) ? hex : ACCENTS[0];
+  return /^#[\da-f]{6}$/.test(hex) ? hex : ACCENTS[0].hex;
 }
 
 export default function Settings() {
@@ -138,7 +154,15 @@ function Appearance({ update }: { update: Updater }) {
   const config = useStore((s) => s.config)!;
   const current = hexAccent(config.accent);
   /** The accent is one nobody offered, so the picker is the control holding it. */
-  const custom = !ACCENTS.includes(current);
+  const custom = !ACCENTS.some((a) => a.hex === current);
+
+  // A radio group has exactly one tab stop, and it is the chosen option — or
+  // the first one when nothing in the group is chosen, which is the accent
+  // swatches whenever the colour in use came from the picker beside them, and
+  // the theme row if `config.json` were hand-edited to a third value. Without
+  // the fallback neither group can be reached by Tab at all.
+  const themeStop = THEMES.find((t) => t === config.theme) ?? THEMES[0];
+  const accentStop = ACCENTS.find((a) => a.hex === current)?.hex ?? ACCENTS[0].hex;
 
   return (
     <div className={styles.form}>
@@ -148,9 +172,22 @@ function Appearance({ update }: { update: Updater }) {
       </p>
 
       <section className={styles.section}>
-        <h2 className={styles.sectionTitle}>Theme</h2>
-        <div className={styles.themeRow}>
-          {(["dark", "light"] as const).map((theme) => (
+        <h2 className={styles.sectionTitle} id="theme-label">
+          Theme
+        </h2>
+        {/* One of two, so a radio group: the tick said which was in force to
+            anyone who could see it and nothing said it to anyone who could
+            not. Named from the heading above it. */}
+        <div
+          className={styles.themeRow}
+          role="radiogroup"
+          aria-labelledby="theme-label"
+          onKeyDown={(e) => {
+            const next = radioGroupKey(e, THEMES);
+            if (next) void update({ theme: next });
+          }}
+        >
+          {THEMES.map((theme) => (
             <button
               key={theme}
               className={clsx(
@@ -158,6 +195,10 @@ function Appearance({ update }: { update: Updater }) {
                 config.theme === theme && styles.themeActive,
               )}
               onClick={() => update({ theme })}
+              role="radio"
+              aria-checked={config.theme === theme}
+              tabIndex={theme === themeStop ? 0 : -1}
+              data-radio={theme}
             >
               <span
                 className={styles.themeSwatch}
@@ -172,22 +213,47 @@ function Appearance({ update }: { update: Updater }) {
       </section>
 
       <section className={styles.section}>
-        <h2 className={styles.sectionTitle}>Accent colour</h2>
+        <h2 className={styles.sectionTitle} id="accent-label">
+          Accent colour
+        </h2>
         <div className={styles.accents}>
-          {ACCENTS.map((accent) => (
-            <button
-              key={accent}
-              className={clsx(
-                styles.accent,
-                current === accent && styles.accentActive,
-              )}
-              style={{ background: accent }}
-              onClick={() => update({ accent })}
-              aria-label={`Accent ${accent}`}
-            >
-              {current === accent && <Check size={14} />}
-            </button>
-          ))}
+          {/* The eight presets are a radio group and the picker on the end is
+              not one of them, so the group is drawn around the eight alone.
+              When the colour in use is the picker's, none of the eight is
+              checked — which is what is true, and is why the tab stop above
+              has a fallback. */}
+          <div
+            className={styles.accentPresets}
+            role="radiogroup"
+            aria-labelledby="accent-label"
+            onKeyDown={(e) => {
+              const next = radioGroupKey(
+                e,
+                ACCENTS.map((a) => a.hex),
+              );
+              if (next) void update({ accent: next });
+            }}
+          >
+            {ACCENTS.map((accent) => (
+              <button
+                key={accent.hex}
+                className={clsx(
+                  styles.accent,
+                  current === accent.hex && styles.accentActive,
+                )}
+                style={{ background: accent.hex }}
+                onClick={() => update({ accent: accent.hex })}
+                role="radio"
+                aria-checked={current === accent.hex}
+                tabIndex={accent.hex === accentStop ? 0 : -1}
+                data-radio={accent.hex}
+                aria-label={accent.name}
+                title={`${accent.name} · ${accent.hex}`}
+              >
+                {current === accent.hex && <Check size={14} />}
+              </button>
+            ))}
+          </div>
           {/* The ninth control in the row was the colour input itself, drawn
               as a swatch of whatever accent was in use — which is to say a
               tenth green whenever that was the default one, with nothing on
@@ -208,12 +274,15 @@ function Appearance({ update }: { update: Updater }) {
               <Pipette size={13} />
             )}
             Your own
+            {/* Named with the words on the tile inside the name, because
+                "Custom accent colour" was a name with none of them in it:
+                somebody driving this by voice says what they can read. */}
             <input
               type="color"
               className={styles.accentInput}
               value={current}
               onChange={(e) => update({ accent: e.target.value })}
-              aria-label="Custom accent colour"
+              aria-label="Your own accent colour"
             />
           </label>
         </div>

@@ -15,8 +15,10 @@ import {
 } from "lucide-react";
 
 import { api } from "../lib/api";
+import { radioGroupKey } from "../lib/radioGroup";
 import { renderProviderBody } from "../lib/richtext";
 import { useBackHandler } from "../lib/useBackHandler";
+import { useFocusTrap } from "../lib/useFocusTrap";
 import { launchInstance } from "../lib/actions";
 import { useStore } from "../lib/store";
 import {
@@ -106,6 +108,11 @@ export default function ProjectPanel({
   // reason a dialog is: it sits over the list rather than in place of it.
   useBackHandler(true, onClose, "overlay");
 
+  // And the keyboard belongs to it for the same reason. Escape above was the
+  // only part of that this panel had: Tab still walked the filter rail and the
+  // result grid behind it, pressing controls the panel was covering.
+  const panel = useFocusTrap<HTMLElement>();
+
   const blocked = !project.distributionAllowed;
   const isModpack = project.kind === "modpack";
 
@@ -124,10 +131,13 @@ export default function ProjectPanel({
       }}
     >
       <aside
+        ref={panel}
         className={styles.panel}
         onMouseDown={(e) => e.stopPropagation()}
         role="dialog"
+        aria-modal="true"
         aria-label={project.name}
+        tabIndex={-1}
       >
         <header className={styles.head}>
           <div className={styles.icon}>
@@ -153,19 +163,44 @@ export default function ProjectPanel({
 
         {availableSources.length > 1 && (
           <div className={styles.sourceSwitch}>
-            <span className={styles.sourceLabel}>Source</span>
-            {availableSources.map((s) => (
-              <button
-                key={s.provider}
-                className={clsx(
-                  styles.sourceChip,
-                  source.provider === s.provider && styles.sourceActive,
-                )}
-                onClick={() => setSource(s)}
-              >
-                {providerLabel(s.provider)}
-              </button>
-            ))}
+            {/* One of them, never several, so the chips are a radio group
+                rather than a row of buttons that each happen to look pressed.
+                The label stays outside it — a group holds radios and nothing
+                else — and names it from there, since a `span` names nothing
+                on its own. */}
+            <span className={styles.sourceLabel} id="project-source-label">
+              Source
+            </span>
+            <div
+              className={styles.sourceChips}
+              role="radiogroup"
+              aria-labelledby="project-source-label"
+              onKeyDown={(e) => {
+                const next = radioGroupKey(
+                  e,
+                  availableSources.map((s) => s.provider),
+                );
+                const picked = availableSources.find((s) => s.provider === next);
+                if (picked) setSource(picked);
+              }}
+            >
+              {availableSources.map((s) => (
+                <button
+                  key={s.provider}
+                  className={clsx(
+                    styles.sourceChip,
+                    source.provider === s.provider && styles.sourceActive,
+                  )}
+                  onClick={() => setSource(s)}
+                  role="radio"
+                  aria-checked={source.provider === s.provider}
+                  tabIndex={source.provider === s.provider ? 0 : -1}
+                  data-radio={s.provider}
+                >
+                  {providerLabel(s.provider)}
+                </button>
+              ))}
+            </div>
           </div>
         )}
 
