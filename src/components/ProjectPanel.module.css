@@ -90,6 +90,15 @@
   padding: 14px 18px 0;
 }
 
+/* The chips on their own, so the element carrying `role="radiogroup"` holds
+   nothing but the radios in it. Laid out the way the row around it is, which
+   is what keeps the label and the chips reading as one line. */
+.sourceChips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .sourceLabel {
   font-size: 11px;
   font-weight: 700;
