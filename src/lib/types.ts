@@ -1411,6 +1411,8 @@ export interface InstallReport {
   skipped: string[];
   /** The folder it went into, which on a server may be Client mods rather than the one asked for. */
   kind: ContentKind;
+  /** Whether the Minecraft-version override carried this install, as against having been offered. */
+  ignoredGameVersion: boolean;
 }
 
 export interface PackPreview {

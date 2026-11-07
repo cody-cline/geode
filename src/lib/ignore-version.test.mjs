@@ -120,8 +120,20 @@ test("a carried mod is counted apart from a near-version fit", async () => {
     /Carried over anyway/,
     "the report counts the carried mods without naming them, so nobody can tell which jar to turn off when the game stops starting",
   );
-  assert.ok(
-    !/will run|should work|is compatible/.test(modal),
-    "the report claims a carried mod works, which nothing here has checked",
+  // Pinned positively. Asserting the absence of phrases nobody would write
+  // ("will run", "is compatible") cannot fail against any plausible
+  // implementation, which is cover rather than a check. What has to hold is
+  // that the section still says the two honest things it can: that whether the
+  // mod runs is not knowable here, and which mod to turn off first when the
+  // game stops starting.
+  assert.match(
+    modal,
+    /whether it runs is not something\s+Geode can tell you/,
+    "the carried-over section stopped saying that whether the mod runs is unknowable here, so the screen implies a check nothing ran",
+  );
+  assert.match(
+    modal,
+    /first thing to turn off/,
+    "the carried-over section stopped telling somebody which mod to turn off first when the game will not start",
   );
 });

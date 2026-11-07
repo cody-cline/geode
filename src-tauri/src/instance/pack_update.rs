@@ -1146,12 +1146,6 @@ async fn recorded(
     out
 }
 
-/// One record per file, keeping the last.
-///
-/// The CurseForge arm of the import extends the record list rather than
-/// replacing matching entries the way the Modrinth arm does, which importing
-/// into a fresh instance never noticed. Importing into one that already holds
-/// the same pack does.
 /// The mods this instance has been told to ignore the Minecraft version of,
 /// keyed by the project rather than the file.
 ///
@@ -1181,6 +1175,12 @@ fn restore_ignoring_the_game_version(
     }
 }
 
+/// One record per file, keeping the last.
+///
+/// The CurseForge arm of the import extends the record list rather than
+/// replacing matching entries the way the Modrinth arm does, which importing
+/// into a fresh instance never noticed. Importing into one that already holds
+/// the same pack does.
 fn dedupe_records(instance: &mut Instance) {
     let mut seen: HashSet<(ContentKind, String)> = HashSet::new();
     let mut kept: Vec<content::ContentRecord> = Vec::new();

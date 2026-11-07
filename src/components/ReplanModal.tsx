@@ -473,9 +473,11 @@ export default function ReplanModal({
               <p className={styles.note}>
                 Applying {loaderLabel(target.loader)} {target.gameVersion}{" "}
                 re-points every mod this instance tracks at a build for that
-                pair. A mod with no build for it is turned off, never deleted,
-                and a jar you added by hand is left alone — the report says
-                what happened to each.
+                pair. A mod with no build for it is turned off, never deleted
+                &mdash; unless you have told that mod to ignore its Minecraft
+                version, and then it is carried over on the newest build its
+                author has published. A jar you added by hand is left alone.
+                The report says what happened to each.
               </p>
               <div>
                 <label className="label" htmlFor="replan-land-on">

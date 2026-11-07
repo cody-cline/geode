@@ -406,7 +406,7 @@ export default function ContentTab({
                     {item.ignoreGameVersion && (
                       <span
                         className="badge"
-                        title={`Its Minecraft version is ignored. Geode takes its newest ${instance.loader} build whatever version that was built for, instead of refusing to find one.`}
+                        title="Its Minecraft version is ignored. Geode takes its newest build for this instance’s loader, whatever Minecraft version that build was made for, instead of refusing to find one."
                       >
                         any version
                       </span>

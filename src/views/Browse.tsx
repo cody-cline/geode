@@ -446,17 +446,24 @@ export default function Browse({
       toast({
         kind: "success",
         title: `Added ${project.name} to ${instance.name}`,
-        // The override is said first and in its own words. It is the only one
-        // of the three that can stop the game starting, and it is a standing
-        // choice about the mod rather than a fact about this install — the
-        // badge on its row in Content says so from now on.
-        body: useAnyVersion
-          ? `Its Minecraft version is ignored from now on, so it may not run. Undo that on its row in Content.${extras > 0 ? ` Plus ${extras} more.` : ""}`
-          : project.viaConnector
-            ? `Running on Sinytra Connector${extras > 0 ? `, plus ${extras} more` : ""}.`
-            : extras > 0
-              ? `Plus ${extras} required ${extras === 1 ? "dependency" : "dependencies"}.`
-              : undefined,
+        // Every one of these can be true at once, so none of them is allowed
+        // to hide the others: a Connector install with the box ticked used to
+        // stop mentioning that a whole runtime had arrived.
+        //
+        // The override reads off `ignoredGameVersion` — what the install
+        // actually did — and not off the box, which is a filter over the whole
+        // search. A mod that fits perfectly gets no override recorded and so
+        // must not be told it has one.
+        body:
+          [
+            report.ignoredGameVersion &&
+              "Its Minecraft version is ignored from now on, so it may not run. Undo that on its row in Content.",
+            project.viaConnector && "Running on Sinytra Connector.",
+            extras > 0 &&
+              `Plus ${extras} required ${extras === 1 ? "dependency" : "dependencies"}.`,
+          ]
+            .filter(Boolean)
+            .join(" ") || undefined,
       });
       if (report.skipped.length > 0) {
         toast({
@@ -1010,7 +1017,7 @@ export default function Browse({
                     </span>
                   </label>
                   <p className={styles.filterNote}>
-                    Mods in also whose authors have not listed Minecraft{" "}
+                    Also shows mods whose authors have not listed Minecraft{" "}
                     {lockedInstance.mcVersion}. A jar usually runs on a little
                     newer than it says — one that does not can stop the game
                     starting, and nothing here has read it. Anything you install

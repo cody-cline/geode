@@ -1096,7 +1096,7 @@ pub async fn install_content(
     // they run through the same layer, and asking for (Neo)Forge builds of them
     // would find nothing.
     //
-    // A mod carried in outside the version it declares resolves its against
+    // A mod carried in outside the version it declares resolves its own
     // the version it *is* built for, for the same reason and the one
     // `plan::build` and `instance::retarget` both state: a dependency follows
     // the mod. Only where the override actually fired — the build chosen
@@ -1131,12 +1131,17 @@ pub async fn install_content(
     state.clear_cancel(progress.id());
     match result {
         Ok(mut report) => {
-            // The box the person ticked, written onto the record the install
-            // just made. Only ever here: every later rewrite of that record
-            // carries the flag across by itself — see
-            // `install::content::install_into` — which is what makes it
-            // survive an update.
-            let recorded = match (ignore_game_version, report.installed.first()) {
+            // Written onto the record the install just made, and only when
+            // the override actually carried this mod — `ignored`, not the box.
+            // The box is a filter over a whole search: ticking it to find one
+            // mod and then installing a second from the same list must not
+            // leave that second mod wearing a permanent override it never
+            // needed. A per-mod choice is what was asked for.
+            //
+            // Only ever here: every later rewrite of that record carries the
+            // flag across by itself — see `install::content::install_into` —
+            // which is what makes it survive an update.
+            let recorded = match (ignored, report.installed.first()) {
                 (true, Some(landed)) => crate::instance::content::set_ignore_game_version(
                     &mut inst.content,
                     ContentKind::Mod,
@@ -1145,6 +1150,9 @@ pub async fn install_content(
                 ),
                 _ => Ok(()),
             };
+            // What actually happened, not what was asked for, so the toast
+            // can name a standing override only where one was recorded.
+            report.ignored_game_version = ignored;
             // Report the runtime alongside the mod so the toast can say what
             // else arrived and why.
             for name in connector_added {

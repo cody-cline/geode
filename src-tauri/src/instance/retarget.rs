@@ -1031,6 +1031,22 @@ mod tests {
         &after[..after.find("\n}\n").unwrap_or(after.len())]
     }
 
+    /// The override is wired into the real `placement`, not only into
+    /// `anyway`, which every test below calls directly.
+    ///
+    /// Reverting `placement` to return `climbed` — never consulting the
+    /// record — left all of those green while a ticked box changed nothing
+    /// about a re-target, which is the one moment it exists for.
+    #[test]
+    fn placement_hands_the_records_own_override_to_the_fallback() {
+        let body = body_of("async fn placement(");
+        assert!(
+            body.contains("anyway(climbed, record.ignore_game_version"),
+            "placement no longer passes the record's own override into the fallback, so \
+             ticking the box changes nothing when a re-target cannot find a build",
+        );
+    }
+
     /// A cancel that lands mid-download decides nothing about a mod.
     ///
     /// The loop checks for a cancel at the top of each turn, but

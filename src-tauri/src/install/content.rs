@@ -258,6 +258,15 @@ pub struct InstallReport {
     /// The folder it went into. A server may send a mod asked for as a mod to
     /// its Client mods instead, and the UI says so.
     pub kind: ContentKind,
+    /// Whether the Minecraft-version override actually carried this install,
+    /// as against having merely been offered.
+    ///
+    /// The screen has to tell those apart: ticking the box to find one mod and
+    /// then installing a second that fits perfectly must not be announced as a
+    /// standing override, because no override was recorded for it. Set by
+    /// `commands::install_content`, which is the only place that knows.
+    #[serde(default)]
+    pub ignored_game_version: bool,
 }
 
 /// Install a version plus everything it requires.
@@ -330,6 +339,7 @@ pub async fn install_with_dependencies_into(
         installed: Vec::new(),
         skipped: Vec::new(),
         kind,
+            ignored_game_version: false,
     };
 
     progress.stage("Installing", 1).await;
@@ -586,7 +596,13 @@ where
     Fut: std::future::Future<Output = Result<Vec<Version>>>,
 {
     let filtered = ask(Some(game_version.to_string())).await?;
-    if !ignore_game_version || pick_best(&filtered).is_some() {
+    // `pick_best_or_blocked`, matching the same question asked in
+    // `commands::install_content`: a file CurseForge will not serve is still
+    // an answer, because `install::blocked` can fetch it from the author's own
+    // Modrinth release. Gating on `pick_best` here made one rule into two, and
+    // a mod whose only build for this version is blocked read as unanswered
+    // on an update check and answered on an install.
+    if !ignore_game_version || pick_best_or_blocked(&filtered).is_some() {
         return Ok(filtered);
     }
     let mut any = ask(None).await?;
@@ -688,6 +704,37 @@ pub async fn check_updates(
 mod tests {
     use super::*;
     use crate::paths::Scratch;
+
+    /// The text of one function in this file, for the test below.
+    ///
+    /// A shape rather than a value: reaching `check_updates` needs a provider
+    /// that answers, and a unit test has none. The first definition wins, so
+    /// this reads the real function rather than the literal asking for it.
+    fn body_of(signature: &str) -> &'static str {
+        let here = include_str!("content.rs");
+        let after = here
+            .split(signature)
+            .nth(1)
+            .unwrap_or_else(|| panic!("{signature} is not in install/content.rs"));
+        &after[..after.find("\n}\n").unwrap_or(after.len())]
+    }
+
+    /// The override is wired into the real update check, not only into the
+    /// helper the tests below call directly.
+    ///
+    /// Every one of those calls `files_to_weigh` itself, so reverting
+    /// `check_updates` to ask `providers::versions` with the instance's
+    /// version — never consulting the record at all — left all of them green
+    /// while the box silently stopped working at the first update.
+    #[test]
+    fn the_update_check_asks_with_the_records_own_override() {
+        let body = body_of("pub async fn check_updates(");
+        assert!(
+            body.contains("files_to_weigh(record.ignore_game_version"),
+            "the update check no longer asks with the record's own override, so a flagged \
+             mod is offered nothing and the box lasts only until the next update",
+        );
+    }
     use crate::providers::VersionFile;
 
     fn version(id: &str, release_type: &str, has_file: bool) -> Version {

@@ -1630,7 +1630,6 @@ mod tests {
             servers("profiler.jar", Some(Side::Server)),
             ContentRecord {
                 server_off: true,
-                ignore_game_version: false,
                 ..servers("admin-off.jar", Some(Side::Server))
             },
             servers("both.jar", None),
