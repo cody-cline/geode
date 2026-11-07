@@ -244,18 +244,25 @@ test("the hero's generated wash carries its text at every hue, in both themes", 
 });
 
 // The per-theme half of that wash has to stay in the stylesheet. Put a
-// lightness back into the view's inline style and the sweep above goes on
+// lightness back into a view's inline style and the sweep above goes on
 // measuring the tokens while the screen shows something else.
-test("the hero wash's inline style carries nothing but the hue", async () => {
-  const view = await readFile(new URL("../views/InstanceView.tsx", import.meta.url), "utf8");
-  const at = view.indexOf("styles.heroWash");
-  assert.ok(at > 0, "the hero wash is no longer drawn by the heroWash class");
-  const style = view.slice(at, view.indexOf("/>", at));
-  assert.ok(
-    !/background|hsl\(/.test(style),
-    "the hero wash is building a colour inline again; the per-theme part belongs in CSS",
-  );
-});
+//
+// Both headers, because they are the same wash twice: the server's was left
+// inline when the instance's moved, and so stayed dark in a light theme for as
+// long as nothing here was looking at it. The sweep above measures the token
+// values, which both now read, so this is what ties each screen to them.
+for (const view of ["InstanceView", "ServerView"]) {
+  test(`${view}'s hero wash carries nothing but the hue inline`, async () => {
+    const text = await readFile(new URL(`../views/${view}.tsx`, import.meta.url), "utf8");
+    const at = text.indexOf("styles.heroWash");
+    assert.ok(at > 0, `${view} no longer draws its hero wash with the heroWash class`);
+    const style = text.slice(at, text.indexOf("/>", at));
+    assert.ok(
+      !/background|hsl\(/.test(style),
+      `${view} is building the wash inline again; the per-theme part belongs in CSS`,
+    );
+  });
+}
 
 // The sidebar's current row washes the accent over the surface and writes the
 // shortcut hint on top. With the default accent that is what ships; a chosen

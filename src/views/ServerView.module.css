@@ -31,6 +31,19 @@
   z-index: -2;
 }
 
+/* The same wash the instance header gets, and the same reason its lightness
+   is not written here: only the hue belongs to the server, and what is drawn
+   over it is `--text`, `--text-dim` and `--text-faint`, which flip with the
+   theme — see `--hero-wash-from` in global.css. Hardcoding the dark pair here
+   is what left the light theme writing dark text on a dark field. */
+.heroWash {
+  background: linear-gradient(
+    135deg,
+    hsl(var(--hero-hue-from) var(--hero-wash-from)),
+    hsl(var(--hero-hue-to) var(--hero-wash-to))
+  );
+}
+
 .heroScrim {
   position: absolute;
   inset: 0;

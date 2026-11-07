@@ -65,7 +65,16 @@ nobody can find is dead weight. `contrast.test.mjs` measures every colour
 this app writes text in against every surface it writes it on, in both
 themes, because the light one shipped for months unmeasured — it inherited
 colours picked to read on `#0b0f14` and put them on white, where the accent
-came out at 1.7:1. Nothing caught it because nothing looked.
+came out at 1.7:1. Nothing caught it because nothing looked. It also sweeps
+the one surface that is *not* a token: the field behind an instance or server
+header is a gradient built at runtime from `hashHue` of the id, so the test
+parses both stops and the scrim out of the CSS, walks every 15 degrees of hue
+and every twentieth of the gradient, and composites the scrim over it — the
+failure it caught sat between the stops rather than on either one, and a
+token-to-token check could not see this surface at all. Two smaller tests
+beside it tie each header to those tokens by refusing an `hsl()` put back
+into the view's inline style, because the sweep would otherwise go on
+measuring the stylesheet while the screen showed something else.
 `mcversion.test.mjs` is the odd one out and the reason `src/lib/mcversion.ts`
 exists at all: it is the only frontend logic here that `npm test` can *run*
 rather than read, because the file holds no JSX and Node will import it. The
