@@ -1,3 +1,5 @@
+import type { GameVersion } from "./types";
+
 export function compactNumber(n: number): string {
   if (n < 1000) return String(n);
   if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}K`;
@@ -43,6 +45,24 @@ export function relativeTime(input: string | number | null | undefined): string 
 }
 
 /**
+ * When each Minecraft version came out, as `YYYY-MM-DD`, keyed by its id.
+ *
+ * Read from the version manifest rather than worked out from the string,
+ * because the string stopped saying: 26.3 is newer than 1.21.11 and nothing
+ * about the two numbers tells anybody that. So a screen offering a choice
+ * between versions prints the date beside each one — the New instance list
+ * does, and the two screens that rank targets do it from this, in this shape,
+ * so none of the three can place a version in time differently.
+ *
+ * A version the manifest has nothing for is absent rather than guessed: a
+ * provider can name a game version Mojang never shipped, and an invented date
+ * is worse than none.
+ */
+export function releaseDates(versions: GameVersion[]): Map<string, string> {
+  return new Map(versions.map((v) => [v.id, v.releaseTime.slice(0, 10)]));
+}
+
+/**
  * Display name for a content source.
  *
  * A function rather than a ternary at each call site: there are three sources
@@ -69,14 +89,6 @@ export const GAME_MODES: Record<number, string> = {
   2: "Adventure",
   3: "Spectator",
 };
-
-/** Short form, for rows too tight for the full name. */
-export function providerShort(provider: string): string {
-  if (provider === "modrinth") return "MR";
-  if (provider === "curseforge") return "CF";
-  if (provider === "spiget") return "Spigot";
-  return provider.slice(0, 2).toUpperCase();
-}
 
 export function titleCase(s: string): string {
   return s

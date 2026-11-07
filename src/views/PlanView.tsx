@@ -17,7 +17,7 @@ import PlanPacks from "./PlanPacks";
 import type { PlanSource } from "../components/PlanSourceTabs";
 import Browse from "./Browse";
 import { api } from "../lib/api";
-import { titleCase } from "../lib/format";
+import { providerLabel, releaseDates, titleCase } from "../lib/format";
 import { modKey, planModFromProject } from "../lib/plan";
 import { useBackHandler } from "../lib/useBackHandler";
 import { useStore } from "../lib/store";
@@ -59,6 +59,7 @@ export default function PlanView({ id }: { id: string }) {
 
   const [plan, setPlan] = useState<Plan | null>(null);
   const [resolution, setResolution] = useState<PlanResolution | null>(null);
+  const [dates, setDates] = useState<Map<string, string>>(new Map());
   const [resolving, setResolving] = useState(false);
   const [chosen, setChosen] = useState(0);
   const [adding, setAdding] = useState(false);
@@ -119,6 +120,22 @@ export default function PlanView({ id }: { id: string }) {
       cancelled = true;
     };
   }, [id, resolve, reportError]);
+
+  // Snapshots included, because the resolver offers whatever these mods
+  // publish for and some of them publish for a snapshot — a candidate with no
+  // date beside it is the one row nobody can place in time. The manifest not
+  // answering costs the dates and nothing else, so it is not reported: this
+  // screen's own answer does not depend on it.
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .listGameVersions(true)
+      .then((versions) => !cancelled && setDates(releaseDates(versions)))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const commit = useCallback(
     async (next: Plan, reResolve: boolean) => {
@@ -269,6 +286,74 @@ export default function PlanView({ id }: { id: string }) {
 
   const blockers = (target?.fits ?? []).filter((f) => f.fit === "missing");
 
+  /**
+   * One candidate, drawn the way the re-target dialog draws it so the two
+   * screens cannot say one thing two ways.
+   *
+   * Only the best one is on screen until somebody asks for the rest. A rail of
+   * rows all reading "All 2 mods run here" under a version number hands the
+   * loader-and-version decision back to the person a plan exists to make it
+   * for, and the ranking that put the first row first is the part worth
+   * showing.
+   */
+  function targetCard(option: PlanTarget, index: number) {
+    const date = dates.get(option.gameVersion);
+    return (
+      <button
+        key={`${option.loader}:${option.gameVersion}`}
+        className={clsx(
+          styles.target,
+          index === 0 && styles.targetLead,
+          index === chosen && styles.targetChosen,
+          option.missing > 0 && styles.targetIncomplete,
+        )}
+        onClick={() => setChosen(index)}
+      >
+        {/* Version first, loader after it — the same card the re-target dialog
+            draws, and it must stay the same one so the two screens cannot say
+            one thing two ways. The release date follows them because the
+            number alone no longer says which way round two of them go: 26.3 is
+            newer than 1.21.11, and nothing about the two strings tells anybody
+            that. */}
+        <span className={styles.targetHead}>
+          <span className={styles.targetVersion}>{option.gameVersion}</span>
+          <span className={styles.targetLoader}>
+            {loaderLabel(option.loader)}
+          </span>
+          {date && <span className={styles.targetDate}>{date}</span>}
+          {index === 0 && <span className={styles.best}>best</span>}
+        </span>
+
+        <span
+          className={clsx(
+            styles.coverage,
+            option.missing === 0 && styles.coverageFull,
+          )}
+        >
+          {option.missing === 0
+            ? `All ${option.fits.length} mods run here`
+            : `${option.fits.length - option.missing} of ${option.fits.length} — ${option.missing} left out`}
+        </span>
+
+        {(option.connector > 0 || option.near > 0) && (
+          <span className={styles.compromises}>
+            {option.connector > 0 && (
+              <span className={clsx(styles.fit, styles.connector)}>
+                <Blocks size={10} />
+                {option.connector} via Connector
+              </span>
+            )}
+            {option.near > 0 && (
+              <span className={clsx(styles.fit, styles.nearVersion)}>
+                {option.near} other version
+              </span>
+            )}
+          </span>
+        )}
+      </button>
+    );
+  }
+
   return (
     <>
       <header className={styles.header}>
@@ -366,8 +451,13 @@ export default function PlanView({ id }: { id: string }) {
                     )}
                   </span>
 
+                  {/* Spelled out, the way the Content tab and Browse spell it.
+                      A plan mod's provider is one of three, so "modrinth or
+                      else CurseForge" labels a SpigotMC row CurseForge — and
+                      "MR" and "Modrinth" were the same provider two screens
+                      apart, to save a few pixels on a row that has them. */}
                   <span className={clsx("badge", `badge-${mod.provider}`)}>
-                    {mod.provider === "modrinth" ? "MR" : "CF"}
+                    {providerLabel(mod.provider)}
                   </span>
 
                   {verdict && fit !== "native" && (
@@ -416,59 +506,28 @@ export default function PlanView({ id }: { id: string }) {
           ) : (
             <>
               <div className={styles.targets}>
-                {resolution.targets.map((option, index) => (
-                  <button
-                    key={`${option.loader}:${option.gameVersion}`}
-                    className={clsx(
-                      styles.target,
-                      index === chosen && styles.targetChosen,
-                      option.missing > 0 && styles.targetIncomplete,
-                    )}
-                    onClick={() => setChosen(index)}
-                  >
-                    {/* Version first, loader after it — the same card the
-                        re-target dialog draws, and it must stay the same one
-                        so the two screens cannot say one thing two ways. */}
-                    <span className={styles.targetHead}>
-                      <span className={styles.targetVersion}>
-                        {option.gameVersion}
-                      </span>
-                      <span className={styles.targetLoader}>
-                        {loaderLabel(option.loader)}
-                      </span>
-                      {index === 0 && (
-                        <span className={styles.best}>best</span>
-                      )}
-                    </span>
+                {targetCard(resolution.targets[0], 0)}
 
-                    <span
-                      className={clsx(
-                        styles.coverage,
-                        option.missing === 0 && styles.coverageFull,
-                      )}
-                    >
-                      {option.missing === 0
-                        ? `All ${option.fits.length} mods run here`
-                        : `${option.fits.length - option.missing} of ${option.fits.length} — ${option.missing} left out`}
-                    </span>
-
-                    {(option.connector > 0 || option.near > 0) && (
-                      <span className={styles.compromises}>
-                        {option.connector > 0 && (
-                          <span className={clsx(styles.fit, styles.connector)}>
-                            <Blocks size={10} />
-                            {option.connector} via Connector
-                          </span>
-                        )}
-                        {option.near > 0 && (
-                          <span className={clsx(styles.fit, styles.nearVersion)}>
-                            {option.near} other version
-                          </span>
-                        )}
-                      </span>
-                    )}
-                  </button>
-                ))}
+                {/* Every candidate is still reachable — this is a summary, not
+                    a filter, and a target left off the rail is a target nobody
+                    can choose. Collapsed rather than scrolled, and counted in
+                    the summary so the number of other answers is readable
+                    without opening it. A card can only be chosen while it is
+                    on screen, so the chosen one is never hidden behind this. */}
+                {resolution.targets.length > 1 && (
+                  <details className={styles.others}>
+                    <summary>
+                      {resolution.targets.length - 1} other
+                      {resolution.targets.length === 2 ? "" : "s"} this plan
+                      could run on
+                    </summary>
+                    <div className={styles.othersList}>
+                      {resolution.targets
+                        .slice(1)
+                        .map((option, index) => targetCard(option, index + 1))}
+                    </div>
+                  </details>
+                )}
               </div>
 
               {target && target.connector > 0 && (
