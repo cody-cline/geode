@@ -153,7 +153,6 @@
   white-space: nowrap;
   font-family: var(--mono);
   font-size: 11px;
-  opacity: 0.8;
 }
 
 /* Two different things to say about one row, and the same shape for both: the

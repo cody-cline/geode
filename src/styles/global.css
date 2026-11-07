@@ -48,7 +48,13 @@
      is right before any script runs. */
   --text-on-tint: #93a0ae;
 
-  --danger: #f87171;
+  /* Lightened from #f87171, which read fine on a surface and not on itself:
+     `.btn-danger` writes this colour on a 10% wash of it that goes to 18% on
+     hover, and that pairing bottomed out at 4.25:1 — on the button labelled
+     "Delete permanently", which is the one word in the app worth being sure
+     of. The pair stands or falls together, so neither value moves alone; see
+     the test that measures it. */
+  --danger: #fa8585;
   --warn: #fbbf24;
   --info: #60a5fa;
 
@@ -129,7 +135,9 @@
   --modrinth-text: #0f7539;
   --curseforge-text: #ab4726;
   --spiget-text: #806019;
-  --danger: #a64c4c;
+  /* Darkened for the same reason as the dark theme's, and it was worse here:
+     4.39:1 at rest on a dialog's footer and 3.66:1 on hover. */
+  --danger: #8f3c3c;
   --warn: #836313;
   --info: #3c689d;
   --connector-text: #6d5aa2;
@@ -206,6 +214,18 @@ kbd {
   font-family: var(--mono);
   font-size: 11px;
   color: var(--text-faint);
+}
+
+/* A key printed on a filled button is written on the accent, not on a surface,
+   and `--text-faint` is picked to read on surfaces: on the primary green it
+   came out at 1.55:1, which is the least readable text in the app printed on
+   the most prominent button in it. The button's own label already answers this
+   question — `--accent-ink` is the colour chosen to be legible on whatever
+   accent the user picked — so the key borrows it and sits back by weight
+   instead. The pair is measured in `contrast.test.mjs`. */
+.btn-primary kbd {
+  color: var(--accent-ink);
+  font-weight: 600;
 }
 
 a {

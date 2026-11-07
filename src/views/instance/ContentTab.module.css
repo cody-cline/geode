@@ -319,7 +319,6 @@
   white-space: nowrap;
   font-family: var(--mono);
   font-size: 11px;
-  opacity: 0.8;
 }
 
 /* What a bulk delete is about to take, named one by one. Scrolls rather than

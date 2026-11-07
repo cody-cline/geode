@@ -116,7 +116,6 @@
 .category {
   font-size: 11.5px;
   color: var(--text-faint);
-  opacity: 0.75;
   white-space: nowrap;
 }
 

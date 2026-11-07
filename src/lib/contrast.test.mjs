@@ -18,7 +18,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 
 const AA = 4.5;
 
@@ -278,4 +278,128 @@ test("the hint on the current sidebar row is readable with the default accent", 
       );
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// The hole everything above falls through.
+//
+// Every check in this file compares a token with a token. A rendered element
+// can be neither: `opacity` on the element composites whatever colour it was
+// given toward whatever is behind it, and the result appears in no stylesheet
+// for any of the sweeps above to read. So the tokens can all be correct — they
+// are, that is what the rest of this file is for — while five elements built
+// from them are not, and nothing says a word.
+//
+// It was not hypothetical. `--text-faint` is the dimmest colour in this app
+// that still clears 4.5:1, and five rules took it and then asked for less:
+// the console timestamp came out at 2.87:1 in the light theme, under even the
+// 3:1 floor that large text gets, and it is the thing an admin reads to find
+// their place. Each of the five sat beside siblings using the same token
+// undimmed, so the recession bought a hierarchy that colour, family and size
+// were already carrying.
+//
+// Hence the shape of this test: it does not try to work out which rules draw
+// text, because the rule that started this carried no colour or font of its
+// own at all — it dimmed a `<kbd>` that takes its colour from `global.css`,
+// and any heuristic reading the block alone would have waved it through.
+// Instead *every* partial opacity has to be a kind that is allowed to dim,
+// and the kinds are named here with the reason each one is exempt.
+const MAY_DIM = [
+  [/:disabled|\[disabled\]/, "a disabled control, which WCAG 1.4.3 exempts"],
+  [/\b(incompatible|unusable|rowOff|disabled)\b/, "an inactive row, same exemption"],
+  [/\bgroup\[data-empty\]/, "a group with nothing in it, likewise inactive"],
+  [/\bemptyIcon\b/, "the drawing on an empty screen, not words"],
+  [/\bsvg\b|\bimage\b/, "an icon rather than text"],
+  [/\bcheckOff\b|\bdot\b|::before/, "a glyph standing in for punctuation"],
+  [/\b(faded|alone|off)\b/, "the dependency graph saying what you are not looking at"],
+];
+
+test("nothing dims text with opacity, which no check here can see", async () => {
+  const dir = new URL("../", import.meta.url);
+  const files = [];
+  const walk = async (at) => {
+    for (const entry of await readdir(at, { withFileTypes: true })) {
+      const next = new URL(`${entry.name}${entry.isDirectory() ? "/" : ""}`, at);
+      if (entry.isDirectory()) await walk(next);
+      else if (entry.name.endsWith(".css")) files.push(next);
+    }
+  };
+  await walk(dir);
+  assert.ok(files.length > 10, "no stylesheets were found to scan");
+
+  for (const file of files) {
+    const css = await readFile(file, "utf8");
+    for (const block of css.matchAll(/([^{}]*)\{([^{}]*)\}/g)) {
+      // `stroke-opacity` and `fill-opacity` paint one shape; they do not
+      // composite an element and its children the way `opacity` does.
+      const dim = block[2].match(/(?<![-\w])opacity:\s*(0?\.\d+)/);
+      if (!dim) continue;
+      const selector = block[1].trim().split("\n").pop().trim();
+      const allowed = MAY_DIM.find(([pattern]) => pattern.test(selector));
+      assert.ok(
+        allowed,
+        `${file.pathname.split("/src/")[1]} dims \`${selector}\` to ${dim[1]}. ` +
+          "If that is text, the ratio it ends up at is not measured anywhere — " +
+          "say the recession in a colour instead. If it is not text, add the " +
+          "kind to MAY_DIM beside the reason it is exempt.",
+      );
+    }
+  }
+});
+
+// `.btn-danger` is the same shape as a badge — a colour written on a wash of
+// itself — but it was not in the list above, and it is the button that says
+// "Delete permanently". Two things make it harder than a badge. Its wash is
+// mixed with `transparent`, so what it really lands on is whatever the button
+// sits on, and a dialog's footer is `--surface-2` rather than the `--surface`
+// the badges assume; and it has a hover state that takes the wash from 10% to
+// 18%, which is the worse of the two. It read 4.39:1 at rest on a dialog
+// footer and 3.66:1 under the pointer before the tokens were corrected.
+test("the danger button's label is readable on its own wash, everywhere it sits", async () => {
+  for (const [name, tokens] of Object.entries(await themes())) {
+    for (const surface of SURFACES) {
+      for (const pct of [0.1, 0.18]) {
+        const wash = over(tokens["--danger"], tokens[surface], pct);
+        const ratio = contrast(tokens["--danger"], wash);
+        assert.ok(
+          ratio >= AA,
+          `${name}: --danger (${tokens["--danger"]}) on its ${pct * 100}% wash over ` +
+            `${surface} (${wash}) is ${ratio.toFixed(2)}:1, under ${AA}`,
+        );
+      }
+    }
+  }
+});
+
+// The accent is a background as well as a colour to write in: `.btn-primary`
+// fills with it. Nothing above measured anything against it, because it is not
+// in `SURFACES` — it is user-chosen, so it cannot be, and the default is all a
+// static test can see. That gap let a shortcut hint ship at 1.55:1 on the most
+// prominent button in the app: `kbd` is globally `--text-faint`, which is
+// picked to read on surfaces, and nothing said the primary button is not one.
+test("what is written on the primary button is readable on the accent", async () => {
+  for (const [name, tokens] of Object.entries(await themes())) {
+    const ratio = contrast(tokens["--accent-ink"], tokens["--accent"]);
+    assert.ok(
+      ratio >= AA,
+      `${name}: --accent-ink (${tokens["--accent-ink"]}) on --accent ` +
+        `(${tokens["--accent"]}) is ${ratio.toFixed(2)}:1, under ${AA}`,
+    );
+  }
+
+  // And that the key printed on that button takes the label's colour rather
+  // than the one meant for surfaces.
+  const css = await readFile(new URL("../styles/global.css", import.meta.url), "utf8");
+  const rule = css.slice(css.indexOf(".btn-primary kbd {"));
+  assert.ok(
+    rule.startsWith(".btn-primary kbd {"),
+    "nothing gives a printed key its own colour on the primary button, so it " +
+      "falls back to `--text-faint`, which is chosen to read on a surface",
+  );
+  assert.match(
+    rule.slice(0, rule.indexOf("}")),
+    /color:\s*var\(--accent-ink\)/,
+    "the key on a primary button is no longer written in --accent-ink, the one " +
+      "colour that tracks whatever accent the user chose",
+  );
 });
