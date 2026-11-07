@@ -52,7 +52,16 @@ export default function Plans() {
   return (
     <>
       <header className={styles.header}>
-        <h1 className={styles.heading}>Plans</h1>
+        <div>
+          <h1 className={styles.heading}>Plans</h1>
+          {/* The one sentence that says what a plan is lived only in the empty
+              state, so it disappeared the moment somebody made one and was
+              never readable again. */}
+          <p className={styles.lede}>
+            A list of mods with no Minecraft version attached. Geode works out
+            afterwards which loader and version can run all of them.
+          </p>
+        </div>
         <button className="btn btn-primary" onClick={create} disabled={creating}>
           {creating ? <Loader2 size={14} className="spin" /> : <Plus size={14} />}
           New plan

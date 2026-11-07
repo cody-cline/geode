@@ -72,26 +72,32 @@ export default function Servers() {
       <header className={styles.header}>
         <h1 className={styles.heading}>Servers</h1>
         <div className={styles.headerTools}>
-          <div className={styles.searchWrap}>
-            <Search size={14} className={styles.searchIcon} />
-            <input
-              className={clsx("input", styles.search)}
-              placeholder="Search servers"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
-          </div>
-          <select
-            className="select"
-            style={{ width: 140 }}
-            value={sort}
-            onChange={(e) => setSort(e.target.value as Sort)}
-            aria-label="Sort servers"
-          >
-            <option value="recent">Recently run</option>
-            <option value="name">Name</option>
-            <option value="kind">Software</option>
-          </select>
+          {/* Nothing to search or sort until there is a server, and a live
+              control over an empty page is a control that cannot work. */}
+          {servers.length > 0 && (
+            <>
+              <div className={styles.searchWrap}>
+                <Search size={14} className={styles.searchIcon} />
+                <input
+                  className={clsx("input", styles.search)}
+                  placeholder="Search servers"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                />
+              </div>
+              <select
+                className="select"
+                style={{ width: 140 }}
+                value={sort}
+                onChange={(e) => setSort(e.target.value as Sort)}
+                aria-label="Sort servers"
+              >
+                <option value="recent">Recently run</option>
+                <option value="name">Name</option>
+                <option value="kind">Software</option>
+              </select>
+            </>
+          )}
           {/* Beside New server rather than buried in Settings: bringing a
               server back from a host is one of the two ways a server appears
               in this list. */}
@@ -103,7 +109,10 @@ export default function Servers() {
             <Download size={14} />
             From a host
           </button>
-          <button className="btn btn-primary" onClick={() => setCreating(true)}>
+          <button
+            className={clsx("btn", servers.length > 0 && "btn-primary")}
+            onClick={() => setCreating(true)}
+          >
             New server
           </button>
         </div>
@@ -120,10 +129,15 @@ export default function Servers() {
           <div className={styles.empty}>
             <ServerIcon size={40} className={styles.emptyIcon} />
             <h2>No servers yet</h2>
+            {/* The benefit before the brands. This was ten proper nouns and
+                two categories — "the hybrids and the proxies" — before it said
+                what any of them were for, and the dialog it leads to is the
+                thing that actually does the sorting. */}
             <p>
-              Geode sets up Paper, Purpur, Folia, Spigot, Fabric, Quilt, Forge,
-              NeoForge, the hybrids and the proxies — finding the build, putting
-              it in place, and giving you a console to run it from.
+              A server your friends can join, running on this machine. Geode
+              finds the build, puts it in place, and gives you a console to run
+              it from — for plugin servers, modded ones, the hybrids that take
+              both, and the proxies that sit in front of them.
             </p>
             <button className="btn btn-primary" onClick={() => setCreating(true)}>
               Create your first server

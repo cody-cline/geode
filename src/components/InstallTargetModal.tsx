@@ -240,11 +240,18 @@ export default function InstallTargetModal({
               disabled={!target || busy}
             >
               {busy && <Loader2 size={14} className="spin" />}
+              {/* "Install into" over a copy that is already there says nothing
+                  about what pressing it does. `install::content` removes the
+                  previous file for the project before writing the new one, so
+                  the honest verb is the one that says a copy is being swapped
+                  rather than added. */}
               {!target
                 ? "Install"
                 : targetProblem
                   ? `Install anyway into ${target.name}`
-                  : `Install into ${target.name}`}
+                  : installedIn?.has(target.id)
+                    ? `Reinstall into ${target.name}`
+                    : `Install into ${target.name}`}
             </button>
           </>
         ) : (
@@ -316,7 +323,10 @@ export default function InstallTargetModal({
                 </span>
 
                 {already && (
-                  <span className={styles.already} title="Already installed here">
+                  <span
+                    className={styles.already}
+                    title={`Already in ${instance.name}. Installing again replaces that copy with the version you pick.`}
+                  >
                     <Package size={12} />
                     installed
                   </span>

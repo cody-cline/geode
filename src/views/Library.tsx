@@ -76,27 +76,40 @@ export default function Library() {
       <header className={styles.header}>
         <h1 className={styles.heading}>Library</h1>
         <div className={styles.headerTools}>
-          <div className={styles.searchWrap}>
-            <Search size={14} className={styles.searchIcon} />
-            <input
-              className={clsx("input", styles.search)}
-              placeholder="Search instances"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
-          </div>
-          <select
-            className="select"
-            style={{ width: 140 }}
-            value={sort}
-            onChange={(e) => setSort(e.target.value as Sort)}
-            aria-label="Sort instances"
+          {/* Searching and sorting nothing are controls that cannot do
+              anything, and on first run they sat live over an empty page. */}
+          {instances.length > 0 && (
+            <>
+              <div className={styles.searchWrap}>
+                <Search size={14} className={styles.searchIcon} />
+                <input
+                  className={clsx("input", styles.search)}
+                  placeholder="Search instances"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                />
+              </div>
+              <select
+                className="select"
+                style={{ width: 140 }}
+                value={sort}
+                onChange={(e) => setSort(e.target.value as Sort)}
+                aria-label="Sort instances"
+              >
+                <option value="recent">Recently played</option>
+                <option value="name">Name</option>
+                <option value="played">Playtime</option>
+              </select>
+            </>
+          )}
+          {/* Quiet while the page below is offering the same thing. Two
+              accent-filled buttons for the one action available, three hundred
+              pixels apart, read as two different actions — and the one in the
+              middle of the page is the one with the explanation attached. */}
+          <button
+            className={clsx("btn", instances.length > 0 && "btn-primary")}
+            onClick={() => setCreating(true)}
           >
-            <option value="recent">Recently played</option>
-            <option value="name">Name</option>
-            <option value="played">Playtime</option>
-          </select>
-          <button className="btn btn-primary" onClick={() => setCreating(true)}>
             New instance
           </button>
         </div>

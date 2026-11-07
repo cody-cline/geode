@@ -12,6 +12,32 @@ import type { FolderInstance, GameVersion, Loader, PackPreview } from "../lib/ty
 
 import styles from "./NewInstanceModal.module.css";
 
+/**
+ * What each loader *is*, in one line.
+ *
+ * The first decision anyone makes in this app was five bare proper nouns, in a
+ * product that explains what a plan is, what a proxy is and what Java 17 is
+ * for. Somebody who has never modded Minecraft cannot pick between Quilt and
+ * NeoForge from the names, and picking wrong means every mod they then find is
+ * the wrong one.
+ *
+ * Descriptions of the software, never claims about what it supports: which
+ * loader has a build for which Minecraft version is read from the upstream at
+ * runtime — the picker below already says "No Fabric builds for 1.21.4" when
+ * that is the answer — and a sentence here asserting it would be the same
+ * hardcoding this codebase refuses everywhere else.
+ *
+ * `Record<Loader, string>` rather than a list, so a loader added to `LOADERS`
+ * and forgotten here fails the typecheck instead of rendering a blank row.
+ */
+const LOADER_BLURB: Record<Loader, string> = {
+  vanilla: "Minecraft as it comes, with no mod loader at all.",
+  fabric: "Light and quick to update. Most new mods are built for it.",
+  quilt: "A fork of Fabric. It runs Fabric's mods as well as its own.",
+  neoforge: "A fork of Forge, and the newer of the two.",
+  forge: "The older line, and what many long-running packs are built on.",
+};
+
 export default function NewInstanceModal({ onClose }: { onClose: () => void }) {
   const navigate = useStore((s) => s.navigate);
   const refresh = useStore((s) => s.refreshInstances);
@@ -329,14 +355,21 @@ export default function NewInstanceModal({ onClose }: { onClose: () => void }) {
               key={l.id}
               className={clsx(styles.loaderChip, loader === l.id && styles.loaderActive)}
               onClick={() => setLoader(l.id)}
+              aria-pressed={loader === l.id}
             >
-              {l.label}
+              <span className={styles.loaderName}>{l.label}</span>
+              <span className={styles.loaderBlurb}>{LOADER_BLURB[l.id]}</span>
             </button>
           ))}
         </div>
 
         {loader !== "vanilla" && (
           <div className={styles.loaderVersion}>
+            {/* Named, because the grid above now has enough structure that an
+                unlabelled select under it reads as belonging to nothing. */}
+            <label className="label" htmlFor="loader-version">
+              {LOADERS.find((l) => l.id === loader)?.label} version
+            </label>
             {loadingLoader ? (
               <span className={styles.loaderHint}>
                 <Loader2 size={13} className="spin" /> Looking up {loader} builds…
@@ -348,6 +381,7 @@ export default function NewInstanceModal({ onClose }: { onClose: () => void }) {
               </span>
             ) : (
               <select
+                id="loader-version"
                 className="select"
                 value={loaderVersion}
                 onChange={(e) => setLoaderVersion(e.target.value)}
