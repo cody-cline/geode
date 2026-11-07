@@ -31,11 +31,18 @@ export function parseLine(entry: ServerLine): ParsedLine {
     // prefix at all, and colouring it like ordinary output would bury it.
     return { level: entry.stream === "err" ? "error" : "info", message: entry.line };
   }
+  // The server labelled this line itself, and that label is printed back to
+  // the user inside the server's own brackets — so the stream does not get a
+  // vote here. Plenty of setups send everything to stderr (a wrapper, a log4j
+  // appender pointed there, an installer), and overriding the level there
+  // turned `[Server thread/INFO]` into `[Server thread/ERROR]` on screen: a
+  // word the server never wrote, in the server's own voice. The stream is only
+  // evidence when there is no label to read, which is the branch above.
   const [, time, thread, rawLevel, message] = match;
   return {
     time,
     thread,
-    level: entry.stream === "err" ? "error" : normaliseLevel(rawLevel),
+    level: normaliseLevel(rawLevel),
     message,
   };
 }

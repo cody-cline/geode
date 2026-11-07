@@ -38,13 +38,13 @@ cargo test --lib           # unit tests — offline, fast, the ones that gate a 
 cargo clippy --all-targets # expected to be clean; treat a warning as a failure
 ```
 
-`npm test` runs `node --test src/lib/*.test.mjs` — today that is ten files,
-`src/lib/share.test.mjs`, `src/lib/blocked.test.mjs`,
+`npm test` runs `node --test src/lib/*.test.mjs` — today that is eleven
+files, `src/lib/share.test.mjs`, `src/lib/blocked.test.mjs`,
 `src/lib/pack-update.test.mjs`, `src/lib/update.test.mjs`,
 `src/lib/types.test.mjs`, `src/lib/retarget.test.mjs`,
 `src/lib/ignore-version.test.mjs`, `src/lib/shortcuts.test.mjs`,
-`src/lib/contrast.test.mjs` and `src/lib/mcversion.test.mjs`. Six of those
-are worth knowing apart. `types.test.mjs` is the only check anywhere that
+`src/lib/contrast.test.mjs`, `src/lib/mcversion.test.mjs` and
+`src/lib/serverConsole.test.mjs`. Seven of those are worth knowing apart. `types.test.mjs` is the only check anywhere that
 `types.ts` really mirrors the Rust struct it claims to — it reads the text of
 `types.ts` and `Settings.tsx` and asserts that the `close_to_tray` field
 arrived in both, because a field left out of the hand-written mirror reads as
@@ -80,9 +80,17 @@ exists at all: it is the only frontend logic here that `npm test` can *run*
 rather than read, because the file holds no JSX and Node will import it. The
 sum it guards is that `26.3` is newer than `1.21.11` and `1.21.10` newer than
 `1.21.9` — both of which a string compare gets backwards, and getting it
-backwards tells somebody their world is safe to open when it is not. All ten
-also check a few invariants by reading the `.tsx` that holds them, because there is
-no DOM or React renderer under `npm test`. Everything else on the frontend is
+backwards tells somebody their world is safe to open when it is not.
+`serverConsole.test.mjs` is the other runnable one, for the same reason, and
+it pins one claim about somebody else's software: a server writes its own
+level into its own prefix, and this screen prints that prefix back, so the
+stream a line arrived on does not get to overrule the label inside it. It did
+once — every line reaching stderr was relabelled, which turned
+`[Server thread/INFO]` into `[Server thread/ERROR]` on screen, a word the
+server never wrote in the server's own voice. The stream decides only when
+there is no label to read, which is the JVM-crash case. The other nine check
+their invariants by reading the `.tsx` or `.css` that holds them, because
+there is no DOM or React renderer under `npm test`. Everything else on the frontend is
 gated by `tsc` alone, which is strict (`noUnusedLocals`,
 `verbatimModuleSyntax`); there is no ESLint or Prettier config. `npm run dev`
 on its own serves a UI with no backend to talk to, which is why the palette
