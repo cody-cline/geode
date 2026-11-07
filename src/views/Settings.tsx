@@ -11,6 +11,7 @@ import {
   Info,
   Loader2,
   Palette,
+  Pipette,
   RefreshCw,
   Server as ServerIcon,
   Share2,
@@ -136,9 +137,16 @@ type Updater = (patch: Record<string, unknown>) => Promise<void>;
 function Appearance({ update }: { update: Updater }) {
   const config = useStore((s) => s.config)!;
   const current = hexAccent(config.accent);
+  /** The accent is one nobody offered, so the picker is the control holding it. */
+  const custom = !ACCENTS.includes(current);
 
   return (
     <div className={styles.form}>
+      <p className={styles.saveModel}>
+        Everything on this screen is saved the moment you change it. There is
+        no Save button and nothing to lose by leaving.
+      </p>
+
       <section className={styles.section}>
         <h2 className={styles.sectionTitle}>Theme</h2>
         <div className={styles.themeRow}>
@@ -180,13 +188,34 @@ function Appearance({ update }: { update: Updater }) {
               {current === accent && <Check size={14} />}
             </button>
           ))}
-          <input
-            type="color"
-            className={styles.accentPicker}
-            value={current}
-            onChange={(e) => update({ accent: e.target.value })}
-            aria-label="Custom accent colour"
-          />
+          {/* The ninth control in the row was the colour input itself, drawn
+              as a swatch of whatever accent was in use — which is to say a
+              tenth green whenever that was the default one, with nothing on
+              it to say it did something the other eight do not. It says so
+              now, and shows a colour only when the colour is one no preset
+              offers. */}
+          <label
+            className={clsx(styles.accentCustom, custom && styles.accentCustomOn)}
+            title="Pick any colour"
+          >
+            {custom ? (
+              <span
+                className={styles.accentDot}
+                style={{ background: current }}
+                aria-hidden="true"
+              />
+            ) : (
+              <Pipette size={13} />
+            )}
+            Your own
+            <input
+              type="color"
+              className={styles.accentInput}
+              value={current}
+              onChange={(e) => update({ accent: e.target.value })}
+              aria-label="Custom accent colour"
+            />
+          </label>
         </div>
       </section>
 
@@ -309,6 +338,11 @@ function JavaSettings({ update }: { update: Updater }) {
 
   return (
     <div className={styles.form}>
+      <p className={styles.saveModel}>
+        Everything on this screen is saved the moment you change it — a box you
+        are typing in, when you click away from it. There is no Save button.
+      </p>
+
       <section className={styles.section}>
         <h2 className={styles.sectionTitle}>Default memory</h2>
         <div className={styles.memoryRow}>
@@ -344,9 +378,11 @@ function JavaSettings({ update }: { update: Updater }) {
           onChange={(e) => setArgs(e.target.value)}
           onBlur={() => args !== config.javaArgs && update({ javaArgs: args })}
         />
-        <p className="hint">
-          Saved when you click away. Instances can override this individually.
-        </p>
+        {/* "Saved when you click away" used to be here and nowhere else, so
+            this was the only field on any of these screens that said what
+            happens to it. The line at the top of the screen says it for all
+            of them. */}
+        <p className="hint">Instances can override this individually.</p>
       </section>
 
       <section className={styles.section}>
@@ -447,7 +483,10 @@ function AccountsSettings() {
   return (
     <div className={styles.form}>
       <section className={styles.section}>
-        <h2 className={styles.sectionTitle}>Signed in</h2>
+        {/* "Signed in" over "No accounts yet." asserted a state that was not
+            true. This heading names the list under it either way, and claims
+            nothing about a token Geode has not tried to use. */}
+        <h2 className={styles.sectionTitle}>Accounts you can play as</h2>
         {accounts.length === 0 ? (
           <p className="hint">No accounts yet.</p>
         ) : (
@@ -482,6 +521,20 @@ function AccountsSettings() {
           <UserRound size={14} />
           Manage accounts
         </button>
+        {/* This is the moment somebody signs in to a launcher that is not
+            Mojang's, and the only place that said so was the About page.
+            Both halves are facts about the code rather than reassurance:
+            `auth/mod.rs` uses the device code grant, so the password is
+            typed on Microsoft's own page in the person's own browser and
+            never reaches Geode, and `auth/store.rs` writes `accounts.json`
+            with owner-only permissions. Nothing beyond those two is
+            claimed. */}
+        <p className="hint">
+          Geode is not Mojang or Microsoft, and never asks you for your
+          password: signing in opens Microsoft&apos;s own page in your browser.
+          What Geode keeps afterwards is the token Microsoft hands back, in a
+          file only your user account can read.
+        </p>
       </section>
 
       {managing && <AccountsModal onClose={() => setManaging(false)} />}
@@ -529,7 +582,7 @@ function HostSettings() {
       setName("");
       setAddress("");
       setToken("");
-      toast({ kind: "success", title: "Host saved" });
+      toast({ kind: "success", title: "Host added" });
     } catch (e) {
       reportError("Could not save that host", e);
     } finally {
@@ -555,6 +608,11 @@ function HostSettings() {
 
   return (
     <div className={styles.form}>
+      <p className={styles.saveModel}>
+        Nothing on this screen waits to be saved: a host is added or forgotten
+        the moment you press the button for it.
+      </p>
+
       <section className={styles.section}>
         <h2 className={styles.sectionTitle}>Hosts you can send a server to</h2>
 
@@ -640,7 +698,10 @@ function HostSettings() {
             disabled={busy || !name.trim() || !address.trim() || !token.trim()}
           >
             {busy && <Loader2 size={13} className="spin" />}
-            Save host
+            {/* "Save host" read as the Save of a settings form, which is the
+                one thing this is not: there is nothing here to come back and
+                change. */}
+            Add host
           </button>
         </div>
 
@@ -714,131 +775,148 @@ function SharingSettings() {
   }
 
   return (
-    <div className={styles.form}>
-      <section className={styles.section}>
-        <h2 className={styles.sectionTitle}>Port</h2>
-        <div className={styles.field}>
-          <label className="label" htmlFor="share-port">
-            Port for shared packs
+    <>
+      <div className={styles.form}>
+        <p className={styles.saveModel}>
+          Nothing on this screen changes until you press Save. The port, the
+          router and the address are one route to this computer between them,
+          so they are written together or not at all.
+        </p>
+
+        <section className={styles.section}>
+          <h2 className={styles.sectionTitle}>Port</h2>
+          <div className={styles.field}>
+            <label className="label" htmlFor="share-port">
+              Port for shared packs
+            </label>
+            <input
+              id="share-port"
+              className="input"
+              style={{ width: 110 }}
+              inputMode="numeric"
+              value={port}
+              onChange={(e) => setPort(e.target.value)}
+            />
+            {parsedPort === null ? (
+              <p className={styles.checkBad}>
+                <AlertTriangle size={13} />
+                <span>A whole number from 1024 to 65535.</span>
+              </p>
+            ) : (
+              <p className="hint">
+                Every server you share is served on this one port. It goes in
+                the link; a player who types your address by hand has to type
+                it too, unless it is {DEFAULT_SHARE_PORT}. Changing it changes
+                every shared server&apos;s link and address.
+              </p>
+            )}
+          </div>
+        </section>
+
+        <section className={styles.section}>
+          <h2 className={styles.sectionTitle}>Router</h2>
+          <label className={styles.toggleRow}>
+            <input
+              type="radio"
+              name="share-mapping"
+              checked={mapping === "auto"}
+              onChange={() => setMapping("auto")}
+            />
+            <span>
+              <strong>Open the port automatically</strong>
+              <span className={styles.toggleHint}>
+                Geode asks your router over UPnP while a server is shared, keeps
+                asking so the opening does not lapse, and closes it when Geode
+                exits. The server page says whether the router opened it and
+                whether the address it reports is one players could reach; Geode
+                cannot test the connection from outside.
+              </span>
+            </span>
           </label>
-          <input
-            id="share-port"
-            className="input"
-            style={{ width: 110 }}
-            inputMode="numeric"
-            value={port}
-            onChange={(e) => setPort(e.target.value)}
-          />
-          {parsedPort === null ? (
-            <p className={styles.checkBad}>
-              <AlertTriangle size={13} />
-              <span>A whole number from 1024 to 65535.</span>
-            </p>
-          ) : (
+          <label className={styles.toggleRow}>
+            <input
+              type="radio"
+              name="share-mapping"
+              checked={mapping === "manual"}
+              onChange={() => setMapping("manual")}
+            />
+            <span>
+              <strong>Set it up myself</strong>
+              <span className={styles.toggleHint}>
+                Geode changes nothing on the router. Forward TCP port{" "}
+                {parsedPort ?? saved.port} to this computer, or run a tunnel to
+                it. Geode still asks the router what its public address is, and
+                links use it when it really is a public one; when the router will
+                not say, set the public address below.
+              </span>
+            </span>
+          </label>
+        </section>
+
+        <section className={styles.section}>
+          <h2 className={styles.sectionTitle}>Public address</h2>
+          <div className={styles.field}>
+            <label className="label" htmlFor="share-address">
+              Address players connect to
+            </label>
+            <input
+              id="share-address"
+              className="input"
+              value={address}
+              placeholder="play.example.com, host.playit.gg:12345, https://pack.example.com"
+              spellCheck={false}
+              autoComplete="off"
+              onChange={(e) => setAddress(e.target.value)}
+            />
             <p className="hint">
-              Every server you share is served on this one port. It goes in the
-              link; a player who types your address by hand has to type it too,
-              unless it is {DEFAULT_SHARE_PORT}. Changing it changes every shared
-              server&apos;s link and address.
+              Leave it empty to use the address your router reports. Set it when
+              players reach you another way: a domain pointed at your router, or
+              a TCP tunnel&apos;s host and port, such as playit.gg gives you.
+              Both are still checked against this computer&apos;s certificate,
+              and a TCP tunnel only has to pass the connection through, so it is
+              the simpler of the tunnels to set up.
             </p>
-          )}
-        </div>
-      </section>
+            {/* Said up front, because a tunnel set up the usual way fails for
+                every player while nothing on this computer looks wrong: Geode
+                only speaks TLS, with a certificate no authority signed. */}
+            <p className="hint">
+              An https:// address is checked by its certificate authority
+              instead, and whatever serves it — a tunnel or a reverse proxy —
+              has to pass requests on to https://localhost:
+              {parsedPort ?? saved.port}, not http://, with its check of this
+              computer&apos;s certificate turned off, since that certificate is
+              self-signed. With cloudflared, that is --no-tls-verify. Set up any
+              other way, players cannot connect, and nothing here shows it.
+            </p>
+          </div>
+        </section>
+      </div>
 
-      <section className={styles.section}>
-        <h2 className={styles.sectionTitle}>Router</h2>
-        <label className={styles.toggleRow}>
-          <input
-            type="radio"
-            name="share-mapping"
-            checked={mapping === "auto"}
-            onChange={() => setMapping("auto")}
-          />
-          <span>
-            <strong>Open the port automatically</strong>
-            <span className={styles.toggleHint}>
-              Geode asks your router over UPnP while a server is shared, keeps
-              asking so the opening does not lapse, and closes it when Geode
-              exits. The server page says whether the router opened it and
-              whether the address it reports is one players could reach; Geode
-              cannot test the connection from outside.
-            </span>
+      {/* The same bar the instance Settings tab and server Properties use,
+          rather than the Save button this screen used to end with: the end of
+          a long scroll is the one place somebody who has finished editing is
+          not looking, and leaving without pressing it lost the lot. */}
+      {dirty && (
+        <div className={clsx("save-bar", styles.saveBar)}>
+          <span className="save-hint">
+            {parsedPort === null
+              ? "The port has to be a whole number from 1024 to 65535 before this can be saved."
+              : "You have unsaved changes."}
           </span>
-        </label>
-        <label className={styles.toggleRow}>
-          <input
-            type="radio"
-            name="share-mapping"
-            checked={mapping === "manual"}
-            onChange={() => setMapping("manual")}
-          />
-          <span>
-            <strong>Set it up myself</strong>
-            <span className={styles.toggleHint}>
-              Geode changes nothing on the router. Forward TCP port{" "}
-              {parsedPort ?? saved.port} to this computer, or run a tunnel to
-              it. Geode still asks the router what its public address is, and
-              links use it when it really is a public one; when the router will
-              not say, set the public address below.
-            </span>
-          </span>
-        </label>
-      </section>
-
-      <section className={styles.section}>
-        <h2 className={styles.sectionTitle}>Public address</h2>
-        <div className={styles.field}>
-          <label className="label" htmlFor="share-address">
-            Address players connect to
-          </label>
-          <input
-            id="share-address"
-            className="input"
-            value={address}
-            placeholder="play.example.com, host.playit.gg:12345, https://pack.example.com"
-            spellCheck={false}
-            autoComplete="off"
-            onChange={(e) => setAddress(e.target.value)}
-          />
-          <p className="hint">
-            Leave it empty to use the address your router reports. Set it when
-            players reach you another way: a domain pointed at your router, or a
-            TCP tunnel&apos;s host and port, such as playit.gg gives you. Both
-            are still checked against this computer&apos;s certificate, and a
-            TCP tunnel only has to pass the connection through, so it is the
-            simpler of the tunnels to set up.
-          </p>
-          {/* Said up front, because a tunnel set up the usual way fails for
-              every player while nothing on this computer looks wrong: Geode
-              only speaks TLS, with a certificate no authority signed. */}
-          <p className="hint">
-            An https:// address is checked by its certificate authority instead,
-            and whatever serves it — a tunnel or a reverse proxy — has to pass
-            requests on to https://localhost:{parsedPort ?? saved.port}, not
-            http://, with its check of this computer&apos;s certificate turned
-            off, since that certificate is self-signed. With cloudflared, that
-            is --no-tls-verify. Set up any other way, players cannot connect,
-            and nothing here shows it.
-          </p>
-        </div>
-      </section>
-
-      <div className={styles.inlineRow}>
-        <button
-          className="btn btn-primary"
-          onClick={() => void save()}
-          disabled={!dirty || parsedPort === null || saving}
-        >
-          {saving && <Loader2 size={13} className="spin" />}
-          Save
-        </button>
-        {dirty && (
           <button className="btn" onClick={() => reset(saved)} disabled={saving}>
             Discard
           </button>
-        )}
-      </div>
-    </div>
+          <button
+            className="btn btn-primary"
+            onClick={() => void save()}
+            disabled={parsedPort === null || saving}
+          >
+            {saving && <Loader2 size={13} className="spin" />}
+            Save changes
+          </button>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -895,13 +973,24 @@ function Updates() {
         setFailure(null);
         setPutOff(false);
       } catch (e) {
-        setFailure(errorMessage(e));
-        if (asked) reportError("Could not check for updates", e);
+        const why = errorMessage(e);
+        setFailure(why);
+        // The one place the request URL and the HTTP status still land. A
+        // panel and a toast are both read by somebody who wanted to know
+        // whether there is a newer Geode, and neither of them is a log.
+        console.warn("Geode's update check failed:", why);
+        // So the toast says what the panel is about to say underneath it,
+        // rather than reporting the error — which is where those internals
+        // used to reach a player.
+        if (asked) {
+          const said = panelLine({ status: null, failure: why, putOff: false });
+          toast({ kind: "error", title: said.title, body: said.detail });
+        }
       } finally {
         setChecking(false);
       }
     },
-    [reportError],
+    [toast],
   );
 
   useEffect(() => {
