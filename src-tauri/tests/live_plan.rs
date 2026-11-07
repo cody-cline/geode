@@ -16,6 +16,8 @@
 //! rather than on one mod's current build list — otherwise the suite breaks
 //! every time an author ships something new.
 
+use std::collections::HashSet;
+
 use geode_lib::connector::SupportCache;
 use geode_lib::instance::content::ContentKind;
 use geode_lib::net::{self, Progress};
@@ -67,6 +69,9 @@ async fn resolve_plan(slugs: &[&str]) -> Resolution {
     resolve::resolve(
         &client,
         &plan_of(slugs).mods,
+        // A saved plan has no instance behind it, so no mod in it can have
+        // been told to ignore its Minecraft version.
+        &HashSet::new(),
         &matrix,
         &resolve::SupportCache::new(),
         None,
@@ -253,7 +258,7 @@ async fn jei_can_still_be_planned_on_forge_1_12_2() {
 
     // The whole space, not the best few: an eight-year-old target is never
     // going to be near the top of the list.
-    let targets = resolve::rank(&mods, &matrix, 500);
+    let targets = resolve::rank(&mods, &HashSet::new(), &matrix, 500);
     let ancient = targets
         .iter()
         .find(|t| t.loader == "forge" && t.game_version == "1.12.2")
@@ -296,7 +301,7 @@ async fn a_stranded_mod_is_not_described_by_a_truncated_hint() {
             resolve::Support::from_versions(&versions),
         ));
     }
-    let targets = resolve::rank(&mods, &matrix, 500);
+    let targets = resolve::rank(&mods, &HashSet::new(), &matrix, 500);
     println!("{} candidate targets", targets.len());
 
     let mut checked_jei = false;
@@ -365,6 +370,7 @@ async fn builds_a_versionless_plan_into_a_real_instance() {
     let resolution = resolve::resolve(
         &client,
         &plan.mods,
+        &HashSet::new(),
         &matrix,
         &resolve::SupportCache::new(),
         None,

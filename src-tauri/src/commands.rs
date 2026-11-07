@@ -1672,9 +1672,16 @@ pub async fn resolve_plan(
     // not the answer — `resolve` says so in its warnings.
     let matrix = state.connector.get(&state.http).await.unwrap_or_default();
 
+    // A plan is a list of projects on disk with no instance behind it, so
+    // nothing in it can have been told to ignore its Minecraft version — that
+    // is a choice recorded against an installed file. `resolve_instance`
+    // below is the one caller with any to pass.
+    let no_overrides = std::collections::HashSet::new();
+
     let result = crate::plan::resolve::resolve(
         &state.http,
         &plan.mods,
+        &no_overrides,
         &matrix,
         &state.plan_support,
         config.effective_curseforge_key().as_deref(),
@@ -1757,9 +1764,13 @@ async fn resolved_target(
 ) -> Result<(crate::plan::resolve::Resolution, usize)> {
     let found: Result<(crate::plan::resolve::Resolution, usize)> = async {
         let matrix = state.connector.get(&state.http).await.unwrap_or_default();
+        // A saved plan's mods, as in `resolve_plan`: no instance, so no
+        // record, so no override to honour.
+        let no_overrides = std::collections::HashSet::new();
         let resolution = crate::plan::resolve::resolve(
             &state.http,
             &plan.mods,
+            &no_overrides,
             &matrix,
             &state.plan_support,
             cf_key,
