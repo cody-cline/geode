@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 
 import { api } from "../lib/api";
-import { radioGroupKey } from "../lib/radioGroup";
+import { rovingKey } from "../lib/rovingFocus";
 import { renderProviderBody } from "../lib/richtext";
 import { useBackHandler } from "../lib/useBackHandler";
 import { useFocusTrap } from "../lib/useFocusTrap";
@@ -176,7 +176,7 @@ export default function ProjectPanel({
               role="radiogroup"
               aria-labelledby="project-source-label"
               onKeyDown={(e) => {
-                const next = radioGroupKey(
+                const next = rovingKey(
                   e,
                   availableSources.map((s) => s.provider),
                 );
@@ -195,7 +195,7 @@ export default function ProjectPanel({
                   role="radio"
                   aria-checked={source.provider === s.provider}
                   tabIndex={source.provider === s.provider ? 0 : -1}
-                  data-radio={s.provider}
+                  data-roving={s.provider}
                 >
                   {providerLabel(s.provider)}
                 </button>

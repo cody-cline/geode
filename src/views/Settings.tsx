@@ -23,7 +23,7 @@ import {
 import AccountAvatar from "../components/AccountAvatar";
 import AccountsModal from "../components/AccountsModal";
 import { api, errorMessage } from "../lib/api";
-import { radioGroupKey } from "../lib/radioGroup";
+import { rovingKey } from "../lib/rovingFocus";
 import { DEFAULT_SHARE_PORT, parsePort } from "../lib/share";
 import { RELEASES_URL, panelHint, panelLine } from "../lib/update";
 import { useStore } from "../lib/store";
@@ -183,7 +183,7 @@ function Appearance({ update }: { update: Updater }) {
           role="radiogroup"
           aria-labelledby="theme-label"
           onKeyDown={(e) => {
-            const next = radioGroupKey(e, THEMES);
+            const next = rovingKey(e, THEMES);
             if (next) void update({ theme: next });
           }}
         >
@@ -198,7 +198,7 @@ function Appearance({ update }: { update: Updater }) {
               role="radio"
               aria-checked={config.theme === theme}
               tabIndex={theme === themeStop ? 0 : -1}
-              data-radio={theme}
+              data-roving={theme}
             >
               <span
                 className={styles.themeSwatch}
@@ -227,7 +227,7 @@ function Appearance({ update }: { update: Updater }) {
             role="radiogroup"
             aria-labelledby="accent-label"
             onKeyDown={(e) => {
-              const next = radioGroupKey(
+              const next = rovingKey(
                 e,
                 ACCENTS.map((a) => a.hex),
               );
@@ -246,7 +246,7 @@ function Appearance({ update }: { update: Updater }) {
                 role="radio"
                 aria-checked={current === accent.hex}
                 tabIndex={accent.hex === accentStop ? 0 : -1}
-                data-radio={accent.hex}
+                data-roving={accent.hex}
                 aria-label={accent.name}
                 title={`${accent.name} · ${accent.hex}`}
               >

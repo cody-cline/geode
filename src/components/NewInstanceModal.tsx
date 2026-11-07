@@ -6,7 +6,7 @@ import { FileArchive, FolderOpen, Loader2, Search, Users } from "lucide-react";
 
 import Modal from "./Modal";
 import { api } from "../lib/api";
-import { radioGroupKey } from "../lib/radioGroup";
+import { rovingKey } from "../lib/rovingFocus";
 import { useStore } from "../lib/store";
 import { LOADERS } from "../lib/types";
 import type { FolderInstance, GameVersion, Loader, PackPreview } from "../lib/types";
@@ -362,7 +362,7 @@ export default function NewInstanceModal({ onClose }: { onClose: () => void }) {
           role="radiogroup"
           aria-labelledby="loader-label"
           onKeyDown={(e) => {
-            const next = radioGroupKey(
+            const next = rovingKey(
               e,
               LOADERS.map((l) => l.id),
             );
@@ -379,7 +379,7 @@ export default function NewInstanceModal({ onClose }: { onClose: () => void }) {
               // One tab stop for the group, as a native radio row has: Tab
               // reaches the chosen loader, and the arrows move from there.
               tabIndex={loader === l.id ? 0 : -1}
-              data-radio={l.id}
+              data-roving={l.id}
             >
               <span className={styles.loaderName}>{l.label}</span>
               <span className={styles.loaderBlurb}>{LOADER_BLURB[l.id]}</span>
