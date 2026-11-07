@@ -1,13 +1,18 @@
-// The window's keyboard shortcuts, and the one rule that makes them worth
-// having: every binding is printed beside the thing it opens. A shortcut
-// nobody can come across is dead weight, and the only place these five are
-// discoverable is the sidebar — so a sixth added to the table and left out of
-// `Sidebar.tsx` is a feature that ships invisible.
+// The keyboard's shortcuts, and the one rule that makes them worth having:
+// every binding is printed where it applies. A shortcut nobody can come across
+// is dead weight, so a binding added to a table in `shortcuts.ts` and left out
+// of the screen that can carry it out is a feature that ships invisible.
 //
-// Checked by reading the two files, the way `retarget.test.mjs` checks what
-// spans two files: `npm test` has no DOM and no React renderer, so the hint
-// cannot be rendered and looked at here. Plain JavaScript for the same reason
-// those are: the project has no test runner and no Node typings.
+// Where that is depends on which kind it is. A **route** is reachable from
+// anywhere and the sidebar is the only place all five are named, so that is
+// where those are printed. An **action** belongs to one screen, has no sidebar
+// row, and is printed on the thing it presses — which is why `PRINTED_IN`
+// below says, per action, which file has to be the one printing it.
+//
+// Checked by reading the files, the way `retarget.test.mjs` checks what spans
+// two files: `npm test` has no DOM and no React renderer, so the hint cannot be
+// rendered and looked at here. Plain JavaScript for the same reason those are:
+// the project has no test runner and no Node typings.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -17,24 +22,52 @@ async function source(path) {
   return readFile(new URL(path, import.meta.url), "utf8");
 }
 
-/** The table itself, read out of `shortcuts.ts`. */
-async function bindings() {
+/** One table, read out of `shortcuts.ts` by name. */
+async function table(name) {
   const text = await source("./shortcuts.ts");
-  const start = text.indexOf("const SHORTCUTS");
-  assert.ok(start > 0, "shortcuts.ts no longer declares a table of bindings");
-  const table = text.slice(start, text.indexOf("];", start));
+  const start = text.indexOf(`const ${name}`);
+  assert.ok(start > 0, `shortcuts.ts no longer declares ${name}`);
+  return text.slice(start, text.indexOf("];", start));
+}
 
+/** The shortcuts that open a screen. */
+async function routeBindings() {
   const found = [
-    ...table.matchAll(/key:\s*"([^"]+)"[^}]*view:\s*"([^"]+)"/g),
+    ...(await table("ROUTE_SHORTCUTS")).matchAll(
+      /key:\s*"([^"]+)"[^}]*view:\s*"([^"]+)"/g,
+    ),
   ].map(([, key, view]) => ({ key, view }));
-  assert.ok(found.length > 0, "no bindings could be read out of the table");
+  assert.ok(found.length > 0, "no route bindings could be read out of the table");
   return found;
 }
+
+/** The shortcuts that press something on the screen that owns them. */
+async function actionBindings() {
+  const found = [
+    ...(await table("ACTION_SHORTCUTS")).matchAll(
+      /action:\s*"([^"]+)",\s*key:\s*"([^"]+)",\s*ctrl:\s*(true|false)/g,
+    ),
+  ].map(([, action, key, ctrl]) => ({ action, key, ctrl: ctrl === "true" }));
+  assert.ok(found.length > 0, "no action bindings could be read out of the table");
+  return found;
+}
+
+/**
+ * The screen that has to print each action's hint.
+ *
+ * The test's own map rather than a column in the table, because a file path is
+ * nothing the app itself needs to know. An action added to the table with no
+ * entry here fails below rather than slipping through unprinted.
+ */
+const PRINTED_IN = {
+  focusFilter: "../views/instance/ContentTab.tsx",
+  clearSelection: "../views/instance/ContentTab.tsx",
+};
 
 test("every binding is printed beside the screen it opens", async () => {
   const sidebar = await source("../components/Sidebar.tsx");
 
-  for (const { key, view } of await bindings()) {
+  for (const { key, view } of await routeBindings()) {
     assert.ok(
       sidebar.includes(`shortcutHint("${view}")`),
       `${key} opens ${view}, and the sidebar prints no hint for it — nobody would find it`,
@@ -42,16 +75,74 @@ test("every binding is printed beside the screen it opens", async () => {
   }
 });
 
+test("every action is printed on the screen that can carry it out", async () => {
+  for (const { key, action } of await actionBindings()) {
+    const where = PRINTED_IN[action];
+    assert.ok(
+      where,
+      `${key} is bound to ${action} and no screen is named as the one that ` +
+        "prints it — a hint with no home is a binding nobody comes across",
+    );
+    assert.ok(
+      (await source(where)).includes(`actionHint("${action}")`),
+      `${key} is bound to ${action}, and ${where} prints no hint for it — ` +
+        "nobody would find it",
+    );
+  }
+});
+
 // Ctrl+C, Ctrl+V, Ctrl+A and Ctrl+Z are the webview's, and a person typing in
-// the server console expects all four to do what they always do. Binding any
-// letter at all is how one of them gets taken, so none is.
-test("no binding is a letter, so none can take one of the webview's", async () => {
-  for (const { key, view } of await bindings()) {
+// the server console expects all four to do what they always do. A route is
+// live on every screen there is, the console included, so binding any letter at
+// all is how one of them gets taken — and so none is.
+test("no route binding is a letter, so none can take one of the webview's", async () => {
+  for (const { key, view } of await routeBindings()) {
     assert.ok(
       !/^[a-z]$/i.test(key),
       `${view} is bound to a letter, which is how Ctrl+C or Ctrl+V stops working`,
     );
   }
+});
+
+// An action is dead on every screen but its own, so a letter is safe there —
+// except these five, which the webview answers everywhere.
+test("no action binding takes one of the webview's own letters", async () => {
+  for (const { key, action } of await actionBindings()) {
+    assert.ok(
+      !/^[cvxaz]$/i.test(key),
+      `${action} is bound to Ctrl+${key.toUpperCase()}, which is the ` +
+        "webview's own — cut, copy, paste, select all and undo are not ours to take",
+    );
+  }
+});
+
+// A modifier types nothing into a field, which is what lets every route
+// binding ignore where the keyboard is. A bare key has no such cover: Escape
+// closes an open `<select>` and dismisses what a field's own handler put up, so
+// a bare binding has to stand aside while somebody is typing.
+test("a binding with no modifier does nothing in a text field", async () => {
+  const text = await source("./shortcuts.ts");
+  const matcher = text.indexOf("export function shortcutAction");
+  assert.ok(matcher > 0, "shortcuts.ts no longer matches a press to an action");
+
+  assert.match(
+    text.slice(matcher).replace(/\s+/g, " "),
+    /!\w*\.?ctrl && typing\(/,
+    "a press with no modifier is read as a shortcut wherever the keyboard is, " +
+      "so a bare binding now fires in the middle of somebody's typing",
+  );
+
+  const guard = text.slice(text.indexOf("function typing"), matcher);
+  for (const tag of ["INPUT", "TEXTAREA", "SELECT"]) {
+    assert.ok(
+      guard.includes(`"${tag}"`),
+      `a bare binding fires inside a <${tag.toLowerCase()}>, which belongs to whatever is in it`,
+    );
+  }
+  assert.ok(
+    guard.includes("isContentEditable"),
+    "a bare binding fires inside an editable element, which belongs to whatever is in it",
+  );
 });
 
 // Three screens claim back without being on top of anything: browsing inside
@@ -90,5 +181,28 @@ test("a dialog registers as an overlay, so it does hold the shortcuts", async ()
     /useBackHandler\(\s*true,\s*onClose,\s*"overlay"\s*\)/.test(modal),
     "Modal no longer claims back as an overlay, so a shortcut pressed with a " +
       "dialog open would change the screen underneath it",
+  );
+});
+
+// The same rule, kept by the screen rather than by `App` — and it needs one
+// thing `App` does not. `Modal` listens on the document and closes on Escape,
+// which pops the very handler this gate reads; captured at the window, the
+// screen is asked first and still sees the dialog that owns the press.
+test("a screen's own shortcut holds off while a dialog is open", async () => {
+  const tab = await source("../views/instance/ContentTab.tsx");
+  const start = tab.indexOf("const onShortcut");
+  assert.ok(start > 0, "the Content tab no longer binds keys through `onShortcut`");
+  const handler = tab.slice(start, tab.indexOf("return () =>", start)).replace(/\s+/g, " ");
+
+  assert.ok(
+    /backHandlers\.some\( *\(?\w+\)? *=> *\w+\.overlay *\)/.test(handler),
+    "the Content tab's keys no longer stand aside for a dialog, so Escape now " +
+      "closes one and clears the selection behind it in the same press",
+  );
+  assert.match(
+    handler,
+    /addEventListener\("keydown", onShortcut, true\)/,
+    "the listener is no longer captured, so Modal closes and unregisters " +
+      "itself before the gate above is read, and the press does both things",
   );
 });
