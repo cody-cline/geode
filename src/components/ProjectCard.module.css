@@ -277,3 +277,23 @@
   background: color-mix(in srgb, var(--connector) 22%, transparent);
   color: var(--connector-text);
 }
+
+/* The three fixed parts of this row — icon, gaps, action column — cost 212px
+   whatever is left for the summary, and at the narrowest width the window
+   supports that left the summary less than the icon. See the matching rule in
+   Browse.module.css: between them the summary keeps about a third more. */
+@media (max-width: 1100px) {
+  .row {
+    gap: 12px;
+    padding: 14px 14px;
+  }
+
+  .icon {
+    width: 52px;
+    height: 52px;
+  }
+
+  .action {
+    min-width: 0;
+  }
+}

@@ -476,6 +476,17 @@ h4 {
   }
 }
 
+/* The window will open as small as `minWidth: 940` in `tauri.conf.json`, and
+   nothing in here knew that number existed — every width was fixed, so at the
+   smallest supported size the rail took more than a quarter of it. Declared on
+   the token rather than on `.app`, because `ProgressDock` positions itself off
+   the same value and the two must not disagree. */
+@media (max-width: 1100px) {
+  :root {
+    --sidebar-w: 198px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

@@ -53,6 +53,9 @@ const SORTS: { id: SortBy; label: string }[] = [
 
 const PAGE_SIZE = 30;
 
+/** How many category chips the rail shows before asking to be opened. */
+const CATEGORY_PREVIEW = 10;
+
 /** Loaders have fixed capitalisation ("NeoForge"), so never title-case them. */
 function loaderLabel(id: string): string {
   return LOADERS.find((l) => l.id === id)?.label ?? titleCase(id);
@@ -150,6 +153,12 @@ export default function Browse({
   ]);
   const [categories, setCategories] = useState<string[]>([]);
   const [available, setAvailable] = useState<string[]>([]);
+  /**
+   * Whether the whole category list is open. Modrinth publishes twenty-one for
+   * mods, and as a wall of equal-weight chips they were the tallest thing on
+   * the screen while being the last thing anyone reaches for.
+   */
+  const [allCategories, setAllCategories] = useState(false);
   /** Last instance installed into, used to preselect the picker. */
   const [lastTargetId, setLastTargetId] = useState<string>("");
   const [filterVersion, setFilterVersion] = useState("");
@@ -550,6 +559,7 @@ export default function Browse({
       .then(setAvailable)
       .catch(() => setAvailable([]));
     setCategories([]);
+    setAllCategories(false);
   }, [kind]);
 
   // Only the in-instance view scopes automatically — there the destination is
@@ -777,6 +787,21 @@ export default function Browse({
     [kind],
   );
 
+  /**
+   * The categories on show while the list is collapsed: the first few, plus
+   * any that are already picked. A chosen filter must never be hidden by the
+   * thing that hides unchosen ones — the list would be narrowed by something
+   * the screen no longer mentions.
+   */
+  const shownCategories = useMemo(() => {
+    if (allCategories) return available;
+    const head = available.slice(0, CATEGORY_PREVIEW);
+    return [
+      ...head,
+      ...available.slice(CATEGORY_PREVIEW).filter((c) => categories.includes(c)),
+    ];
+  }, [allCategories, available, categories]);
+
   return (
     <>
       <header className={styles.header}>
@@ -810,36 +835,6 @@ export default function Browse({
                 <ClipboardList size={14} />
                 {plan.name}
               </span>
-              {/* These narrow the search, not the plan. A plan has no version
-                  of its own and picking one here does not give it one. */}
-              <select
-                className="select"
-                style={{ width: 140 }}
-                value={filterVersion}
-                onChange={(e) => setFilterVersion(e.target.value)}
-                aria-label="Filter by Minecraft version"
-              >
-                <option value="">Any version</option>
-                {gameVersions.map((v) => (
-                  <option key={v} value={v}>
-                    {v}
-                  </option>
-                ))}
-              </select>
-              <select
-                className="select"
-                style={{ width: 125 }}
-                value={filterLoader}
-                onChange={(e) => setFilterLoader(e.target.value)}
-                aria-label="Filter by mod loader"
-              >
-                <option value="">Any loader</option>
-                {LOADERS.filter((l) => l.id !== "vanilla").map((l) => (
-                  <option key={l.id} value={l.id}>
-                    {l.label}
-                  </option>
-                ))}
-              </select>
               <button className="btn btn-sm btn-primary" onClick={onDone}>
                 Done
               </button>
@@ -855,41 +850,7 @@ export default function Browse({
                 Done
               </button>
             </>
-          ) : (
-            <>
-              <span className={styles.targetLabel}>Filter</span>
-              <select
-                className="select"
-                style={{ width: 150 }}
-                value={filterVersion}
-                onChange={(e) => setFilterVersion(e.target.value)}
-                aria-label="Filter by Minecraft version"
-              >
-                <option value="">Any version</option>
-                {gameVersions.map((v) => (
-                  <option key={v} value={v}>
-                    {v}
-                  </option>
-                ))}
-              </select>
-              {(kind === "mod" || kind === "modpack") && (
-                <select
-                  className="select"
-                  style={{ width: 130 }}
-                  value={filterLoader}
-                  onChange={(e) => setFilterLoader(e.target.value)}
-                  aria-label="Filter by mod loader"
-                >
-                  <option value="">Any loader</option>
-                  {LOADERS.filter((l) => l.id !== "vanilla").map((l) => (
-                    <option key={l.id} value={l.id}>
-                      {l.label}
-                    </option>
-                  ))}
-                </select>
-              )}
-            </>
-          )}
+          ) : null}
         </div>
       </header>
 
@@ -907,24 +868,75 @@ export default function Browse({
             </button>
           ))
         )}
-        <div style={{ flex: 1 }} />
-        <select
-          className="select"
-          style={{ width: 175 }}
-          value={sort}
-          onChange={(e) => setSort(e.target.value as SortBy)}
-          aria-label="Sort results"
-        >
-          {SORTS.map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.label}
-            </option>
-          ))}
-        </select>
       </div>
 
       <div className={styles.body}>
         <aside className={styles.filters}>
+          {/* Sort and the two narrowing selects used to sit above the results,
+              in two rows that had nothing else in them, while the rail below
+              held the rest of the same job — so what the list shows was set
+              from three places at once and the plan's explanation of what the
+              selects do was six hundred pixels from the selects. One place,
+              and the row above the first result is the search and the kind. */}
+          <section className={styles.filterSection}>
+            <h3 className={styles.filterTitle}>Sort</h3>
+            <select
+              className={clsx("select", styles.filterSelect)}
+              value={sort}
+              onChange={(e) => setSort(e.target.value as SortBy)}
+              aria-label="Sort results"
+            >
+              {SORTS.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.label}
+                </option>
+              ))}
+            </select>
+          </section>
+
+          {!lockedInstance && !server && (
+            <section className={styles.filterSection}>
+              <h3 className={styles.filterTitle}>Narrow</h3>
+              <select
+                className={clsx("select", styles.filterSelect)}
+                value={filterVersion}
+                onChange={(e) => setFilterVersion(e.target.value)}
+                aria-label="Filter by Minecraft version"
+              >
+                <option value="">Any version</option>
+                {gameVersions.map((v) => (
+                  <option key={v} value={v}>
+                    {v}
+                  </option>
+                ))}
+              </select>
+              {(Boolean(plan) || kind === "mod" || kind === "modpack") && (
+                <select
+                  className={clsx("select", styles.filterSelect)}
+                  value={filterLoader}
+                  onChange={(e) => setFilterLoader(e.target.value)}
+                  aria-label="Filter by mod loader"
+                >
+                  <option value="">Any loader</option>
+                  {LOADERS.filter((l) => l.id !== "vanilla").map((l) => (
+                    <option key={l.id} value={l.id}>
+                      {l.label}
+                    </option>
+                  ))}
+                </select>
+              )}
+              {plan && (
+                /* These narrow the search, not the plan. A plan has no version
+                   of its own and picking one here does not give it one. */
+                <p className={styles.filterNote}>
+                  A plan has no Minecraft version, so this only narrows what you
+                  are looking at. Geode works out which loader and version can
+                  run the finished list.
+                </p>
+              )}
+            </section>
+          )}
+
           <section className={styles.filterSection}>
             <h3 className={styles.filterTitle}>Source</h3>
             <label className={styles.check}>
@@ -964,17 +976,6 @@ export default function Browse({
               </>
             )}
           </section>
-
-          {plan && (
-            <section className={styles.filterSection}>
-              <h3 className={styles.filterTitle}>Versions</h3>
-              <p className={styles.filterNote}>
-                A plan has no Minecraft version, so filtering only narrows what
-                you are looking at. Geode works out which loader and version can
-                run the finished list.
-              </p>
-            </section>
-          )}
 
           {lockedInstance && (
             <section className={styles.filterSection}>
@@ -1054,7 +1055,7 @@ export default function Browse({
             <section className={styles.filterSection}>
               <h3 className={styles.filterTitle}>Categories</h3>
               <div className={styles.categories}>
-                {available.map((category) => (
+                {shownCategories.map((category) => (
                   <button
                     key={category}
                     className={clsx(
@@ -1067,6 +1068,22 @@ export default function Browse({
                   </button>
                 ))}
               </div>
+              {available.length > shownCategories.length && (
+                <button
+                  className={styles.moreCategories}
+                  onClick={() => setAllCategories(true)}
+                >
+                  {available.length - shownCategories.length} more
+                </button>
+              )}
+              {allCategories && available.length > CATEGORY_PREVIEW && (
+                <button
+                  className={styles.moreCategories}
+                  onClick={() => setAllCategories(false)}
+                >
+                  Show fewer
+                </button>
+              )}
             </section>
           )}
         </aside>
