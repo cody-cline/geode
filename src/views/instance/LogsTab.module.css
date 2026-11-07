@@ -205,9 +205,12 @@
   color: var(--text);
 }
 
-/* The crash card takes the height it needs at the top; the files take the
-   rest, which they size themselves against. */
-.filesView {
+/* One element per panel, because that is what a tabpanel is — and the console
+   half is two children, the toolbar and the output. Both are the same column:
+   the crash card and the toolbar take the height they need at the top, and the
+   files or the lines take the rest, which they size themselves against. */
+.filesView,
+.consoleView {
   display: flex;
   flex-direction: column;
   min-height: 0;

@@ -6,6 +6,7 @@ import LogFilesPanel from "../../components/LogFilesPanel";
 import type { LogSource } from "../../components/LogFilesPanel";
 import CrashCard from "./CrashCard";
 import { api } from "../../lib/api";
+import { rovingKey } from "../../lib/rovingFocus";
 import { useStore } from "../../lib/store";
 import type { LogEntry } from "../../lib/types";
 
@@ -14,13 +15,17 @@ import styles from "./LogsTab.module.css";
 const LEVELS = ["ALL", "INFO", "WARN", "ERROR"] as const;
 type Level = (typeof LEVELS)[number];
 
+/** The two panels, in the order the strip above them prints them. */
+const VIEWS = ["console", "files"] as const;
+type View = (typeof VIEWS)[number];
+
 export default function LogsTab({ instanceId }: { instanceId: string }) {
   const logs = useStore((s) => s.logs[instanceId]);
   const clearLogs = useStore((s) => s.clearLogs);
 
   // The console is this run; the files are every run, including the one that
   // crashed while nobody was looking.
-  const [view, setView] = useState<"console" | "files">("console");
+  const [view, setView] = useState<View>("console");
   const [level, setLevel] = useState<Level>("ALL");
   const [filter, setFilter] = useState("");
   const [follow, setFollow] = useState(true);
@@ -83,23 +88,54 @@ export default function LogsTab({ instanceId }: { instanceId: string }) {
 
   return (
     <div className={styles.wrap}>
-      <div className={styles.views}>
+      {/* The strip swaps the whole panel below it, so it is a tab set and says
+          so: one tab stop for the pair, arrows between them, and the panel
+          named by the tab that opened it. Saying `role="tab"` without the
+          arrows would be worse than saying nothing, which is why the keyboard
+          comes from the shared helper rather than from here. */}
+      <div
+        className={styles.views}
+        role="tablist"
+        aria-label="Log view"
+        onKeyDown={(e) => {
+          const next = rovingKey(e, VIEWS);
+          if (next) setView(next);
+        }}
+      >
         <button
+          id="logs-view-console"
           className={clsx(styles.viewTab, view === "console" && styles.viewActive)}
           onClick={() => setView("console")}
+          role="tab"
+          aria-selected={view === "console"}
+          aria-controls="logs-panel-console"
+          tabIndex={view === "console" ? 0 : -1}
+          data-roving="console"
         >
           Console
         </button>
         <button
+          id="logs-view-files"
           className={clsx(styles.viewTab, view === "files" && styles.viewActive)}
           onClick={() => setView("files")}
+          role="tab"
+          aria-selected={view === "files"}
+          aria-controls="logs-panel-files"
+          tabIndex={view === "files" ? 0 : -1}
+          data-roving="files"
         >
           Log files
         </button>
       </div>
 
       {view === "files" ? (
-        <div className={styles.filesView}>
+        <div
+          id="logs-panel-files"
+          className={styles.filesView}
+          role="tabpanel"
+          aria-labelledby="logs-view-files"
+          tabIndex={0}
+        >
           {/* Above the files, because the crash report is the same failure
               already narrowed down to a mod. */}
           <CrashCard instanceId={instanceId} />
@@ -108,7 +144,13 @@ export default function LogsTab({ instanceId }: { instanceId: string }) {
           </div>
         </div>
       ) : (
-      <>
+      <div
+        id="logs-panel-console"
+        className={styles.consoleView}
+        role="tabpanel"
+        aria-labelledby="logs-view-console"
+        tabIndex={0}
+      >
       <div className={styles.toolbar}>
         <div className={styles.levels}>
           {LEVELS.map((l) => (
@@ -179,7 +221,7 @@ export default function LogsTab({ instanceId }: { instanceId: string }) {
           ))
         )}
       </div>
-      </>
+      </div>
       )}
     </div>
   );

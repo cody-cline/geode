@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import { Bot, Check, Copy, FileText, Loader2, Trash2 } from "lucide-react";
 
+import Modal from "./Modal";
 import { useStore } from "../lib/store";
 import { fileSize, relativeTime } from "../lib/format";
 import type { LogFile } from "../lib/types";
@@ -37,6 +38,8 @@ export default function LogFilesPanel({ source }: { source: LogSource }) {
   const [text, setText] = useState<string | null>(null);
   const [copied, setCopied] = useState<"none" | "text" | "report">("none");
   const [busy, setBusy] = useState(false);
+  /** The log the delete dialog is asking about, if it is open. */
+  const [asking, setAsking] = useState<LogFile | null>(null);
 
   const scroller = useRef<HTMLPreElement>(null);
 
@@ -113,10 +116,14 @@ export default function LogFilesPanel({ source }: { source: LogSource }) {
   }
 
   async function remove(name: string) {
+    // The question has been answered, so the dialog goes before the work
+    // starts — that also means the button cannot be pressed twice.
+    setAsking(null);
     try {
       await source.remove(name);
       if (chosen === name) setChosen(null);
       refresh();
+      toast({ kind: "success", title: `Deleted ${name}` });
     } catch (e) {
       reportError("Could not delete that log", e);
     }
@@ -125,6 +132,7 @@ export default function LogFilesPanel({ source }: { source: LogSource }) {
   const empty = useMemo(() => files !== null && files.length === 0, [files]);
 
   return (
+    <>
     <div className={styles.panel}>
       <aside className={styles.list}>
         {files === null ? (
@@ -156,7 +164,7 @@ export default function LogFilesPanel({ source }: { source: LogSource }) {
               {!file.current && (
                 <button
                   className={styles.remove}
-                  onClick={() => void remove(file.name)}
+                  onClick={() => setAsking(file)}
                   title={`Delete ${file.name}`}
                   aria-label={`Delete ${file.name}`}
                 >
@@ -204,5 +212,40 @@ export default function LogFilesPanel({ source }: { source: LogSource }) {
         </pre>
       </div>
     </div>
+
+    {/* The trash icon asks rather than acts. A log is the only record of a run
+        that has already finished — the game cannot be made to print it again,
+        there is nothing upstream to re-fetch it from, and the file goes from
+        disk rather than to a bin, so an Undo on a toast would be a promise
+        nothing here could keep. The icon also sits a few pixels from the row
+        that merely opens a log, in a narrow list, so a press lands on the
+        wrong one easily. */}
+    {asking && (
+      <Modal
+        title={`Delete ${asking.name}?`}
+        subtitle="This removes the log from disk. It cannot be undone."
+        onClose={() => setAsking(null)}
+        width={420}
+        footer={
+          <>
+            <button className="btn" onClick={() => setAsking(null)}>
+              Cancel
+            </button>
+            <button
+              className="btn btn-danger"
+              onClick={() => void remove(asking.name)}
+            >
+              Delete log
+            </button>
+          </>
+        }
+      >
+        <p className={styles.askNote}>
+          Minecraft writes one of these each time it runs and never writes an
+          old one again, so this is the only copy of what that run printed.
+        </p>
+      </Modal>
+    )}
+    </>
   );
 }
