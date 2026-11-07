@@ -37,6 +37,12 @@ export interface Toast {
   kind: "info" | "success" | "error";
   title: string;
   body?: string;
+  /**
+   * One thing the toast can offer to do about what it is reporting — an undo,
+   * and nothing else today. Pressing it dismisses the toast, so whatever it
+   * runs has to be the whole of the way back.
+   */
+  action?: { label: string; run: () => void };
 }
 
 /** What the offline-play dialog needs to ask its question. */
@@ -255,7 +261,12 @@ export const useStore = create<State>((set, get) => ({
   toast: (t) => {
     const id = ++toastSeq;
     set((s) => ({ toasts: [...s.toasts, { ...t, id }] }));
-    const ttl = t.kind === "error" ? 9000 : 4500;
+    // A toast carrying an action is the only route back from the thing it is
+    // reporting, so it is given longer than any other kind: 12 seconds, which
+    // is long enough to read a line, decide, and move a pointer to it. The
+    // ordinary 4.5 is barely enough for the reading. An undo that has already
+    // left is worse than no undo at all, because it was offered.
+    const ttl = t.action ? 12000 : t.kind === "error" ? 9000 : 4500;
     setTimeout(() => get().dismissToast(id), ttl);
   },
   dismissToast: (id) =>

@@ -75,6 +75,15 @@ export default function PlanView({ id }: { id: string }) {
   // Guards against a slow resolve landing after a newer one.
   const resolveSeq = useRef(0);
 
+  // The plan as it is now, for the undo a removal leaves behind: that undo
+  // outlives the render that made it, and reading `plan` out of the closure it
+  // was created in would make it a snapshot. Two removals in a row and the
+  // first Undo would write back a list that still held the second mod.
+  const latest = useRef<Plan | null>(null);
+  useEffect(() => {
+    latest.current = plan;
+  }, [plan]);
+
   const resolve = useCallback(async () => {
     const seq = ++resolveSeq.current;
     setResolving(true);
@@ -161,12 +170,42 @@ export default function PlanView({ id }: { id: string }) {
     void commit({ ...plan, mods: [...plan.mods, ...fresh] }, true);
   };
 
+  /**
+   * Take one mod off the plan, with the way back in the toast.
+   *
+   * No dialog: this is a row in a list of rows, and asking every time would
+   * make the common case the expensive one. The undo is what makes that safe,
+   * so it has to put the mod back *exactly* — the stored entry, icon and slug
+   * included, at the index it came from. The rail's blocker rows call this
+   * with a mod built out of a verdict, which has neither, so the entry is
+   * looked up here rather than taken from the argument. And it inserts into
+   * the list as it is at the moment Undo is pressed, not into the one that was
+   * on screen when the toast was written.
+   */
   const removeMod = (mod: PlanMod) => {
     if (!plan) return;
+    const key = modKey(mod);
+    const index = plan.mods.findIndex((m) => modKey(m) === key);
+    if (index < 0) return;
+    const removed = plan.mods[index];
     void commit(
-      { ...plan, mods: plan.mods.filter((m) => modKey(m) !== modKey(mod)) },
+      { ...plan, mods: plan.mods.filter((m) => modKey(m) !== key) },
       true,
     );
+    toast({
+      kind: "info",
+      title: `Removed ${removed.name}`,
+      action: {
+        label: "Undo",
+        run: () => {
+          const now = latest.current;
+          if (!now || now.mods.some((m) => modKey(m) === key)) return;
+          const mods = [...now.mods];
+          mods.splice(index, 0, removed);
+          void commit({ ...now, mods }, true);
+        },
+      },
+    });
   };
 
   const present = useMemo(

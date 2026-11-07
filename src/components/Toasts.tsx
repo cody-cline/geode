@@ -22,6 +22,7 @@ export default function Toasts() {
     <div className={styles.stack} aria-live="polite" aria-atomic="false">
       {toasts.map((toast) => {
         const Icon = ICONS[toast.kind];
+        const action = toast.action;
         return (
           <div
             key={toast.id}
@@ -33,6 +34,20 @@ export default function Toasts() {
             <div className={styles.text}>
               <p className={styles.title}>{toast.title}</p>
               {toast.body && <p className={styles.body}>{toast.body}</p>}
+              {/* Pressing it spends the toast: the offer was for one press,
+                  and a toast still sitting there with an Undo that has
+                  already run is an offer to undo it twice. */}
+              {action && (
+                <button
+                  className={styles.action}
+                  onClick={() => {
+                    action.run();
+                    dismiss(toast.id);
+                  }}
+                >
+                  {action.label}
+                </button>
+              )}
             </div>
             <button
               className={styles.close}

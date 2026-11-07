@@ -64,6 +64,22 @@
   user-select: text;
 }
 
+/* The one thing a toast can offer to do about what it says. A text button
+   rather than a filled one — this sits inside a notification nobody asked for
+   — in the accent's legible cast, which is the colour this app writes things
+   to press in and is measured on every surface in both themes. */
+.action {
+  margin-top: 5px;
+  padding: 2px 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--accent-text);
+}
+
+.action:hover {
+  text-decoration: underline;
+}
+
 .close {
   flex-shrink: 0;
   color: var(--text-faint);
