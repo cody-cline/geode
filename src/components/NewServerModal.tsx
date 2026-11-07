@@ -1,12 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
-import {
-  Blocks,
-  GitBranch,
-  Loader2,
-  Puzzle,
-  Server as ServerIcon,
-} from "lucide-react";
+import { GitBranch, Loader2, Server as ServerIcon } from "lucide-react";
 
 import Modal from "./Modal";
 import { api } from "../lib/api";
@@ -14,6 +8,36 @@ import { useStore } from "../lib/store";
 import type { GitStatus, Server, ServerKindInfo } from "../lib/types";
 
 import styles from "./NewServerModal.module.css";
+
+/**
+ * The choices a picker can actually tell apart, read off the kind rather than
+ * written down here.
+ *
+ * Fourteen names in one grid is fourteen decisions; what separates them is
+ * what the software runs, and `ServerKindInfo` already says. A list of names
+ * in this file would be a second copy of a fact that belongs to the software
+ * — the thing `ServerKind` exists to hold — and a kind added to the backend
+ * would quietly land in the wrong place or nowhere at all.
+ */
+type Group = "plugins" | "plain" | "mods" | "both" | "proxy";
+
+function groupOf(kind: ServerKindInfo): Group {
+  // Asked first, because a proxy takes plugins too and would otherwise read as
+  // a server that happens to be tagged.
+  if (kind.isProxy) return "proxy";
+  if (kind.takesPlugins && kind.takesMods) return "both";
+  if (kind.takesPlugins) return "plugins";
+  if (kind.takesMods) return "mods";
+  return "plain";
+}
+
+const GROUP_LABEL: Record<Group, string> = {
+  plugins: "Runs Bukkit-style plugins",
+  plain: "Runs no plugins or mods",
+  mods: "Runs mods",
+  both: "Runs Bukkit plugins and mods side by side",
+  proxy: "Not a server",
+};
 
 export default function NewServerModal({
   onClose,
@@ -75,6 +99,20 @@ export default function NewServerModal({
     () => kinds?.find((k) => k.id === kind),
     [kinds, kind],
   );
+
+  // Groups in the order their first member arrives, so the order a picker
+  // should offer them stays `ServerKind::ALL`'s decision rather than becoming
+  // a second one here.
+  const groups = useMemo(() => {
+    const out: { key: Group; kinds: ServerKindInfo[] }[] = [];
+    for (const option of kinds ?? []) {
+      const key = groupOf(option);
+      const group = out.find((g) => g.key === key);
+      if (group) group.kinds.push(option);
+      else out.push({ key, kinds: [option] });
+    }
+    return out;
+  }, [kinds]);
 
   // Versions belong to the software, not to Minecraft: Velocity's are its own.
   useEffect(() => {
@@ -142,33 +180,37 @@ export default function NewServerModal({
         </div>
       ) : (
         <>
-          <div className={styles.kinds}>
-            {kinds.map((option) => (
-              <button
-                key={option.id}
-                className={clsx(
-                  styles.kind,
-                  kind === option.id && styles.kindActive,
-                )}
-                onClick={() => setKind(option.id)}
+          <div className={styles.groups}>
+            {groups.map((group) => (
+              <div
+                key={group.key}
+                className={clsx(group.key === "proxy" && styles.apart)}
               >
-                <span className={styles.kindName}>{option.name}</span>
-                <span className={styles.kindTags}>
-                  {option.takesPlugins && (
-                    <span className={styles.tag}>
-                      <Puzzle size={9} />
-                      plugins
-                    </span>
-                  )}
-                  {option.takesMods && (
-                    <span className={styles.tag}>
-                      <Blocks size={9} />
-                      mods
-                    </span>
-                  )}
-                  {option.isProxy && <span className={styles.tag}>proxy</span>}
-                </span>
-              </button>
+                <p className={styles.groupLabel}>{GROUP_LABEL[group.key]}</p>
+                {/* Said before the tile is pressed rather than after. A proxy
+                    looks like every other choice here and is the one that
+                    cannot be played on, so the sentence belongs above it. */}
+                {group.key === "proxy" && (
+                  <p className={styles.groupNote}>
+                    A proxy hosts no world of its own. It stands in front of
+                    servers you already have and passes players between them.
+                  </p>
+                )}
+                <div className={styles.kinds}>
+                  {group.kinds.map((option) => (
+                    <button
+                      key={option.id}
+                      className={clsx(
+                        styles.kind,
+                        kind === option.id && styles.kindActive,
+                      )}
+                      onClick={() => setKind(option.id)}
+                    >
+                      {option.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
             ))}
           </div>
 
@@ -210,17 +252,16 @@ export default function NewServerModal({
               </div>
             </div>
 
-            <p className={styles.note}>
-              {chosen?.takesPlugins && chosen?.takesMods
-                ? "Runs Bukkit plugins and mods side by side."
-                : chosen?.takesPlugins
-                  ? "Runs Bukkit-style plugins."
-                  : chosen?.takesMods
-                    ? "Runs mods."
-                    : "Runs no plugins or mods."}{" "}
-              You will be asked to accept Mojang&apos;s EULA before it starts
-              for the first time.
-            </p>
+            {/* What the software runs is the heading above the tile now, so it
+                is not repeated here. The EULA is: a proxy writes no eula.txt
+                and is never asked for one (`ServerKind::needs_eula`), and this
+                claimed otherwise for the two kinds it is not true of. */}
+            {chosen && !chosen.isProxy && (
+              <p className={styles.note}>
+                You will be asked to accept Mojang&apos;s EULA before it starts
+                for the first time.
+              </p>
+            )}
 
             {/* These two take noticeably longer than a download, and saying so
                 beforehand is the difference between waiting and wondering. */}

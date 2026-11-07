@@ -18,6 +18,7 @@ import InstanceIcon from "./InstanceIcon";
 import NewInstanceModal from "./NewInstanceModal";
 import NewServerModal from "./NewServerModal";
 import { OLD_ADDRESS_LABEL, linksPointAtOldAddress } from "../lib/share";
+import { shortcutHint } from "../lib/shortcuts";
 import { useStore } from "../lib/store";
 import type { Route } from "../lib/store";
 
@@ -81,6 +82,7 @@ export default function Sidebar() {
         >
           <Boxes size={17} />
           Library
+          <kbd className={styles.key}>{shortcutHint("library")}</kbd>
         </button>
         <button
           className={clsx(styles.navItem, isActive({ view: "browse" }) && styles.navActive)}
@@ -88,6 +90,7 @@ export default function Sidebar() {
         >
           <Compass size={17} />
           Browse
+          <kbd className={styles.key}>{shortcutHint("browse")}</kbd>
         </button>
         <button
           className={clsx(
@@ -98,6 +101,7 @@ export default function Sidebar() {
         >
           <ClipboardList size={17} />
           Plans
+          <kbd className={styles.key}>{shortcutHint("plans")}</kbd>
         </button>
         <button
           className={clsx(
@@ -109,6 +113,7 @@ export default function Sidebar() {
         >
           <ServerIcon size={17} />
           Servers
+          <kbd className={styles.key}>{shortcutHint("servers")}</kbd>
         </button>
       </nav>
 
@@ -240,6 +245,7 @@ export default function Sidebar() {
         >
           <SettingsIcon size={17} />
           Settings
+          <kbd className={styles.key}>{shortcutHint("settings")}</kbd>
         </button>
       </div>
 
