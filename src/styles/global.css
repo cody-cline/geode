@@ -22,6 +22,16 @@
   --border: #212b38;
   --border-strong: #2e3a4a;
 
+  /* The two stops — saturation, then lightness — of the field an instance with
+     no artwork gets behind its header. Only the *hue* of that field belongs to
+     the instance (`hashHue` of its id, so any of 360); the lightness belongs to
+     the theme, because what is written over it is `--text`, `--text-dim` and
+     `--text-faint`, and those flip when the theme does. Both values were inline
+     in `InstanceView.tsx` and dark in both themes, which left the light theme
+     writing its dark text on a dark field: 2.15:1 at the worst hue. */
+  --hero-wash-from: 44% 30%;
+  --hero-wash-to: 42% 18%;
+
   --text: #e6edf3;
   --text-dim: #99a6b5;
   /* Lightened from #667484, which was 3.8:1 on `--surface` and 2.9:1 on the
@@ -95,6 +105,14 @@
   --surface-3: #e6ebf1;
   --border: #dde3ea;
   --border-strong: #c4ceda;
+
+  /* Light where the dark theme's is dark, so this theme's dark text reads on
+     it. The lightness has very little room: `--text-faint` is 5.2:1 on `--bg`
+     to begin with, so a field it can be read on is a pale one whatever hue it
+     lands on. The saturation is raised to pay for that — 44% of a hue this
+     close to white is not a colour any more. */
+  --hero-wash-from: 60% 97%;
+  --hero-wash-to: 58% 91%;
 
   --text: #131a22;
   --text-dim: #5a6772;

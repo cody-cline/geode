@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { CSSProperties } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import clsx from "clsx";
@@ -148,10 +149,13 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
           <img className={styles.heroImg} src={hero} alt="" />
         ) : (
           <span
-            className={styles.heroImg}
-            style={{
-              background: `linear-gradient(135deg, hsl(${hue} 44% 30%), hsl(${(hue + 55) % 360} 42% 18%))`,
-            }}
+            className={clsx(styles.heroImg, styles.heroWash)}
+            style={
+              {
+                "--hero-hue-from": hue,
+                "--hero-hue-to": (hue + 55) % 360,
+              } as CSSProperties
+            }
           />
         )}
         <span className={styles.heroScrim} />
