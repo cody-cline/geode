@@ -42,9 +42,9 @@ cargo clippy --all-targets # expected to be clean; treat a warning as a failure
 `src/lib/share.test.mjs`, `src/lib/blocked.test.mjs`,
 `src/lib/pack-update.test.mjs`, `src/lib/update.test.mjs`,
 `src/lib/types.test.mjs`, `src/lib/retarget.test.mjs`,
-`src/lib/ignore-version.test.mjs` and
-`src/lib/shortcuts.test.mjs`, `src/lib/contrast.test.mjs` and
-`src/lib/mcversion.test.mjs`. Six of those are worth knowing apart. `types.test.mjs` is the only check anywhere that
+`src/lib/ignore-version.test.mjs`, `src/lib/shortcuts.test.mjs`,
+`src/lib/contrast.test.mjs` and `src/lib/mcversion.test.mjs`. Six of those
+are worth knowing apart. `types.test.mjs` is the only check anywhere that
 `types.ts` really mirrors the Rust struct it claims to — it reads the text of
 `types.ts` and `Settings.tsx` and asserts that the `close_to_tray` field
 arrived in both, because a field left out of the hand-written mirror reads as
@@ -72,8 +72,7 @@ rather than read, because the file holds no JSX and Node will import it. The
 sum it guards is that `26.3` is newer than `1.21.11` and `1.21.10` newer than
 `1.21.9` — both of which a string compare gets backwards, and getting it
 backwards tells somebody their world is safe to open when it is not. All ten
-also
-check a few invariants by reading the `.tsx` that holds them, because there is
+also check a few invariants by reading the `.tsx` that holds them, because there is
 no DOM or React renderer under `npm test`. Everything else on the frontend is
 gated by `tsc` alone, which is strict (`noUnusedLocals`,
 `verbatimModuleSyntax`); there is no ESLint or Prettier config. `npm run dev`

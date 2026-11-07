@@ -456,7 +456,7 @@ export default function ContentTab({
             <Search size={14} className={styles.searchIcon} />
             <input
               ref={filterBox}
-              className={clsx("input", styles.search)}
+              className={clsx("input", styles.search, styles.searchHinted)}
               placeholder="Filter"
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
