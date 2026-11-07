@@ -51,6 +51,21 @@ function followRenames(selected: Set<string>, moves: Map<string, string>) {
   return next;
 }
 
+/**
+ * The name on disk with the suffix that turns a file off taken back off it.
+ *
+ * `.disabled` is how a loader is made to ignore a jar, and it is nothing the
+ * person reading this row did: they installed FerriteCore, not a renamed file.
+ * The row now says it is disabled in a word, so printing the suffix only
+ * repeats that in the filesystem's terms. Display only — `fileName` is still
+ * the row's identity, the key a selection is held by, and the name every
+ * command takes; `strip_disabled` in `instance/content.rs` is the same rule on
+ * the side that does the renaming.
+ */
+function shownName(fileName: string) {
+  return fileName.replace(/\.disabled$/, "");
+}
+
 export default function ContentTab({
   instance,
   onBrowse,
@@ -638,11 +653,7 @@ export default function ContentTab({
             return (
               <div
                 key={item.fileName}
-                className={clsx(
-                  styles.row,
-                  !item.enabled && styles.disabled,
-                  isPicked && styles.rowPicked,
-                )}
+                className={clsx(styles.row, isPicked && styles.rowPicked)}
               >
                 <label className={styles.toggle}>
                   <input
@@ -689,6 +700,26 @@ export default function ContentTab({
                 <div className={styles.itemText}>
                   <div className={styles.itemTitle}>
                     <span className={styles.itemName}>{item.name}</span>
+                    {/* First in the line, because it is the most important
+                        thing true of this row — and a word, where the row used
+                        to say it only by being drawn at half strength. That
+                        read as "loading" or "unavailable" as readily as "off",
+                        and it was unmeasurable besides: an opacity composites a
+                        colour that then appears in no stylesheet for
+                        `contrast.test.mjs` to pair off, and the two lines here
+                        came out at 3.49:1 and 2.14:1 in the light theme against
+                        an enabled row's 16.9:1 and 5.4:1. WCAG 1.4.3 exempts an
+                        inactive component, which this is not: the toggle beside
+                        it and the delete button at the end both work. The mod
+                        is off, not the row. */}
+                    {!item.enabled && (
+                      <span
+                        className="badge"
+                        title="Turned off, and still here. The loader skips it — the box on the left puts it back."
+                      >
+                        disabled
+                      </span>
+                    )}
                     {item.dependency && (
                       <span className="badge" title="Installed as a dependency">
                         dependency
@@ -735,7 +766,9 @@ export default function ContentTab({
                   </div>
                   <div className={styles.itemMeta}>
                     {item.version && <span>{item.version}</span>}
-                    <span className={styles.fileName}>{item.fileName}</span>
+                    <span className={styles.fileName}>
+                      {shownName(item.fileName)}
+                    </span>
                     <span>{fileSize(item.size)}</span>
                   </div>
                 </div>
@@ -843,7 +876,9 @@ export default function ContentTab({
             {deletable.map((item) => (
               <li key={item.fileName}>
                 <span className={styles.confirmName}>{item.name}</span>
-                <span className={styles.fileName}>{item.fileName}</span>
+                <span className={styles.fileName}>
+                  {shownName(item.fileName)}
+                </span>
               </li>
             ))}
           </ul>
