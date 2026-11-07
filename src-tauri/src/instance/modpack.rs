@@ -1117,6 +1117,7 @@ pub async fn import_into_at(
                         chosen_side: None,
                         keep_on_server: false,
                         server_off: false,
+                        ignore_game_version: false,
                     });
                 }
             }
@@ -1710,6 +1711,7 @@ async fn record_mrpack_provenance(
             chosen_side: None,
             keep_on_server: false,
             server_off: false,
+            ignore_game_version: false,
         });
     }
 }

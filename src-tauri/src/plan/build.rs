@@ -221,6 +221,44 @@ pub(crate) async fn file_for(
     Ok(None)
 }
 
+/// The same answer with the Minecraft version left out of the question: the
+/// newest file this project has for the target's loader, whatever version its
+/// author built it for.
+///
+/// [`file_for`] cannot be asked this, because every rung of the ladder it
+/// serves names a version — which is the whole point of a ladder. This is what
+/// [`crate::instance::content::ContentRecord::ignore_game_version`] reaches
+/// when the ladder has run out, and it keeps the two halves of that override
+/// honest: the loader is still asked for, through the same
+/// [`loaders_to_try`] as a native fit, so Quilt still falls back to Fabric and
+/// nothing is ever handed a jar for a loader that would not load it.
+///
+/// `Ok(None)` and `Err` mean here exactly what they mean in [`file_for`], and
+/// for the same reason: the caller turns a mod off over the first and must
+/// never turn one off over the second.
+pub(crate) async fn newest_file_for(
+    client: &reqwest::Client,
+    target_loader: &str,
+    provider: &str,
+    project_id: &str,
+    curseforge_key: Option<&str>,
+) -> Result<Option<(Project, Version, &'static str)>> {
+    let provider = Provider::parse(provider).ok_or_else(|| Error::msg("unknown provider"))?;
+    let project = providers::project(client, provider, project_id, curseforge_key).await?;
+
+    for loader in loaders_to_try(Fit::Native, target_loader) {
+        let mut versions =
+            providers::versions(client, provider, project_id, None, Some(loader), curseforge_key)
+                .await?;
+        crate::install::content::newest_first(&mut versions);
+        if let Some(best) = crate::install::content::pick_best(&versions) {
+            return Ok(Some((project, best.clone(), loader)));
+        }
+    }
+
+    Ok(None)
+}
+
 #[allow(clippy::too_many_arguments)] // one mod's coordinates, travelling together
 async fn install_one(
     client: &reqwest::Client,

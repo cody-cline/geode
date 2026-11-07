@@ -157,6 +157,17 @@ export default function Browse({
   const [gameVersions, setGameVersions] = useState<string[]>([]);
   const [includeFabric, setIncludeFabric] = useState(false);
   const [connector, setConnector] = useState<ConnectorSupport | null>(null);
+  /**
+   * Show mods whose author has not listed this instance's Minecraft version,
+   * and install whatever is picked from that list with its version ignored.
+   *
+   * Searching is the real barrier, not the Install button: the search is
+   * filtered to the instance's version, so the mod a person wants to override
+   * for is the one mod they cannot find. Dropping the filter here and
+   * recording the choice on what gets installed are the same decision, so they
+   * are the same box.
+   */
+  const [ignoreGameVersion, setIgnoreGameVersion] = useState(false);
 
   const [hits, setHits] = useState<Project[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
@@ -423,6 +434,10 @@ export default function Browse({
         project.id,
         versionId,
         project.viaConnector,
+        // What the list was widened by travels with what was installed from
+        // it, so the choice is recorded against the mod rather than lost with
+        // the search that found it.
+        useAnyVersion,
       );
       setLastTargetId(instance.id);
       await Promise.all([refreshInstalled(), refreshInstances()]);
@@ -431,11 +446,17 @@ export default function Browse({
       toast({
         kind: "success",
         title: `Added ${project.name} to ${instance.name}`,
-        body: project.viaConnector
-          ? `Running on Sinytra Connector${extras > 0 ? `, plus ${extras} more` : ""}.`
-          : extras > 0
-            ? `Plus ${extras} required ${extras === 1 ? "dependency" : "dependencies"}.`
-            : undefined,
+        // The override is said first and in its own words. It is the only one
+        // of the three that can stop the game starting, and it is a standing
+        // choice about the mod rather than a fact about this install — the
+        // badge on its row in Content says so from now on.
+        body: useAnyVersion
+          ? `Its Minecraft version is ignored from now on, so it may not run. Undo that on its row in Content.${extras > 0 ? ` Plus ${extras} more.` : ""}`
+          : project.viaConnector
+            ? `Running on Sinytra Connector${extras > 0 ? `, plus ${extras} more` : ""}.`
+            : extras > 0
+              ? `Plus ${extras} required ${extras === 1 ? "dependency" : "dependencies"}.`
+              : undefined,
       });
       if (report.skipped.length > 0) {
         toast({
@@ -532,8 +553,19 @@ export default function Browse({
   // needs its own branch: without one it fell through to global browse, where
   // the filters it never shows are empty — so a Forge server was asking for
   // every mod of every loader and every version, and being given them.
+  // Offered only where it can mean something: one instance to install into,
+  // and mods, which is the only kind the override covers.
+  const anyVersionOffered = Boolean(lockedInstance) && !plan && !server && kind === "mod";
+  const useAnyVersion = anyVersionOffered && ignoreGameVersion;
+
   const gameVersion = lockedInstance
-    ? lockedInstance.mcVersion
+    ? // Dropped, so the mods whose authors have not listed this version are in
+      // the list at all. The loader is still asked for: a Fabric jar in a
+      // Forge folder does nothing, so widening that would only hand somebody a
+      // mod that cannot work.
+      useAnyVersion
+      ? null
+      : lockedInstance.mcVersion
     : server
       ? server.mcVersion
       : filterVersion || null;
@@ -574,6 +606,12 @@ export default function Browse({
   useEffect(() => {
     if (!connectorOffered && includeFabric) setIncludeFabric(false);
   }, [connectorOffered, includeFabric]);
+
+  // The same, for the same reason: a box left ticked after the thing it
+  // applies to has gone would keep widening a search nobody asked it to.
+  useEffect(() => {
+    if (!anyVersionOffered && ignoreGameVersion) setIgnoreGameVersion(false);
+  }, [anyVersionOffered, ignoreGameVersion]);
 
   const useFabric = connectorOffered && includeFabric;
 
@@ -934,17 +972,55 @@ export default function Browse({
           {lockedInstance && (
             <section className={styles.filterSection}>
               <h3 className={styles.filterTitle}>Compatibility</h3>
+              {/* The claim changes with the box, because the box changes what
+                  was asked. Saying "filtering to what works with Minecraft
+                  1.21.4" over a list that was not filtered by version is the
+                  screen claiming a check nothing ran. */}
               <p className={styles.compat}>
-                Filtering to what works with{" "}
-                <strong>Minecraft {lockedInstance.mcVersion}</strong>
-                {loader && (
+                {useAnyVersion ? (
                   <>
-                    {" "}
-                    on <strong>{loaderLabel(loader)}</strong>
+                    Showing everything for{" "}
+                    <strong>{loaderLabel(loader ?? lockedInstance.loader)}</strong>
+                    , whatever Minecraft version its author listed.
+                  </>
+                ) : (
+                  <>
+                    Filtering to what works with{" "}
+                    <strong>Minecraft {lockedInstance.mcVersion}</strong>
+                    {loader && (
+                      <>
+                        {" "}
+                        on <strong>{loaderLabel(loader)}</strong>
+                      </>
+                    )}
+                    .
                   </>
                 )}
-                .
               </p>
+              {anyVersionOffered && (
+                <>
+                  <label className={styles.check}>
+                    <input
+                      type="checkbox"
+                      checked={ignoreGameVersion}
+                      onChange={(e) => setIgnoreGameVersion(e.target.checked)}
+                    />
+                    <span className={styles.connectorLabel}>
+                      Ignore the Minecraft version
+                    </span>
+                  </label>
+                  <p className={styles.filterNote}>
+                    Mods in also whose authors have not listed Minecraft{" "}
+                    {lockedInstance.mcVersion}. A jar usually runs on a little
+                    newer than it says — one that does not can stop the game
+                    starting, and nothing here has read it. Anything you install
+                    from this list keeps ignoring the version, on its own row in
+                    Content, until you turn that off. The loader is still
+                    matched: a Fabric mod cannot be made to run on Forge this
+                    way.
+                  </p>
+                </>
+              )}
             </section>
           )}
 

@@ -174,6 +174,7 @@ pub fn run() {
             commands::instance_folder,
             commands::list_content,
             commands::set_content_enabled,
+            commands::set_content_ignore_game_version,
             commands::set_server_side_mods,
             commands::set_server_settings_allowed,
             commands::last_server_sync,

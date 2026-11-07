@@ -10,6 +10,7 @@ import {
   RefreshCw,
   Search,
   Trash2,
+  Unlock,
 } from "lucide-react";
 
 import { api } from "../../lib/api";
@@ -102,6 +103,37 @@ export default function ContentTab({
       await Promise.all([load(), refreshInstances()]);
     } catch (e) {
       reportError(`Could not delete ${item.name}`, e);
+    }
+  }
+
+  /**
+   * Stop asking which Minecraft version this mod's builds are for, or start
+   * again.
+   *
+   * The toast says what the choice does and does not do rather than only that
+   * it was saved: nothing has looked inside the jar, so the one honest claim
+   * is about the question Geode will put next time.
+   */
+  async function ignoreVersion(item: ContentItem, ignore: boolean) {
+    try {
+      await api.setContentIgnoreGameVersion(
+        instance.id,
+        kind,
+        item.fileName,
+        ignore,
+      );
+      await load();
+      toast({
+        kind: "success",
+        title: ignore
+          ? `${item.name} ignores the Minecraft version`
+          : `${item.name} needs a build for Minecraft ${instance.mcVersion}`,
+        body: ignore
+          ? "Updates and version changes will take its newest build for this loader, whatever version it was built for. It may stop the game starting."
+          : undefined,
+      });
+    } catch (e) {
+      reportError(`Could not change what ${item.name} asks for`, e);
     }
   }
 
@@ -371,6 +403,14 @@ export default function ContentTab({
                         server-side
                       </span>
                     )}
+                    {item.ignoreGameVersion && (
+                      <span
+                        className="badge"
+                        title={`Its Minecraft version is ignored. Geode takes its newest ${instance.loader} build whatever version that was built for, instead of refusing to find one.`}
+                      >
+                        any version
+                      </span>
+                    )}
                     {item.provider && (
                       <span className={clsx("badge", `badge-${item.provider}`)}>
                         {providerShort(item.provider)}
@@ -399,6 +439,39 @@ export default function ContentTab({
                     Update
                   </button>
                 )}
+
+                {/* Offered only where it could mean anything: a mod, from a
+                    platform that can be asked for another build, and not one
+                    the server owns. The title is the one place this is
+                    explained, and it says the risk in plain words — a mod
+                    running outside what it declares can stop the game
+                    starting, and nothing here has looked inside the jar. */}
+                {kind === "mod" &&
+                  item.provider &&
+                  item.origin !== "server" && (
+                    <button
+                      className={clsx(
+                        "btn btn-ghost btn-icon btn-sm",
+                        item.ignoreGameVersion && styles.anyVersion,
+                      )}
+                      onClick={() =>
+                        void ignoreVersion(item, !item.ignoreGameVersion)
+                      }
+                      title={
+                        item.ignoreGameVersion
+                          ? `Ignoring the Minecraft version: its newest build for this loader is used whatever version it was built for, and it may stop the game starting. Press to require a build for Minecraft ${instance.mcVersion} again.`
+                          : `Ignore the Minecraft version: use its newest build for this loader even when its author has not listed Minecraft ${instance.mcVersion}. Mods usually run on a little newer than they say — but one that does not can stop the game starting, and nothing here has read the jar. The loader is still matched.`
+                      }
+                      aria-label={
+                        item.ignoreGameVersion
+                          ? `Require a build for Minecraft ${instance.mcVersion} for ${item.name}`
+                          : `Ignore the Minecraft version for ${item.name}`
+                      }
+                      aria-pressed={item.ignoreGameVersion ?? false}
+                    >
+                      <Unlock size={14} />
+                    </button>
+                  )}
 
                 {/* The server's own mods stay. Offering a button that always
                     fails is worse than not offering one, so the row explains
