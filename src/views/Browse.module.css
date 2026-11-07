@@ -60,6 +60,16 @@
   white-space: nowrap;
 }
 
+/* `text-overflow` belongs here and not on the pill above: that is a flex
+   container, where the name is an anonymous item the property never reaches —
+   so the cap cut names off mid-character. The full name is on the pill's
+   `title`. */
+.lockedName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .tabs {
   display: flex;
   align-items: center;
@@ -189,6 +199,9 @@
 }
 
 .categoryChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   height: 24px;
   padding: 0 9px;
   border-radius: var(--radius-pill);

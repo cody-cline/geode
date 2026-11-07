@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import {
   AlertTriangle,
+  Check,
   ClipboardList,
   Download,
   Info,
@@ -20,6 +21,7 @@ import ProjectCard from "../components/ProjectCard";
 import ProjectPanel from "../components/ProjectPanel";
 import { api } from "../lib/api";
 import { titleCase } from "../lib/format";
+import { rovingKey } from "../lib/rovingFocus";
 import { useStore } from "../lib/store";
 import { LOADERS } from "../lib/types";
 import type {
@@ -343,6 +345,12 @@ export default function Browse({
     // returns plenty of multi-platform plugins typed as mods, and asking the
     // project would misroute exactly those.
     if (kind === "plugin") {
+      // The panel goes before the dialog arrives, every time one does. Two
+      // overlays mounted together both hear Escape — the panel listens on the
+      // document — so one press dismissed the pair instead of the top layer.
+      // It is also what lets the panel's focus trap put the keyboard back
+      // where it came from rather than behind the dialog that replaced it.
+      setSelected(null);
       setAskServer(project);
       return;
     }
@@ -362,6 +370,8 @@ export default function Browse({
       void installDirect(lockedInstance, project, versionId);
       return;
     }
+    // Closes the panel first, for the reason above.
+    setSelected(null);
     setAskTarget({ project, versionId });
   }
 
@@ -788,6 +798,14 @@ export default function Browse({
   );
 
   /**
+   * Which tab carries the strip's one tab stop. Normally the kind in force —
+   * but the effect above corrects `kind` a render *after* a server or a plan
+   * narrows the list it may appear in, and a strip where no tab is reachable
+   * is a strip the keyboard cannot get into at all.
+   */
+  const kindStop = kinds.some((k) => k.id === kind) ? kind : kinds[0]?.id;
+
+  /**
    * The categories on show while the list is collapsed: the first few, plus
    * any that are already picked. A chosen filter must never be hidden by the
    * thing that hides unchosen ones — the list would be narrowed by something
@@ -820,9 +838,13 @@ export default function Browse({
           {server ? (
             <>
               <span className={styles.targetLabel}>Adding to</span>
-              <span className={styles.lockedTarget}>
+              {/* The name is capped at 240px, so the long ones are cut off.
+                  The title carries the whole of it, and the ellipsis says
+                  there is more — on the name rather than on the pill, which is
+                  a flex container and so cannot ellipsise its own text. */}
+              <span className={styles.lockedTarget} title={server.name}>
                 <ServerIcon size={14} />
-                {server.name}
+                <span className={styles.lockedName}>{server.name}</span>
               </span>
               <button className="btn btn-sm btn-primary" onClick={onDone}>
                 Done
@@ -831,9 +853,9 @@ export default function Browse({
           ) : plan ? (
             <>
               <span className={styles.targetLabel}>Adding to</span>
-              <span className={styles.lockedTarget}>
+              <span className={styles.lockedTarget} title={plan.name}>
                 <ClipboardList size={14} />
-                {plan.name}
+                <span className={styles.lockedName}>{plan.name}</span>
               </span>
               <button className="btn btn-sm btn-primary" onClick={onDone}>
                 Done
@@ -842,9 +864,9 @@ export default function Browse({
           ) : lockedInstance ? (
             <>
               <span className={styles.targetLabel}>Adding to</span>
-              <span className={styles.lockedTarget}>
+              <span className={styles.lockedTarget} title={lockedInstance.name}>
                 <InstanceIcon instance={lockedInstance} size={20} />
-                {lockedInstance.name}
+                <span className={styles.lockedName}>{lockedInstance.name}</span>
               </span>
               <button className="btn btn-sm" onClick={onDone}>
                 Done
@@ -854,7 +876,28 @@ export default function Browse({
         </div>
       </header>
 
-      <div className={styles.tabs}>
+      {/* A strip that swaps the list below it is a tab set, and said so to
+          nobody: no role, no selected state, no name — in the same row as
+          PlanSourceTabs, which announces its own. Only the kind strip is a tab
+          set, though. For a plan the row holds PlanSourceTabs instead, which
+          names and marks its own group, so the roles go on neither the row nor
+          the results while it is there. */}
+      <div
+        className={styles.tabs}
+        role={plan ? undefined : "tablist"}
+        aria-label={plan ? undefined : "What to browse"}
+        onKeyDown={
+          plan
+            ? undefined
+            : (e) => {
+                const next = rovingKey(
+                  e,
+                  kinds.map((k) => k.id),
+                );
+                if (next) setKind(next);
+              }
+        }
+      >
         {plan ? (
           <PlanSourceTabs source={plan.source} onSource={plan.onSource} />
         ) : (
@@ -863,6 +906,14 @@ export default function Browse({
               key={k.id}
               className={clsx(styles.tab, kind === k.id && styles.tabActive)}
               onClick={() => setKind(k.id)}
+              role="tab"
+              aria-selected={kind === k.id}
+              id={`browse-tab-${k.id}`}
+              aria-controls="browse-results"
+              // One tab stop for the whole strip, with the arrows moving
+              // between the kinds from there.
+              tabIndex={k.id === kindStop ? 0 : -1}
+              data-roving={k.id}
             >
               {k.label}
             </button>
@@ -1055,18 +1106,25 @@ export default function Browse({
             <section className={styles.filterSection}>
               <h3 className={styles.filterTitle}>Categories</h3>
               <div className={styles.categories}>
-                {shownCategories.map((category) => (
-                  <button
-                    key={category}
-                    className={clsx(
-                      styles.categoryChip,
-                      categories.includes(category) && styles.categoryActive,
-                    )}
-                    onClick={() => toggleCategory(category)}
-                  >
-                    {titleCase(category)}
-                  </button>
-                ))}
+                {/* Several can be on at once, so these are toggles rather than
+                    a radio group — `aria-pressed` each, and no arrow keys to
+                    claim. The tick is the second channel: on and off were an
+                    accent tint and nothing else, which is the one difference a
+                    screen reader cannot read out and some eyes cannot see. */}
+                {shownCategories.map((category) => {
+                  const on = categories.includes(category);
+                  return (
+                    <button
+                      key={category}
+                      className={clsx(styles.categoryChip, on && styles.categoryActive)}
+                      aria-pressed={on}
+                      onClick={() => toggleCategory(category)}
+                    >
+                      {titleCase(category)}
+                      {on && <Check size={11} aria-hidden="true" />}
+                    </button>
+                  );
+                })}
               </div>
               {available.length > shownCategories.length && (
                 <button
@@ -1088,7 +1146,17 @@ export default function Browse({
           )}
         </aside>
 
-        <div className={styles.results}>
+        <div
+          className={styles.results}
+          id="browse-results"
+          role={plan ? undefined : "tabpanel"}
+          aria-labelledby={plan ? undefined : `browse-tab-${kindStop}`}
+          // Focusable because it is the thing the strip switches and it scrolls:
+          // while it is loading, empty, or showing rows whose first stop is a
+          // long way down, Tab out of the strip would otherwise skip the
+          // results entirely and the keyboard could not scroll them.
+          tabIndex={plan ? undefined : 0}
+        >
           {warnings.map((warning) => (
             <div key={warning} className={styles.warning}>
               <AlertTriangle size={14} />

@@ -62,10 +62,21 @@
 .name {
   font-size: 15px;
   letter-spacing: -0.01em;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* The truncation sits on the button rather than on the heading around it: the
+   heading's `overflow: hidden` would clip the focus ring, which is drawn
+   outside the button's box. An element's own `overflow` never clips its own
+   outline, so here it is safe. */
+.nameBtn {
+  display: block;
+  max-width: 100%;
+  text-align: left;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 100%;
 }
 
 .author {
