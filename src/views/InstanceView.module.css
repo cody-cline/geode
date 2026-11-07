@@ -25,8 +25,23 @@
   z-index: -2;
 }
 
+/* The wash an instance with no artwork gets. The hue is the instance's and
+   arrives inline; everything else is the theme's — see `--hero-wash-from` in
+   global.css. */
+.heroWash {
+  background: linear-gradient(
+    135deg,
+    hsl(var(--hero-hue-from) var(--hero-wash-from)),
+    hsl(var(--hero-hue-to) var(--hero-wash-to))
+  );
+}
+
 /* Dark enough under the text to keep contrast on a bright screenshot, clear
-   at the top so the image is still the image. */
+   at the top so the image is still the image. It needs no answer of its own
+   per theme: it fades toward the theme's own background, which is on the far
+   side of that theme's text, so wherever it covers it can only add contrast —
+   provided what is under it is on the right side to start with, which is what
+   the wash tokens are for. */
 .heroScrim {
   position: absolute;
   inset: 0;
