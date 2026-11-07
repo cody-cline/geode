@@ -14,6 +14,7 @@ import Plans from "./views/Plans";
 import ServerView from "./views/ServerView";
 import Servers from "./views/Servers";
 import Settings from "./views/Settings";
+import { shortcutRoute } from "./lib/shortcuts";
 import { useStore } from "./lib/store";
 
 import styles from "./App.module.css";
@@ -46,6 +47,17 @@ export default function App() {
       if (e.altKey && e.key === "ArrowLeft") {
         e.preventDefault();
         useStore.getState().goBack();
+        return;
+      }
+      // The sidebar's screens, bound here for the same reason: one definition
+      // that reaches every screen. A dialog is a mode, though — a shortcut
+      // that changed the screen behind one would leave it floating over a
+      // view it was never opened from — so an open overlay takes the press
+      // instead, and it says so by holding a back handler.
+      const route = shortcutRoute(e);
+      if (route && useStore.getState().backHandlers.length === 0) {
+        e.preventDefault();
+        useStore.getState().navigate(route);
       }
     };
     window.addEventListener("mouseup", onMouse);

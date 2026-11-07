@@ -38,11 +38,12 @@ cargo test --lib           # unit tests — offline, fast, the ones that gate a 
 cargo clippy --all-targets # expected to be clean; treat a warning as a failure
 ```
 
-`npm test` runs `node --test src/lib/*.test.mjs` — today that is seven files,
+`npm test` runs `node --test src/lib/*.test.mjs` — today that is eight files,
 `src/lib/share.test.mjs`, `src/lib/blocked.test.mjs`,
 `src/lib/pack-update.test.mjs`, `src/lib/update.test.mjs`,
-`src/lib/types.test.mjs`, `src/lib/retarget.test.mjs` and
-`src/lib/ignore-version.test.mjs`. Three of those are worth knowing apart. `types.test.mjs` is the only check anywhere that
+`src/lib/types.test.mjs`, `src/lib/retarget.test.mjs`,
+`src/lib/ignore-version.test.mjs` and
+`src/lib/shortcuts.test.mjs`. Four of those are worth knowing apart. `types.test.mjs` is the only check anywhere that
 `types.ts` really mirrors the Rust struct it claims to — it reads the text of
 `types.ts` and `Settings.tsx` and asserts that the `close_to_tray` field
 arrived in both, because a field left out of the hand-written mirror reads as
@@ -54,7 +55,10 @@ every jar was just rebuilt for, and that the dialog's world warning claims
 only what the dialog actually knows. `ignore-version.test.mjs` holds the
 words the Minecraft-version override is allowed to say: that whether a
 carried mod runs is not knowable here, and which mod to turn off first when
-the game will not start. All seven also
+the game will not start. `shortcuts.test.mjs` holds the rule that makes a
+keyboard shortcut worth adding — that every binding in `shortcuts.ts` is
+printed beside the thing it opens, since the sidebar is the only place these
+are discoverable and one nobody can find is dead weight. All eight also
 check a few invariants by reading the `.tsx` that holds them, because there is
 no DOM or React renderer under `npm test`. Everything else on the frontend is
 gated by `tsc` alone, which is strict (`noUnusedLocals`,

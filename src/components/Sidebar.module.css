@@ -64,6 +64,16 @@
   color: var(--accent);
 }
 
+/* The shortcut, beside the thing it opens. A binding is only worth having
+   where somebody can come across it without being told, and this is the one
+   place every one of these five screens is already named. */
+.key {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
 .sectionHead {
   display: flex;
   align-items: center;
