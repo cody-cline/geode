@@ -4,6 +4,7 @@ import { GitBranch, Loader2, Server as ServerIcon } from "lucide-react";
 
 import Modal from "./Modal";
 import { api } from "../lib/api";
+import { rovingKey } from "../lib/rovingFocus";
 import { useStore } from "../lib/store";
 import type { GitStatus, Server, ServerKindInfo } from "../lib/types";
 
@@ -114,6 +115,25 @@ export default function NewServerModal({
     return out;
   }, [kinds]);
 
+  /**
+   * Every kind in the order the screen offers them, flattened back out of the
+   * groups.
+   *
+   * The groups are how a person reads this list and the arrow keys are how the
+   * keyboard crosses it, and those are not the same shape: stopping at the end
+   * of "Runs mods" would strand somebody four tiles from the proxies with no
+   * key that reaches them. So the keyboard walks all fourteen and the headings
+   * are announced on the way past.
+   */
+  const order = useMemo(
+    () => groups.flatMap((g) => g.kinds.map((k) => k.id)),
+    [groups],
+  );
+  // The group is one tab stop. It lands on the chosen tile, or on the first
+  // one when the chosen kind is not in the list yet — without that fallback a
+  // list still loading has no stop at all and Tab goes straight past it.
+  const stop = order.includes(kind) ? kind : order[0];
+
   // Versions belong to the software, not to Minecraft: Velocity's are its own.
   useEffect(() => {
     let cancelled = false;
@@ -180,13 +200,30 @@ export default function NewServerModal({
         </div>
       ) : (
         <>
-          <div className={styles.groups}>
+          {/* A choice of one from fourteen, in five labelled groups — which is
+              what `<select>` with `<optgroup>` is, so it carries those roles
+              rather than a flat radio group's: a radiogroup owns radios and
+              has nowhere to put "Runs Bukkit-style plugins". Each tile reads
+              out its own sentence as part of its name, which is the whole
+              reason the sentences are there. */}
+          <div
+            className={styles.groups}
+            role="listbox"
+            aria-label="Server software"
+            onKeyDown={(e) => {
+              const next = rovingKey(e, order);
+              if (next) setKind(next);
+            }}
+          >
             {groups.map((group) => (
               <div
                 key={group.key}
+                role="presentation"
                 className={clsx(group.key === "proxy" && styles.apart)}
               >
-                <p className={styles.groupLabel}>{GROUP_LABEL[group.key]}</p>
+                <p className={styles.groupLabel} id={`kinds-${group.key}`}>
+                  {GROUP_LABEL[group.key]}
+                </p>
                 {/* Said before the tile is pressed rather than after. A proxy
                     looks like every other choice here and is the one that
                     cannot be played on, so the sentence belongs above it. */}
@@ -206,10 +243,21 @@ export default function NewServerModal({
                     Pick one only if you need both at once.
                   </p>
                 )}
-                <div className={styles.kinds}>
+                {/* The group wraps the tiles alone. Its heading and its note
+                    sit outside it and name it by id, so the listbox owns
+                    options and groups of options and nothing else. */}
+                <div
+                  className={styles.kinds}
+                  role="group"
+                  aria-labelledby={`kinds-${group.key}`}
+                >
                   {group.kinds.map((option) => (
                     <button
                       key={option.id}
+                      role="option"
+                      aria-selected={kind === option.id}
+                      data-roving={option.id}
+                      tabIndex={stop === option.id ? 0 : -1}
                       className={clsx(
                         styles.kind,
                         kind === option.id && styles.kindActive,
