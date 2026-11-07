@@ -51,6 +51,7 @@ import {
   complete as completeWith,
 } from "../lib/serverConsole";
 import { fileSize, hashHue, relativeTime } from "../lib/format";
+import { rovingKey } from "../lib/rovingFocus";
 import { useStore } from "../lib/store";
 import type {
   BackupInfo,
@@ -103,16 +104,26 @@ function commonPrefix(items: string[]): string {
  * so they recede; what the server actually said keeps the foreground, with the
  * few things inside it worth picking out — quoted strings, addresses, numbers,
  * the word Exception — lifted from it.
+ *
+ * A line with no `[thread/LEVEL]` prefix has no level of its own to print, and
+ * that is exactly the stderr case — a JVM crash arrives with no prefix at all.
+ * So the stream is named instead, and named as Geode's own word rather than
+ * dressed as the bracketed prefix a server writes, because the server did not
+ * say it. Only there: a prefixed line already spells its level out, and saying
+ * it twice on every line is what makes a console unreadable. The red stays as
+ * the second channel rather than the only one.
  */
 function ConsoleLine({ entry }: { entry: ServerLine }) {
   const parsed = parseLine(entry);
   return (
     <div className={clsx(styles.line, styles[parsed.level])}>
       {parsed.time && <span className={styles.time}>[{parsed.time}] </span>}
-      {parsed.thread && (
+      {parsed.thread ? (
         <span className={styles.thread}>
           [{parsed.thread}/{parsed.level.toUpperCase()}]{" "}
         </span>
+      ) : (
+        entry.stream === "err" && <span className={styles.stream}>stderr · </span>
       )}
       {pieces(parsed.message).map((piece, i) =>
         piece.kind ? (
@@ -463,6 +474,21 @@ export default function ServerView({ id }: { id: string }) {
   // instance without a banner gets — the layout is then identical either way.
   const hue = hashHue(server.id);
 
+  const shownTabs = TABS.filter(
+    // A server that keeps neither mods nor plugins — a proxy, or plain
+    // vanilla — has nothing to draw a dependency field from. A proxy has
+    // no world and no Minecraft version of its own, so no pack to share.
+    (tab) =>
+      (tab.id !== "graph" || server.takesMods || server.takesPlugins) &&
+      // A proxy hosts no world, so it has no whitelist, operators or
+      // bans of its own — the servers behind it do.
+      (tab.id !== "players" || server.hasWorld) &&
+      (tab.id !== "share" || server.hasWorld),
+  );
+  // The arrows step through the tabs this server actually has, not the eight
+  // written above: a tab nobody can click is not one the keyboard may land on.
+  const tabIds = shownTabs.map((tab) => tab.id);
+
   return (
     <>
       <div className={styles.hero}>
@@ -594,25 +620,37 @@ export default function ServerView({ id }: { id: string }) {
       </div>
 
       <nav className={styles.tabs}>
-        {TABS.filter(
-          // A server that keeps neither mods nor plugins — a proxy, or plain
-          // vanilla — has nothing to draw a dependency field from. A proxy has
-          // no world and no Minecraft version of its own, so no pack to share.
-          (tab) =>
-            (tab.id !== "graph" || server.takesMods || server.takesPlugins) &&
-            // A proxy hosts no world, so it has no whitelist, operators or
-            // bans of its own — the servers behind it do.
-            (tab.id !== "players" || server.hasWorld) &&
-            (tab.id !== "share" || server.hasWorld),
-        ).map((tab) => (
-          <button
-            key={tab.id}
-            className={clsx(styles.tab, active === tab.id && styles.tabActive)}
-            onClick={() => setActive(tab.id)}
-          >
-            {tab.label}
-          </button>
-        ))}
+        {/* The tabs on their own, so the element carrying `role="tablist"`
+            holds tabs and nothing else — Clear, on the end of this row, is a
+            button about the console rather than a ninth section. One tab stop
+            for the strip, arrows between the tabs from there and the tab they
+            land on shown, which is the contract `rovingKey` and the radio
+            groups share. */}
+        <div
+          className={styles.tabStrip}
+          role="tablist"
+          aria-label="Server sections"
+          onKeyDown={(e) => {
+            const next = rovingKey(e, tabIds);
+            if (next) setActive(next);
+          }}
+        >
+          {shownTabs.map((tab) => (
+            <button
+              key={tab.id}
+              id={`server-tab-${tab.id}`}
+              className={clsx(styles.tab, active === tab.id && styles.tabActive)}
+              onClick={() => setActive(tab.id)}
+              role="tab"
+              aria-selected={active === tab.id}
+              aria-controls="server-tabpanel"
+              tabIndex={active === tab.id ? 0 : -1}
+              data-roving={tab.id}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
         <div style={{ flex: 1 }} />
         {active === "console" && shown.length > 0 && (
           <button className="btn btn-sm" onClick={() => clearServerLog(id)}>
@@ -622,7 +660,18 @@ export default function ServerView({ id }: { id: string }) {
         )}
       </nav>
 
-      <div className={styles.body}>
+      {/* One panel that swaps, since the tabs are local state rather than
+          routes — so every tab points at this element and it says which tab
+          it is currently showing. Focusable in its own right: the console is
+          a scrolling region, and a panel reached by Tab is how the keyboard
+          gets into it. */}
+      <div
+        className={styles.body}
+        id="server-tabpanel"
+        role="tabpanel"
+        aria-labelledby={`server-tab-${active}`}
+        tabIndex={0}
+      >
       {active === "console" ? (
         <div className={styles.console}>
           <div
@@ -769,7 +818,16 @@ function BackupsPane({ server }: { server: Server }) {
 
   const [items, setItems] = useState<BackupInfo[] | null>(null);
   const [busy, setBusy] = useState(false);
-  const [confirming, setConfirming] = useState<BackupInfo | null>(null);
+  /**
+   * The one backup being asked about, and which question is being asked of it.
+   * One piece of state rather than two: only one of these dialogs can be open
+   * at a time, and a second flag beside the first is how both end up open over
+   * each other. The same shape `WorldsTab` asks its questions in.
+   */
+  const [confirming, setConfirming] = useState<{
+    kind: "restore" | "delete";
+    info: BackupInfo;
+  } | null>(null);
   const [keep, setKeep] = useState(server.settings.keepBackups);
 
   const load = useCallback(async () => {
@@ -816,11 +874,16 @@ function BackupsPane({ server }: { server: Server }) {
   }
 
   async function remove(info: BackupInfo) {
+    setBusy(true);
+    setConfirming(null);
     try {
       await api.deleteServerBackup(server.id, info.name);
       await load();
+      toast({ kind: "success", title: `Deleted ${info.name}` });
     } catch (e) {
       reportError("Could not delete that backup", e);
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -894,7 +957,7 @@ function BackupsPane({ server }: { server: Server }) {
 
               <button
                 className="btn btn-sm"
-                onClick={() => setConfirming(info)}
+                onClick={() => setConfirming({ kind: "restore", info })}
                 disabled={busy || server.running}
                 title={
                   server.running
@@ -906,7 +969,7 @@ function BackupsPane({ server }: { server: Server }) {
               </button>
               <button
                 className={styles.rowRemove}
-                onClick={() => void remove(info)}
+                onClick={() => setConfirming({ kind: "delete", info })}
                 title={`Delete ${info.name}`}
                 aria-label={`Delete ${info.name}`}
               >
@@ -919,10 +982,10 @@ function BackupsPane({ server }: { server: Server }) {
 
       <SchedulesSection server={server} />
 
-      {confirming && (
+      {confirming?.kind === "restore" && (
         <Modal
           title="Restore this backup?"
-          subtitle={confirming.name}
+          subtitle={confirming.info.name}
           onClose={() => setConfirming(null)}
           width={460}
           footer={
@@ -932,7 +995,7 @@ function BackupsPane({ server }: { server: Server }) {
               </button>
               <button
                 className="btn btn-danger"
-                onClick={() => void restore(confirming)}
+                onClick={() => void restore(confirming.info)}
                 disabled={busy}
               >
                 Restore
@@ -944,6 +1007,47 @@ function BackupsPane({ server }: { server: Server }) {
             Every file in the backup is written over what is there now. Files
             added since — a plugin you installed today, say — are left alone
             rather than deleted, so this puts back rather than rewinds.
+          </p>
+        </Modal>
+      )}
+
+      {/* Asked, because this is the irreversible one of the two. Restoring
+          leaves the backup where it is; deleting takes away a world nobody
+          can fetch again. */}
+      {confirming?.kind === "delete" && (
+        <Modal
+          title={`Delete ${confirming.info.name}?`}
+          subtitle={`${fileSize(confirming.info.size)} · taken ${relativeTime(
+            confirming.info.createdAt,
+          )}`}
+          onClose={() => setConfirming(null)}
+          width={460}
+          footer={
+            <>
+              <button className="btn" onClick={() => setConfirming(null)}>
+                Cancel
+              </button>
+              <button
+                className="btn btn-danger"
+                onClick={() => void remove(confirming.info)}
+                disabled={busy}
+              >
+                {busy && <Loader2 size={14} className="spin" />}
+                Delete
+              </button>
+            </>
+          }
+        >
+          <p className={styles.eula}>
+            The zip goes from this server&apos;s <code>backups</code> folder
+            and there is no undo. What it holds — the world as it stood when
+            the backup was taken, with the configs, the plugin data and the
+            player lists beside it — is kept nowhere else, and a world is not
+            something Geode can ask for again.
+          </p>
+          <p className={styles.eula}>
+            The server as it is now, and every other backup of it, are left
+            alone.
           </p>
         </Modal>
       )}
