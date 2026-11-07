@@ -21,6 +21,7 @@ import ExportModal from "../components/ExportModal";
 import InstanceIcon from "../components/InstanceIcon";
 import PackLinkBuildModal from "../components/PackLinkBuildModal";
 import ShareMenu from "../components/ShareMenu";
+import StopGameModal from "../components/StopGameModal";
 import type { ShareItem } from "../components/ShareMenu";
 import Browse from "./Browse";
 import ContentTab from "./instance/ContentTab";
@@ -31,7 +32,7 @@ import SettingsTab from "./instance/SettingsTab";
 import WorldsTab from "./instance/WorldsTab";
 import { api } from "../lib/api";
 import { useBackHandler } from "../lib/useBackHandler";
-import { launchInstance, stopInstance } from "../lib/actions";
+import { launchInstance } from "../lib/actions";
 import { hashHue, relativeTime } from "../lib/format";
 import { formatDuration, useStore } from "../lib/store";
 import { EXPORT_FORMATS } from "../lib/share";
@@ -71,6 +72,9 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
   const [exportAs, setExportAs] = useState<PackFormat | null>(null);
   const [makingLink, setMakingLink] = useState(false);
   const [signingIn, setSigningIn] = useState(false);
+  // Stopping is SIGKILL, so it asks here exactly as it does on the library
+  // card — one warning written once, in `StopGameModal`.
+  const [stopping, setStopping] = useState(false);
 
   // Export was only reachable from the instance's own Settings tab, which is
   // the last place somebody looks when they want to hand a pack to a friend.
@@ -217,10 +221,7 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
           </button>
           <ShareMenu items={shareItems} />
           {instance.running ? (
-            <button
-              className="btn btn-danger"
-              onClick={() => void stopInstance(instance)}
-            >
+            <button className="btn btn-danger" onClick={() => setStopping(true)}>
               <Square size={13} fill="currentColor" />
               Stop
             </button>
@@ -289,6 +290,9 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
       )}
       {makingLink && <PackLinkBuildModal onClose={() => setMakingLink(false)} />}
       {signingIn && <AccountsModal onClose={() => setSigningIn(false)} />}
+      {stopping && (
+        <StopGameModal instance={instance} onClose={() => setStopping(false)} />
+      )}
     </>
   );
 }

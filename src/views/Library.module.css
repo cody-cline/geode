@@ -275,21 +275,6 @@
 /* The body of the stop question. Same measure as the world dialogs' note,
    because it is the same kind of sentence: what this costs, before it costs
    it. */
-.stopNote {
-  font-size: 12.5px;
-  line-height: 1.6;
-  color: var(--text-dim);
-}
-
-.stopNote code {
-  font-family: var(--mono);
-  font-size: 11.5px;
-  padding: 1px 4px;
-  border-radius: 4px;
-  background: var(--surface-3);
-  color: var(--text);
-}
-
 .noResults {
   padding: 48px;
   text-align: center;

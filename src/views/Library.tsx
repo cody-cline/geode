@@ -15,9 +15,9 @@ import {
 
 import AccountsModal from "../components/AccountsModal";
 import InstanceIcon from "../components/InstanceIcon";
-import Modal from "../components/Modal";
 import NewInstanceModal from "../components/NewInstanceModal";
-import { launchInstance, stopInstance } from "../lib/actions";
+import StopGameModal from "../components/StopGameModal";
+import { launchInstance } from "../lib/actions";
 import { formatDuration, useStore } from "../lib/store";
 import { hashHue, relativeTime } from "../lib/format";
 import { LOADERS } from "../lib/types";
@@ -173,46 +173,8 @@ export default function Library() {
       {creating && <NewInstanceModal onClose={() => setCreating(false)} />}
       {signingIn && <AccountsModal onClose={() => setSigningIn(false)} />}
 
-      {/* Asked every time, even though stopping a hung game is sometimes
-          exactly what somebody wants. The press is one click and the cost is
-          unbounded, so the trade is a click against minutes of play — and the
-          dialog is also the only place this app says that quitting from
-          inside the game is the way to keep them. */}
       {stopping && (
-        <Modal
-          title={`Stop ${stopping.name}?`}
-          subtitle="Minecraft is not asked to save first, because there is nothing here to ask."
-          onClose={() => setStopping(null)}
-          width={460}
-          footer={
-            <>
-              <button className="btn" onClick={() => setStopping(null)}>
-                Keep playing
-              </button>
-              <button
-                className="btn btn-danger"
-                onClick={() => {
-                  const instance = stopping;
-                  setStopping(null);
-                  void stopInstance(instance);
-                }}
-              >
-                <Square size={13} fill="currentColor" />
-                Stop the game
-              </button>
-            </>
-          }
-        >
-          <p className={styles.stopNote}>
-            Geode ends the process outright. A server can be told to{" "}
-            <code>save-all flush</code> and waited for; a client has no console
-            to type that at, so whatever has happened since Minecraft last
-            saved by itself goes with it — and a world is the one thing with no
-            upstream to fetch it back from. Quit from inside the game to save
-            first. Stop here when the game has stopped responding and that is
-            not an option.
-          </p>
-        </Modal>
+        <StopGameModal instance={stopping} onClose={() => setStopping(null)} />
       )}
     </>
   );
