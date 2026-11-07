@@ -31,6 +31,35 @@ type Asking =
   | null;
 
 /**
+ * Whether a world was last saved by a Minecraft later than the one this
+ * instance runs.
+ *
+ * Compared segment by segment as numbers, which is the only way that holds:
+ * as text `1.21.9` sorts above `1.21.10`, and as a number `1.21.1` is not one
+ * at all. The same arithmetic covers the year-based line Mojang now ships
+ * alongside the old scheme — `26.3` wins on its first segment against any
+ * `1.21.x`, which is the right answer — so there is one rule and not two.
+ *
+ * Anything that is not a plain release answers no. A snapshot (`26w14a`), a
+ * pre-release, or whatever a third-party jar left in `level.dat` has no place
+ * in this ordering, and the quiet answer is the honest one: this badge exists
+ * to name an upgrade Minecraft performs once and never undoes, and a warning
+ * that colour on a world nobody needed to worry about is worse than no
+ * warning at all.
+ */
+function savedByNewer(world: string, instance: string): boolean {
+  const release = /^\d+(\.\d+)*$/;
+  const [a, b] = [world.trim(), instance.trim()];
+  if (!release.test(a) || !release.test(b)) return false;
+  const [parts, against] = [a, b].map((v) => v.split(".").map(Number));
+  for (let i = 0; i < Math.max(parts.length, against.length); i++) {
+    const [mine, theirs] = [parts[i] ?? 0, against[i] ?? 0];
+    if (mine !== theirs) return mine > theirs;
+  }
+  return false;
+}
+
+/**
  * An instance's singleplayer worlds.
  *
  * Everything here but the two listings is refused by the backend while the
@@ -219,6 +248,11 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
             const kept = backupsFor(world.folder);
             const mode =
               world.gameMode === undefined ? null : GAME_MODES[world.gameMode];
+            // The app held both numbers and never compared them, so a world
+            // one Minecraft ahead of its instance read as another genre tag.
+            const ahead = Boolean(
+              world.version && savedByNewer(world.version, instance.mcVersion),
+            );
             return (
               <div
                 key={world.folder}
@@ -242,9 +276,14 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
                     {mode && <span className="badge">{mode}</span>}
                     {world.version && (
                       <span
-                        className="badge"
-                        title="The Minecraft version this world was last opened with"
+                        className={clsx("badge", ahead && "badge-warn")}
+                        title={
+                          ahead
+                            ? `Saved by Minecraft ${world.version}; this instance runs ${instance.mcVersion}`
+                            : "The Minecraft version this world was last opened with"
+                        }
                       >
+                        {ahead && <TriangleAlert size={10} />}
                         {world.version}
                       </span>
                     )}
@@ -268,6 +307,19 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
                     )}
                   </div>
                   {world.trouble && <p className={styles.trouble}>{world.trouble}</p>}
+                  {/* Said on the row and not only in the badge's tooltip: a
+                      tooltip is read after, and what this costs is a world.
+                      The badge's colour is what makes somebody look here. */}
+                  {ahead && (
+                    <p className={styles.ahead}>
+                      Minecraft upgrades a world the first time a newer version
+                      opens it and never puts it back, so opening this on{" "}
+                      {instance.mcVersion} can drop what {world.version} wrote
+                      — and a world is the one thing with no upstream to fetch
+                      it back from. Back it up first, or run this instance on{" "}
+                      {world.version}.
+                    </p>
+                  )}
                 </div>
 
                 <button

@@ -612,6 +612,14 @@ export default function GraphTab({
 
   const dim = (id: string) => (lit ? !lit.has(id) : false);
 
+  // Whether there is a field below to act on. It is drawn only once there is
+  // an edge in it, so until then there is nothing to find, nothing to zoom and
+  // nothing to fit — and a toolbar that answers a press by doing nothing is
+  // the Logs tab's Copy and Clear before they learned to go grey. The folder
+  // switch is deliberately not in here: on a hybrid server the other folder is
+  // the one thing worth pressing when this one has nothing to show.
+  const drawn = items !== null && field.links.length > 0;
+
   // A mod connected to nothing gets its name on demand rather than always.
   // Two thirds of a folder is unconnected, and naming all of them at once
   // buries the handful of mods that actually relate to each other.
@@ -652,6 +660,7 @@ export default function GraphTab({
             placeholder={`Find a ${one}`}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
+            disabled={!drawn}
           />
         </div>
         {/* Only where there is a graph to describe. With no edges at all the
@@ -669,12 +678,15 @@ export default function GraphTab({
             )}
           </p>
         )}
-        <span className={styles.hint}>drag a {one} to move it</span>
+        {/* Only where there is something to drag. Over an empty canvas this
+            was instructions for an interaction that does not exist. */}
+        {drawn && <span className={styles.hint}>drag a {one} to move it</span>}
         <div className={styles.zoom}>
           <button
             className="btn btn-icon btn-sm"
             onClick={() => step(1 / 1.3)}
             title="Zoom out"
+            disabled={!drawn}
           >
             <Minus size={14} />
           </button>
@@ -683,6 +695,7 @@ export default function GraphTab({
             className="btn btn-icon btn-sm"
             onClick={() => step(1.3)}
             title="Zoom in"
+            disabled={!drawn}
           >
             <Plus size={14} />
           </button>
@@ -690,6 +703,7 @@ export default function GraphTab({
             className="btn btn-sm"
             onClick={() => setView({ x: 0, y: 0, k: 1 })}
             title="Back to the whole field"
+            disabled={!drawn}
           >
             <Crosshair size={13} />
             Fit
