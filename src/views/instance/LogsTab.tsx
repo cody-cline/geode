@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
-import { ArrowDownToLine, Copy, Search, Terminal, Trash2 } from "lucide-react";
+import { ArrowDownToLine, Check, Copy, Search, Terminal, Trash2 } from "lucide-react";
 
 import LogFilesPanel from "../../components/LogFilesPanel";
 import type { LogSource } from "../../components/LogFilesPanel";
@@ -17,7 +17,6 @@ type Level = (typeof LEVELS)[number];
 export default function LogsTab({ instanceId }: { instanceId: string }) {
   const logs = useStore((s) => s.logs[instanceId]);
   const clearLogs = useStore((s) => s.clearLogs);
-  const toast = useStore((s) => s.toast);
 
   // The console is this run; the files are every run, including the one that
   // crashed while nobody was looking.
@@ -25,6 +24,7 @@ export default function LogsTab({ instanceId }: { instanceId: string }) {
   const [level, setLevel] = useState<Level>("ALL");
   const [filter, setFilter] = useState("");
   const [follow, setFollow] = useState(true);
+  const [copied, setCopied] = useState(false);
 
   const scroller = useRef<HTMLDivElement>(null);
 
@@ -53,12 +53,22 @@ export default function LogsTab({ instanceId }: { instanceId: string }) {
     if (atBottom !== follow) setFollow(atBottom);
   }
 
+  // Said on the button, the way the log-file panel and the share links say it.
+  // This was the one copy in the app that answered in a corner toast instead,
+  // which is a different gesture for the same action — and the only one where
+  // what you pressed does not react.
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 1800);
+    return () => clearTimeout(timer);
+  }, [copied]);
+
   async function copyAll() {
     const text = entries
       .map((e) => `[${e.level}]${e.thread ? ` [${e.thread}]` : ""} ${e.message}`)
       .join("\n");
     await navigator.clipboard.writeText(text);
-    toast({ kind: "success", title: `Copied ${entries.length} lines` });
+    setCopied(true);
   }
 
   const source: LogSource = useMemo(
@@ -135,8 +145,8 @@ export default function LogsTab({ instanceId }: { instanceId: string }) {
             Follow
           </button>
           <button className="btn" onClick={copyAll} disabled={entries.length === 0}>
-            <Copy size={14} />
-            Copy
+            {copied ? <Check size={14} /> : <Copy size={14} />}
+            {copied ? "Copied" : "Copy"}
           </button>
           <button
             className="btn"

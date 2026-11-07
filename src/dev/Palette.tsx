@@ -71,7 +71,7 @@ export default function Palette() {
             >
               <div style={{ height: 52, background: `var(${token})` }} />
               <div style={{ padding: "8px 10px" }}>
-                <div style={{ fontSize: 11.5, fontFamily: "ui-monospace, monospace" }}>
+                <div style={{ fontSize: 11.5, fontFamily: "var(--mono)" }}>
                   {token}
                 </div>
                 <div style={{ fontSize: 10.5, color: "var(--text-faint)" }}>{use}</div>
@@ -181,7 +181,7 @@ export default function Palette() {
             borderRadius: "var(--radius)",
             background: "var(--bg)",
             boxShadow: "0 0 0 1px var(--border)",
-            fontFamily: "ui-monospace, monospace",
+            fontFamily: "var(--mono)",
             fontSize: 11.5,
             lineHeight: 1.6,
             color: "var(--text-dim)",

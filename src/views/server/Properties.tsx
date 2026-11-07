@@ -249,8 +249,8 @@ export default function Properties({ server }: { server: Server }) {
       )}
 
       {changedCount > 0 && (
-        <div className={styles.saveBar}>
-          <span className={styles.saveHint}>
+        <div className={clsx("save-bar", styles.saveBar)}>
+          <span className="save-hint">
             {changedCount} setting{changedCount === 1 ? "" : "s"} changed.
             {server.running ? " Restart the server to apply." : ""}
           </span>

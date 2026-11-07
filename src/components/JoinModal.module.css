@@ -38,7 +38,7 @@
 }
 
 .mono {
-  font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, monospace;
+  font-family: var(--mono);
   font-size: 12px;
 }
 

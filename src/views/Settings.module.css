@@ -326,7 +326,7 @@
 .javaPath {
   display: block;
   margin-top: 4px;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: var(--mono);
   font-size: 11px;
   color: var(--text-faint);
   overflow-wrap: anywhere;
@@ -349,18 +349,6 @@
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
   background: var(--surface);
-}
-
-.avatar {
-  display: grid;
-  place-items: center;
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
-  color: #fff;
-  font-size: 11px;
-  font-weight: 700;
-  flex-shrink: 0;
 }
 
 .accountText {
@@ -458,7 +446,7 @@
   border-radius: var(--radius-sm);
   background: var(--bg);
   border: 1px solid var(--border);
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: var(--mono);
   font-size: 11.5px;
   color: var(--text-dim);
   overflow-wrap: anywhere;
@@ -497,6 +485,6 @@
 }
 
 .fingerprint code {
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: var(--mono);
   user-select: text;
 }

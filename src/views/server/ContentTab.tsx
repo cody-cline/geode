@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 
 import { api } from "../../lib/api";
-import { fileSize, providerShort } from "../../lib/format";
+import { fileSize, providerLabel } from "../../lib/format";
 import { useStore } from "../../lib/store";
 import type {
   ContentItem,
@@ -640,7 +640,7 @@ export default function ServerContentTab({
                     )}
                     {item.provider && (
                       <span className={clsx("badge", `badge-${item.provider}`)}>
-                        {providerShort(item.provider)}
+                        {providerLabel(item.provider)}
                       </span>
                     )}
                     {side && (

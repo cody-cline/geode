@@ -22,9 +22,27 @@
   --warn: #fbbf24;
   --info: #60a5fa;
 
+  /* Sinytra Connector's own colour. A supported route, just not the preferred
+     one, so it is neither a provider nor a warning — and the three files that
+     said so had each hardcoded #a78bfa at a different mix (15/34, 16/38, 22)
+     for the one concept. Percentages below match the provider badges. */
+  --connector: #a78bfa;
+  --connector-text: #c4b5fd;
+
+  /* One monospace stack. It was hand-written 29 times in two variants — 13
+     naming "Cascadia Code" and 16 not — and ServerView held both, so the
+     server console was split down the middle. Invisible on Linux, where both
+     fall through to generic `monospace`; on Windows the first resolves to
+     Cascadia and the second does not, and half the app renders in another
+     typeface. */
+  --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, monospace;
+
   --radius-sm: 6px;
   --radius: 10px;
   --radius-lg: 16px;
+  /* A pill. Was spelled both `99px` and `999px`, eleven times each — identical
+     on screen, two things to grep for and nothing saying they were one idea. */
+  --radius-pill: 999px;
 
   --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.4);
   --shadow: 0 8px 24px -8px rgb(0 0 0 / 0.6);
@@ -162,7 +180,7 @@ h4 {
   background: var(--border-strong);
   border: 3px solid transparent;
   background-clip: content-box;
-  border-radius: 99px;
+  border-radius: var(--radius-pill);
 }
 
 *::-webkit-scrollbar-thumb:hover {
@@ -331,7 +349,7 @@ h4 {
   gap: 5px;
   height: 20px;
   padding: 0 7px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.02em;
@@ -377,6 +395,45 @@ h4 {
   height: 1px;
   background: var(--border);
   border: 0;
+}
+
+/* The bar that commits a screen's edits. Rides the bottom of the pane instead
+   of sitting at the end of a long scroll, so the thing that saves your work is
+   never somewhere you have to go and find. Only rendered when there is
+   something to save.
+
+   One definition because it was three — the server console's, the instance
+   Settings tab's and server Properties' — byte-identical but for the two
+   declarations that showed: only the Settings tab faded in, and only
+   Properties raised itself above the rows it sits over. Both are kept here, so
+   the bar behaves the same way on all three screens.
+
+   `margin-bottom` stays with each screen: it cancels the bottom padding its
+   own scroller reserves for this bar, and that is 90px in some panes and 120px
+   in others. */
+.save-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 24px;
+  margin-right: -22px;
+  margin-left: -22px;
+  padding: 12px 22px;
+  background: var(--surface-2);
+  border-top: 1px solid var(--border-strong);
+  box-shadow: 0 -8px 24px -12px rgb(0 0 0 / 0.5);
+  animation: fade-up 0.16s var(--ease);
+}
+
+/* The sentence beside it, saying what is unsaved. Travelled with `.save-bar`
+   as a fourth byte-identical copy, so it comes along. */
+.save-hint {
+  flex: 1;
+  font-size: 12.5px;
+  color: var(--text-dim);
 }
 
 /* Loading shimmer used by every skeleton placeholder. */
@@ -467,7 +524,7 @@ h4 {
 }
 
 .prose code {
-  font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, monospace;
+  font-family: var(--mono);
   font-size: 12px;
   background: var(--surface-2);
   padding: 1px 5px;

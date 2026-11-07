@@ -27,6 +27,28 @@ fn default_accent() -> String {
     "#4ade80".into()
 }
 
+/// A `#rrggbb` accent, else [`default_accent`].
+///
+/// The frontend writes this straight into the `--accent` custom property and
+/// reads it back to pick readable ink for the buttons filled with it. Nothing
+/// downstream re-checks the string, so anything that is not six hex digits
+/// leaves the page with a colour the browser may not accept and an ink colour
+/// chosen for whatever the parse failed on. The app itself can only produce
+/// hex — the swatches are literals and the picker is `<input type="color">` —
+/// so this is about a `config.json` someone edited by hand, which is the one
+/// way a value nobody wrote in the UI gets in.
+pub fn valid_accent(raw: &str) -> String {
+    let hex = raw.trim();
+    if hex.len() == 7
+        && hex.starts_with('#')
+        && hex[1..].bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        hex.to_ascii_lowercase()
+    } else {
+        default_accent()
+    }
+}
+
 /// The CurseForge key Geode searches with.
 ///
 /// Committed, the way Prism Launcher and PolyMC commit theirs. There is no
@@ -182,7 +204,16 @@ impl Default for Config {
 impl Config {
     pub async fn load(paths: &Paths) -> Result<Self> {
         match tokio::fs::read(paths.config_file()).await {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| Error::json("config.json", e)),
+            Ok(bytes) => {
+                let mut config: Self =
+                    serde_json::from_slice(&bytes).map_err(|e| Error::json("config.json", e))?;
+                // Checked on the way in rather than at every reader: a
+                // hand-edited file is the only way a non-hex accent arrives,
+                // and once it is in memory the frontend has it. Dropping it
+                // here means it is also gone from the next save.
+                config.accent = valid_accent(&config.accent);
+                Ok(config)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e.into()),
         }
@@ -345,6 +376,24 @@ mod tests {
     fn effective_key_matches_build_when_unset() {
         let config = Config::default();
         assert_eq!(config.effective_curseforge_key(), default_curseforge_key());
+    }
+
+    /// The accent goes into a CSS custom property as it stands, and the ink
+    /// colour for everything filled with it is read back off the same string.
+    /// Nothing in the app can produce anything but `#rrggbb`, so what this
+    /// guards is a hand-edited config.json — and a value that gets past here
+    /// is one the page cannot do anything sensible with.
+    #[test]
+    fn only_a_six_digit_hex_accent_is_kept() {
+        assert_eq!(valid_accent("#38BDF8"), "#38bdf8");
+        assert_eq!(valid_accent("  #38bdf8  "), "#38bdf8");
+        for bad in ["", "   ", "red", "#fff", "38bdf8", "#38bdf", "#38bdf8g"] {
+            assert_eq!(
+                valid_accent(bad),
+                default_accent(),
+                "{bad:?} was kept as an accent"
+            );
+        }
     }
 
 

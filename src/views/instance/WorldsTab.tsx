@@ -231,9 +231,12 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
                 <div className={styles.itemText}>
                   <div className={styles.itemTitle}>
                     <span className={styles.itemName}>{world.name}</span>
+                    {/* Capitalised like the game mode beside it: both are
+                        badges naming how the world plays, and one of them
+                        was lowercase. */}
                     {world.hardcore && (
                       <span className="badge" title="Hardcore: one life">
-                        hardcore
+                        Hardcore
                       </span>
                     )}
                     {mode && <span className="badge">{mode}</span>}

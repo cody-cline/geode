@@ -40,7 +40,7 @@
 
 .count {
   padding: 1px 7px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--surface-3);
   font-size: 11px;
   font-weight: 600;
@@ -94,7 +94,7 @@
 
 .level {
   padding: 1px 6px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--surface-3);
   font-size: 10px;
   color: var(--text-dim);
@@ -103,7 +103,7 @@
 /* The identity, as against the name above it, which the server may have
    recorded under an owner who has since renamed. */
 .uuid {
-  font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, monospace;
+  font-family: var(--mono);
   font-size: 10px;
   color: var(--text-faint);
   overflow-wrap: anywhere;
@@ -156,7 +156,7 @@
   border-radius: var(--radius-sm);
   background: var(--bg);
   border: 1px solid var(--border);
-  font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, monospace;
+  font-family: var(--mono);
   font-size: 11px;
   line-height: 1.6;
   color: var(--text-dim);

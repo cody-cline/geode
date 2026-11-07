@@ -89,7 +89,7 @@ pub async fn set_config(
         config.theme = v;
     }
     if let Some(v) = patch.accent {
-        config.accent = v;
+        config.accent = crate::config::valid_accent(&v);
     }
     if let Some(v) = patch.hide_on_launch {
         config.hide_on_launch = v;

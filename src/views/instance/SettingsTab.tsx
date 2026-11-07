@@ -747,8 +747,8 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
       </div>
 
       {dirty && (
-        <div className={styles.saveBar}>
-          <span className={styles.saveHint}>You have unsaved changes.</span>
+        <div className={`save-bar ${styles.saveBar}`}>
+          <span className="save-hint">You have unsaved changes.</span>
           <button
             className="btn"
             onClick={() => {

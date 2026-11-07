@@ -88,7 +88,7 @@ export default function ImageField({
               disabled={busy}
               title={`Remove the ${label.toLowerCase()}`}
             >
-              <Trash2 size={13} />
+              <Trash2 size={14} />
               Remove
             </button>
           )}

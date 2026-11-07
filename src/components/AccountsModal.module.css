@@ -34,18 +34,6 @@
   background: var(--surface-2);
 }
 
-.avatar {
-  display: grid;
-  place-items: center;
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  color: #fff;
-  font-size: 12px;
-  font-weight: 700;
-  flex-shrink: 0;
-}
-
 .meta {
   display: flex;
   flex-direction: column;
@@ -97,7 +85,7 @@
 
 .code {
   flex: 1;
-  font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, monospace;
+  font-family: var(--mono);
   font-size: 20px;
   font-weight: 700;
   letter-spacing: 0.18em;

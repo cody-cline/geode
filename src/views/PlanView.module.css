@@ -188,7 +188,7 @@
   gap: 4px;
   height: 20px;
   padding: 0 7px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   font-size: 11px;
   font-weight: 600;
   white-space: nowrap;
@@ -197,11 +197,14 @@
 }
 
 /* Connector gets its own colour rather than a warning one: it is a supported
-   route, just not the preferred one. */
+   route, just not the preferred one. The colour is `--connector` in
+   global.css, at the same mix the provider badges use, because this was
+   hardcoded here and in ProjectCard at three different percentages for the
+   one idea. */
 .connector {
-  background: color-mix(in srgb, #a78bfa 15%, transparent);
-  border-color: color-mix(in srgb, #a78bfa 34%, transparent);
-  color: #c4b5fd;
+  background: color-mix(in srgb, var(--connector) 14%, transparent);
+  border-color: color-mix(in srgb, var(--connector) 32%, transparent);
+  color: var(--connector-text);
 }
 
 .nearVersion {
@@ -210,10 +213,11 @@
   color: var(--warn);
 }
 
+/* Both at once: Connector's fill, a warning's border. */
 .connectorNear {
-  background: color-mix(in srgb, #a78bfa 15%, transparent);
+  background: color-mix(in srgb, var(--connector) 14%, transparent);
   border-color: color-mix(in srgb, var(--warn) 40%, transparent);
-  color: #c4b5fd;
+  color: var(--connector-text);
 }
 
 .missing {
@@ -300,22 +304,27 @@
   gap: 7px;
 }
 
-.targetLoader {
+/* The Minecraft version leads and the loader follows it, dim. It was the other
+   way round, which inverted itself in the re-target dialog: there every row
+   offers the loader the instance already has, so the bold half of each card
+   was the one constant on screen and the dim half was the whole choice. The
+   version is the more identifying fact of the pair in either screen. */
+.targetVersion {
   font-size: 14px;
   font-weight: 600;
   letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
 }
 
-.targetVersion {
+.targetLoader {
   font-size: 13px;
   color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
 }
 
 .best {
   margin-left: auto;
   padding: 0 6px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: color-mix(in srgb, var(--accent) 16%, transparent);
   color: var(--accent);
   font-size: 10px;

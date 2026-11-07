@@ -718,8 +718,11 @@ function ListPane({
                 )}
               </div>
               <div className={styles.rowActions}>
+                {/* Ghost, like every other row-removal button in the app —
+                    this one was the lone solid one, which read as the row's
+                    main action rather than the quiet way out of it. */}
                 <button
-                  className="btn btn-sm btn-icon"
+                  className="btn btn-ghost btn-icon btn-sm"
                   title={
                     removable
                       ? config.remove
@@ -729,7 +732,7 @@ function ListPane({
                   disabled={busy || !removable}
                   onClick={() => onRemove(entry)}
                 >
-                  <Trash2 size={13} />
+                  <Trash2 size={14} />
                 </button>
               </div>
             </li>

@@ -536,7 +536,12 @@ export function applyTheme(config: Config) {
 /** Relative luminance test, so a pale accent gets dark text and vice versa. */
 function contrastInk(hex: string): string {
   const m = /^#?([\da-f]{6})$/i.exec(hex.trim());
-  if (!m) return "#04140a";
+  // White, not the near-black this used to return. An unparseable accent is
+  // something that got past `config.rs` into `--accent`, and nothing here
+  // knows what colour the browser made of it — but every accent this app has
+  // ever shipped is dark enough to read white on, and dark ink on an unknown
+  // colour is the one guess that can disappear entirely.
+  if (!m) return "#ffffff";
   const int = parseInt(m[1], 16);
   const [r, g, b] = [(int >> 16) & 255, (int >> 8) & 255, int & 255].map((c) => {
     const s = c / 255;

@@ -28,6 +28,31 @@ function loaderLabel(id: string): string {
 /** Which instance a re-target lands on. `""` leaves the choice to Geode. */
 type LandOn = "" | "here" | "copy";
 
+/**
+ * How much of this instance a target covers, in one line on its card.
+ *
+ * `fits` is what the resolver could look up, which is not the folder: a jar
+ * with no project id was never checked. Counting only against `fits` printed
+ * "All 2 mods run here" on a card in a dialog whose own header said "3 mods",
+ * which is the one mod nobody can say anything about rounded quietly out of
+ * the denominator. So when something went unchecked the whole folder is the
+ * denominator and the word "checked" is on screen — the jar itself is named
+ * under "Could not be checked" below, and this only makes the count agree
+ * with it. When everything was checked there is no exclusion to show and the
+ * shorter line stands.
+ */
+function coverageLine(option: PlanTarget, unchecked: number): string {
+  if (unchecked === 0) {
+    return option.missing === 0
+      ? `All ${option.fits.length} mods run here`
+      : `${option.fits.length - option.missing} of ${option.fits.length} — ${option.missing} left out`;
+  }
+  const whole = option.fits.length + unchecked;
+  return option.missing === 0
+    ? `${option.fits.length} of ${whole} checked — all run here`
+    : `${option.fits.length} of ${whole} checked — ${option.missing} left out`;
+}
+
 /** What a finished re-target amounts to, in one line. */
 function retargetLine(report: RetargetReport): StatusLine {
   // The preview said "using its 1.21.3 build" about some of these, and the
@@ -190,7 +215,16 @@ export default function ReplanModal({
                   title={instance.running ? "Stop the game first" : undefined}
                 >
                   {applying && <Loader2 size={14} className="spin" />}
-                  Apply {loaderLabel(target.loader)} {target.gameVersion}
+                  {/* Named for what changes. It read "Apply Fabric 1.21.3",
+                      leading with the loader — which on most of these rows is
+                      the loader the instance already has, so the button named
+                      the half of the pair that was staying put. The loader is
+                      still named when it is genuinely moving: a re-target can
+                      cross loaders, and then it is half of what is about to
+                      happen. */}
+                  Move to Minecraft {target.gameVersion}
+                  {target.loader !== instance.loader &&
+                    ` on ${loaderLabel(target.loader)}`}
                 </button>
               )}
         </>
@@ -323,12 +357,15 @@ export default function ReplanModal({
                     )}
                     onClick={() => setChosen(index)}
                   >
+                    {/* Version first: it is what differs between these rows,
+                        because they all offer the loader this instance
+                        already has. */}
                     <span className={planStyles.targetHead}>
-                      <span className={planStyles.targetLoader}>
-                        {loaderLabel(option.loader)}
-                      </span>
                       <span className={planStyles.targetVersion}>
                         {option.gameVersion}
+                      </span>
+                      <span className={planStyles.targetLoader}>
+                        {loaderLabel(option.loader)}
                       </span>
                       {index === 0 && (
                         <span className={planStyles.best}>best</span>
@@ -344,9 +381,7 @@ export default function ReplanModal({
                         option.missing === 0 && planStyles.coverageFull,
                       )}
                     >
-                      {option.missing === 0
-                        ? `All ${option.fits.length} mods run here`
-                        : `${option.fits.length - option.missing} of ${option.fits.length} — ${option.missing} left out`}
+                      {coverageLine(option, resolution.unresolved.length)}
                     </span>
 
                     {(option.connector > 0 || option.near > 0) && (

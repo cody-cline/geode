@@ -338,6 +338,31 @@ function buildField(all: ContentItem[]) {
   };
 }
 
+/**
+ * What to say in place of the field when there is not one edge in it.
+ *
+ * A node is labelled only when something touches it, so a folder of mods that
+ * need nothing drew unlabelled blank discs scattered in a void — which reads
+ * as the graph having crashed rather than as the answer it is.
+ *
+ * Three sentences and not one with an aside, because the honest statement
+ * changes shape: with a ubiquitous library hidden, everything here *does*
+ * depend on something, just on the one thing not drawn.
+ */
+function nothingToGraph(
+  count: number,
+  one: string,
+  many: string,
+  omitted: string[],
+): string {
+  if (omitted.length > 0) {
+    return `Everything here depends only on ${omitted.join(", ")}, hidden because nearly everything needs it. There is nothing left to graph.`;
+  }
+  return count === 1
+    ? `This ${one} depends on nothing. There is nothing to graph.`
+    : `None of these ${count} ${many} depends on another. There is nothing to graph.`;
+}
+
 export default function GraphTab({
   id,
   source,
@@ -629,7 +654,10 @@ export default function GraphTab({
             onChange={(e) => setQuery(e.target.value)}
           />
         </div>
-        {items !== null && field.nodes.length > 0 && (
+        {/* Only where there is a graph to describe. With no edges at all the
+            empty state below says the same thing in words, and the two
+            together read as one screen counting itself twice. */}
+        {items !== null && field.links.length > 0 && (
           <p className={styles.summary}>
             {field.linked} of {field.nodes.length} {many} are connected to
             something.
@@ -677,6 +705,20 @@ export default function GraphTab({
         <div className={styles.centre}>
           <Share2 size={28} className={styles.emptyIcon} />
           <p>No {many} installed yet.</p>
+        </div>
+      ) : field.links.length === 0 ? (
+        /* Said in words, and the field drawn only once there is an edge in
+           it — see `nothingToGraph`. */
+        <div className={styles.centre}>
+          <Share2 size={28} className={styles.emptyIcon} />
+          <p>
+            {nothingToGraph(
+              field.nodes.length,
+              one,
+              many,
+              field.omitted.map((i) => i.name),
+            )}
+          </p>
         </div>
       ) : (
         <svg

@@ -160,7 +160,7 @@ export default function LogFilesPanel({ source }: { source: LogSource }) {
                   title={`Delete ${file.name}`}
                   aria-label={`Delete ${file.name}`}
                 >
-                  <Trash2 size={12} />
+                  <Trash2 size={14} />
                 </button>
               )}
             </div>

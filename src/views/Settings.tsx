@@ -19,9 +19,9 @@ import {
   UserRound,
 } from "lucide-react";
 
+import AccountAvatar from "../components/AccountAvatar";
 import AccountsModal from "../components/AccountsModal";
 import { api, errorMessage } from "../lib/api";
-import { hashHue, initials } from "../lib/format";
 import { DEFAULT_SHARE_PORT, parsePort } from "../lib/share";
 import { RELEASES_URL, panelHint, panelLine } from "../lib/update";
 import { useStore } from "../lib/store";
@@ -57,6 +57,21 @@ const ACCENTS = [
   "#f87171",
   "#2dd4bf",
 ];
+
+/**
+ * A `#rrggbb` to compare against `ACCENTS` and to hand `<input type="color">`.
+ *
+ * Normally `config.accent` already is one — every swatch and the picker
+ * produce hex, and `config.rs` now refuses anything else on the way in. A
+ * `config.json` edited by hand can still hold `red`, and then the comparison
+ * below matched no swatch at all while the picker, which coerces what it
+ * cannot parse to black, drew a void on the end of the row. `ACCENTS[0]` is
+ * the built-in default, same value as `default_accent()` in Rust.
+ */
+function hexAccent(raw: string): string {
+  const hex = raw.trim().toLowerCase();
+  return /^#[\da-f]{6}$/.test(hex) ? hex : ACCENTS[0];
+}
 
 export default function Settings() {
   const route = useStore((s) => s.route);
@@ -120,6 +135,7 @@ type Updater = (patch: Record<string, unknown>) => Promise<void>;
 
 function Appearance({ update }: { update: Updater }) {
   const config = useStore((s) => s.config)!;
+  const current = hexAccent(config.accent);
 
   return (
     <div className={styles.form}>
@@ -155,19 +171,19 @@ function Appearance({ update }: { update: Updater }) {
               key={accent}
               className={clsx(
                 styles.accent,
-                config.accent.toLowerCase() === accent && styles.accentActive,
+                current === accent && styles.accentActive,
               )}
               style={{ background: accent }}
               onClick={() => update({ accent })}
               aria-label={`Accent ${accent}`}
             >
-              {config.accent.toLowerCase() === accent && <Check size={14} />}
+              {current === accent && <Check size={14} />}
             </button>
           ))}
           <input
             type="color"
             className={styles.accentPicker}
-            value={config.accent}
+            value={current}
             onChange={(e) => update({ accent: e.target.value })}
             aria-label="Custom accent colour"
           />
@@ -438,14 +454,7 @@ function AccountsSettings() {
           <div className={styles.accountList}>
             {accounts.map((account) => (
               <div key={account.id} className={styles.accountRow}>
-                <span
-                  className={styles.avatar}
-                  style={{
-                    background: `linear-gradient(135deg, hsl(${hashHue(account.id)} 55% 42%), hsl(${(hashHue(account.id) + 40) % 360} 55% 30%))`,
-                  }}
-                >
-                  {initials(account.username)}
-                </span>
+                <AccountAvatar account={account} size={30} />
                 <span className={styles.accountText}>
                   <strong>{account.username}</strong>
                   <span className={styles.accountKind}>

@@ -31,7 +31,7 @@
   height: 16px;
   display: inline-grid;
   place-items: center;
-  border-radius: 99px;
+  border-radius: var(--radius-pill);
   background: var(--surface-3);
   color: var(--text-faint);
   font-size: 10.5px;
@@ -125,24 +125,11 @@
   margin-top: 2px;
 }
 
-/* Rides the bottom of the pane rather than sitting at the end of a long list,
-   so the button that commits your edits is never somewhere you scroll to find. */
+/* The bar itself is `.save-bar` in global.css — the `z-index` it used to be
+   alone in having now belongs to all three, so the bar stacks over the rows it
+   covers everywhere. Only the bottom margin is this tab's: it cancels the
+   containing pane's 90px bottom padding. */
 .saveBar {
-  position: sticky;
-  bottom: 0;
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 20px -22px -90px;
-  padding: 12px 22px;
-  background: var(--surface-2);
-  border-top: 1px solid var(--border-strong);
-  box-shadow: 0 -8px 24px -12px rgb(0 0 0 / 0.5);
+  margin-bottom: -90px;
 }
 
-.saveHint {
-  flex: 1;
-  font-size: 12.5px;
-  color: var(--text-dim);
-}

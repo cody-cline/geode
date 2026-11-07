@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 
 import { api } from "../../lib/api";
-import { fileSize, providerShort } from "../../lib/format";
+import { fileSize, providerLabel } from "../../lib/format";
 import { useStore } from "../../lib/store";
 import type { ContentItem, ContentKind, Instance, UpdateCandidate } from "../../lib/types";
 
@@ -411,9 +411,13 @@ export default function ContentTab({
                         any version
                       </span>
                     )}
+                    {/* Spelled out, the way Browse spells it. "MR" and
+                        "Modrinth" are the same provider two screens apart,
+                        and the short form saved a few pixels on a row that
+                        has them. */}
                     {item.provider && (
                       <span className={clsx("badge", `badge-${item.provider}`)}>
-                        {providerShort(item.provider)}
+                        {providerLabel(item.provider)}
                       </span>
                     )}
                   </div>

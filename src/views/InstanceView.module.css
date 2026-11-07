@@ -186,7 +186,7 @@
   height: 16px;
   display: inline-grid;
   place-items: center;
-  border-radius: 99px;
+  border-radius: var(--radius-pill);
   background: var(--surface-3);
   color: var(--text-faint);
   font-size: 10.5px;

@@ -12,8 +12,10 @@ import {
   ExternalLink,
   Package,
   Link2 as LinkIcon,
+  UserRound,
 } from "lucide-react";
 
+import AccountsModal from "../components/AccountsModal";
 import ExportModal from "../components/ExportModal";
 import InstanceIcon from "../components/InstanceIcon";
 import PackLinkBuildModal from "../components/PackLinkBuildModal";
@@ -57,6 +59,7 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
   const reportError = useStore((s) => s.reportError);
   const progress = useStore((s) => s.progress[`launch:${id}`]);
   const logs = useStore((s) => s.logs[id]);
+  const accounts = useStore((s) => s.accounts);
 
   const [active, setActive] = useState<TabId>(
     TABS.some((t) => t.id === tab) ? (tab as TabId) : "content",
@@ -66,6 +69,7 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
   const [browsing, setBrowsing] = useState(false);
   const [exportAs, setExportAs] = useState<PackFormat | null>(null);
   const [makingLink, setMakingLink] = useState(false);
+  const [signingIn, setSigningIn] = useState(false);
 
   // Export was only reachable from the instance's own Settings tab, which is
   // the last place somebody looks when they want to hand a pack to a friend.
@@ -213,6 +217,16 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
               <Square size={13} fill="currentColor" />
               Stop
             </button>
+          ) : accounts.length === 0 ? (
+            /* The precondition is known before the click, so the button says
+               what is actually missing instead of being a Play that fails.
+               It used to toast "add an account first" into the bottom-right
+               corner while the only way to do that was the sidebar in the
+               opposite one — a dead end with the remedy off screen. */
+            <button className="btn btn-primary" onClick={() => setSigningIn(true)}>
+              <UserRound size={14} />
+              Sign in to play
+            </button>
           ) : (
             <button
               className="btn btn-primary"
@@ -267,6 +281,7 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
         />
       )}
       {makingLink && <PackLinkBuildModal onClose={() => setMakingLink(false)} />}
+      {signingIn && <AccountsModal onClose={() => setSigningIn(false)} />}
     </>
   );
 }

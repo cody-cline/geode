@@ -69,7 +69,7 @@
 .here {
   margin-left: auto;
   padding: 0 6px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--surface-3);
   color: var(--text-dim);
   font-size: 10px;

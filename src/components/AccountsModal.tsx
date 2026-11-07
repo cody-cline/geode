@@ -10,9 +10,9 @@ import {
   UserPlus,
 } from "lucide-react";
 
+import AccountAvatar from "./AccountAvatar";
 import Modal from "./Modal";
 import { api } from "../lib/api";
-import { hashHue, initials } from "../lib/format";
 import { useStore } from "../lib/store";
 import type { DeviceCodeStart } from "../lib/types";
 
@@ -128,14 +128,7 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
               className={clsx(styles.account, account.active && styles.active)}
             >
               <button className={styles.pick} onClick={() => select(account.id)}>
-                <span
-                  className={styles.avatar}
-                  style={{
-                    background: `linear-gradient(135deg, hsl(${hashHue(account.id)} 55% 42%), hsl(${(hashHue(account.id) + 40) % 360} 55% 30%))`,
-                  }}
-                >
-                  {initials(account.username)}
-                </span>
+                <AccountAvatar account={account} size={32} />
                 <span className={styles.meta}>
                   <span className={styles.name}>{account.username}</span>
                   <span className={styles.kind}>

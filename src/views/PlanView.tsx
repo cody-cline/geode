@@ -426,12 +426,15 @@ export default function PlanView({ id }: { id: string }) {
                     )}
                     onClick={() => setChosen(index)}
                   >
+                    {/* Version first, loader after it — the same card the
+                        re-target dialog draws, and it must stay the same one
+                        so the two screens cannot say one thing two ways. */}
                     <span className={styles.targetHead}>
-                      <span className={styles.targetLoader}>
-                        {loaderLabel(option.loader)}
-                      </span>
                       <span className={styles.targetVersion}>
                         {option.gameVersion}
+                      </span>
+                      <span className={styles.targetLoader}>
+                        {loaderLabel(option.loader)}
                       </span>
                       {index === 0 && (
                         <span className={styles.best}>best</span>

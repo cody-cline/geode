@@ -10,14 +10,13 @@ import {
   Plus,
   Server as ServerIcon,
   Settings as SettingsIcon,
-  UserRound,
 } from "lucide-react";
 
+import AccountAvatar from "./AccountAvatar";
 import AccountsModal from "./AccountsModal";
 import InstanceIcon from "./InstanceIcon";
 import NewInstanceModal from "./NewInstanceModal";
 import NewServerModal from "./NewServerModal";
-import { hashHue, initials } from "../lib/format";
 import { OLD_ADDRESS_LABEL, linksPointAtOldAddress } from "../lib/share";
 import { useStore } from "../lib/store";
 import type { Route } from "../lib/store";
@@ -220,25 +219,7 @@ export default function Sidebar() {
 
       <div className={styles.footer}>
         <button className={styles.account} onClick={() => setManagingAccounts(true)}>
-          {/* Avatars are generated locally from the profile id. Fetching skin
-              heads would mean sending every account UUID to a third party. */}
-          <span
-            className={styles.avatar}
-            style={
-              active
-                ? {
-                    background: `linear-gradient(135deg, hsl(${hashHue(active.id)} 55% 42%), hsl(${(hashHue(active.id) + 40) % 360} 55% 30%))`,
-                    color: "#fff",
-                  }
-                : undefined
-            }
-          >
-            {active ? (
-              <span className={styles.avatarText}>{initials(active.username)}</span>
-            ) : (
-              <UserRound size={15} />
-            )}
-          </span>
+          <AccountAvatar account={active ?? null} size={26} />
           <span className={styles.accountText}>
             <span className={styles.accountName}>
               {active ? active.username : "No account"}

@@ -609,7 +609,7 @@ export default function ServerView({ id }: { id: string }) {
         <div style={{ flex: 1 }} />
         {active === "console" && shown.length > 0 && (
           <button className="btn btn-sm" onClick={() => clearServerLog(id)}>
-            <Trash2 size={13} />
+            <Trash2 size={14} />
             Clear
           </button>
         )}
@@ -1362,8 +1362,8 @@ function SettingsTab({ server }: { server: Server }) {
       )}
 
       {dirty && (
-        <div className={styles.saveBar}>
-          <span className={styles.saveHint}>You have unsaved changes.</span>
+        <div className={clsx("save-bar", styles.saveBar)}>
+          <span className="save-hint">You have unsaved changes.</span>
           <button className="btn" onClick={() => setDraft(server.settings)}>
             Discard
           </button>
