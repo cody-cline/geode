@@ -63,9 +63,17 @@
 }
 
 .search {
-  width: 200px;
+  width: 170px;
   padding-left: 31px;
-  /* Room for the hint on the right, so the filter never runs under it. */
+}
+
+/* A Filter box that prints its own shortcut inside it: wider, with room kept
+   on the right so the text never runs under the hint. Its own class rather
+   than a change to `.search`, because the server's Content tab shares that one
+   and has no such binding — an empty 48px there would be a gap with nothing
+   in it. */
+.searchHinted {
+  width: 200px;
   padding-right: 48px;
 }
 
