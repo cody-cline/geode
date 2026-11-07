@@ -62,7 +62,11 @@
    a sentence is the whole point of the change. */
 .kinds {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(216px, 1fr));
+  /* Two fixed columns rather than `auto-fill`, which sizes a track to its
+     content count: the group holding Vanilla alone would have stretched that
+     one tile to the full width of the dialog while Paper's sat at half, and
+     the same kind of thing is the same size wherever it appears. */
+  grid-template-columns: 1fr 1fr;
   gap: 6px;
 }
 
