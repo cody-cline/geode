@@ -43,10 +43,18 @@
   color: var(--accent-text);
 }
 
+/* Up to six controls, the last of them the primary action. Nothing in here
+   shrinks — `.btn` is `white-space: nowrap` — so a group too wide for the row
+   used to run straight off the window and cut `Browse` down to `Bro`. Wrapping
+   is the floor under that: whatever a label turns out to measure on a platform
+   nobody here has typed on, the overflow becomes a second line instead of
+   something unreachable. The query at the foot of this file is what keeps it
+   from needing one at the width the window can open to. */
 .tools {
   display: flex;
   align-items: center;
   gap: 7px;
+  flex-wrap: wrap;
 }
 
 .searchWrap {
@@ -214,7 +222,16 @@
    that one decides whether the game loads the file. The tick is round and sits
    over the artwork precisely so the one square box on a row stays the enable
    toggle it has always been. Shown on hover as well as when selected, so the
-   gesture can be found by pointing at a row rather than by being told. */
+   gesture can be found by pointing at a row rather than by being told.
+
+   Round was not enough on its own. The enable checkbox takes `accent-color`,
+   so a selected row drew an accent tick 20px from an accent tick that means
+   something else entirely — and since the accent is the user's to choose, no
+   second hue is safe either: pick blue for selection and somebody with a blue
+   accent is back where they started. The selected mark is therefore drawn in
+   the one pair that is never the accent, text on background, and the accent
+   says the same thing in a form that is not a mark at all — see `.rowPicked`
+   below. */
 .pick {
   position: relative;
   padding: 0;
@@ -247,15 +264,20 @@
 }
 
 .picked .pickMark svg {
-  border-color: var(--accent);
-  background: var(--accent);
-  color: var(--accent-ink);
+  border-color: var(--text);
+  background: var(--text);
+  color: var(--bg);
 }
 
+/* A band, and a bar down the leading edge of it. The bar is what a tick cannot
+   be mistaken for: it is the accent, it is the length of the row, and it reads
+   down a list as a column saying which rows the bar above is about to act
+   on. */
 .rowPicked,
 .rowPicked:hover {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  box-shadow: inset 3px 0 0 var(--accent);
 }
 
 /* A disabled row is drawn at half strength, and a selection the eye cannot
@@ -415,4 +437,36 @@
 
 .offerRow .fileName {
   flex: 1;
+}
+
+/* The toolbar at a window the size the window is allowed to be.
+   `tauri.conf.json` opens as small as 940px; the sidebar takes 198 of that and
+   this toolbar's own padding another 44, leaving 698 for a right-hand group
+   that wants 763 with every word in it — so the last control in the row, the
+   primary one, was the part that went off the edge.
+
+   What collapses is decided by what each control is worth. The four kind tabs,
+   the Filter box with its key printed in it, the way into selecting (the one
+   place Shift-click is written down) and `Browse` keep their words: each is
+   either how you get somewhere from here or the only home a gesture has. The
+   three that drop to their icon are the occasional ones, and each keeps its
+   name in `aria-label` and its sentence in `title`, so the pointer and the
+   screen reader are told what the row no longer spells out.
+
+   The same 1100px the sidebar narrows at, in `global.css`. One number because
+   the pane behind this toolbar changes width at exactly that point, so the two
+   reflows are one reflow; a breakpoint of this toolbar's own would be a second
+   place the layout jumps for no reason a person could see.
+   Specificity over `.btn`, whose padding and width this overrides, since
+   a module's stylesheet and the global one are both one class deep and which
+   lands last is the bundler's business. */
+@media (max-width: 1100px) {
+  .tools .toolCollapse {
+    width: 34px;
+    padding: 0;
+  }
+
+  .tools .toolLabel {
+    display: none;
+  }
 }

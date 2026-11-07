@@ -479,27 +479,39 @@ export default function ContentTab({
               Select all
             </button>
           )}
-          <button className="btn" onClick={addFiles}>
+          {/* The three occasional controls. Below the width the pane narrows
+              at they keep the icon and drop the word, which is what leaves the
+              primary action at the end of this row room to be read — each one
+              says in `aria-label` what it no longer spells out, and `title`
+              is on all three because a tooltip is the only name an icon
+              has. */}
+          <button
+            className={clsx("btn", styles.toolCollapse)}
+            onClick={addFiles}
+            title="Add a file from this computer"
+            aria-label="Add file"
+          >
             <FilePlus2 size={14} />
-            Add file
+            <span className={styles.toolLabel}>Add file</span>
           </button>
           {untrackedCount > 0 && (
             <button
-              className="btn"
+              className={clsx("btn", styles.toolCollapse)}
               onClick={linkUntracked}
               disabled={linking}
               title="Match untracked files against Modrinth and CurseForge by file hash"
+              aria-label={`Identify ${untrackedCount} untracked file${untrackedCount === 1 ? "" : "s"}`}
             >
               {linking ? (
                 <Loader2 size={14} className="spin" />
               ) : (
                 <Link2 size={14} />
               )}
-              Identify {untrackedCount}
+              <span className={styles.toolLabel}>Identify {untrackedCount}</span>
             </button>
           )}
           <button
-            className="btn"
+            className={clsx("btn", styles.toolCollapse)}
             onClick={checkUpdates}
             disabled={checking || trackedCount === 0}
             title={
@@ -507,13 +519,14 @@ export default function ContentTab({
                 ? "Nothing here was installed from Modrinth or CurseForge"
                 : "Check for newer versions"
             }
+            aria-label="Check updates"
           >
             {checking ? (
               <Loader2 size={14} className="spin" />
             ) : (
               <RefreshCw size={14} />
             )}
-            Check updates
+            <span className={styles.toolLabel}>Check updates</span>
           </button>
           <button className="btn btn-primary" onClick={onBrowse}>
             Browse
@@ -547,6 +560,16 @@ export default function ContentTab({
           <div className={styles.selectText}>
             {bulkBusy && <Loader2 size={13} className="spin" />}
             <span className={styles.selectCount}>{picked.length} selected</span>
+            {/* Why "Enable 1" sits beside "Disable 5" under a count of six:
+                the two presses act on the part of the selection that is not
+                already the way it is being asked to be. Said only when the
+                selection is mixed, because that is the only time the numbers
+                differ from the count and need accounting for. */}
+            {onCount > 0 && offCount > 0 && (
+              <span className={styles.selectNote}>
+                {onCount} on, {offCount} off
+              </span>
+            )}
             {/* A selection outlives the filter that made it, so the count says
                 so rather than letting a press act on rows nobody can see. */}
             {picked.length > pickedShown && (
@@ -641,8 +664,14 @@ export default function ContentTab({
                 {/* Selecting, and deliberately not a second checkbox: the
                     square one to the left decides whether the game loads this
                     file, which is a different question from whether the next
-                    press is about to act on it. A round tick over the artwork
-                    cannot be mistaken for the other one. */}
+                    press is about to act on it. Round, over the artwork, and
+                    drawn in text-on-background rather than the accent the
+                    checkbox beside it takes — two accent ticks 20px apart
+                    meant two unrelated things in the same colour, and the
+                    accent is the user's to choose, so no other hue would have
+                    settled it. The accent still says "picked", as a bar down
+                    the edge of the row, which is not a mark that can be read
+                    as this file being on. */}
                 <button
                   type="button"
                   className={clsx(
