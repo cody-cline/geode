@@ -211,9 +211,11 @@ function Appearance({ update }: { update: Updater }) {
           <span>
             <strong>Keep Geode in the tray when the window closes</strong>
             <span className={styles.toggleHint}>
-              Running servers and games keep going. Open the tray icon&rsquo;s menu to
-              bring the window back, or to exit Geode and stop them. Turn this off if
-              your desktop does not show tray icons.
+              Closing the window leaves Geode in the tray with your servers and
+              games still running, and the icon&rsquo;s menu brings it back or exits
+              and stops them. A desktop with no tray cannot do that, so there
+              closing exits instead &mdash; which is what turning this off does
+              everywhere.
             </span>
           </span>
         </label>

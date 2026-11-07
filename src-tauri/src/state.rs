@@ -222,20 +222,22 @@ impl AppState {
     /// month about what "running" means. State owns both registries and both
     /// counters, and is in the headless build as well.
     ///
-    /// Servers lead: a server may have other people on it, and a region file
-    /// killed mid-save is somebody else's loss. A game is the owner's own
-    /// session on their own machine, so it is counted but not named.
+    /// Servers lead, because a server may have other people on it and a region
+    /// file killed mid-save is somebody else's loss, where a game is the
+    /// owner's own session on their own machine. Both are named: this is read
+    /// out to somebody deciding whether to go ahead, and "something is
+    /// running" is not a thing anybody can decide on.
     pub fn what_is_running(&self) -> Vec<String> {
         let mut what = Vec::new();
-        match self.games.running_ids().len() {
-            0 => {}
-            1 => what.push("Minecraft".to_string()),
-            n => what.push(format!("{n} copies of Minecraft")),
-        }
         match self.servers.running_ids().len() {
             0 => {}
             1 => what.push("a server".to_string()),
             n => what.push(format!("{n} servers")),
+        }
+        match self.games.running_ids().len() {
+            0 => {}
+            1 => what.push("Minecraft".to_string()),
+            n => what.push(format!("{n} copies of Minecraft")),
         }
         // A start that has not spawned yet is in neither registry, and it is
         // the worst thing to walk into: a Spigot server is five to fifteen

@@ -324,10 +324,22 @@ fn warning(what: &[String], a_world_is_open: bool) -> String {
         "Nothing is given the chance to finish, so stop anything you care about from \
          inside Geode first."
     };
-    format!(
-        "Exiting Geode stops {} immediately. {risk}",
-        what.join(" and ")
-    )
+    format!("Exiting Geode stops {} immediately. {risk}", listed(what))
+}
+
+/// A list the way a sentence takes it: `a and b`, but `a, b and c` once there
+/// are three.
+///
+/// `what_is_running` can name five things — games, servers, servers still
+/// starting, launches still preparing, installs still running — and joining
+/// all five with " and " produced one breathless clause nobody could find the
+/// end of.
+fn listed(what: &[String]) -> String {
+    match what {
+        [] => String::new(),
+        [only] => only.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 /// Take the screen for one dialog, or raise the one that is already on it.
@@ -640,6 +652,24 @@ mod tests {
             "Exiting Geode stops a server immediately. A server killed partway through \
              saving can lose part of its world, so stop anything you care about from \
              inside Geode first."
+        );
+
+        // Three or more takes commas: five things joined by "and" alone was one
+        // clause nobody could find the end of.
+        let three = warning(
+            &[
+                "a server".to_string(),
+                "Minecraft".to_string(),
+                "an install that is still running".to_string(),
+            ],
+            true,
+        );
+        assert!(
+            three.starts_with(
+                "Exiting Geode stops a server, Minecraft and an install that is still \
+                 running immediately."
+            ),
+            "{three}"
         );
 
         let both = warning(&["Minecraft".to_string(), "a server".to_string()], true);
