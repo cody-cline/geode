@@ -60,7 +60,13 @@ pub(crate) async fn newest_loader_build(
 /// Fabric build by definition, and a Quilt target should take a Fabric build
 /// when the mod ships no Quilt one — Quilt loads those directly, which is why
 /// the resolver counted it as a native fit in the first place.
-fn loaders_to_try(fit: Fit, target_loader: &str) -> Vec<&'static str> {
+///
+/// Reachable from `plan::resolve` because this list is also the whole answer to
+/// "would carrying this mod find anything?" — `Support::carried_to` reads it
+/// rather than keeping a second copy. Two copies of which loaders stand in for
+/// which would drift, and then a screen would promise a carry the install
+/// cannot make.
+pub(crate) fn loaders_to_try(fit: Fit, target_loader: &str) -> Vec<&'static str> {
     match fit {
         Fit::Connector | Fit::ConnectorNear => vec!["fabric"],
         _ if target_loader == "quilt" => vec!["quilt", "fabric"],

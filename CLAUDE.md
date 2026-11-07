@@ -54,11 +54,13 @@ of the loader back in step, or the save bar writes the old loader over the one
 every jar was just rebuilt for, and that the dialog's world warning claims
 only what the dialog actually knows. `ignore-version.test.mjs` holds the
 words the Minecraft-version override is allowed to say: that whether a
-carried mod runs is not knowable here, and which mod to turn off first when
-the game will not start. `shortcuts.test.mjs` holds the rule that makes a
-keyboard shortcut worth adding — that every binding in `shortcuts.ts` is
-printed beside the thing it opens, since the sidebar is the only place these
-are discoverable and one nobody can find is dead weight. All eight also
+carried mod runs is not knowable here, which mod to turn off first when
+the game will not start, and that a mod the re-target preview will carry
+over is never listed there as one it will leave behind.
+`shortcuts.test.mjs` holds the rule that makes a keyboard shortcut worth
+adding — that every binding in `shortcuts.ts` is printed beside the thing it
+opens, since the sidebar is the only place these are discoverable and one
+nobody can find is dead weight. All eight also
 check a few invariants by reading the `.tsx` that holds them, because there is
 no DOM or React renderer under `npm test`. Everything else on the frontend is
 gated by `tsc` alone, which is strict (`noUnusedLocals`,

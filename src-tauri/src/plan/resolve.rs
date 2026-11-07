@@ -147,6 +147,32 @@ impl Support {
             .max_by_key(|g| version_key(g))
     }
 
+    /// Whether carrying this mod onto `target_loader` would find anything at
+    /// all — the question
+    /// [`crate::instance::content::ContentRecord::ignore_game_version`] asks
+    /// once the ladder has run out.
+    ///
+    /// Answerable from the pairs already in hand, with no request of anyone,
+    /// because the carry drops the Minecraft version from the question and
+    /// nothing else: it asks [`crate::plan::build::newest_file_for`] for the
+    /// newest build published for the target's loader, and that walks the same
+    /// `loaders_to_try` a native fit does — which is the list read here rather
+    /// than a second copy of it.
+    ///
+    /// One consequence is worth stating, because it is the half people expect
+    /// the box to override and it does not: a Fabric-only mod is **not**
+    /// carried onto a NeoForge target, since the list for `neoforge` is
+    /// `["neoforge"]` alone. The box drops the version filter, never the
+    /// loader — a Fabric jar in a NeoForge `mods/` folder does nothing, and
+    /// the one case where crossing loaders works is Connector, which is a rung
+    /// of the ladder and modelled from Connector's own published files.
+    fn carried_to(&self, target_loader: &str) -> bool {
+        let loaders = crate::plan::build::loaders_to_try(Fit::Native, target_loader);
+        self.pairs
+            .iter()
+            .any(|(l, _)| loaders.contains(&l.as_str()))
+    }
+
     /// Where this mod *can* run, one entry per loader it supports.
     ///
     /// One per loader rather than the best few overall, because the best few
@@ -238,8 +264,30 @@ pub struct ModFit {
     /// Where this mod can run instead, when it cannot run here: one
     /// human-readable pair like `Fabric 1.20.1` per loader it supports, in
     /// preference order. Complete, so it can be read as the whole answer.
+    ///
+    /// Filled for a carried mod too — where else it exists is still true, and
+    /// it is the only other thing the screen can say about one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub elsewhere: Vec<String>,
+    /// Nothing published runs at this target, but this mod's own box is
+    /// ticked, so applying will carry its newest build over rather than turn
+    /// it off.
+    ///
+    /// Deliberately not a [`Fit`], and deliberately costing nothing. A `Fit`
+    /// is something the resolver ranks when it decides which targets to offer
+    /// for a whole instance, and this is not evidence about a target — it is
+    /// one person's judgement about one mod. Put in the cost model it would
+    /// start recommending versions on the strength of a box somebody ticked,
+    /// which is the opposite of deriving support from what the upstream
+    /// publishes. [`crate::instance::retarget`] keeps the override the same
+    /// shape on the applying side: one rung below the ladder, never in it.
+    ///
+    /// True only when a carry would actually find something — see
+    /// [`Support::carried_to`]. A screen that promised a mod would be carried
+    /// over where the install will turn it off is the exact bug this whole
+    /// path was rewritten for once already.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub carried: bool,
 }
 
 /// A candidate answer: one loader, one game version, and what it costs.
@@ -250,7 +298,23 @@ pub struct Target {
     pub game_version: String,
     pub fits: Vec<ModFit>,
     /// Mods with no way to run here at all.
+    ///
+    /// The ranking's first key, and read off what the providers publish and
+    /// nothing else: a ticked box never moves it. That is what keeps a target
+    /// where a mod has a real build genuinely better than one where it only
+    /// gets carried.
     pub missing: usize,
+    /// Of [`Self::missing`], the ones a ticked box will carry over anyway.
+    pub carried: usize,
+    /// Of [`Self::missing`], the ones that really will not be here afterwards —
+    /// the number somebody is being asked to accept.
+    ///
+    /// Three counts where two would do, deliberately. The alternative is the
+    /// frontend working out `missing - carried` for itself, which is a second
+    /// copy of a count, and a second copy of a count is what this repo keeps
+    /// getting bitten by. `missing == carried + blocked` holds at every target
+    /// and is pinned by a test.
+    pub blocked: usize,
     /// Mods that would need Sinytra Connector.
     pub connector: usize,
     /// Mods that would run on a jar built for a neighbouring version.
@@ -363,7 +427,23 @@ fn classify(
 /// answers a different question and they are not interchangeable: a target that
 /// drops a mod is never rescued by being on a nicer loader, and a shaky Fabric
 /// answer should lose to a clean NeoForge one.
-pub fn rank(mods: &[(PlanMod, Support)], matrix: &SupportMatrix, limit: usize) -> Vec<Target> {
+///
+/// `ignore_version` holds the keys — [`PlanMod::key`]'s own shape, so the two
+/// cannot disagree about case — of the mods whose own box is ticked. It changes
+/// nothing about the ranking: which targets are offered and in what order is
+/// read off what the providers publish, and a box somebody ticked is not
+/// evidence about a target. All it decides is whether a mod with nothing here
+/// is reported as [`Target::carried`] or as [`Target::blocked`], so that the
+/// preview says what applying will actually do with it.
+/// [`crate::instance::replan`] fills the set from an installed instance's
+/// records; a saved plan has no instance and no records, so it passes an empty
+/// one.
+pub fn rank(
+    mods: &[(PlanMod, Support)],
+    ignore_version: &HashSet<(String, String)>,
+    matrix: &SupportMatrix,
+    limit: usize,
+) -> Vec<Target> {
     let mut candidates: HashSet<(String, String)> = HashSet::new();
     for (_, support) in mods {
         for pair in &support.pairs {
@@ -377,6 +457,8 @@ pub fn rank(mods: &[(PlanMod, Support)], matrix: &SupportMatrix, limit: usize) -
             let mut target = Target {
                 fits: Vec::with_capacity(mods.len()),
                 missing: 0,
+                carried: 0,
+                blocked: 0,
                 connector: 0,
                 near: 0,
                 native: 0,
@@ -387,6 +469,13 @@ pub fn rank(mods: &[(PlanMod, Support)], matrix: &SupportMatrix, limit: usize) -
 
             for (plan_mod, support) in mods {
                 let (fit, via) = classify(support, &loader, &game, matrix);
+                // Both halves, or the screen promises a carry the install
+                // cannot make: the box is only consulted where the honest
+                // question had no answer, and it only buys anything where the
+                // author has published something for this loader.
+                let carried = fit == Fit::Missing
+                    && ignore_version.contains(&plan_mod.key())
+                    && support.carried_to(&loader);
                 match fit {
                     Fit::Native => target.native += 1,
                     Fit::Connector => target.connector += 1,
@@ -395,7 +484,14 @@ pub fn rank(mods: &[(PlanMod, Support)], matrix: &SupportMatrix, limit: usize) -
                         target.connector += 1;
                         target.near += 1;
                     }
-                    Fit::Missing => target.missing += 1,
+                    Fit::Missing => {
+                        target.missing += 1;
+                        if carried {
+                            target.carried += 1;
+                        } else {
+                            target.blocked += 1;
+                        }
+                    }
                 }
                 target.cost += fit.cost(&loader);
 
@@ -414,6 +510,7 @@ pub fn rank(mods: &[(PlanMod, Support)], matrix: &SupportMatrix, limit: usize) -
                     } else {
                         Vec::new()
                     },
+                    carried,
                 });
             }
             target
@@ -440,9 +537,16 @@ const TARGET_LIMIT: usize = 6;
 /// Takes the mods rather than the plan holding them: an installed instance's
 /// mods are the same question asked of a list that was never a plan on disk —
 /// see [`crate::instance::replan`].
+///
+/// `ignore_version` is passed straight through to [`rank`], which is where it
+/// is documented. It is a parameter rather than a field on [`PlanMod`] because
+/// a plan is saved to disk: a saved plan has no instance and no records, so it
+/// could never set the flag, and the field would be dead weight in a persisted
+/// type.
 pub async fn resolve(
     client: &reqwest::Client,
     mods: &[PlanMod],
+    ignore_version: &HashSet<(String, String)>,
     matrix: &SupportMatrix,
     cache: &SupportCache,
     curseforge_key: Option<&str>,
@@ -524,7 +628,7 @@ pub async fn resolve(
     resolved.sort_by_key(|(plan_mod, _)| plan_mod.key());
 
     Ok(Resolution {
-        targets: rank(&resolved, matrix, TARGET_LIMIT),
+        targets: rank(&resolved, ignore_version, matrix, TARGET_LIMIT),
         unresolved,
         warnings,
     })
@@ -655,6 +759,18 @@ mod tests {
         (plan_mod(name), support(pairs))
     }
 
+    /// Nobody's box is ticked — what a saved plan always passes, and what
+    /// every target in every other test here is ranked with.
+    fn none() -> HashSet<(String, String)> {
+        HashSet::new()
+    }
+
+    /// The boxes these mods' own rows have ticked, keyed the way
+    /// [`PlanMod::key`] keys them.
+    fn ignoring(names: &[&str]) -> HashSet<(String, String)> {
+        names.iter().map(|n| plan_mod(n).key()).collect()
+    }
+
     /// Connector covering NeoForge on 1.21.1 only, like the real matrix.
     fn matrix() -> SupportMatrix {
         SupportMatrix::from_pairs(vec![SupportPair {
@@ -691,7 +807,7 @@ mod tests {
             entry("a", &[("fabric", "1.21.1"), ("neoforge", "1.21.1")]),
             entry("b", &[("fabric", "1.21.1"), ("neoforge", "1.21.1")]),
         ];
-        let best = &rank(&mods, &matrix(), 6)[0];
+        let best = &rank(&mods, &none(), &matrix(), 6)[0];
         assert_eq!(best.loader, "fabric");
         assert_eq!(best.game_version, "1.21.1");
         assert_eq!(best.missing, 0);
@@ -705,7 +821,7 @@ mod tests {
             entry("a", &[("fabric", "1.21.1"), ("neoforge", "1.21.1")]),
             entry("b", &[("neoforge", "1.21.1")]),
         ];
-        let best = &rank(&mods, &empty_matrix(), 6)[0];
+        let best = &rank(&mods, &none(), &empty_matrix(), 6)[0];
         assert_eq!(best.loader, "neoforge");
         assert_eq!(best.missing, 0);
     }
@@ -717,7 +833,7 @@ mod tests {
             entry("a", &[("fabric", "1.21.3"), ("neoforge", "1.21.1")]),
             entry("b", &[("fabric", "1.21.1"), ("neoforge", "1.21.1")]),
         ];
-        let best = &rank(&mods, &empty_matrix(), 6)[0];
+        let best = &rank(&mods, &none(), &empty_matrix(), 6)[0];
         assert_eq!(best.loader, "neoforge");
         assert_eq!(best.cost, 0);
     }
@@ -728,7 +844,7 @@ mod tests {
             entry("native", &[("neoforge", "1.21.1")]),
             entry("fabric-only", &[("fabric", "1.21.1")]),
         ];
-        let targets = rank(&mods, &matrix(), 6);
+        let targets = rank(&mods, &none(), &matrix(), 6);
         let neoforge = targets
             .iter()
             .find(|t| t.loader == "neoforge" && t.game_version == "1.21.1")
@@ -745,7 +861,7 @@ mod tests {
             entry("native", &[("neoforge", "1.20.1")]),
             entry("fabric-only", &[("fabric", "1.20.1")]),
         ];
-        let targets = rank(&mods, &matrix(), 6);
+        let targets = rank(&mods, &none(), &matrix(), 6);
         let neoforge = targets
             .iter()
             .find(|t| t.loader == "neoforge" && t.game_version == "1.20.1")
@@ -758,7 +874,7 @@ mod tests {
     fn a_native_build_is_used_rather_than_connector() {
         // The mod ships both; Connector is a last resort, not a coin toss.
         let mods = vec![entry("both", &[("fabric", "1.21.1"), ("neoforge", "1.21.1")])];
-        let targets = rank(&mods, &matrix(), 6);
+        let targets = rank(&mods, &none(), &matrix(), 6);
         let neoforge = targets
             .iter()
             .find(|t| t.loader == "neoforge")
@@ -779,7 +895,7 @@ mod tests {
     #[test]
     fn a_near_version_names_the_build_it_would_use() {
         let mods = vec![entry("a", &[("fabric", "1.21.3"), ("fabric", "1.21.4")])];
-        let targets = rank(&mods, &empty_matrix(), 6);
+        let targets = rank(&mods, &none(), &empty_matrix(), 6);
         let at_3 = targets
             .iter()
             .find(|t| t.game_version == "1.21.3")
@@ -824,7 +940,7 @@ mod tests {
             entry("anchor", &[("fabric", "1.21.1")]),
             entry("late", &[("fabric", "1.21.4"), ("fabric", "1.20.1")]),
         ];
-        let targets = rank(&mods, &empty_matrix(), 6);
+        let targets = rank(&mods, &none(), &empty_matrix(), 6);
         let at_1211 = targets
             .iter()
             .find(|t| t.loader == "fabric" && t.game_version == "1.21.1")
@@ -841,7 +957,7 @@ mod tests {
             entry("modern", &[("fabric", "1.21.1")]),
             entry("ancient", &[("forge", "1.12.2")]),
         ];
-        let best = &rank(&mods, &empty_matrix(), 6)[0];
+        let best = &rank(&mods, &none(), &empty_matrix(), 6)[0];
         assert_eq!(best.missing, 1);
         let stranded = best
             .fits
@@ -872,7 +988,7 @@ mod tests {
                 ],
             ),
         ];
-        let targets = rank(&mods, &empty_matrix(), 20);
+        let targets = rank(&mods, &none(), &empty_matrix(), 20);
         let at = targets
             .iter()
             .find(|t| t.loader == "fabric" && t.game_version == "1.20.4")
@@ -899,7 +1015,7 @@ mod tests {
             entry("anchor", &[("fabric", "1.21.1")]),
             entry("forge-only", &[("forge", "1.21.1"), ("forge", "1.22")]),
         ];
-        let targets = rank(&mods, &empty_matrix(), 20);
+        let targets = rank(&mods, &none(), &empty_matrix(), 20);
         let at = targets
             .iter()
             .find(|t| t.loader == "fabric" && t.game_version == "1.21.1")
@@ -919,7 +1035,7 @@ mod tests {
             entry("quilt-only", &[("quilt", "1.21.1")]),
             entry("fabric-only", &[("fabric", "1.21.1")]),
         ];
-        let targets = rank(&mods, &empty_matrix(), 6);
+        let targets = rank(&mods, &none(), &empty_matrix(), 6);
         let quilt = targets
             .iter()
             .find(|t| t.loader == "quilt")
@@ -935,7 +1051,7 @@ mod tests {
             "a",
             &[("fabric", "1.21.1"), ("fabric", "1.20.1"), ("fabric", "1.21")],
         )];
-        let best = &rank(&mods, &empty_matrix(), 6)[0];
+        let best = &rank(&mods, &none(), &empty_matrix(), 6)[0];
         assert_eq!(best.game_version, "1.21.1");
     }
 
@@ -945,8 +1061,8 @@ mod tests {
             entry("a", &[("fabric", "1.21.1"), ("neoforge", "1.21.1")]),
             entry("b", &[("fabric", "1.21.1")]),
         ];
-        let first = rank(&mods, &matrix(), 6);
-        let second = rank(&mods, &matrix(), 6);
+        let first = rank(&mods, &none(), &matrix(), 6);
+        let second = rank(&mods, &none(), &matrix(), 6);
         let shape = |t: &[Target]| -> Vec<(String, String)> {
             t.iter()
                 .map(|t| (t.loader.clone(), t.game_version.clone()))
@@ -988,7 +1104,7 @@ mod tests {
 
     #[test]
     fn an_empty_plan_has_no_targets() {
-        assert!(rank(&[], &matrix(), 6).is_empty());
+        assert!(rank(&[], &none(), &matrix(), 6).is_empty());
     }
 
     /// The verdict a screen shows is the first thing an install tries, because
@@ -1067,5 +1183,215 @@ mod tests {
         );
         // Another family is not a neighbour, so there is genuinely nothing.
         assert!(ladder(&support, "fabric", "1.20.1", &empty_matrix()).is_empty());
+    }
+
+    /// Every target, as a row that can be compared between two rankings:
+    /// where it sits, and the three counts that have to add up.
+    fn shape(targets: &[Target]) -> Vec<(String, String, usize, usize, usize, u32)> {
+        targets
+            .iter()
+            .map(|t| {
+                (
+                    t.loader.clone(),
+                    t.game_version.clone(),
+                    t.missing,
+                    t.carried,
+                    t.blocked,
+                    t.cost,
+                )
+            })
+            .collect()
+    }
+
+    /// The whole ranking, written out, with nobody's box ticked. The order is
+    /// the product here and the rest of this file tests it a key at a time;
+    /// this is the one that would notice a target appearing, disappearing or
+    /// changing places for any reason at all — including the override below,
+    /// whose entire discipline is that it must not do that.
+    #[test]
+    fn with_no_boxes_ticked_the_ranking_is_exactly_this() {
+        let mods = vec![
+            entry(
+                "anchor",
+                &[("fabric", "1.21.1"), ("fabric", "1.21.3"), ("neoforge", "1.21.1")],
+            ),
+            entry(
+                "old",
+                &[("fabric", "1.21.1"), ("fabric", "1.21.3"), ("fabric", "1.20.1")],
+            ),
+        ];
+        assert_eq!(
+            shape(&rank(&mods, &none(), &empty_matrix(), 6)),
+            vec![
+                // Two targets cover both mods, so the newer leads.
+                ("fabric".into(), "1.21.3".into(), 0, 0, 0, 0),
+                ("fabric".into(), "1.21.1".into(), 0, 0, 0, 0),
+                // Then the two that drop one each, Fabric before NeoForge.
+                ("fabric".into(), "1.20.1".into(), 1, 0, 1, 0),
+                ("neoforge".into(), "1.21.1".into(), 1, 0, 1, 0),
+            ],
+        );
+    }
+
+    /// A mod the target has nothing for, whose own box is ticked, is reported
+    /// as carried rather than as a blocker — because that is what applying
+    /// will do with it. It stays in `missing` all the same, and the ranking
+    /// does not move: which targets are offered and in what order is read off
+    /// what the providers publish, never off a box somebody ticked.
+    #[test]
+    fn a_ticked_box_carries_a_mod_the_target_has_nothing_for() {
+        let mods = vec![
+            entry("anchor", &[("fabric", "1.21.1"), ("fabric", "1.20.1")]),
+            entry("old", &[("fabric", "1.20.1")]),
+        ];
+        let unflagged = rank(&mods, &none(), &empty_matrix(), 6);
+        let flagged = rank(&mods, &ignoring(&["old"]), &empty_matrix(), 6);
+
+        let at = |targets: &[Target]| -> Target {
+            targets
+                .iter()
+                .find(|t| t.loader == "fabric" && t.game_version == "1.21.1")
+                .expect("a 1.21.1 Fabric target")
+                .clone()
+        };
+
+        // Nothing it publishes runs at 1.21.1 — 1.20.1 is another family — so
+        // the honest question still has no answer and the count still says so.
+        assert_eq!(at(&flagged).missing, 1);
+        assert_eq!(at(&flagged).carried, 1);
+        assert_eq!(at(&flagged).blocked, 0);
+        // The same mod, with nobody's box ticked, is simply blocked.
+        assert_eq!(at(&unflagged).carried, 0);
+        assert_eq!(at(&unflagged).blocked, 1);
+
+        let carried = at(&flagged)
+            .fits
+            .into_iter()
+            .find(|f| f.name == "old")
+            .expect("the carried mod");
+        assert_eq!(carried.fit, Fit::Missing, "the box is not a fit");
+        assert!(carried.carried);
+        // Where it does exist is still true of a carried mod, and the only
+        // other thing the screen can say about one.
+        assert_eq!(carried.elsewhere, vec!["Fabric 1.20.1"]);
+
+        // And every target is where it was, at the cost it was, with the same
+        // `missing`. Only the split of that count moved.
+        let places = |t: &[Target]| -> Vec<(String, String, usize, u32)> {
+            shape(t)
+                .into_iter()
+                .map(|(l, g, missing, _, _, cost)| (l, g, missing, cost))
+                .collect()
+        };
+        assert_eq!(places(&flagged), places(&unflagged));
+    }
+
+    /// The box drops the Minecraft version from the question and never the
+    /// loader. A Fabric-only mod on a NeoForge target is blocked whatever its
+    /// row says, because the carry asks for a NeoForge build and its author
+    /// has published none — so the screen says it will be turned off, which is
+    /// what the re-target will do.
+    #[test]
+    fn a_ticked_box_cannot_carry_a_mod_onto_a_loader_it_was_never_built_for() {
+        let mods = vec![
+            entry("anchor", &[("neoforge", "1.21.1")]),
+            entry("fabric-only", &[("fabric", "1.21.1")]),
+        ];
+        // Without Connector in the picture, or the Fabric mod would have a
+        // rung at this very pair and never reach the question.
+        let targets = rank(&mods, &ignoring(&["fabric-only"]), &empty_matrix(), 6);
+        let neoforge = targets
+            .iter()
+            .find(|t| t.loader == "neoforge" && t.game_version == "1.21.1")
+            .expect("a NeoForge target");
+
+        assert_eq!(neoforge.missing, 1);
+        assert_eq!(neoforge.carried, 0);
+        assert_eq!(neoforge.blocked, 1);
+        let stranded = neoforge
+            .fits
+            .iter()
+            .find(|f| f.name == "fabric-only")
+            .expect("the stranded mod");
+        assert!(
+            !stranded.carried,
+            "the screen promised a carry the install cannot make",
+        );
+
+        // Quilt is the case that proves the list is read and not invented: it
+        // loads Fabric mods, so a carry onto Quilt does find something.
+        let quilt = vec![
+            entry("anchor", &[("quilt", "1.21.1")]),
+            entry("fabric-only", &[("fabric", "1.20.1")]),
+        ];
+        let targets = rank(&quilt, &ignoring(&["fabric-only"]), &empty_matrix(), 6);
+        let at = targets
+            .iter()
+            .find(|t| t.loader == "quilt" && t.game_version == "1.21.1")
+            .expect("a Quilt target");
+        assert_eq!(at.carried, 1);
+        assert_eq!(at.blocked, 0);
+    }
+
+    /// `missing == carried + blocked`, at every target. The frontend reads
+    /// `blocked` as the number somebody is being asked to accept and never
+    /// subtracts one count from another to get it, which is only safe while
+    /// this holds.
+    #[test]
+    fn every_missing_mod_is_either_carried_or_blocked() {
+        let mods = vec![
+            entry("native", &[("fabric", "1.21.1"), ("neoforge", "1.21.1")]),
+            // Ticked, and published for both loaders at another version.
+            entry("carried", &[("fabric", "1.20.1"), ("neoforge", "1.20.1")]),
+            // Ticked, and Fabric-only, so it cannot be carried onto NeoForge.
+            entry("fabric-only", &[("fabric", "1.20.1")]),
+            // Not ticked at all.
+            entry("stranded", &[("forge", "1.12.2")]),
+        ];
+        let ticked = ignoring(&["carried", "fabric-only"]);
+
+        for set in [none(), ticked] {
+            let targets = rank(&mods, &set, &matrix(), 20);
+            assert!(!targets.is_empty());
+            for target in targets {
+                assert_eq!(
+                    target.missing,
+                    target.carried + target.blocked,
+                    "{} {}: {} missing, {} carried, {} blocked",
+                    target.loader,
+                    target.game_version,
+                    target.missing,
+                    target.carried,
+                    target.blocked,
+                );
+                // And the per-mod flag agrees with the count that summarises it.
+                assert_eq!(
+                    target.fits.iter().filter(|f| f.carried).count(),
+                    target.carried,
+                );
+                assert!(
+                    target.fits.iter().all(|f| !f.carried || f.fit == Fit::Missing),
+                    "a mod with somewhere to go was reported as carried",
+                );
+            }
+        }
+    }
+
+    /// A ticked box never makes a mod look worse off than it is. The override
+    /// is asked only after the honest question has no answer — everywhere it
+    /// is read — so a mod with a real build here is native, and nothing on the
+    /// screen says otherwise about it.
+    #[test]
+    fn a_ticked_box_does_nothing_to_a_mod_that_has_a_build_here() {
+        let mods = vec![entry("flagged", &[("fabric", "1.21.1")])];
+        let targets = rank(&mods, &ignoring(&["flagged"]), &empty_matrix(), 6);
+        let at = &targets[0];
+
+        assert_eq!(at.game_version, "1.21.1");
+        assert_eq!(at.fits[0].fit, Fit::Native);
+        assert!(!at.fits[0].carried);
+        assert_eq!((at.missing, at.carried, at.blocked), (0, 0, 0));
+        assert_eq!(at.native, 1);
+        assert_eq!(at.cost, 0);
     }
 }

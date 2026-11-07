@@ -40,17 +40,29 @@ type LandOn = "" | "here" | "copy";
  * under "Could not be checked" below, and this only makes the count agree
  * with it. When everything was checked there is no exclusion to show and the
  * shorter line stands.
+ *
+ * A mod carried over on a ticked box is neither of the two things this line
+ * used to be able to say. It is not left out — applying installs a file for
+ * it — and it is not known to run, because nothing has read the jar. So it is
+ * named in its own clause and kept out of both: `blocked` is what somebody is
+ * being asked to accept, and `missing` is still what the resolver found
+ * nothing for, which is why "all run here" is only printed when there is
+ * neither.
  */
 function coverageLine(option: PlanTarget, unchecked: number): string {
+  const left = [
+    option.blocked > 0 && `${option.blocked} left out`,
+    option.carried > 0 && `${option.carried} carried over`,
+  ].filter(Boolean) as string[];
   if (unchecked === 0) {
-    return option.missing === 0
+    return left.length === 0
       ? `All ${option.fits.length} mods run here`
-      : `${option.fits.length - option.missing} of ${option.fits.length} — ${option.missing} left out`;
+      : `${option.fits.length - option.missing} of ${option.fits.length} — ${left.join(", ")}`;
   }
   const whole = option.fits.length + unchecked;
-  return option.missing === 0
+  return left.length === 0
     ? `${option.fits.length} of ${whole} checked — all run here`
-    : `${option.fits.length} of ${whole} checked — ${option.missing} left out`;
+    : `${option.fits.length} of ${whole} checked — ${left.join(", ")}`;
 }
 
 /** What a finished re-target amounts to, in one line. */
@@ -152,7 +164,14 @@ export default function ReplanModal({
     option.gameVersion === instance.mcVersion;
 
   const target: PlanTarget | undefined = resolution?.targets[chosen];
-  const blockers = (target?.fits ?? []).filter((f) => f.fit === "missing");
+  // A carried mod has nothing published here either — it is `missing` like the
+  // rest — but it is not a blocker, because applying installs a file for it
+  // rather than turning it off. Listing it as one is the screen saying a mod
+  // will be left behind and the install then carrying it over.
+  const blockers = (target?.fits ?? []).filter(
+    (f) => f.fit === "missing" && !f.carried,
+  );
+  const carried = (target?.fits ?? []).filter((f) => f.carried);
 
   /**
    * Move this instance — or a copy of it — to the chosen target. Nothing is
@@ -436,6 +455,49 @@ export default function ReplanModal({
                     less reliable on Forge and NeoForge.
                   </span>
                 </p>
+              )}
+
+              {/* Above "Would be left behind", the way the report of a
+                  finished move puts the same two sections in the same order:
+                  these mods are the ones that come across *switched on*
+                  without a build for this pair, which is the thing on this
+                  screen most worth reading. Said rather than hidden — a mod
+                  that disappeared from both lists would be a mod nobody was
+                  told about. Two facts and no prediction: the box is ticked,
+                  so a build will be fetched, and where the mod is actually
+                  published. Which build it lands on is not knowable here —
+                  `Support` holds only releases for loaders Geode installs and
+                  a blocked CurseForge file is dropped later still, so a
+                  version named here could be the wrong one. */}
+              {target && carried.length > 0 && (
+                <section className={planStyles.blockers}>
+                  <h3 className={planStyles.blockTitle}>
+                    Would be carried over
+                  </h3>
+                  {carried.map((one) => (
+                    <div
+                      key={`${one.provider}:${one.projectId}`}
+                      className={planStyles.blocker}
+                    >
+                      <span className={planStyles.blockText}>
+                        <span className={planStyles.blockName}>{one.name}</span>
+                        <span
+                          className={clsx(planStyles.blockWhere, styles.wraps)}
+                        >
+                          Nothing is published for {loaderLabel(target.loader)}{" "}
+                          {target.gameVersion}, and this mod ignores the
+                          Minecraft version, so the newest build its author has
+                          published for {loaderLabel(target.loader)} would be
+                          installed instead of turning it off.{" "}
+                          {one.elsewhere && one.elsewhere.length > 0
+                            ? `Published for ${one.elsewhere.join(", ")}. `
+                            : ""}
+                          Whether it runs is not something Geode can tell you.
+                        </span>
+                      </span>
+                    </div>
+                  ))}
+                </section>
               )}
 
               {blockers.length > 0 && (

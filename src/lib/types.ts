@@ -673,6 +673,12 @@ export interface ModFit {
   viaVersion?: string;
   /** Where this mod can run instead, when it cannot run here. */
   elsewhere?: string[];
+  /**
+   * Nothing runs here, but this mod's own box is ticked, so applying carries
+   * its newest build over rather than turning it off. Not a `Fit`: it is one
+   * person's judgement about one mod, not evidence about a target.
+   */
+  carried?: boolean;
 }
 
 /** One candidate answer: a loader, a game version, and what it costs. */
@@ -680,7 +686,16 @@ export interface PlanTarget {
   loader: string;
   gameVersion: string;
   fits: ModFit[];
+  /** Mods with nothing published here at all. The ranking's first key. */
   missing: number;
+  /** Of those, the ones a ticked box carries over anyway. */
+  carried: number;
+  /**
+   * Of those, the ones that really will not be here afterwards — the number
+   * somebody is being asked to accept. Read it rather than working out
+   * `missing - carried`: a second copy of a count is what drifts.
+   */
+  blocked: number;
   connector: number;
   near: number;
   native: number;

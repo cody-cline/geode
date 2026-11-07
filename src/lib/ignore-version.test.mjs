@@ -137,3 +137,72 @@ test("a carried mod is counted apart from a near-version fit", async () => {
     "the carried-over section stopped telling somebody which mod to turn off first when the game will not start",
   );
 });
+
+// The other half of the same dialog, read *before* anything moves. A carried
+// mod is `missing` at the target like every other mod with nothing published
+// there — the resolver counts it that way on purpose, so that a ticked box
+// cannot move which targets are offered or in what order — so a preview that
+// read the fit alone listed it as about to be left behind, and then applying
+// that very target carried it over. A screen and an install telling a person
+// two different things is the bug this feature was fixed for; these are the
+// three places the screen can tell it again.
+test("the preview says a carried mod is carried, not left behind", async () => {
+  const modal = await source("../components/ReplanModal.tsx");
+
+  // The list the dialog heads "Would be left behind".
+  const start = modal.indexOf("const blockers = (target?.fits ?? [])");
+  assert.ok(start > 0, "the preview no longer works out its blockers");
+  const blockers = modal.slice(start, modal.indexOf(";", start));
+  assert.match(
+    blockers,
+    /!f\.carried/,
+    "a mod a ticked box will carry over is listed as one that would be left behind, which is the opposite of what applying does with it",
+  );
+
+  // The count on every target card, which is what somebody reads before
+  // choosing one. `missing` includes the carried mods; `blocked` is the number
+  // being asked for.
+  const line = modal.indexOf("function coverageLine");
+  assert.ok(line > 0, "the target cards no longer say how much they cover");
+  const coverage = modal.slice(line, modal.indexOf("\n}", line));
+  assert.match(
+    coverage,
+    /\$\{option\.blocked\} left out/,
+    "the card counts a carried mod among the ones left out, so the number somebody is asked to accept is too high",
+  );
+  assert.match(
+    coverage,
+    /option\.carried > 0/,
+    "the card never mentions the mods that would be carried over, so a target that carries one reads as a clean move",
+  );
+
+  // And the mods themselves, named with the two things that are true of one
+  // and nothing that is not. Which build a carry lands on is deliberately not
+  // claimed: `Support` holds only releases for the loaders Geode installs, and
+  // a blocked CurseForge file is dropped later still, so a version named here
+  // could be one the install never fetches.
+  const section = modal.indexOf("Would be carried over");
+  assert.ok(section > 0, "the preview never names the mods it would carry over");
+  const carried = modal.slice(section, modal.indexOf("</section>", section));
+
+  assert.match(
+    carried,
+    /ignores the\s+Minecraft version/,
+    "the preview does not say why this mod is being carried rather than turned off",
+  );
+  assert.match(
+    carried,
+    /newest build its author has\s+published for/,
+    "the preview does not say what would be installed for a carried mod",
+  );
+  assert.match(
+    carried,
+    /one\.elsewhere/,
+    "the preview drops where a carried mod is actually published, which is the only other thing it can truthfully say about one",
+  );
+  assert.match(
+    carried,
+    /not something Geode can tell you/,
+    "the preview implies a carried mod will run, which is a check nothing ran",
+  );
+});
