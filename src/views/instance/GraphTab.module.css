@@ -165,6 +165,18 @@
     stroke-width 0.12s var(--ease);
 }
 
+/* Three states share this ring, and each one has to be its own. Pointing at a
+   node drew exactly what selecting one draws, so on a screen whose whole
+   subject is one mod's chain, the mod under the cursor and the mod actually
+   being traced were the same picture.
+
+   Colour and width cannot carry it between them: the accent is the user's to
+   choose and can land on the same amber as `--warn`. So each state takes a
+   channel that is not colour — hover the plain heavier ring, a search hit a
+   dashed one, the selected node a second ring outside the first (`.halo`), and
+   keyboard focus a third further out again (`.ring`). None of them is opacity,
+   which `.faded`, `.alone` and `.off` have already spent, so every one of them
+   still reads while `dim()` holds the rest of the field at 18%. */
 .node:hover .rim {
   stroke: var(--accent);
   stroke-width: 2.5;
@@ -187,9 +199,21 @@
   stroke-width: 2.5;
 }
 
+/* The second ring, and the whole of what says "the one you chose" rather than
+   "the one under the cursor". It is in the tree only for the picked node, so
+   it is one circle and not one per mod — and because it is its own element it
+   outlives `.found` winning the rim below: a search hit you have also selected
+   keeps its dashes and gains this. */
+.halo {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+}
+
 .found .rim {
   stroke: var(--warn);
   stroke-width: 2.5;
+  stroke-dasharray: 4 3;
 }
 
 .off .disc,
@@ -197,9 +221,52 @@
   opacity: 0.3;
 }
 
+/* "Turned off", said in something other than the 30% above. Opacity was the
+   whole of it, on the one screen whose subject is which mods are going to
+   load, so a disabled mod read as an enabled one to anybody who cannot tell
+   30% from 100%. The `<title>` beside it carries the same fact to a screen
+   reader and to a tooltip; this is the part you can see. Outside the fade on
+   purpose — it is the mark, not the thing marked. */
+.slash {
+  stroke: var(--text-dim);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
 .faded {
   opacity: 0.18;
   pointer-events: none;
+}
+
+/* Keyboard focus, which the field had none of at all.
+
+   On `:focus` rather than `:focus-visible`, and taken back again for a pointer
+   press: a renderer that does not know the second pseudo-class drops the
+   second rule and draws the ring for a click too, which is noise — where the
+   other way round is a focus indicator that never appears. Like `.halo` the
+   element is in the tree only for the node holding the tab stop. */
+.ring {
+  fill: none;
+  stroke: none;
+}
+
+.node:focus .ring {
+  stroke: var(--accent-text);
+  stroke-width: 2;
+}
+
+.node:focus:not(:focus-visible) .ring {
+  stroke: none;
+}
+
+/* The ring above is the indicator, so the page's own is taken off: an outline
+   on a `<g>` boxes its whole bounds, label included, which is neither the
+   shape of a node nor centred on one. And a node the keyboard is on is never
+   one of the ones being faded out, whatever the pointer is doing elsewhere —
+   at 18% the ring cannot be found. */
+.node:focus {
+  outline: none;
+  opacity: 1;
 }
 
 .label {
@@ -218,6 +285,7 @@
 }
 
 .node:hover .label,
+.node:focus .label,
 .picked .label {
   fill: var(--text);
 }
