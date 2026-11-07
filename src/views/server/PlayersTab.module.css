@@ -96,7 +96,7 @@
   padding: 1px 6px;
   border-radius: var(--radius-pill);
   background: var(--surface-3);
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-dim);
 }
 
@@ -104,7 +104,7 @@
    recorded under an owner who has since renamed. */
 .uuid {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-faint);
   overflow-wrap: anywhere;
 }

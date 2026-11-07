@@ -85,7 +85,7 @@
   top: 50%;
   transform: translateY(-50%);
   font-family: var(--mono);
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--text-faint);
   pointer-events: none;
 }
@@ -140,7 +140,7 @@
 
 .selectKey {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-faint);
 }
 
