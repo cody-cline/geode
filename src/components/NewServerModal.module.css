@@ -6,11 +6,32 @@
 }
 
 /* One child of the dialog body, so the body's own gap does not land between
-   every group as well as the spacing set here. */
+   every group as well as the spacing set here.
+
+   And the one child that scrolls. The window opens as small as 620px tall
+   (`minHeight` in `tauri.conf.json`), and at that size five labelled groups of
+   tiles pushed the Minecraft version field, the name field and the EULA
+   sentence below the fold of the body's own scroll — with nothing saying so
+   and Create still pinned in the footer and enabled, so a server could be made
+   without ever seeing which version it would run. Giving the scroll to the
+   picker instead keeps them on screen: this takes whatever room is left after
+   them and scrolls what will not fit, down to a floor of a heading and two
+   rows of tiles, because a picker shrunk to nothing is no better than a
+   version field nobody saw.
+   The rule below is the boundary the dialog's subtitle already describes — the
+   software above it, the version it runs below — and the edge that says this
+   part has more than it is showing. The negative margins cancel the padding
+   that keeps a tile's focus ring from being clipped by the scroll box, so the
+   tiles still line up with everything else in the body. */
 .groups {
   display: flex;
   flex-direction: column;
   gap: 11px;
+  overflow-y: auto;
+  min-height: 132px;
+  margin: -4px -4px 0;
+  padding: 4px 4px 14px;
+  border-bottom: 1px solid var(--border);
 }
 
 /* The proxies are not another kind of server, so they do not sit in the same
@@ -63,11 +84,12 @@
   background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
 
+/* No `margin-top`: the rule at the foot of the picker is the separation now,
+   and the body's own gap is what sits under it. */
 .row {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
-  margin-top: 16px;
 }
 
 .field {
