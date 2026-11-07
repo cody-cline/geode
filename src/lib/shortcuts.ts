@@ -44,6 +44,17 @@ const ACTION_SHORTCUTS = [
   { action: "focusFilter", key: "f", ctrl: true, label: "F" },
   /** Drop a selection of rows on the Content tab. */
   { action: "clearSelection", key: "Escape", ctrl: false, label: "Esc" },
+  /**
+   * Make the kind of thing the screen is a list of.
+   *
+   * The one action bound on more than one screen, and still an action rather
+   * than a route: what "new" means is the screen's own answer — an instance in
+   * the library, a plan under Plans, a server under Servers — and it means
+   * nothing at all on the others. Each of the three binds it and prints it, so
+   * the key is the same promise everywhere it is made and silent everywhere it
+   * is not.
+   */
+  { action: "newThing", key: "n", ctrl: true, label: "N" },
 ] as const;
 
 /** One of the actions a screen can bind, named by the table above. */

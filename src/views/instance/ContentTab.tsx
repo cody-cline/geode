@@ -18,7 +18,8 @@ import {
 import Modal from "../../components/Modal";
 import { api } from "../../lib/api";
 import { fileSize, providerLabel } from "../../lib/format";
-import { actionHint, shortcutAction } from "../../lib/shortcuts";
+import { actionHint } from "../../lib/shortcuts";
+import { useActionShortcut } from "../../lib/useActionShortcut";
 import { useStore } from "../../lib/store";
 import type { ContentItem, ContentKind, Instance, UpdateCandidate } from "../../lib/types";
 
@@ -170,32 +171,23 @@ export default function ContentTab({
    * sidebar's keys back for one — and a press that belongs to it must not also
    * reach the screen underneath.
    */
-  useEffect(() => {
-    const onShortcut = (e: KeyboardEvent) => {
-      if (useStore.getState().backHandlers.some((h) => h.overlay)) return;
-      switch (shortcutAction(e)) {
-        case "focusFilter": {
-          // The webview's find bar is not what this is for, and the text that
-          // is there is selected so the next keystroke replaces the old filter.
-          e.preventDefault();
-          const box = filterBox.current;
-          if (box) {
-            box.focus();
-            box.select();
-          }
-          break;
-        }
-        case "clearSelection":
-          // Not prevented: Escape has no default of its own here, and anything
-          // else listening for it should still get it.
-          setSelected((prev) => (prev.size === 0 ? prev : new Set<string>()));
-          setAnchor(null);
-          break;
-      }
-    };
-    window.addEventListener("keydown", onShortcut, true);
-    return () => window.removeEventListener("keydown", onShortcut, true);
-  }, []);
+  useActionShortcut("focusFilter", (e) => {
+    // The webview's find bar is not what this is for, and the text that is
+    // there is selected so the next keystroke replaces the old filter.
+    e.preventDefault();
+    const box = filterBox.current;
+    if (box) {
+      box.focus();
+      box.select();
+    }
+  });
+
+  // Not prevented: Escape has no default of its own here, and anything else
+  // listening for it should still get it.
+  useActionShortcut("clearSelection", () => {
+    setSelected((prev) => (prev.size === 0 ? prev : new Set<string>()));
+    setAnchor(null);
+  });
 
   // The folder as well as the project: the check spans every folder while this
   // list shows one, so a row takes only a candidate from its own folder — the

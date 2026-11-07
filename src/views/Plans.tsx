@@ -4,6 +4,8 @@ import { ClipboardList, Loader2, Package, Plus, Trash2 } from "lucide-react";
 import Modal from "../components/Modal";
 import { api } from "../lib/api";
 import { relativeTime } from "../lib/format";
+import { actionHint } from "../lib/shortcuts";
+import { useActionShortcut } from "../lib/useActionShortcut";
 import { useStore } from "../lib/store";
 import type { Plan } from "../lib/types";
 
@@ -16,6 +18,7 @@ export default function Plans() {
 
   const [plans, setPlans] = useState<Plan[] | null>(null);
   const [creating, setCreating] = useState(false);
+  /** The dialog state the other two screens have; Plans makes one outright. */
   /** The plan the delete dialog is asking about, if it is open. */
   const [asking, setAsking] = useState<Plan | null>(null);
 
@@ -43,6 +46,14 @@ export default function Plans() {
       setCreating(false);
     }
   }
+
+
+  // Plans has no dialog to open: the button makes one and navigates into it,
+  // so the key does exactly what the button does rather than a lighter version.
+  useActionShortcut("newThing", (e) => {
+    e.preventDefault();
+    if (!creating) void create();
+  });
 
   async function remove(plan: Plan) {
     // The question has been answered, so the dialog goes before the work
@@ -73,6 +84,7 @@ export default function Plans() {
         <button className="btn btn-primary" onClick={create} disabled={creating}>
           {creating ? <Loader2 size={14} className="spin" /> : <Plus size={14} />}
           New plan
+          <kbd className={styles.newKey}>{actionHint("newThing")}</kbd>
         </button>
       </header>
 

@@ -60,8 +60,17 @@ the game will not start, and that a mod the re-target preview will carry
 over is never listed there as one it will leave behind.
 `shortcuts.test.mjs` holds the rule that makes a keyboard shortcut worth
 adding — that every binding in `shortcuts.ts` is printed beside the thing it
-opens, since the sidebar is the only place these are discoverable and one
-nobody can find is dead weight. `contrast.test.mjs` measures every colour
+reaches, since nothing else in this app advertises one and a binding nobody
+can come across is dead weight. Where that is depends on the kind: a route is
+reachable from anywhere and the sidebar names all five, while an action
+belongs to the screens that can carry it out and is printed on each of them —
+`newThing` is bound and printed on three, and the test fails if any one of
+them stops. It also pins the two rules the handler itself keeps, off
+`useActionShortcut.ts` rather than off a screen, so they are checked for every
+screen that binds through it: the listener is captured, so it runs before
+`Modal`'s Escape and can still see the dialog; and it stands aside for an
+overlay rather than for any back handler, because browsing inside an instance
+claims back too and gating on the whole stack made the keys dead there. `contrast.test.mjs` measures every colour
 this app writes text in against every surface it writes it on, in both
 themes, because the light one shipped for months unmeasured — it inherited
 colours picked to read on `#0b0f14` and put them on white, where the accent

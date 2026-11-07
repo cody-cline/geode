@@ -15,6 +15,8 @@ import {
 
 import InstanceIcon from "../components/InstanceIcon";
 import NewServerModal from "../components/NewServerModal";
+import { actionHint } from "../lib/shortcuts";
+import { useActionShortcut } from "../lib/useActionShortcut";
 import TransferServerModal from "../components/TransferServerModal";
 import { api } from "../lib/api";
 import { hashHue, relativeTime } from "../lib/format";
@@ -37,6 +39,11 @@ export default function Servers() {
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<Sort>("recent");
   const [creating, setCreating] = useState(false);
+
+  useActionShortcut("newThing", (e) => {
+    e.preventDefault();
+    setCreating(true);
+  });
   const [bringing, setBringing] = useState(false);
 
   useEffect(() => {
@@ -114,6 +121,7 @@ export default function Servers() {
             onClick={() => setCreating(true)}
           >
             New server
+            <kbd className={styles.newKey}>{actionHint("newThing")}</kbd>
           </button>
         </div>
       </header>

@@ -18,6 +18,8 @@ import InstanceIcon from "../components/InstanceIcon";
 import NewInstanceModal from "../components/NewInstanceModal";
 import StopGameModal from "../components/StopGameModal";
 import { launchInstance } from "../lib/actions";
+import { actionHint } from "../lib/shortcuts";
+import { useActionShortcut } from "../lib/useActionShortcut";
 import { formatDuration, useStore } from "../lib/store";
 import { hashHue, relativeTime } from "../lib/format";
 import { LOADERS } from "../lib/types";
@@ -42,6 +44,11 @@ export default function Library() {
   // fixed inside it — a dialog opened from a card would be clipped into the
   // card it was opened from.
   const [stopping, setStopping] = useState<Instance | null>(null);
+
+  useActionShortcut("newThing", (e) => {
+    e.preventDefault();
+    setCreating(true);
+  });
 
   const shown = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -118,6 +125,7 @@ export default function Library() {
             onClick={() => setCreating(true)}
           >
             New instance
+            <kbd className={styles.newKey}>{actionHint("newThing")}</kbd>
           </button>
         </div>
       </header>

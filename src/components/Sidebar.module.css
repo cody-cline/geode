@@ -75,9 +75,6 @@
    place every one of these five screens is already named. */
 .key {
   margin-left: auto;
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--text-faint);
 }
 
 .sectionHead {

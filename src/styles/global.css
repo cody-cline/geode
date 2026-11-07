@@ -196,6 +196,18 @@ button {
   cursor: pointer;
 }
 
+/* A printed key. Every shortcut in this app is written beside the thing it
+   reaches — that rule is what makes a binding worth adding at all, and
+   `shortcuts.test.mjs` enforces it — so there are a good few of these, and
+   they were each styled where they happened to be written. Here instead, on
+   the element rather than a class, so a hint added anywhere already looks
+   like the others and only its placing is the screen's business. */
+kbd {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
 a {
   color: var(--accent-text);
   text-decoration: none;

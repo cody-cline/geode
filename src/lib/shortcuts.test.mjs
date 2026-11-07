@@ -60,8 +60,13 @@ async function actionBindings() {
  * entry here fails below rather than slipping through unprinted.
  */
 const PRINTED_IN = {
-  focusFilter: "../views/instance/ContentTab.tsx",
-  clearSelection: "../views/instance/ContentTab.tsx",
+  focusFilter: ["../views/instance/ContentTab.tsx"],
+  clearSelection: ["../views/instance/ContentTab.tsx"],
+  // Three, and all three have to print it. An action can belong to more than
+  // one screen — "new" means something on each of these and nothing anywhere
+  // else — and the screen that binds it without printing it is the one where
+  // the key is a secret.
+  newThing: ["../views/Library.tsx", "../views/Plans.tsx", "../views/Servers.tsx"],
 };
 
 test("every binding is printed beside the screen it opens", async () => {
@@ -75,19 +80,21 @@ test("every binding is printed beside the screen it opens", async () => {
   }
 });
 
-test("every action is printed on the screen that can carry it out", async () => {
+test("every action is printed on every screen that can carry it out", async () => {
   for (const { key, action } of await actionBindings()) {
-    const where = PRINTED_IN[action];
+    const screens = PRINTED_IN[action];
     assert.ok(
-      where,
-      `${key} is bound to ${action} and no screen is named as the one that ` +
+      screens,
+      `${key} is bound to ${action} and no screen is named as one that ` +
         "prints it — a hint with no home is a binding nobody comes across",
     );
-    assert.ok(
-      (await source(where)).includes(`actionHint("${action}")`),
-      `${key} is bound to ${action}, and ${where} prints no hint for it — ` +
-        "nobody would find it",
-    );
+    for (const where of screens) {
+      assert.ok(
+        (await source(where)).includes(`actionHint("${action}")`),
+        `${key} is bound to ${action}, and ${where} prints no hint for it — ` +
+          "nobody would find it there",
+      );
+    }
   }
 });
 
@@ -188,16 +195,21 @@ test("a dialog registers as an overlay, so it does hold the shortcuts", async ()
 // thing `App` does not. `Modal` listens on the document and closes on Escape,
 // which pops the very handler this gate reads; captured at the window, the
 // screen is asked first and still sees the dialog that owns the press.
+//
+// Read off the hook rather than off a screen. Four screens bind an action now
+// and they all go through it, so this guards every one of them — where before
+// it watched the single copy that happened to be written first, and a second
+// screen could have registered in the bubble phase with nothing to say so.
 test("a screen's own shortcut holds off while a dialog is open", async () => {
-  const tab = await source("../views/instance/ContentTab.tsx");
-  const start = tab.indexOf("const onShortcut");
-  assert.ok(start > 0, "the Content tab no longer binds keys through `onShortcut`");
-  const handler = tab.slice(start, tab.indexOf("return () =>", start)).replace(/\s+/g, " ");
+  const hook = await source("./useActionShortcut.ts");
+  const start = hook.indexOf("const onShortcut");
+  assert.ok(start > 0, "useActionShortcut no longer binds keys through `onShortcut`");
+  const handler = hook.slice(start, hook.indexOf("return () =>", start)).replace(/\s+/g, " ");
 
   assert.ok(
     /backHandlers\.some\( *\(?\w+\)? *=> *\w+\.overlay *\)/.test(handler),
-    "the Content tab's keys no longer stand aside for a dialog, so Escape now " +
-      "closes one and clears the selection behind it in the same press",
+    "a screen's keys no longer stand aside for a dialog, so Escape now closes " +
+      "one and clears the selection behind it in the same press",
   );
   assert.match(
     handler,
@@ -205,4 +217,14 @@ test("a screen's own shortcut holds off while a dialog is open", async () => {
     "the listener is no longer captured, so Modal closes and unregisters " +
       "itself before the gate above is read, and the press does both things",
   );
+
+  // And that the screens actually go through it, since the gate is only worth
+  // anything on the path the keys really take.
+  for (const where of new Set(Object.values(PRINTED_IN).flat())) {
+    assert.ok(
+      (await source(where)).includes("useActionShortcut("),
+      `${where} prints a shortcut hint but does not bind through the hook, so ` +
+        "its own listener answers to none of the rules above",
+    );
+  }
 });
