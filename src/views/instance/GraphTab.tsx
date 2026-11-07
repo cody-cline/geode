@@ -363,6 +363,14 @@ function nothingToGraph(
     : `None of these ${count} ${many} depends on another. There is nothing to graph.`;
 }
 
+/** The arrow keys, by the step each one takes through the node set. */
+const ARROW: Record<string, number> = {
+  ArrowRight: 1,
+  ArrowDown: 1,
+  ArrowLeft: -1,
+  ArrowUp: -1,
+};
+
 export default function GraphTab({
   id,
   source,
@@ -400,11 +408,21 @@ export default function GraphTab({
   const [items, setItems] = useState<ContentItem[] | null>(null);
   const [query, setQuery] = useState("");
   const [focus, setFocus] = useState<string | null>(null);
+  // Where the pointer is, or — the same question answered by the other input —
+  // which node the keyboard is on. Both trace the chain the node is part of,
+  // which is what makes a focused node mean something rather than merely be
+  // outlined, and what puts its name on screen when it has no edges to earn
+  // one.
   const [hover, setHover] = useState<string | null>(null);
+  // Where the field's one tab stop sits. A node id rather than an index, so
+  // switching folder cannot leave it pointing at a node that is no longer
+  // here: it falls back to the first below, and the node set stays reachable.
+  const [keyed, setKeyed] = useState<string | null>(null);
   const [, repaint] = useReducer((n: number) => n + 1, 0);
 
   const svg = useRef<SVGSVGElement>(null);
   const world = useRef<SVGGElement>(null);
+  const nodeList = useRef<SVGGElement>(null);
   const frame = useRef<number>(0);
   const dragging = useRef<Node | null>(null);
   const panning = useRef<{ x: number; y: number } | null>(null);
@@ -540,6 +558,49 @@ export default function GraphTab({
   }
 
   /**
+   * The field's keyboard: one tab stop for the whole node set, arrows between
+   * the nodes from there, Enter or Space to trace one. The same contract the
+   * chips and tab strips in this app already use, because fifty tab stops in a
+   * picture of fifty mods is its own problem.
+   *
+   * `rovingKey` in `lib/rovingFocus.ts` is that contract written down, and it
+   * cannot be called from here for a reason that has nothing to do with the
+   * layout: it reads which option the press came from off
+   * `e.target instanceof HTMLElement`, and a node is an `SVGGElement`, so
+   * every press would come back null.
+   *
+   * The order is the DOM's, which is this folder sorted by file name — the
+   * order the Content tab lists the same mods in. Deliberately not the 2-D one
+   * you can see: the positions come out of a force solver and a node you have
+   * dragged stays where you put it, so there is no row for ArrowRight to step
+   * along, and an arrow that took the nearest node in its own direction would
+   * go somewhere different every time the field settled.
+   */
+  function onNodeKey(e: React.KeyboardEvent<SVGGElement>, node: Node, at: number) {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      setFocus((f) => (f === node.id ? null : node.id));
+      return;
+    }
+    // Double-click's other half. Only where there is something pinned to hand
+    // back, so on a node nobody has dragged it does nothing at all rather than
+    // appearing to be about to delete a mod.
+    if ((e.key === "Backspace" || e.key === "Delete") && node.fx != null) {
+      e.preventDefault();
+      release(node);
+      return;
+    }
+    const step = ARROW[e.key];
+    if (!step) return;
+    e.preventDefault();
+    // Off the rendered options rather than off `field.nodes`, so the step is
+    // taken through what is actually focusable.
+    const options = nodeList.current?.querySelectorAll<SVGGElement>('[role="option"]');
+    if (!options || options.length === 0) return;
+    options[(at + step + options.length) % options.length].focus();
+  }
+
+  /**
    * Keep the field within reach of the viewport.
    *
    * Without this you can pan the whole thing off the edge and be left staring
@@ -619,6 +680,10 @@ export default function GraphTab({
   // switch is deliberately not in here: on a hybrid server the other folder is
   // the one thing worth pressing when this one has nothing to show.
   const drawn = items !== null && field.links.length > 0;
+
+  // The one node that answers Tab. Checked against the field rather than
+  // trusted, because `keyed` outlives the folder it was set in.
+  const stop = field.nodes.some((n) => n.id === keyed) ? keyed : field.nodes[0]?.id;
 
   // A mod connected to nothing gets its name on demand rather than always.
   // Two thirds of a folder is unconnected, and naming all of them at once
@@ -805,7 +870,12 @@ export default function GraphTab({
             ))}
           </defs>
 
-          {field.nodes.map((node) => {
+          {/* One tab stop, arrows between the nodes, Enter to trace one — see
+              `onNodeKey`. A listbox rather than a set of buttons because that
+              is what the field is: these are the options, one of them is the
+              chosen one, and `.picked` is what choosing one draws. */}
+          <g ref={nodeList} role="listbox" aria-label={`The ${many} in this graph`}>
+          {field.nodes.map((node, at) => {
             const faded = dim(node.id);
             return (
               <g
@@ -819,12 +889,32 @@ export default function GraphTab({
                   !node.item.enabled && styles.off,
                 )}
                 transform={`translate(${node.x},${node.y})`}
+                role="option"
+                aria-selected={focus === node.id}
+                tabIndex={stop === node.id ? 0 : -1}
                 onPointerDown={(e) => onNodeDown(e, node)}
                 onPointerEnter={() => setHover(node.id)}
                 onPointerLeave={() => setHover((h) => (h === node.id ? null : h))}
+                onFocus={() => {
+                  setKeyed(node.id);
+                  setHover(node.id);
+                }}
+                onBlur={() => setHover((h) => (h === node.id ? null : h))}
+                onKeyDown={(e) => onNodeKey(e, node, at)}
                 onClick={() => setFocus((f) => (f === node.id ? null : node.id))}
                 onDoubleClick={() => release(node)}
               >
+                {/* The node's whole name, where the label below is shortened
+                    and often not drawn at all — and the only place the screen
+                    says a mod is turned off in words. Not `aria-disabled`:
+                    nothing here refuses to be selected, it is the mod that is
+                    off, and the difference is the subject of this screen. */}
+                <title>
+                  {node.item.enabled
+                    ? node.item.name
+                    : `${node.item.name} — turned off`}
+                </title>
+                {stop === node.id && <circle className={styles.ring} r={node.r + 7} />}
                 <circle className={styles.disc} r={node.r} />
                 {node.item.iconUrl && (
                   <image
@@ -838,6 +928,16 @@ export default function GraphTab({
                   />
                 )}
                 <circle className={styles.rim} r={node.r} />
+                {focus === node.id && <circle className={styles.halo} r={node.r + 4} />}
+                {!node.item.enabled && (
+                  <line
+                    className={styles.slash}
+                    x1={-node.r * 0.66}
+                    y1={-node.r * 0.66}
+                    x2={node.r * 0.66}
+                    y2={node.r * 0.66}
+                  />
+                )}
                 {!faded && (node.degree > 0 || named.has(node.id)) && (
                   <text
                     className={styles.label}
@@ -850,6 +950,7 @@ export default function GraphTab({
               </g>
             );
           })}
+          </g>
           </g>
         </svg>
       )}
