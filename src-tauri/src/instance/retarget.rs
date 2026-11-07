@@ -420,11 +420,23 @@ async fn apply(
                     skipped: installed.skipped,
                 });
             }
-            // The download landed nothing, so the build this instance had is
-            // still the file on disk and still what its record says. Turned
-            // off for the same reason as a mod with nowhere to go: a jar built
-            // for the version this instance no longer is will stop the game
-            // starting rather than be politely ignored.
+            // A cancel lands here when it arrives mid-download, and it is no
+            // more an answer about this mod than one caught at the top of the
+            // loop is: same flag, same break, and nothing turned off over it.
+            // Without this a cancelled download disabled the jar it was
+            // replacing and then called it a mod with no build.
+            Err(Error::Cancelled) => {
+                cancelled = true;
+                break;
+            }
+            // Anything else and the build this instance had is still the file
+            // on disk and still what its record says. Turned off for the same
+            // reason as a mod with nowhere to go: a jar built for the version
+            // this instance no longer is will stop the game starting rather
+            // than be politely ignored. The reason travels with it, because
+            // "nothing is published for the new target" and "the download did
+            // not land" are the difference between going to find another mod
+            // and simply running this again.
             Err(e) => stranded.push((record, e.to_string())),
         }
     }
@@ -534,7 +546,8 @@ fn stopped_part_way(
     let to = format!("{} {game_version}", loader.display_name());
     Error::msg(format!(
         "Moving {} to {to} was stopped part way through. {} of its mods had been re-pointed at a \
-         build for {to} and {} turned off for having none; the rest are still built for {was}. \
+         build for {to} and {} turned off, each either having no build for {to} or having had \
+         its download stop; the rest are still built for {was}. \
          The instance itself now says {to}, so run this again to finish the move.",
         report.instance_name,
         report.repointed.len(),
@@ -547,11 +560,19 @@ fn stopped_part_way(
 ///
 /// A Fabric jar in a (Neo)Forge mods folder does nothing without the layer
 /// under it, so a mod whose chosen fit was a Connector one has no file here
-/// after all. The rungs below that one are not climbed again: Minecraft is
-/// installed by the time this is called, and from the first file that moves
-/// this module asks nothing outside the machine. Everything else keeps the
-/// placement it had — a native build is a native build whether Connector
-/// installed or not.
+/// after all. Everything else keeps the placement it had — a native build is a
+/// native build whether Connector installed or not.
+///
+/// The rungs below the Connector one are **not** climbed again, and that is a
+/// gap rather than a principle. A mod that also had a native build on a
+/// neighbouring patch is turned off here for a reason that was never about it.
+/// This is reached before the first file moves, so re-climbing would be safe;
+/// what it would cost is another round of provider calls for those mods. The
+/// comment that used to stand here claimed this module asks nothing outside
+/// the machine by now, which is plainly untrue — the loop below asks a
+/// provider for every mod it re-points. Re-climbing is the better answer and
+/// is not built yet; until it is, the reason travels with the mod so a person
+/// can see that Connector, not their mod, is what failed.
 ///
 /// Which answer those mods get is the whole of this function, and it is not one
 /// answer for three failures. Being told otherwise is how a dropped connection
@@ -886,6 +907,52 @@ async fn has_worlds(paths: &Paths, id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// The text of one function in this file, for the test below.
+    ///
+    /// A shape rather than a value, the way `commands.rs`'s own `body_of` is
+    /// and for the same reason: reaching the arm this pins needs a provider
+    /// that answers, a download that starts, and a cancel part way through it,
+    /// and a unit test has none of the three. What must not happen is worth
+    /// more than nothing being able to check it. The first definition wins, so
+    /// this reads the real function rather than the literal asking for it.
+    fn body_of(signature: &str) -> &'static str {
+        let here = include_str!("retarget.rs");
+        let after = here
+            .split(signature)
+            .nth(1)
+            .unwrap_or_else(|| panic!("{signature} is not in retarget.rs"));
+        &after[..after.find("\n}\n").unwrap_or(after.len())]
+    }
+
+    /// A cancel that lands mid-download decides nothing about a mod.
+    ///
+    /// The loop checks for a cancel at the top of each turn, but
+    /// `install_with_dependencies` raises `Error::Cancelled` of its own when a
+    /// download is stopped part way, and that used to fall through to the arm
+    /// that strands: the jar being replaced was turned off, and the account of
+    /// the move called it a mod with no build for the new target. Both halves
+    /// were untrue, and one of them was destructive.
+    ///
+    /// Order is the whole of it. The arm below the cancel one catches every
+    /// error there is, so a cancel reaches the arm written for it only while
+    /// that arm comes first.
+    #[test]
+    fn a_cancel_mid_download_is_not_a_verdict_on_a_mod() {
+        let body = body_of("async fn apply(");
+
+        let cancel = body.find("Err(Error::Cancelled) => {").expect(
+            "the install loop no longer tells a cancel apart from a failure, so stopping a \
+             download turns off the jar it was replacing and reports it as having no build",
+        );
+        let catch_all = body
+            .find("Err(e) => stranded.push(")
+            .expect("the install loop no longer strands a mod whose download failed");
+        assert!(
+            cancel < catch_all,
+            "the catch-all arm comes first, so a cancel is stranded by it and never reaches \
+             the arm written for it",
+        );
+    }
     use super::*;
     use crate::paths::Scratch;
     use crate::providers::{Provider, ProjectKind, VersionFile};

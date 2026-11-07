@@ -954,6 +954,16 @@ mod tests {
     /// The verdict a screen shows is the first thing an install tries, because
     /// they are the same list read to different depths. Anything else is a
     /// preview that ranked a target on a fit the install never asked for.
+    ///
+    /// Read what this does and does not prove. [`classify`] *is*
+    /// `ladder(..).next()`, so while it stays written that way this cannot
+    /// fail, and it is no evidence that either one is right — the cost order
+    /// is pinned by `the_ladder_climbs_in_the_order_the_cost_model_ranks` and
+    /// the fits themselves by their own tests. What it catches is the day
+    /// somebody gives `classify` a body of its own, which is how the preview
+    /// and the install came apart the first time: a screen promised a target
+    /// worked and the install turned off the mods it had promised for. That is
+    /// the whole job, and it is worth a test that can only fail on a refactor.
     #[test]
     fn the_verdict_is_the_first_rung_of_the_ladder() {
         let cases = [

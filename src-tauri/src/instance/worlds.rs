@@ -83,11 +83,12 @@ pub struct World {
     /// Everything in the directory, in bytes.
     ///
     /// A recursive walk per row, which is the shape the mod-count work found
-    /// worth checking rather than assuming — a folder scan there was 0.31 ms
-    /// where opening each jar was 117 ms. No timing is quoted for this walk,
-    /// because none of it was taken: the figures that used to stand here
-    /// described worlds nobody counted, and a figure in a comment reads as
-    /// freshly measured whether it was or not. What is true of the shape is
+    /// worth measuring rather than assuming. No figure is quoted here, for
+    /// either walk: the numbers that used to stand in this comment described
+    /// worlds nobody counted, and the ones that replaced them were measured
+    /// elsewhere and written down nowhere, so neither could be checked by
+    /// anyone reading this. A figure in a comment reads as freshly measured
+    /// whether it was or not. What is true of the shape is
     /// enough to keep it, and that is all that is said — this stats and
     /// never opens, so the cost is the file count and not the gigabytes, and a
     /// world runs from a few dozen files when it is made to tens of thousands
