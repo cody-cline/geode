@@ -156,7 +156,11 @@
   opacity: 0.8;
 }
 
-.trouble {
+/* Two different things to say about one row, and the same shape for both: the
+   folder is not a world Geode can read, or the world is ahead of the instance
+   it sits in. One rule rather than two copies of it. */
+.trouble,
+.ahead {
   margin-top: 4px;
   font-size: 11.5px;
   line-height: 1.5;
