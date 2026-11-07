@@ -14,7 +14,7 @@ import AccountAvatar from "./AccountAvatar";
 import Modal from "./Modal";
 import { api } from "../lib/api";
 import { useStore } from "../lib/store";
-import type { DeviceCodeStart } from "../lib/types";
+import type { Account, DeviceCodeStart } from "../lib/types";
 
 import styles from "./AccountsModal.module.css";
 
@@ -31,6 +31,8 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
   const [autoCopied, setAutoCopied] = useState(false);
   const [offlineName, setOfflineName] = useState("");
   const [addingOffline, setAddingOffline] = useState(false);
+  const [askRemove, setAskRemove] = useState<Account | null>(null);
+  const [removing, setRemoving] = useState(false);
 
   // An offline account plays a copy you already own, so somebody has to have
   // signed in here: Minecraft refuses a Microsoft sign-in without a Java
@@ -104,17 +106,70 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
     }
   }
 
-  async function remove(id: string) {
+  async function remove(account: Account) {
+    setRemoving(true);
     try {
-      await api.removeAccount(id);
+      await api.removeAccount(account.id);
       await refreshAccounts();
+      setAskRemove(null);
+      toast({ kind: "success", title: `Removed ${account.username}` });
     } catch (e) {
       reportError("Could not remove that account", e);
+    } finally {
+      setRemoving(false);
     }
+  }
+
+  // Asked in place of the list rather than in a dialog on top of it: two
+  // Modals open at once both listen for Escape on the document, so one press
+  // would dismiss the question and the Accounts dialog under it. Cancel comes
+  // straight back.
+  //
+  // The keys are what make the swap a new dialog rather than the same one with
+  // different words in it. Both branches return a `Modal` from the same place,
+  // so without them React keeps the panel it already has, and the focus trap —
+  // which moves the keyboard into a panel when that panel mounts — never runs.
+  // The keyboard would stay on the trash button that has just been unmounted,
+  // which is to say on nothing, and Tab from there walks into the screen
+  // behind the overlay.
+  if (askRemove) {
+    return (
+      <Modal
+        key="remove"
+        title={`Remove ${askRemove.username}?`}
+        subtitle="This removes a sign-in Geode has stored on this computer. Nothing is changed anywhere else."
+        onClose={() => setAskRemove(null)}
+        width={520}
+        footer={
+          <>
+            <button className="btn" onClick={() => setAskRemove(null)}>
+              Cancel
+            </button>
+            <button
+              className="btn btn-danger"
+              onClick={() => void remove(askRemove)}
+              disabled={removing}
+            >
+              {removing && <Loader2 size={14} className="spin" />}
+              Remove the account
+            </button>
+          </>
+        }
+      >
+        <p className={styles.confirm}>
+          {askRemove.kind === "microsoft"
+            ? "Getting it back means another round trip through Microsoft's device-code page. Your worlds and instances are untouched either way — Microsoft hands back the same UUID, so the player they name is the same one."
+            : "Adding the same name back gives the same account: an offline UUID is derived from the name, so the worlds and inventories under it are untouched."}
+          {accounts.length === 1 &&
+            " It is also the only account here, and Geode cannot launch anything without one."}
+        </p>
+      </Modal>
+    );
   }
 
   return (
     <Modal
+      key="accounts"
       title="Accounts"
       subtitle="Sign in with Microsoft to play online, or add an offline account for single-player and LAN."
       onClose={onClose}
@@ -140,7 +195,7 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
               </button>
               <button
                 className="btn btn-ghost btn-icon btn-sm"
-                onClick={() => remove(account.id)}
+                onClick={() => setAskRemove(account)}
                 title="Remove"
                 aria-label={`Remove ${account.username}`}
               >
