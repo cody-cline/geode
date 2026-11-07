@@ -67,6 +67,29 @@
   padding-left: 31px;
 }
 
+/* A Filter box that prints its own shortcut inside it: wider, with room kept
+   on the right so the text never runs under the hint. Its own class rather
+   than a change to `.search`, because the server's Content tab shares that one
+   and has no such binding — an empty 48px there would be a gap with nothing
+   in it. */
+.searchHinted {
+  width: 200px;
+  padding-right: 48px;
+}
+
+/* The key that reaches this box, printed in it. Wider than the hint needs so
+   the longer of the two spellings (`Ctrl+F`, `⌘F`) has the same room. */
+.searchKey {
+  position: absolute;
+  right: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text-faint);
+  pointer-events: none;
+}
+
 .updateBanner {
   display: flex;
   align-items: center;
@@ -81,6 +104,49 @@
 
 .updateBanner span {
   flex: 1;
+}
+
+/* The bar that appears only once something is selected. Not accent-tinted
+   like the update banner it can sit under: that one is the app waiting on
+   you, this one is a mode you are in and can leave, and two tinted bars
+   stacked read as one thing. */
+.selectBar {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 22px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border-strong);
+  font-size: 13px;
+}
+
+.selectText {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex: 1;
+  min-width: 0;
+}
+
+.selectCount {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.selectNote {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.selectKey {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+/* Set apart from the two presses beside it that can be taken back. */
+.selectDelete {
+  margin-left: 14px;
 }
 
 .list {
@@ -144,6 +210,61 @@
   object-fit: cover;
 }
 
+/* Selecting a row, which is not the same control as the checkbox beside it:
+   that one decides whether the game loads the file. The tick is round and sits
+   over the artwork precisely so the one square box on a row stays the enable
+   toggle it has always been. Shown on hover as well as when selected, so the
+   gesture can be found by pointing at a row rather than by being told. */
+.pick {
+  position: relative;
+  padding: 0;
+}
+
+.pickMark {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--bg) 62%, transparent);
+  opacity: 0;
+  transition: opacity 0.12s var(--ease);
+}
+
+.pick:hover .pickMark,
+.pick:focus-visible .pickMark,
+.picked .pickMark {
+  opacity: 1;
+}
+
+.pickMark svg {
+  width: 17px;
+  height: 17px;
+  padding: 2px;
+  border-radius: var(--radius-pill);
+  border: 1.5px solid var(--text-faint);
+  background: var(--surface);
+  color: transparent;
+}
+
+.picked .pickMark svg {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.rowPicked,
+.rowPicked:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+}
+
+/* A disabled row is drawn at half strength, and a selection the eye cannot
+   find in the list is not one — which matters most here, since turning a batch
+   of disabled mods back on is the reason to select them. */
+.rowPicked.disabled {
+  opacity: 0.78;
+}
+
 .itemText {
   flex: 1;
   min-width: 0;
@@ -180,6 +301,43 @@
   font-family: var(--mono);
   font-size: 11px;
   opacity: 0.8;
+}
+
+/* What a bulk delete is about to take, named one by one. Scrolls rather than
+   growing the dialog past the screen: a selection can be forty rows. */
+.confirmList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 230px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.confirmList li {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+.confirmName {
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.confirmNote {
+  margin-top: 12px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  line-height: 1.55;
 }
 
 .empty {
