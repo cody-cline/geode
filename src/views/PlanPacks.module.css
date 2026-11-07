@@ -226,23 +226,39 @@
   color: var(--accent-text);
 }
 
+/* The row draws itself and presses nothing: its two actions are the buttons
+   inside it. The padding goes on the open half so that half is the whole of
+   what a press on the row's name lands on, and `padding-right` keeps Add off
+   the border. */
 .modRow {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 9px 14px;
+  padding-right: 14px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
   background: var(--surface);
-  cursor: pointer;
   transition:
     border-color 0.12s var(--ease),
     background 0.12s var(--ease);
 }
 
-.modRow:hover {
+/* Lit for the keyboard as well as the pointer: either way the row is the thing
+   being acted on, and the button's own ring says which half. */
+.modRow:hover,
+.modRow:focus-within {
   border-color: var(--border-strong);
   background: var(--surface-2);
+}
+
+.modOpen {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 9px 14px;
+  text-align: left;
 }
 
 .modIcon {

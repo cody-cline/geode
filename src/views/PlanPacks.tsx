@@ -348,24 +348,34 @@ export default function PlanPacks({
                   const added = inPlan.has(modKey(mod));
                   const busy = opening === modKey(mod);
                   return (
-                    <div
-                      key={modKey(mod)}
-                      className={styles.modRow}
-                      onClick={() => void openMod(mod)}
-                      title={`Open ${mod.name}`}
-                    >
-                      <span className={styles.modIcon}>
-                        {mod.iconUrl ? (
-                          <img src={mod.iconUrl} alt="" loading="lazy" />
-                        ) : (
-                          <Package size={15} />
-                        )}
-                      </span>
-                      <span className={styles.modName}>{mod.name}</span>
-                      <span className={clsx("badge", `badge-${mod.provider}`)}>
-                        {providerLabel(mod.provider)}
-                      </span>
-                      {busy && <Loader2 size={13} className="spin" />}
+                    <div key={modKey(mod)} className={styles.modRow}>
+                      {/* Opening is a press of its own rather than a press on
+                          the row, because the row also holds Add — and a
+                          `<button>` wrapped round another one is invalid, while
+                          `role="button"` on the row would make the whole of its
+                          contents presentational and hide Add from a screen
+                          reader. So the row stays a plain container that draws
+                          the border, and its two actions are two buttons beside
+                          each other: the same split the plan cards and the log
+                          list already use. */}
+                      <button
+                        className={styles.modOpen}
+                        onClick={() => void openMod(mod)}
+                        title={`Open ${mod.name}`}
+                      >
+                        <span className={styles.modIcon}>
+                          {mod.iconUrl ? (
+                            <img src={mod.iconUrl} alt="" loading="lazy" />
+                          ) : (
+                            <Package size={15} />
+                          )}
+                        </span>
+                        <span className={styles.modName}>{mod.name}</span>
+                        <span className={clsx("badge", `badge-${mod.provider}`)}>
+                          {providerLabel(mod.provider)}
+                        </span>
+                        {busy && <Loader2 size={13} className="spin" />}
+                      </button>
                       {added ? (
                         <span className={styles.added}>
                           <Check size={13} />
@@ -374,11 +384,7 @@ export default function PlanPacks({
                       ) : (
                         <button
                           className="btn btn-sm"
-                          // The row opens the mod; only this adds it.
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onAdd([mod]);
-                          }}
+                          onClick={() => onAdd([mod])}
                         >
                           <Plus size={13} />
                           Add

@@ -82,13 +82,24 @@
     color 0.12s var(--ease);
 }
 
-.row:hover .remove {
+/* Shown when the row is pointed at — and when the keyboard lands on it, or a
+   tab stop is a destructive button nobody can see. `opacity: 0` takes the
+   focus ring with it, so the global one is no help on its own. */
+.row:hover .remove,
+.remove:focus-visible {
   opacity: 1;
 }
 
 .remove:hover {
   color: var(--danger);
   background: var(--surface-2);
+}
+
+/* The second half of what the delete dialog has to say, under its question. */
+.askNote {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-dim);
 }
 
 .pending,
