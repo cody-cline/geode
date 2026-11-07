@@ -17,6 +17,7 @@ import {
 import Modal from "../../components/Modal";
 import { api } from "../../lib/api";
 import { GAME_MODES, fileSize, relativeTime } from "../../lib/format";
+import { savedByNewer } from "../../lib/mcversion";
 import { useStore } from "../../lib/store";
 import type { Instance, World, WorldBackup } from "../../lib/types";
 
@@ -30,34 +31,6 @@ type Asking =
   | { kind: "backups"; world: World }
   | null;
 
-/**
- * Whether a world was last saved by a Minecraft later than the one this
- * instance runs.
- *
- * Compared segment by segment as numbers, which is the only way that holds:
- * as text `1.21.9` sorts above `1.21.10`, and as a number `1.21.1` is not one
- * at all. The same arithmetic covers the year-based line Mojang now ships
- * alongside the old scheme — `26.3` wins on its first segment against any
- * `1.21.x`, which is the right answer — so there is one rule and not two.
- *
- * Anything that is not a plain release answers no. A snapshot (`26w14a`), a
- * pre-release, or whatever a third-party jar left in `level.dat` has no place
- * in this ordering, and the quiet answer is the honest one: this badge exists
- * to name an upgrade Minecraft performs once and never undoes, and a warning
- * that colour on a world nobody needed to worry about is worse than no
- * warning at all.
- */
-function savedByNewer(world: string, instance: string): boolean {
-  const release = /^\d+(\.\d+)*$/;
-  const [a, b] = [world.trim(), instance.trim()];
-  if (!release.test(a) || !release.test(b)) return false;
-  const [parts, against] = [a, b].map((v) => v.split(".").map(Number));
-  for (let i = 0; i < Math.max(parts.length, against.length); i++) {
-    const [mine, theirs] = [parts[i] ?? 0, against[i] ?? 0];
-    if (mine !== theirs) return mine > theirs;
-  }
-  return false;
-}
 
 /**
  * An instance's singleplayer worlds.

@@ -85,6 +85,9 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
       onSelect: () => setExportAs(format),
     })),
     { kind: "rule" },
+    // Its own heading, so the menu reads as the two things it is — a file, or
+    // a link — rather than as four options and a stray fifth.
+    { kind: "group", label: "Make a link" },
     {
       kind: "item",
       label: "Make a link\u2026",
