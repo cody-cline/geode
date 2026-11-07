@@ -1,0 +1,79 @@
+/* The target cards, the verdict chips and the soft notes all come from
+   PlanView.module.css, so this screen and the Plans rail cannot drift into
+   drawing a target two ways. Only what is particular to the dialog is here. */
+
+.loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 0;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.error {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--danger);
+}
+
+/* Where the ranking comes from, and that none of it has happened yet. Above
+   the answer rather than under it: it is what decides how the rest is read. */
+.reads {
+  display: flex;
+  gap: 8px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-dim);
+}
+
+.note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-faint);
+}
+
+/* The action at the end of the reading, ruled off from it so that picking a
+   target and applying one cannot be read as the same gesture. */
+.apply {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  padding-top: 13px;
+  border-top: 1px solid var(--border);
+}
+
+/* What the move did. Replaces the ranking rather than sitting under it. */
+.result {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* A re-target's reasons are sentences, not the short "Runs on Fabric" the
+   ranking shows, so they wrap instead of being clipped to one line. */
+.wraps {
+  white-space: normal;
+  overflow: visible;
+}
+
+/* Where the instance already is. Deliberately quieter than "best": it is a
+   fact about this instance, not a recommendation. */
+.here {
+  margin-left: auto;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}

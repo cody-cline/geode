@@ -8,7 +8,7 @@ import Modal from "./Modal";
 import { api } from "../lib/api";
 import { useStore } from "../lib/store";
 import { LOADERS } from "../lib/types";
-import type { GameVersion, Loader, PackPreview } from "../lib/types";
+import type { FolderInstance, GameVersion, Loader, PackPreview } from "../lib/types";
 
 import styles from "./NewInstanceModal.module.css";
 
@@ -31,6 +31,9 @@ export default function NewInstanceModal({ onClose }: { onClose: () => void }) {
   const [loaderVersion, setLoaderVersion] = useState("");
   const [loadingLoader, setLoadingLoader] = useState(false);
   const [creating, setCreating] = useState(false);
+  // The instances found inside a folder that was not itself one, waiting to be
+  // picked from.
+  const [inside, setInside] = useState<FolderInstance[] | null>(null);
 
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -141,6 +144,16 @@ export default function NewInstanceModal({ onClose }: { onClose: () => void }) {
   async function importFolder() {
     const picked = await openDialog({ multiple: false, directory: true });
     if (typeof picked !== "string") return;
+    // The folder a person thinks of as "my instances" is the one holding all
+    // of them, so that is what they point at. When it is not itself an
+    // instance but holds some, the instances are offered to pick from — ten of
+    // them is a worse thing to refuse than to list, and which one they want is
+    // theirs to say, so none is imported here.
+    const found = await api.instancesInFolder(picked).catch(() => []);
+    if (found.length > 0) {
+      setInside(found);
+      return;
+    }
     await importFrom(picked);
   }
 
@@ -187,6 +200,55 @@ export default function NewInstanceModal({ onClose }: { onClose: () => void }) {
     } finally {
       setCreating(false);
     }
+  }
+
+  // Which of a folder's instances to bring across is the person's choice, so
+  // the dialog becomes that list until they make it or go back.
+  if (inside) {
+    return (
+      <Modal
+        title="Pick an instance"
+        subtitle={`That folder is not an instance itself, but it holds ${
+          inside.length === 1 ? "one" : inside.length
+        }.`}
+        onClose={onClose}
+        width={520}
+        footer={
+          <>
+            <button
+              className="btn btn-ghost"
+              onClick={() => setInside(null)}
+              disabled={creating}
+            >
+              Back
+            </button>
+            <div style={{ flex: 1 }} />
+            <button className="btn" onClick={onClose}>
+              Cancel
+            </button>
+          </>
+        }
+      >
+        <div className={styles.foundList}>
+          {inside.map((found) => (
+            <button
+              key={found.path}
+              className={styles.foundRow}
+              disabled={creating}
+              onClick={() => importFrom(found.path)}
+            >
+              <span className={styles.foundName}>{found.name}</span>
+              <span className={styles.foundMeta}>
+                {found.mcVersion}
+                {found.loader !== "vanilla" &&
+                  ` · ${LOADERS.find((l) => l.id === found.loader)?.label}`}
+              </span>
+              <span className={styles.foundHint}>Import</span>
+            </button>
+          ))}
+        </div>
+      </Modal>
+    );
   }
 
   return (

@@ -56,6 +56,20 @@ export function providerLabel(provider: string): string {
   return titleCase(provider);
 }
 
+/**
+ * What Minecraft calls each `GameType`, for the badge on a world's row.
+ *
+ * A label map and not a mirror of anything: `World.gameMode` crosses the IPC
+ * boundary as the number the game writes, because naming them is this side's
+ * job — see the field's own comment in `instance/worlds.rs`.
+ */
+export const GAME_MODES: Record<number, string> = {
+  0: "Survival",
+  1: "Creative",
+  2: "Adventure",
+  3: "Spectator",
+};
+
 /** Short form, for rows too tight for the full name. */
 export function providerShort(provider: string): string {
   if (provider === "modrinth") return "MR";

@@ -52,6 +52,17 @@ pub enum Error {
     #[error("the server did not accept this password — it may have been replaced; ask the admin for the current link")]
     PasswordRefused,
 
+    /// A provider's file list was in hand and holds nothing for what was asked.
+    /// An answer, not a failure to get one.
+    ///
+    /// Its own variant because `instance::retarget` has to tell the two apart
+    /// and acts on the difference: a mod the new target genuinely has no build
+    /// for is turned off, and a mod nothing could be asked about is left
+    /// exactly as it is. Reaching that decision through a string would make a
+    /// dropped connection look like a verdict about somebody's mod.
+    #[error("{0}")]
+    Unpublished(String),
+
     #[error("cancelled")]
     Cancelled,
 }

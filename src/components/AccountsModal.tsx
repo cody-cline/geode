@@ -257,7 +257,7 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
         <p className="hint">
           {ownsTheGame
             ? "Offline accounts work for single-player and LAN. Servers with online mode enabled will reject them."
-            : "Add a Microsoft account first — signing in, or importing a session from another launcher, both count. An offline account plays a copy of Minecraft you already own, so Geode asks once who owns it."}
+            : "Add a Microsoft account first. An offline account plays a copy of Minecraft you already own, so Geode asks once who owns it."}
         </p>
       </div>
     </Modal>

@@ -30,7 +30,7 @@ use crate::error::Result;
 use crate::net::Progress;
 use crate::providers::{self, Provider, Version};
 
-use super::{Plan, PlanMod};
+use super::PlanMod;
 
 /// Loaders a plan can target, most preferred first.
 ///
@@ -276,41 +276,67 @@ fn label(loader: &str, game: &str) -> String {
     format!("{name} {game}")
 }
 
-/// Decide how one mod fares at one target.
+/// Every way one mod could run at one target, cheapest first — each one a file
+/// that can actually be asked for, with the game version to ask it at.
+///
+/// Empty for a mod with nothing here at all, which is [`Fit::Missing`].
+///
+/// The ranking reads the first entry and stops; installing walks the whole
+/// list. That is the point of it being one function: a preview that ranked a
+/// target on a neighbouring-patch build and an install that only ever asked
+/// for the target's own version turned off the very mods the screen had just
+/// shown as fitting. Whatever is offered here is what
+/// [`crate::instance::retarget`] tries, in this order.
+pub(crate) fn ladder(
+    support: &Support,
+    loader: &str,
+    game: &str,
+    matrix: &SupportMatrix,
+) -> Vec<(Fit, Option<String>)> {
+    let mut rungs = Vec::new();
+
+    // One rung for both, because one request answers both: Quilt loads Fabric
+    // mods directly — no compatibility layer involved — and `loaders_to_try`
+    // asks for a Quilt build and then a Fabric one.
+    if support.has(loader, game) || (loader == "quilt" && support.has("fabric", game)) {
+        rungs.push((Fit::Native, None));
+    }
+
+    let connector_here = is_forge_family(loader) && matrix.supports(game, loader);
+    if connector_here && support.has("fabric", game) {
+        rungs.push((Fit::Connector, None));
+    }
+
+    if let Some(near) = support.nearest(loader, game) {
+        rungs.push((Fit::NearVersion, Some(near)));
+    }
+    if loader == "quilt" {
+        if let Some(near) = support.nearest("fabric", game) {
+            rungs.push((Fit::NearVersion, Some(near)));
+        }
+    }
+    if connector_here {
+        if let Some(near) = support.nearest("fabric", game) {
+            rungs.push((Fit::ConnectorNear, Some(near)));
+        }
+    }
+    // Quilt's two near rungs are the same request when the mod's newest Quilt
+    // and Fabric builds are the same version.
+    rungs.dedup();
+    rungs
+}
+
+/// Decide how one mod fares at one target: the best rung of its ladder.
 fn classify(
     support: &Support,
     loader: &str,
     game: &str,
     matrix: &SupportMatrix,
 ) -> (Fit, Option<String>) {
-    if support.has(loader, game) {
-        return (Fit::Native, None);
-    }
-    // Quilt loads Fabric mods directly — no compatibility layer involved.
-    if loader == "quilt" && support.has("fabric", game) {
-        return (Fit::Native, None);
-    }
-
-    let connector_here = is_forge_family(loader) && matrix.supports(game, loader);
-    if connector_here && support.has("fabric", game) {
-        return (Fit::Connector, None);
-    }
-
-    if let Some(near) = support.nearest(loader, game) {
-        return (Fit::NearVersion, Some(near));
-    }
-    if loader == "quilt" {
-        if let Some(near) = support.nearest("fabric", game) {
-            return (Fit::NearVersion, Some(near));
-        }
-    }
-    if connector_here {
-        if let Some(near) = support.nearest("fabric", game) {
-            return (Fit::ConnectorNear, Some(near));
-        }
-    }
-
-    (Fit::Missing, None)
+    ladder(support, loader, game, matrix)
+        .into_iter()
+        .next()
+        .unwrap_or((Fit::Missing, None))
 }
 
 /// Score and order every target the plan's mods make possible.
@@ -394,9 +420,13 @@ pub fn rank(mods: &[(PlanMod, Support)], matrix: &SupportMatrix, limit: usize) -
 const TARGET_LIMIT: usize = 6;
 
 /// Read every mod's file list, then rank the targets they allow.
+///
+/// Takes the mods rather than the plan holding them: an installed instance's
+/// mods are the same question asked of a list that was never a plan on disk —
+/// see [`crate::instance::replan`].
 pub async fn resolve(
     client: &reqwest::Client,
-    plan: &Plan,
+    mods: &[PlanMod],
     matrix: &SupportMatrix,
     cache: &SupportCache,
     curseforge_key: Option<&str>,
@@ -406,7 +436,7 @@ pub async fn resolve(
     let mut unresolved = Vec::new();
     let mut resolved: Vec<(PlanMod, Support)> = Vec::new();
 
-    if plan.mods.is_empty() {
+    if mods.is_empty() {
         return Ok(Resolution {
             targets: Vec::new(),
             unresolved,
@@ -415,16 +445,16 @@ pub async fn resolve(
     }
 
     progress
-        .stage("Reading published versions", plan.mods.len() as u64)
+        .stage("Reading published versions", mods.len() as u64)
         .await;
 
     // Bounded concurrency: Modrinth is generous but a 60-mod plan firing 60
     // simultaneous requests is rude and gets rate-limited for it.
     const CONCURRENCY: usize = 8;
-    let mut pending = plan.mods.iter().cloned();
+    let mut pending = mods.iter().cloned();
     let mut inflight = FuturesUnordered::new();
 
-    for _ in 0..CONCURRENCY.min(plan.mods.len()) {
+    for _ in 0..CONCURRENCY.min(mods.len()) {
         if let Some(plan_mod) = pending.next() {
             inflight.push(support_for(client, cache, plan_mod, curseforge_key));
         }
@@ -456,8 +486,7 @@ pub async fn resolve(
     }
 
     if curseforge_key.is_none()
-        && plan
-            .mods
+        && mods
             .iter()
             .any(|m| m.provider.eq_ignore_ascii_case("curseforge"))
     {
@@ -491,22 +520,14 @@ async fn support_for(
     plan_mod: PlanMod,
     curseforge_key: Option<&str>,
 ) -> (PlanMod, Result<Support>) {
-    let result = async {
-        if let Some(hit) = cache.get(&plan_mod).await {
-            return Ok(hit);
-        }
-        let provider = Provider::parse(&plan_mod.provider)
-            .ok_or_else(|| crate::error::Error::msg("unknown provider"))?;
-        // Everything the project has ever shipped, not a recent page of it:
-        // what a plan can target is defined by the whole history.
-        let pairs =
-            providers::support_pairs(client, provider, &plan_mod.project_id, curseforge_key)
-                .await?;
-        let support = Support::from_pairs(pairs);
-        cache.put(&plan_mod, support.clone()).await;
-        Ok(support)
-    }
-    .await;
+    let result = cache
+        .support(
+            client,
+            &plan_mod.provider,
+            &plan_mod.project_id,
+            curseforge_key,
+        )
+        .await;
     (plan_mod, result)
 }
 
@@ -530,17 +551,57 @@ impl SupportCache {
         }
     }
 
-    async fn get(&self, plan_mod: &PlanMod) -> Option<Support> {
+    /// One project's support table, from this session or from the provider.
+    ///
+    /// Public because two callers want one project's table rather than a
+    /// plan's: the ranking here, and installing in
+    /// [`crate::instance::retarget`], which walks the same [`ladder`] the
+    /// ranking read. They go through the same cache deliberately — a target
+    /// ranked on one file list and then installed from another is a screen
+    /// that promised what the install did not do.
+    pub async fn support(
+        &self,
+        client: &reqwest::Client,
+        provider: &str,
+        project_id: &str,
+        curseforge_key: Option<&str>,
+    ) -> Result<Support> {
+        let key = (provider.to_ascii_lowercase(), project_id.to_string());
+        if let Some(hit) = self.get(&key).await {
+            return Ok(hit);
+        }
+        let parsed = Provider::parse(provider)
+            .ok_or_else(|| crate::error::Error::msg("unknown provider"))?;
+        // Everything the project has ever shipped, not a recent page of it:
+        // what a plan can target is defined by the whole history.
+        let pairs = providers::support_pairs(client, parsed, project_id, curseforge_key).await?;
+        let support = Support::from_pairs(pairs);
+        self.put(key, support.clone()).await;
+        Ok(support)
+    }
+
+    /// Put one project's table in by hand, so a test can ask what would be
+    /// done with it without a provider to ask.
+    #[cfg(test)]
+    pub(crate) async fn seed(&self, provider: &str, project_id: &str, support: Support) {
+        self.put(
+            (provider.to_ascii_lowercase(), project_id.to_string()),
+            support,
+        )
+        .await;
+    }
+
+    async fn get(&self, key: &(String, String)) -> Option<Support> {
         let map = self.inner.read().await;
-        let (at, support) = map.get(&plan_mod.key())?;
+        let (at, support) = map.get(key)?;
         (at.elapsed() < TTL).then(|| support.clone())
     }
 
-    async fn put(&self, plan_mod: &PlanMod, support: Support) {
+    async fn put(&self, key: (String, String), support: Support) {
         self.inner
             .write()
             .await
-            .insert(plan_mod.key(), (Instant::now(), support));
+            .insert(key, (Instant::now(), support));
     }
 }
 
@@ -888,5 +949,83 @@ mod tests {
     #[test]
     fn an_empty_plan_has_no_targets() {
         assert!(rank(&[], &matrix(), 6).is_empty());
+    }
+
+    /// The verdict a screen shows is the first thing an install tries, because
+    /// they are the same list read to different depths. Anything else is a
+    /// preview that ranked a target on a fit the install never asked for.
+    ///
+    /// Read what this does and does not prove. [`classify`] *is*
+    /// `ladder(..).next()`, so while it stays written that way this cannot
+    /// fail, and it is no evidence that either one is right — the cost order
+    /// is pinned by `the_ladder_climbs_in_the_order_the_cost_model_ranks` and
+    /// the fits themselves by their own tests. What it catches is the day
+    /// somebody gives `classify` a body of its own, which is how the preview
+    /// and the install came apart the first time: a screen promised a target
+    /// worked and the install turned off the mods it had promised for. That is
+    /// the whole job, and it is worth a test that can only fail on a refactor.
+    #[test]
+    fn the_verdict_is_the_first_rung_of_the_ladder() {
+        let cases = [
+            vec![("neoforge", "1.21.1")],
+            vec![("fabric", "1.21.1")],
+            vec![("fabric", "1.21.3")],
+            vec![("fabric", "1.21.3"), ("neoforge", "1.21.4")],
+            vec![("forge", "1.12.2")],
+            vec![],
+        ];
+        for pairs in cases {
+            let support = support(&pairs);
+            for loader in LOADER_ORDER {
+                let rungs = ladder(&support, loader, "1.21.1", &matrix());
+                let first = rungs.first().cloned().unwrap_or((Fit::Missing, None));
+                assert_eq!(
+                    classify(&support, loader, "1.21.1", &matrix()),
+                    first,
+                    "{loader} on {pairs:?}",
+                );
+            }
+        }
+    }
+
+    /// The ladder is in the cost model's own order, and every rung on it is a
+    /// fit the installer knows how to ask for.
+    #[test]
+    fn the_ladder_climbs_in_the_order_the_cost_model_ranks() {
+        // A mod with a Fabric build for the target and another for a later
+        // patch, on a NeoForge target Connector covers: Connector on the
+        // target's own version comes before a NeoForge build from next door,
+        // which comes before both compromises at once.
+        let support = support(&[
+            ("fabric", "1.21.1"),
+            ("fabric", "1.21.3"),
+            ("neoforge", "1.21.4"),
+        ]);
+        let rungs = ladder(&support, "neoforge", "1.21.1", &matrix());
+        assert_eq!(
+            rungs,
+            vec![
+                (Fit::Connector, None),
+                (Fit::NearVersion, Some("1.21.4".into())),
+                (Fit::ConnectorNear, Some("1.21.3".into())),
+            ]
+        );
+        // Which is the cost model's order, not a hand-kept one.
+        let costs: Vec<u32> = rungs.iter().map(|(f, _)| f.cost("neoforge")).collect();
+        assert!(costs.windows(2).all(|w| w[0] <= w[1]), "{costs:?}");
+    }
+
+    /// A mod whose only build is for a neighbouring patch has somewhere to go,
+    /// and the version to ask for is on the rung. This is the half an install
+    /// used to drop on the floor.
+    #[test]
+    fn a_neighbouring_patch_is_a_rung_and_not_a_dead_end() {
+        let support = support(&[("fabric", "1.21.3")]);
+        assert_eq!(
+            ladder(&support, "fabric", "1.21.1", &empty_matrix()),
+            vec![(Fit::NearVersion, Some("1.21.3".into()))]
+        );
+        // Another family is not a neighbour, so there is genuinely nothing.
+        assert!(ladder(&support, "fabric", "1.20.1", &empty_matrix()).is_empty());
     }
 }

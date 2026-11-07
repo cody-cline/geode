@@ -17,6 +17,7 @@ import type {
   GameVersion,
   GitStatus,
   Forbidden,
+  FolderInstance,
   Group,
   GroupTally,
   InstallReport,
@@ -53,6 +54,7 @@ import type {
   Provider,
   RemoteHost,
   RemoteServer,
+  RetargetReport,
   Schedule,
   SearchQuery,
   SearchResults,
@@ -73,6 +75,8 @@ import type {
   UpdateCandidate,
   UpdateStatus,
   WantedSetting,
+  World,
+  WorldBackup,
 } from "./types";
 
 /** Backend errors arrive as plain strings; normalise them for the toast layer. */
@@ -133,6 +137,27 @@ export const api = {
   deleteInstance: (id: string) => invoke<void>("delete_instance", { id }),
   duplicateInstance: (id: string, name: string) =>
     invoke<Instance>("duplicate_instance", { id, name }),
+  /**
+   * Move an instance to a different Minecraft version or loader, re-pointing
+   * its mods at files built for it.
+   *
+   * `toCopy` says which instance it lands on: `true` a copy, `false` this one,
+   * and `null` leaves it to Geode, which copies whenever there is something a
+   * one-way change would cost — worlds in it, or a server that decides its
+   * version. The report says which happened and why.
+   */
+  retargetInstance: (
+    id: string,
+    loader: string,
+    gameVersion: string,
+    toCopy: boolean | null,
+  ) =>
+    invoke<RetargetReport>("retarget_instance", {
+      id,
+      loader,
+      gameVersion,
+      toCopy,
+    }),
   instanceFolder: (id: string) => invoke<string>("instance_folder", { id }),
   /**
    * Set or clear an instance's icon or banner. `source` is a path on disk; the
@@ -265,6 +290,13 @@ export const api = {
   savePlan: (plan: Plan) => invoke<Plan>("save_plan", { plan }),
   deletePlan: (id: string) => invoke<void>("delete_plan", { id }),
   resolvePlan: (id: string) => invoke<PlanResolution>("resolve_plan", { id }),
+  /**
+   * The same question asked of an installed instance: which loaders and
+   * Minecraft versions could run the mods it already has. Read-only — it
+   * answers and applies nothing.
+   */
+  resolveInstance: (id: string) =>
+    invoke<PlanResolution>("resolve_instance", { id }),
   buildPlan: (
     id: string,
     loader: string,
@@ -344,6 +376,38 @@ export const api = {
    * once, since nothing outside a running server knows a mod's commands.
    */
   serverCommands: (id: string) => invoke<CommandNode[]>("server_commands", { id }),
+  // Worlds. Every one of these but the two listings refuses while the game is
+  // running, because Minecraft holds its world open and only writes level.dat
+  // when it saves. The refusal is the backend's and says so in words, so
+  // nothing here has to repeat the reason.
+  listWorlds: (id: string) => invoke<World[]>("list_worlds", { id }),
+  /**
+   * Change the name the game shows for a world — `LevelName` inside its
+   * `level.dat`. The folder it lives in is deliberately left alone, which is
+   * what Minecraft itself does when a world is renamed in-game.
+   */
+  renameWorld: (id: string, folder: string, name: string) =>
+    invoke<World>("rename_world", { id, folder, name }),
+  copyWorld: (id: string, folder: string, name: string) =>
+    invoke<World>("copy_world", { id, folder, name }),
+  /** Take a world from a zip or a folder. Refused if it holds no `level.dat`. */
+  importWorld: (id: string, path: string) =>
+    invoke<World>("import_world", { id, path }),
+  /**
+   * Delete a world, after backing it up. The backup is not optional and the
+   * one returned is the copy that was kept — tell the player where it is.
+   */
+  deleteWorld: (id: string, folder: string) =>
+    invoke<WorldBackup>("delete_world", { id, folder }),
+  listWorldBackups: (id: string) =>
+    invoke<WorldBackup[]>("list_world_backups", { id }),
+  backUpWorld: (id: string, folder: string) =>
+    invoke<WorldBackup>("back_up_world", { id, folder }),
+  restoreWorld: (id: string, folder: string, name: string) =>
+    invoke<World>("restore_world", { id, folder, name }),
+  deleteWorldBackup: (id: string, folder: string, name: string) =>
+    invoke<void>("delete_world_backup", { id, folder, name }),
+
   // Log files. An instance's and a server's are the same files in different
   // folders, so the two sets of bindings are deliberately identical in shape.
   listInstanceLogs: (id: string) => invoke<LogFile[]>("list_instance_logs", { id }),
@@ -587,6 +651,18 @@ export const api = {
   removeAccount: (id: string) => invoke<Account[]>("remove_account", { id }),
   setActiveAccount: (id: string) =>
     invoke<Account[]>("set_active_account", { id }),
+  /**
+   * The name this instance's account would play under offline, or null when
+   * there is nothing to offer. Asked after a launch of it failed, so playing
+   * offline stays a choice the player makes rather than something Geode does
+   * for them.
+   *
+   * Only ever an answer about the failure just seen: the launch leaves this
+   * behind when it is the sign-in it could not renew, and nothing is left for
+   * a failure that is about anything else.
+   */
+  takeOfflinePlayOffer: (id: string) =>
+    invoke<string | null>("take_offline_play_offer", { id }),
 
   // Java
   detectJava: () => invoke<JavaInstall[]>("detect_java"),
@@ -594,11 +670,19 @@ export const api = {
     invoke<JavaInstall>("install_java", { major }),
 
   // Launch
-  /** `notices` are for after the game is on its way: what an update from the server changed, or why it could not be checked for. */
-  launchInstance: (id: string, accountId?: string) =>
+  /**
+   * `notices` are for after the game is on its way: what an update from the
+   * server changed, or why it could not be checked for.
+   *
+   * `offline` plays as the account's own name and UUID with no sign-in behind
+   * it. Only ever true because the player said so on the dialog
+   * `takeOfflinePlayOffer` raises.
+   */
+  launchInstance: (id: string, accountId?: string, offline = false) =>
     invoke<{ pid: number; instanceId: string; notices: string[] }>("launch_instance", {
       id,
       accountId: accountId ?? null,
+      offline,
     }),
   prepareInstance: (id: string) => invoke<void>("prepare_instance", { id }),
   stopInstance: (id: string) => invoke<boolean>("stop_instance", { id }),
@@ -608,6 +692,14 @@ export const api = {
   // Modpacks
   previewModpack: (path: string) =>
     invoke<PackPreview>("preview_modpack", { path }),
+  /**
+   * The instances inside a folder that is not itself one, so a person who
+   * picked Prism's `instances/` directory is offered its ten rather than
+   * refused. Empty when the folder is an instance or holds none; both leave
+   * `previewModpack` to answer for the folder as it stands.
+   */
+  instancesInFolder: (path: string) =>
+    invoke<FolderInstance[]>("instances_in_folder", { path }),
   /** Makes the instance and reports what it could not fetch beside it. Progress id `import:<instance id>`. */
   importModpack: (path: string, name?: string) =>
     invoke<PackImport>("import_modpack", { path, name: name ?? null }),

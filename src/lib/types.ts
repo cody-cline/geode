@@ -157,6 +157,11 @@ export interface Instance {
   joinedListingClaimed?: boolean;
   /** Added by the backend view layer. */
   running: boolean;
+  /**
+   * How many mods the instance holds: the jars in its `mods/` folder, the ones
+   * turned off included, whether or not Geode knows where any of them came
+   * from. Resource packs and shaders are not in it.
+   */
   modCount: number;
 }
 
@@ -341,6 +346,44 @@ export interface CrashReport {
 
 /** One backup of a server's files. Its name is also its timestamp. */
 export interface BackupInfo {
+  name: string;
+  size: number;
+  createdAt: number;
+}
+
+/**
+ * One singleplayer world in an instance's `saves/` folder.
+ *
+ * `folder` and `name` are two different things and are allowed to disagree:
+ * Minecraft derives the folder from the name once, at creation, and suffixes
+ * it when it is taken, so a world called "New World" can live in
+ * `New World (1)`. `name` is `LevelName`, which is what the game shows;
+ * `folder` is this world's identity for every operation, because two worlds
+ * can share a name and only one can have a folder.
+ */
+export interface World {
+  folder: string;
+  name: string;
+  /** Milliseconds since the epoch — the game's own unit, not seconds. */
+  lastPlayed?: number;
+  /** 0 survival, 1 creative, 2 adventure, 3 spectator. */
+  gameMode?: number;
+  hardcore: boolean;
+  /** The Minecraft version this world was last opened with. */
+  version?: string;
+  size: number;
+  /**
+   * Why this folder is not a world Geode can read. Set for a folder with no
+   * `level.dat`, or one whose `level.dat` does not parse — it is still listed,
+   * because it is sitting in the player's `saves/`.
+   */
+  trouble?: string;
+}
+
+/** A zipped copy of one world, kept outside `.minecraft` beside the instance. */
+export interface WorldBackup {
+  /** The world this is a copy of, by folder name. */
+  world: string;
   name: string;
   size: number;
   createdAt: number;
@@ -636,7 +679,12 @@ export interface PlanTarget {
 }
 
 export interface UnresolvedMod {
-  provider: Provider;
+  /**
+   * Empty for a jar no platform knows — one dropped into an instance's mods
+   * folder by hand. Those have no identity to report, only a name and the
+   * reason nothing could be asked about them.
+   */
+  provider: Provider | "";
   projectId: string;
   name: string;
   reason: string;
@@ -654,6 +702,65 @@ export interface BuildReport {
   instanceName: string;
   installed: string[];
   skipped: string[];
+}
+
+/** One mod now pointing at a file built for an instance's new target. */
+export interface RepointedMod {
+  name: string;
+  /** The file on disk, which is also what its record says. */
+  fileName: string;
+  versionNumber: string;
+  /** A Fabric build, running on (Neo)Forge through Sinytra Connector. */
+  throughConnector: boolean;
+  /**
+   * The Minecraft version this build is for, when it is not the instance's new
+   * one — the neighbouring patch the preview named. Absent is the ordinary
+   * case: a build for the target itself.
+   */
+  viaVersion?: string;
+  /** Dependencies of this mod that did not land, with the reason. */
+  skipped?: string[];
+}
+
+/**
+ * One mod the new target has no file for. Turned off, never deleted — a
+ * version bump that could not find a build is no reason to throw away a mod.
+ */
+export interface StrandedMod {
+  name: string;
+  fileName: string;
+  reason: string;
+  /** The jar is off, so the game will not try to load it. */
+  off: boolean;
+}
+
+/**
+ * One file in `mods/` nothing could be looked up for: a jar added by hand, or
+ * one a server's pack owns. Left exactly as it is, and named rather than
+ * counted as fine.
+ */
+export interface UncheckedFile {
+  fileName: string;
+  reason: string;
+}
+
+/** What re-targeting an instance did. */
+export interface RetargetReport {
+  /** The instance it landed on: the one asked about, or the copy. */
+  instanceId: string;
+  instanceName: string;
+  mcVersion: string;
+  loader: string;
+  loaderVersion: string;
+  /** It landed on a copy, and the instance asked about is exactly as it was. */
+  appliedToCopy: boolean;
+  /** Why a copy was Geode's own choice, when it was. */
+  copiedBecause?: string;
+  repointed: RepointedMod[];
+  stranded: StrandedMod[];
+  unchecked: UncheckedFile[];
+  /** Sinytra Connector and its companions, when the new target needs them. */
+  connector?: string[];
 }
 
 /**
@@ -755,7 +862,6 @@ export interface Account {
   kind: "microsoft" | "offline";
   active: boolean;
   needsReauth: boolean;
-  /** Which launcher an imported session came from. */
 }
 
 export interface DeviceCodeStart {
@@ -1306,6 +1412,18 @@ export interface PackPreview {
   /** Which of the three things Geode can read this is. */
   format: "mrpack" | "curseforge" | "prism";
   needsCurseforgeKey: boolean;
+}
+
+/**
+ * One importable instance inside a folder that is not itself an instance —
+ * Prism's own `instances/` directory, most often. `path` is what an import is
+ * then asked for, so the picker hands it straight back.
+ */
+export interface FolderInstance {
+  path: string;
+  name: string;
+  mcVersion: string;
+  loader: Loader;
 }
 
 // ---------------------------------------------------------------------------

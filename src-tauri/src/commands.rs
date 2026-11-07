@@ -395,6 +395,9 @@ pub struct InstanceView {
     #[serde(flatten)]
     pub instance: Instance,
     pub running: bool,
+    /// How many mods the instance holds: the jars in its `mods/` folder, the
+    /// ones turned off included, whether or not Geode knows where any of them
+    /// came from. Resource packs and shaders are not mods and are not in it.
     pub mod_count: usize,
     /// Absolute paths to the uploaded images, or `None` when none is set or the
     /// file has since gone. Resolved here so the UI never builds a path or
@@ -410,15 +413,17 @@ fn media_path(dir: &std::path::Path, name: &Option<String>) -> Option<String> {
     path.is_file().then(|| path.to_string_lossy().to_string())
 }
 
-fn view(instance: Instance, state: &AppState) -> InstanceView {
+/// Costs one folder read per instance and opens nothing: the mod count is a
+/// count of files. [`instance::content::list`] joins those same files with
+/// what is recorded about each one and would answer it too, but it opens every
+/// jar in the instance for its manifest to do it — right for one instance's
+/// page, and measured at a few hundred times the cost on a screen that builds
+/// a view for every instance there is.
+async fn view(instance: Instance, state: &AppState) -> InstanceView {
     let media = state.paths.instance_media(&instance.id);
     InstanceView {
         running: state.games.is_running(&instance.id),
-        mod_count: instance
-            .content
-            .iter()
-            .filter(|c| c.kind == ContentKind::Mod)
-            .count(),
+        mod_count: instance::content::count(&state.paths, &instance.id, ContentKind::Mod).await,
         icon_path: media_path(&media, &instance.icon),
         banner_path: media_path(&media, &instance.banner),
         instance,
@@ -466,16 +471,16 @@ async fn store_image(dir: &std::path::Path, slot: &str, source: &str) -> Result<
 
 #[tauri::command]
 pub async fn list_instances(state: State<'_, AppState>) -> Result<Vec<InstanceView>> {
-    Ok(instance::list(&state.paths)
-        .await?
-        .into_iter()
-        .map(|i| view(i, &state))
-        .collect())
+    let mut views = Vec::new();
+    for instance in instance::list(&state.paths).await? {
+        views.push(view(instance, &state).await);
+    }
+    Ok(views)
 }
 
 #[tauri::command]
 pub async fn get_instance(state: State<'_, AppState>, id: String) -> Result<InstanceView> {
-    Ok(view(instance::load(&state.paths, &id).await?, &state))
+    Ok(view(instance::load(&state.paths, &id).await?, &state).await)
 }
 
 #[tauri::command]
@@ -500,7 +505,7 @@ pub async fn create_instance(
 
     let created =
         instance::create(&state.paths, name, game_version, loader, loader_version).await?;
-    Ok(view(created, &state))
+    Ok(view(created, &state).await)
 }
 
 #[derive(Debug, Deserialize)]
@@ -551,7 +556,7 @@ pub async fn update_instance(
     }
 
     inst.save(&state.paths).await?;
-    Ok(view(inst, &state))
+    Ok(view(inst, &state).await)
 }
 
 /// Set or clear an instance's icon or banner.
@@ -592,7 +597,7 @@ pub async fn set_instance_image(
         inst.banner = next;
     }
     inst.save(&state.paths).await?;
-    Ok(view(inst, &state))
+    Ok(view(inst, &state).await)
 }
 
 /// The same for a server.
@@ -646,7 +651,74 @@ pub async fn duplicate_instance(
     name: String,
 ) -> Result<InstanceView> {
     let copy = instance::duplicate(&state.paths, &id, name.trim().to_string()).await?;
-    Ok(view(copy, &state))
+    Ok(view(copy, &state).await)
+}
+
+/// Move an instance to a different Minecraft version or loader, re-pointing
+/// every mod it tracks at a file built for the new pair.
+///
+/// `to_copy` is which instance it lands on: `true` for a copy, `false` for
+/// this one, and `null` to leave the choice to Geode — which is a copy
+/// whenever there is something a one-way change would cost. The report says
+/// which happened, what moved, what had to be turned off and what was never
+/// examined.
+#[tauri::command]
+pub async fn retarget_instance(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    loader: String,
+    game_version: String,
+    to_copy: Option<bool>,
+) -> Result<crate::instance::retarget::RetargetReport> {
+    // The game has its mods and its version open, and moving them under it
+    // would mislead the player about what is running at best.
+    if state.games.is_running(&id) {
+        return Err(Error::msg(
+            "Stop the game before changing this instance's Minecraft version or loader",
+        ));
+    }
+    if state.is_launching(&id) {
+        return Err(Error::msg("Wait for the game to finish starting"));
+    }
+
+    let config = state.config().await;
+    let inst = instance::load(&state.paths, &id).await?;
+    let java_override = inst
+        .overrides
+        .java_path
+        .clone()
+        .or_else(|| config.java_path.clone())
+        .map(PathBuf::from);
+
+    let progress = Progress::new(crate::desktop::sink(app), format!("retarget:{id}"));
+    state.register_cancel(progress.id(), progress.cancel_flag());
+
+    // Being unable to read Connector's matrix costs the Connector option, not
+    // the answer: a Fabric-only mod is then reported as having nowhere to go on
+    // a NeoForge target, which is what it has without Connector.
+    let matrix = state.connector.get(&state.http).await.unwrap_or_default();
+
+    let result = crate::instance::retarget::retarget(
+        &state.http,
+        &state.paths,
+        &state.manifests,
+        &matrix,
+        // The same cache the preview filled, so applying a target reads the
+        // file lists it was ranked on rather than asking again for its own.
+        &state.plan_support,
+        &id,
+        &loader,
+        &game_version,
+        to_copy,
+        java_override.as_deref(),
+        config.effective_curseforge_key().as_deref(),
+        &progress,
+    )
+    .await;
+
+    state.clear_cancel(progress.id());
+    finish(&progress, result).await
 }
 
 #[tauri::command]
@@ -1120,7 +1192,7 @@ pub async fn install_modpack(
     match result {
         Ok(missing) if missing.is_empty() => {
             progress.finish().await;
-            Ok(view(inst, &state))
+            Ok(view(inst, &state).await)
         }
         // The instance exists and holds most of the pack, so what needs the
         // user is said through the job rather than returned instead of the
@@ -1134,7 +1206,7 @@ pub async fn install_modpack(
                     missing.join(", ")
                 ))
                 .await;
-            Ok(view(inst, &state))
+            Ok(view(inst, &state).await)
         }
         Err(e) => {
             progress.fail(&e.to_string()).await;
@@ -1231,7 +1303,7 @@ pub async fn apply_pack_update(
         Ok(problems) if problems.is_empty() => {
             progress.finish().await;
             Ok(PackImport {
-                instance: view(inst, &state),
+                instance: view(inst, &state).await,
                 problems,
             })
         }
@@ -1244,7 +1316,7 @@ pub async fn apply_pack_update(
             );
             progress.fail(&detail).await;
             Ok(PackImport {
-                instance: view(inst, &state),
+                instance: view(inst, &state).await,
                 problems,
             })
         }
@@ -1471,7 +1543,7 @@ pub async fn resolve_plan(
 
     let result = crate::plan::resolve::resolve(
         &state.http,
-        &plan,
+        &plan.mods,
         &matrix,
         &state.plan_support,
         config.effective_curseforge_key().as_deref(),
@@ -1490,6 +1562,43 @@ pub async fn resolve_plan(
             Err(e)
         }
     }
+}
+
+/// The same question, asked of an installed instance: which loaders and
+/// Minecraft versions could run the mods it already has, and what would each
+/// one cost.
+///
+/// Read-only. It applies nothing — no download, no rename, and nothing written
+/// to `instance.json`.
+#[tauri::command]
+pub async fn resolve_instance(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<crate::plan::resolve::Resolution> {
+    let inst = instance::load(&state.paths, &id).await?;
+    let config = state.config().await;
+    let progress = Progress::new(crate::desktop::sink(app), format!("replan:{id}"));
+    state.register_cancel(progress.id(), progress.cancel_flag());
+
+    // As above: an unreadable Connector matrix costs the Connector option, not
+    // the answer.
+    let matrix = state.connector.get(&state.http).await.unwrap_or_default();
+
+    let result = instance::replan::resolve(
+        &state.http,
+        &state.paths,
+        &inst,
+        &state.jars,
+        &matrix,
+        &state.plan_support,
+        config.effective_curseforge_key().as_deref(),
+        &progress,
+    )
+    .await;
+
+    state.clear_cancel(progress.id());
+    finish(&progress, result).await
 }
 
 /// Resolve a plan and find the target that was asked for, as its index into
@@ -1519,7 +1628,7 @@ async fn resolved_target(
         let matrix = state.connector.get(&state.http).await.unwrap_or_default();
         let resolution = crate::plan::resolve::resolve(
             &state.http,
-            plan,
+            &plan.mods,
             &matrix,
             &state.plan_support,
             cf_key,
@@ -1865,6 +1974,165 @@ pub async fn create_server_from_plan(
         Ok(report) => {
             progress.finish().await;
             Ok(report)
+        }
+        Err(e) => {
+            progress.fail(&e.to_string()).await;
+            Err(e)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Worlds
+// ---------------------------------------------------------------------------
+
+/// Refuse a world operation while this instance's launch is still preparing.
+///
+/// [`instance::worlds`] itself refuses while a game is *running*, which is the
+/// rule that must never be skipped and so lives where no caller — including
+/// the headless host — can go round it. This is the window just before that: a
+/// launch that has not spawned a process yet is about to open the world, and a
+/// copy begun now finishes underneath it. Only the command layer can see it,
+/// because only the command layer has the app state the claim is held in.
+///
+/// Worded like [`instance::worlds::only_when_stopped`] on purpose, since the
+/// two appear on the same screen: an imperative that says what to do first, and
+/// then the reason as its own sentence. A statement of fact — "no backup called
+/// …" — is the other register, a lowercase fragment with no full stop, which is
+/// what nearly every refusal in this codebase is.
+fn not_while_starting(state: &AppState, id: &str) -> Result<()> {
+    if state.is_launching(id) {
+        return Err(Error::msg(
+            "Wait for the game to finish starting. It is about to open this instance's worlds.",
+        ));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn list_worlds(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<instance::worlds::World>> {
+    instance::worlds::list(&state.paths, &id).await
+}
+
+/// Change the name Minecraft shows for a world. The folder it lives in is left
+/// alone — see [`instance::worlds::rename`] for why those are two things.
+#[tauri::command]
+pub async fn rename_world(
+    state: State<'_, AppState>,
+    id: String,
+    folder: String,
+    name: String,
+) -> Result<instance::worlds::World> {
+    not_while_starting(&state, &id)?;
+    instance::worlds::rename(&state.paths, &state.games, &id, &folder, &name).await
+}
+
+#[tauri::command]
+pub async fn copy_world(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    folder: String,
+    name: String,
+) -> Result<instance::worlds::World> {
+    not_while_starting(&state, &id)?;
+    let progress = Progress::new(crate::desktop::sink(app), format!("world-copy:{id}"));
+    let result =
+        instance::worlds::copy(&state.paths, &state.games, &id, &folder, &name, &progress).await;
+    finish(&progress, result).await
+}
+
+#[tauri::command]
+pub async fn list_world_backups(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<instance::worlds::WorldBackup>> {
+    instance::worlds::list_backups(&state.paths, &id).await
+}
+
+#[tauri::command]
+pub async fn back_up_world(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    folder: String,
+) -> Result<instance::worlds::WorldBackup> {
+    not_while_starting(&state, &id)?;
+    let progress = Progress::new(crate::desktop::sink(app), format!("world-backup:{id}"));
+    let result =
+        instance::worlds::back_up(&state.paths, &state.games, &id, &folder, &progress).await;
+    finish(&progress, result).await
+}
+
+#[tauri::command]
+pub async fn restore_world(
+    state: State<'_, AppState>,
+    id: String,
+    folder: String,
+    name: String,
+) -> Result<instance::worlds::World> {
+    not_while_starting(&state, &id)?;
+    instance::worlds::restore(&state.paths, &state.games, &id, &folder, &name).await
+}
+
+#[tauri::command]
+pub async fn delete_world_backup(
+    state: State<'_, AppState>,
+    id: String,
+    folder: String,
+    name: String,
+) -> Result<()> {
+    instance::worlds::delete_backup(&state.paths, &id, &folder, &name).await
+}
+
+/// Take a world from a zip or a folder the player picked.
+#[tauri::command]
+pub async fn import_world(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    path: String,
+) -> Result<instance::worlds::World> {
+    not_while_starting(&state, &id)?;
+    let progress = Progress::new(crate::desktop::sink(app), format!("world-import:{id}"));
+    let result = instance::worlds::import(
+        &state.paths,
+        &state.games,
+        &id,
+        std::path::Path::new(&path),
+        &progress,
+    )
+    .await;
+    finish(&progress, result).await
+}
+
+/// Delete a world, after backing it up.
+///
+/// The backup is not optional and the returned one is what the screen tells
+/// the player it kept; [`instance::worlds::delete`] has the reasoning.
+#[tauri::command]
+pub async fn delete_world(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    folder: String,
+) -> Result<instance::worlds::WorldBackup> {
+    not_while_starting(&state, &id)?;
+    let progress = Progress::new(crate::desktop::sink(app), format!("world-delete:{id}"));
+    let result =
+        instance::worlds::delete(&state.paths, &state.games, &id, &folder, &progress).await;
+    finish(&progress, result).await
+}
+
+/// Close out a job in the dock, whichever way it went.
+async fn finish<T>(progress: &Progress, result: Result<T>) -> Result<T> {
+    match result {
+        Ok(value) => {
+            progress.finish().await;
+            Ok(value)
         }
         Err(e) => {
             progress.fail(&e.to_string()).await;
@@ -3241,12 +3509,9 @@ pub async fn begin_microsoft_login(
     state: State<'_, AppState>,
 ) -> Result<crate::auth::DeviceCodeStart> {
     let config = state.config().await;
-    let client_id = config.effective_client_id().ok_or_else(|| {
-        Error::msg(
-            "Microsoft sign-in is unavailable in this copy of Geode. Signing \
-             in through another launcher on this machine still works.",
-        )
-    })?;
+    let client_id = config
+        .effective_client_id()
+        .ok_or_else(|| Error::msg("Microsoft sign-in is unavailable in this copy of Geode."))?;
     crate::auth::begin_device_code(&state.http, &client_id).await
 }
 
@@ -3273,6 +3538,7 @@ pub async fn complete_microsoft_login(
         mc_access_token: Some(token),
         mc_expires_at: expires_at,
         msa_refresh_token: msa.refresh_token,
+        msa_rejected: false,
         added_at: chrono::Utc::now().timestamp(),
         source_path: None,
         source_label: None,
@@ -3298,9 +3564,7 @@ pub async fn add_offline_account(
     if !file.owns_the_game() {
         return Err(Error::msg(
             "Add a Microsoft account first. An offline account plays a copy of \
-             Minecraft you already own, so Geode asks once who owns it — \
-             signing in with Microsoft does it, and so does importing a \
-             session from another launcher on this machine.",
+             Minecraft you already own, so Geode asks once who owns it.",
         ));
     }
 
@@ -3348,6 +3612,24 @@ pub async fn set_active_account(
     file.active = Some(id);
     file.save(&state.paths).await?;
     Ok(file.views())
+}
+
+/// The name this instance's account would play under offline, when its launch
+/// just failed at the sign-in, and nothing otherwise.
+///
+/// Asked after a launch failed, so the choice is the player's rather than a
+/// fallback Geode made quietly on their behalf. The answer comes from the
+/// launch itself — [`launch_instance`] leaves it on the way out of the one step
+/// playing offline is the way past, and this takes it. Nothing here reads error
+/// text, and nothing here guesses from the account either: an instance that was
+/// already running fails before a sign-in is attempted, and used to be told its
+/// sign-in could not be renewed.
+#[tauri::command]
+pub async fn take_offline_play_offer(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Option<String>> {
+    Ok(state.take_offline_play_offer(&id))
 }
 
 // ---------------------------------------------------------------------------
@@ -3839,7 +4121,12 @@ pub async fn launch_instance(
     state: State<'_, AppState>,
     id: String,
     account_id: Option<String>,
+    offline: bool,
 ) -> Result<LaunchResult> {
+    // Before the first thing that can refuse: whatever an earlier launch left
+    // for the window to pick up is not an answer about this one.
+    state.clear_offline_offer();
+
     if state.games.is_running(&id) {
         return Err(Error::msg("that instance is already running"));
     }
@@ -3856,18 +4143,41 @@ pub async fn launch_instance(
 
     // Resolve the account first: a sign-in problem should surface before we
     // spend minutes downloading.
-    let session = crate::auth::store::session_for(
-        &state.http,
-        &state.paths,
-        config.effective_client_id().as_deref(),
-        account_id.as_deref(),
-    )
-    .await
-    .inspect_err(|e| {
-        let progress = progress.clone();
-        let msg = e.to_string();
-        tauri::async_runtime::spawn(async move { progress.fail(&msg).await });
-    })?;
+    //
+    // `offline` is a choice the player made on a dialog, never something
+    // reached by falling back: a launch that quietly played offline when a
+    // renewal failed would tell somebody they are signed in when they are
+    // not, and leave them wondering why no server will have them.
+    let session = match if offline {
+        crate::auth::store::offline_session_for(&state.paths, account_id.as_deref()).await
+    } else {
+        crate::auth::store::session_for(
+            &state.http,
+            &state.paths,
+            config.effective_client_id().as_deref(),
+            account_id.as_deref(),
+        )
+        .await
+    } {
+        Ok(session) => session,
+        Err(e) => {
+            // The one failure playing offline is the way past, so the offer is
+            // left here rather than worked out afterwards from the account's
+            // state: this is the step that could not reach Microsoft, and
+            // every other way a launch fails is about something else. Not
+            // offered to somebody who already chose to play offline — this is
+            // where they chose it.
+            if !offline {
+                if let Ok(Some(username)) =
+                    crate::auth::store::offline_offer(&state.paths, account_id.as_deref()).await
+                {
+                    state.offer_offline_play(id.clone(), username);
+                }
+            }
+            progress.fail(&e.to_string()).await;
+            return Err(e);
+        }
+    };
 
     // Before the Java and version work: an update can move the instance to
     // another Minecraft or loader version, and that is the one to install.
@@ -4027,6 +4337,14 @@ pub async fn preview_modpack(path: String) -> Result<instance::modpack::PackPrev
     share::pack::preview(&PathBuf::from(path)).await
 }
 
+/// The instances inside a folder that is not itself one, for the picker that
+/// offers them. Empty when the folder is an instance or holds none, which both
+/// leave the import to answer for the folder as it stands.
+#[tauri::command]
+pub async fn instances_in_folder(path: String) -> Result<Vec<instance::prism::Found>> {
+    Ok(instance::prism::instances_inside(&PathBuf::from(path)).await)
+}
+
 /// Import a pack file, and report what it could not fetch *beside* the
 /// instance rather than instead of it.
 ///
@@ -4088,7 +4406,7 @@ pub async fn import_modpack(
         Ok(missing) if missing.is_empty() => {
             progress.finish().await;
             Ok(PackImport {
-                instance: view(inst, &state),
+                instance: view(inst, &state).await,
                 problems: Vec::new(),
             })
         }
@@ -4105,7 +4423,7 @@ pub async fn import_modpack(
             );
             progress.fail(&detail).await;
             Ok(PackImport {
-                instance: view(inst, &state),
+                instance: view(inst, &state).await,
                 problems: vec![detail],
             })
         }
@@ -4925,7 +5243,7 @@ pub async fn relink_joined_instance(
     link: share::link::Link,
 ) -> Result<InstanceView> {
     let inst = relink(&state.paths, &id, link).await?;
-    Ok(view(inst, &state))
+    Ok(view(inst, &state).await)
 }
 
 /// A join that got as far as creating the instance.
@@ -4981,7 +5299,7 @@ pub async fn join_server(
                 progress.fail(&problems.join("; ")).await;
             }
             Ok(JoinOutcome {
-                instance: view(inst, &state),
+                instance: view(inst, &state).await,
                 problems,
             })
         }
@@ -5221,6 +5539,48 @@ mod tests {
             .nth(1)
             .unwrap_or_else(|| panic!("{signature} is not in commands.rs"));
         &after[..after.find("\n}\n").unwrap_or(after.len())]
+    }
+
+    /// The offline-play dialog has to belong to the failure it appears beside.
+    ///
+    /// Two shapes, read the way the update tests below read theirs, because
+    /// `launch_instance` takes an `AppHandle` a unit test has no window for.
+    /// The offer slot is cleared before the first thing that can refuse, and
+    /// filled only in the arm where resolving the account failed. Both halves
+    /// matter: pressing Play on an instance that is already running fails
+    /// above the sign-in entirely, and used to be answered with a dialog
+    /// headed "Geode could not renew Notch's Microsoft sign-in" — two
+    /// contradictory reasons on screen at once.
+    #[test]
+    fn a_launch_offers_offline_play_only_for_the_sign_in_it_could_not_renew() {
+        let body = body_of("pub async fn launch_instance(");
+
+        let cleared = body
+            .find("clear_offline_offer()")
+            .expect("launch_instance no longer clears an earlier launch's offer");
+        let refuses = body
+            .find("is_running(")
+            .expect("launch_instance no longer refuses a running instance");
+        assert!(
+            cleared < refuses,
+            "a launch can refuse before clearing the offer, so a dialog about a sign-in can \
+             appear next to an error about something else",
+        );
+
+        let signing_in = body
+            .find("session_for(")
+            .expect("launch_instance no longer resolves the account");
+        let offered = body
+            .find("offer_offline_play(")
+            .expect("nothing leaves an offline-play offer, so the dialog can never be raised");
+        let next_step = body
+            .find("bring_up_to_date(")
+            .expect("launch_instance no longer updates from the server");
+        assert!(
+            signing_in < offered && offered < next_step,
+            "the offer is left somewhere other than the sign-in's own failure, so it answers \
+             for failures that are about something else",
+        );
     }
 
     /// A version this build cannot verify is a version it must not fetch, and

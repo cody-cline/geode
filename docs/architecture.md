@@ -10,7 +10,7 @@ the authority — when this document and a module disagree, the module is right.
 
 ```
 React in the OS webview          src/
-    │  invoke("command_name", args)          162 #[tauri::command] fns
+    │  invoke("command_name", args)          166 #[tauri::command] fns
     │  listen("topic", handler)              events pushed the other way
     ▼
 Rust core                        src-tauri/src/
@@ -134,7 +134,23 @@ library with no webview in its dependency tree at all.
   the export dialog is shown before anything is written — and the `Selection`
   of file groups every writer takes), `logs.rs`,
   `multiplayer.rs` (the player's own `servers.dat`, added to without losing a
-  byte of it — the same rule as `server/properties.rs`, in binary).
+  byte of it — the same rule as `server/properties.rs`, in binary),
+  `replan.rs` (asking the plan resolver which loader and Minecraft version an
+  installed instance's mods could run on, which applies nothing), `retarget.rs`
+  (actually moving it there: each mod's file found through `plan/build.rs`, a
+  mod with none turned off rather than deleted, a jar nothing can be looked up
+  for named rather than assumed, and a copy by default when there are worlds to
+  lose), and `worlds.rs` (the `saves/` folder: listing, importing, copying,
+  renaming, backing up and deleting a world) with `nbt.rs`, the byte-level NBT
+  walk it and `multiplayer.rs` share. A world's folder name and its `LevelName`
+  are two different things — the game derives the folder once and thereafter
+  changes only the name — so a rename writes `LevelName` and leaves the folder
+  alone, and the screen shows both. Every operation that reads or writes a
+  world refuses while the instance is running, because Minecraft holds the
+  world open and writes `level.dat` only when it saves; a server can be asked
+  to flush first, a client cannot be asked anything. And unlike a server's, a
+  world backup is the *whole* world: none of it is re-downloadable, so
+  `server/backup.rs`'s thinning rule deliberately does not apply.
 - **`connector.rs`** is Sinytra Connector support — running Fabric mods on
   Forge/NeoForge. The canonical example of reading support from what upstream
   actually publishes, as *pairs*, rather than trusting the union of two arrays.
@@ -143,6 +159,16 @@ library with no webview in its dependency tree at all.
   way to sign in: Geode used to adopt a live session from another launcher on
   the machine, which existed solely because signing in needed an application id
   Mojang had not yet approved, and went when that approval arrived.
+  Two things in here are about identity rather than sign-in. A sign-in that
+  cannot be renewed can still be played *as itself* — `offline_session` keeps
+  the account's own UUID, because Minecraft knows a player by UUID and a
+  world's character lives at `playerdata/<uuid>.dat`, so adding an offline
+  account instead hands you a name-derived UUID and a stranger in your own
+  world. It is never reached by falling back; the player is asked. And
+  `refresh_msa` keeps "Microsoft says this grant is gone" (`invalid_grant`,
+  the one thing that marks the account) apart from "Geode could not reach
+  Microsoft" (a 5xx, a timeout, no wifi — which changes nothing on disk),
+  because collapsing the two signs people out over a blip.
 
 ## Content: `providers/`
 
@@ -298,8 +324,8 @@ React 19 + TypeScript + Vite, zustand for state, CSS modules for styling.
   tab.
 - **Views** in `views/`: `Library`, `Browse`, `Settings`, `Plans`, `PlanView`,
   `PlanPacks`, `Servers`, `ServerView`, `InstanceView`. Instance tabs are files
-  in `views/instance/` (`ContentTab`, `GraphTab`, `LogsTab`, `PackTab`,
-  `SettingsTab`). A server's are not, mostly: `ServerView` renders console,
+  in `views/instance/` (`ContentTab`, `WorldsTab`, `GraphTab`, `LogsTab`,
+  `PackTab`, `SettingsTab`). A server's are not, mostly: `ServerView` renders console,
   automation and settings inline, which is why it is large, and only `ContentTab`
   and `Properties` live in `views/server/` — plus `ShareTab`, the admin's
   sharing screen, and `PlayersTab`, which shows who is online and manages the

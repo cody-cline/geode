@@ -621,6 +621,39 @@ pub fn content_dir(paths: &Paths, instance_id: &str, kind: ContentKind) -> PathB
     paths.game_dir(instance_id).join(kind.folder())
 }
 
+/// How many files of one kind an instance holds, counted off the folder alone.
+///
+/// The same files [`list`] would return, for a caller that wants only the
+/// number: a jar nobody kept a record for is one of them, a record whose file
+/// has gone is not, and a file that is turned off is still a file the instance
+/// holds. The provenance records are not the count — counting those is what
+/// made a library card say 53 mods for a folder of 57 jars.
+///
+/// What it leaves out is the expensive half of a listing: every jar opened and
+/// read for its manifest and its dependency edges, which a count does not need
+/// and a screen that builds a view per instance cannot afford.
+///
+/// Best-effort, like the rest of reading a folder here: a directory that
+/// cannot be read counts nothing, since the alternative is a whole library
+/// screen failing over one instance.
+pub async fn count(paths: &Paths, instance_id: &str, kind: ContentKind) -> usize {
+    let Ok(mut entries) = tokio::fs::read_dir(content_dir(paths, instance_id, kind)).await else {
+        return 0;
+    };
+    let mut found = 0;
+    // The name first, because it is already in hand and rules out most of a
+    // folder; only what the name admits costs a look at the kind of entry it is.
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if !is_content_file(&entry.file_name().to_string_lossy(), kind) {
+            continue;
+        }
+        if entry.file_type().await.is_ok_and(|t| t.is_file()) {
+            found += 1;
+        }
+    }
+    found
+}
+
 /// Resolve a user-supplied filename inside a content folder, rejecting anything
 /// that tries to escape it.
 fn resolve_in(dir: &Path, file: &str) -> Result<PathBuf> {
@@ -1524,5 +1557,79 @@ mod tests {
         }];
         link(&mut items, &[None, None], &records);
         assert_eq!(items[1].required_by, vec!["mod.jar.disabled"]);
+    }
+
+    /// What a library card's "53 mods" is counting. It is the folder, not the
+    /// provenance records: a jar dragged in by hand has no record and is still
+    /// a mod the instance holds, a record whose file has gone is not one, and
+    /// a turned-off jar is. Counting the records is what made a card read 53
+    /// for an instance holding 57 jars.
+    ///
+    /// Proved against [`list_in`] rather than against a number typed here, so
+    /// the count and the list the instance's own page shows cannot come to
+    /// disagree about what a mod is.
+    #[tokio::test]
+    async fn the_mod_count_is_the_folder_and_not_the_records() {
+        let scratch = Scratch::new("count");
+        let mods = content_dir(&scratch.paths, "i", ContentKind::Mod);
+        tokio::fs::create_dir_all(&mods).await.unwrap();
+        for name in [
+            "jei.jar",
+            "sodium.jar",
+            // No record for these two: dropped in from a download.
+            "handdropped.jar",
+            "lithium.jar",
+            // Turned off is still held.
+            "iris.jar.disabled",
+            // Neither of these is a mod.
+            "notes.txt",
+            "config.toml",
+        ] {
+            tokio::fs::write(mods.join(name), b"x").await.unwrap();
+        }
+        // packwiz's index sits in the mods folder and is not a mod either.
+        tokio::fs::create_dir_all(mods.join(".index")).await.unwrap();
+
+        // A resource pack is not a mod, and neither is a record for a file
+        // that has since been deleted outside the launcher.
+        let packs = content_dir(&scratch.paths, "i", ContentKind::ResourcePack);
+        tokio::fs::create_dir_all(&packs).await.unwrap();
+        tokio::fs::write(packs.join("faithful.zip"), b"x").await.unwrap();
+        let records = vec![
+            record("jei.jar", ContentKind::Mod, "AAA", &[]),
+            record("sodium.jar", ContentKind::Mod, "BBB", &[]),
+            record("iris.jar", ContentKind::Mod, "CCC", &[]),
+            record("deleted.jar", ContentKind::Mod, "DDD", &[]),
+            record("faithful.zip", ContentKind::ResourcePack, "EEE", &[]),
+        ];
+
+        let mods_held = count(&scratch.paths, "i", ContentKind::Mod).await;
+        assert_eq!(mods_held, 5, "every jar in mods/, and only those");
+        // The "53 mods for 57 jars" shape, so this test is not passing by a
+        // coincidence between the two numbers.
+        assert_ne!(
+            records.iter().filter(|r| r.kind == ContentKind::Mod).count(),
+            mods_held,
+            "the records and the folder have to disagree here or nothing is proved"
+        );
+        assert_eq!(
+            count(&scratch.paths, "i", ContentKind::ResourcePack).await,
+            1,
+            "resource packs are counted as resource packs, not as mods"
+        );
+
+        let jars = crate::instance::jar::MetaCache::new();
+        let listed = list_in(&mods, &records, ContentKind::Mod, &jars)
+            .await
+            .unwrap();
+        assert_eq!(
+            listed.len(),
+            mods_held,
+            "the count and the instance's own list must mean the same thing"
+        );
+        assert!(
+            listed.iter().any(|i| i.file_name == "handdropped.jar"),
+            "the untracked jar is the one the records would have missed"
+        );
     }
 }

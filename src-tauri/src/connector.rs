@@ -181,6 +181,13 @@ pub async fn support_for(
 ///
 /// Each companion is resolved against the instance's own Minecraft version and
 /// loader, so this stays correct as those projects publish new builds.
+///
+/// One failure here is an answer and the rest are not, and the difference is
+/// load-bearing for [`crate::instance::retarget`]: a project in the stack that
+/// publishes nothing for this pair is [`Error::Unpublished`], while a provider
+/// that did not answer, a download that dropped and a cancellation are the
+/// errors they already were. A Fabric mod is turned off over the first and left
+/// alone over the others.
 pub async fn ensure_stack(
     client: &reqwest::Client,
     paths: &crate::paths::Paths,
@@ -218,7 +225,11 @@ pub async fn ensure_stack(
         .await?;
 
         let Some(best) = crate::install::content::pick_best(&versions) else {
-            return Err(Error::msg(format!(
+            // The file list came back and holds nothing for this pair, which is
+            // as much an answer as the support matrix is — said in the variant
+            // that means that, because a caller turns somebody's mod off over
+            // it.
+            return Err(Error::Unpublished(format!(
                 "{} has no build for Minecraft {} on {}",
                 project.name,
                 instance.mc_version,

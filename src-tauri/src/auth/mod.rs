@@ -16,7 +16,7 @@ pub mod store;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::error::{Error, Result};
+use crate::error::{Context, Error, Result};
 
 const DEVICE_CODE_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode";
 const TOKEN_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
@@ -199,6 +199,20 @@ pub async fn poll_device_code(
     }
 }
 
+/// Renew a Microsoft sign-in.
+///
+/// The two ways this fails are not the same fact and must never be collapsed
+/// into one error, because a caller acts differently on each:
+///
+/// * [`Error::AuthExpired`] means Microsoft answered, and the answer was that
+///   this grant is gone — revoked, expired, or signed out somewhere else.
+///   That is a verdict on the account, and only a new sign-in fixes it.
+/// * Anything else means Geode never got an answer: no network, DNS, a
+///   timeout, a 5xx, a 429, a captive portal. It says nothing at all about
+///   the token, which may well work again in ten minutes.
+///
+/// This used to return `AuthExpired` for every non-success status, which made
+/// a Microsoft outage indistinguishable from a revoked token.
 pub async fn refresh_msa(
     client: &reqwest::Client,
     client_id: &str,
@@ -213,13 +227,41 @@ pub async fn refresh_msa(
             ("scope", SCOPE),
         ])
         .send()
-        .await?;
+        .await
+        .ctx("could not reach Microsoft to renew this sign-in")?;
 
-    if !resp.status().is_success() {
-        return Err(Error::AuthExpired);
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .ctx("could not read Microsoft's answer while renewing this sign-in")?;
+
+    if !status.is_success() {
+        return Err(refresh_refusal(status, &text));
     }
-    let t: TokenResponse = resp.json().await?;
+    let t: TokenResponse =
+        serde_json::from_str(&text).map_err(|e| Error::json("token response", e))?;
     Ok(to_msa_tokens(t))
+}
+
+/// What a non-success answer from the token endpoint actually means.
+///
+/// `invalid_grant` is the one authoritative "this token is finished" in RFC
+/// 6749, and Microsoft returns it with a 4xx. Everything else — a 5xx, a 429,
+/// a body that is not even JSON, `invalid_client` (this build's own problem,
+/// not the player's) — is read as Microsoft not having answered the question,
+/// so the account is left alone. Erring this way round is deliberate: being
+/// told to sign in again when the token was fine is an annoyance, while
+/// marking a good account because a server wobbled signs somebody out until
+/// they notice.
+fn refresh_refusal(status: reqwest::StatusCode, body: &str) -> Error {
+    if status.is_client_error() && oauth_error_code(body).as_deref() == Some("invalid_grant") {
+        return Error::AuthExpired;
+    }
+    Error::msg(format!(
+        "Microsoft could not renew this sign-in right now ({status}). {}",
+        describe_oauth_error(body)
+    ))
 }
 
 fn to_msa_tokens(t: TokenResponse) -> MsaTokens {
@@ -242,15 +284,45 @@ pub(crate) fn oauth_error_code(body: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// What an OAuth endpoint said went wrong, in something a player can read.
+///
+/// Only ever from the shape these endpoints promise: a JSON object with an
+/// `error` code, and usually an `error_description` beside it. The description
+/// is genuinely worth passing on — "AADSTS700082: the refresh token has
+/// expired" is the whole answer — so it is, down to its first line, which is
+/// the sentence; the rest is a trace id and a timestamp.
+///
+/// Anything else is not read out. This used to put 300 characters of the body
+/// in, and a 5xx from Microsoft is frequently an HTML page, so the toast a
+/// player saw was markup: it said nothing and looked broken. Error text here is
+/// user-facing copy, and a body that is not the documented shape has nothing in
+/// it to quote — so it says that, and what to do about it.
 pub(crate) fn describe_oauth_error(body: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|v| {
-            v.get("error_description")
-                .and_then(|d| d.as_str())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| body.chars().take(300).collect())
+    let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
+    let code = parsed
+        .as_ref()
+        .and_then(|v| v.get("error"))
+        .and_then(|e| e.as_str());
+    let Some(code) = code else {
+        return "Microsoft did not say why, which is usually temporary — try again in a few \
+                minutes."
+            .to_string();
+    };
+
+    let described = parsed
+        .as_ref()
+        .and_then(|v| v.get("error_description"))
+        .and_then(|d| d.as_str())
+        .and_then(|d| d.lines().next())
+        .map(str::trim)
+        .filter(|d| !d.is_empty());
+
+    match described {
+        // Microsoft's own sentence, bounded: it is copy on a screen, not a log
+        // line, and nothing says how long one of these can be.
+        Some(d) => d.chars().take(300).collect(),
+        None => format!("Microsoft called it '{code}'."),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -405,8 +477,7 @@ pub async fn minecraft_session(
     // `docs/releasing.md` for what actually causes it.
     if resp.status() == reqwest::StatusCode::FORBIDDEN {
         return Err(Error::msg(
-            "Microsoft sign-in is unavailable in this copy of Geode. Signing \
-             in through another launcher on this machine still works.",
+            "Microsoft sign-in is unavailable in this copy of Geode.",
         ));
     }
     if !resp.status().is_success() {
@@ -554,5 +625,84 @@ mod tests {
     fn offline_uuid_is_stable() {
         assert_eq!(offline_uuid("Steve"), offline_uuid("Steve"));
         assert_ne!(offline_uuid("Steve"), offline_uuid("Alex"));
+    }
+
+    /// Microsoft's own verdict: this grant is gone and nothing but a fresh
+    /// sign-in brings it back.
+    #[test]
+    fn microsoft_saying_the_grant_is_gone_is_a_sign_in_to_redo() {
+        let body = r#"{"error":"invalid_grant","error_description":"AADSTS700082: The refresh token has expired."}"#;
+        assert!(matches!(
+            refresh_refusal(reqwest::StatusCode::BAD_REQUEST, body),
+            Error::AuthExpired
+        ));
+    }
+
+    /// The bug this separation exists for. None of these is Microsoft saying
+    /// no — they are Microsoft not answering, or answering about something
+    /// other than the player's token — and treating any of them as a verdict
+    /// would sign somebody out over a wifi blip.
+    #[test]
+    fn microsoft_having_a_bad_day_is_not_a_verdict_on_the_account() {
+        let cases: [(u16, &str); 5] = [
+            (500, r#"{"error":"temporarily_unavailable"}"#),
+            (503, "<html><body>Service Unavailable</body></html>"),
+            (429, r#"{"error":"slow_down"}"#),
+            // The application id, not the player: nothing they can re-sign to fix.
+            (400, r#"{"error":"invalid_client"}"#),
+            (502, ""),
+        ];
+        for (code, body) in cases {
+            let status = reqwest::StatusCode::from_u16(code).unwrap();
+            assert!(
+                !matches!(refresh_refusal(status, body), Error::AuthExpired),
+                "HTTP {code} was read as Microsoft refusing the account"
+            );
+        }
+    }
+
+    /// What a player reads when a sign-in fails. An OAuth endpoint's own
+    /// description is the useful half and goes through; a body that is not one
+    /// is not quoted at a person, because a 503 from Microsoft is an HTML page
+    /// and 300 characters of it made the toast a sheet of markup.
+    #[test]
+    fn only_a_real_oauth_error_is_read_out_to_the_player() {
+        // The shape these endpoints promise: the sentence, without the trace
+        // id and timestamp Microsoft appends on the lines below it.
+        assert_eq!(
+            describe_oauth_error(
+                "{\"error\":\"invalid_grant\",\"error_description\":\"AADSTS700082: The refresh \
+                 token has expired.\\r\\nTrace ID: 0000\\r\\nTimestamp: now\"}"
+            ),
+            "AADSTS700082: The refresh token has expired.",
+        );
+        // A code with no description still says something specific.
+        assert_eq!(
+            describe_oauth_error(r#"{"error":"temporarily_unavailable"}"#),
+            "Microsoft called it 'temporarily_unavailable'.",
+        );
+
+        for body in [
+            "<html><head><title>503</title></head><body>Service Unavailable</body></html>",
+            "",
+            "null",
+            r#"{"error_description":"no code beside it"}"#,
+            r#"{"error":{"code":5}}"#,
+        ] {
+            let said = describe_oauth_error(body);
+            assert!(
+                !said.contains('<') && !said.contains("no code beside it"),
+                "a response body reached a player's screen: {said}"
+            );
+            assert!(said.contains("try again"), "{said}");
+        }
+
+        // And however long Microsoft's own sentence is, what lands on screen
+        // is bounded.
+        let long = format!(
+            "{{\"error\":\"invalid_grant\",\"error_description\":\"{}\"}}",
+            "a".repeat(900)
+        );
+        assert_eq!(describe_oauth_error(&long).chars().count(), 300);
     }
 }

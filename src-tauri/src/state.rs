@@ -84,6 +84,18 @@ pub struct AppState {
     /// launch spends the time before that updating from the server and
     /// downloading — rewriting the very files a second launch would read.
     launching: Mutex<HashSet<String>>,
+    /// The offline-play offer a launch's own sign-in failure left behind,
+    /// until the window takes it.
+    ///
+    /// Parked here for the reason `pending_join` below is: the one place that
+    /// knows this is worth offering is the step that failed, and the window
+    /// comes and takes it afterwards. It used to be asked of the account's
+    /// state instead, which answers "this account's token is stale" and not
+    /// "this is what went wrong just now" — so pressing Play on an instance
+    /// that was already running, which fails before a sign-in is attempted at
+    /// all, put a dialog about renewing a sign-in on screen beside an error
+    /// about something else entirely.
+    offline_offer: Mutex<Option<OfflineOffer>>,
     /// The latest `geode://join` link, validated and normalised, until the
     /// window takes it.
     ///
@@ -115,6 +127,7 @@ impl AppState {
             config: tokio::sync::RwLock::new(config),
             cancels: Mutex::new(HashMap::new()),
             launching: Mutex::new(HashSet::new()),
+            offline_offer: Mutex::new(None),
             pending_join: Mutex::new(None),
             share: Default::default(),
         }
@@ -246,6 +259,58 @@ impl AppState {
         }
         what
     }
+    /// Leave an offline-play offer for the window: this instance's launch could
+    /// not renew `username`'s sign-in, and playing offline is the way past it.
+    pub fn offer_offline_play(&self, instance_id: String, username: String) {
+        if let Ok(mut slot) = self.offline_offer.lock() {
+            *slot = Some(OfflineOffer {
+                instance_id,
+                username,
+            });
+        }
+    }
+
+    /// Forget any offer left by an earlier launch.
+    ///
+    /// Called by a launch before it can refuse for any reason, so an offer is
+    /// only ever answered to the failure that left it.
+    pub fn clear_offline_offer(&self) {
+        if let Ok(mut slot) = self.offline_offer.lock() {
+            *slot = None;
+        }
+    }
+
+    /// Take the offer left for `instance_id`, if the offer is for that
+    /// instance.
+    ///
+    /// Taken rather than read, because it answers one failure once: a dialog
+    /// that could be raised twice from one sign-in problem is a dialog that
+    /// outlives the thing it is about.
+    ///
+    /// Compared before it is taken, because there is one slot for every
+    /// instance. Taking first meant a question about any other instance threw
+    /// the offer away: the dialog the failed launch left it for never came up,
+    /// because something else on screen had asked first.
+    pub fn take_offline_play_offer(&self, instance_id: &str) -> Option<String> {
+        let mut slot = self.offline_offer.lock().ok()?;
+        if !slot
+            .as_ref()
+            .is_some_and(|offer| offer.instance_id == instance_id)
+        {
+            return None;
+        }
+        slot.take().map(|offer| offer.username)
+    }
+}
+
+/// A launch that could not renew its account's sign-in, and the name that
+/// account would play under offline.
+struct OfflineOffer {
+    /// The instance whose launch failed. The window asks about the instance it
+    /// just failed to start, so an offer from another one is nothing to do
+    /// with the error on screen.
+    instance_id: String,
+    username: String,
 }
 
 /// One instance's launch, held from [`AppState::claim_launch`] until dropped.
@@ -326,5 +391,52 @@ mod tests {
 
         drop(claim);
         assert_eq!(state.what_is_running(), vec!["a server".to_string()]);
+    }
+
+    /// The offer belongs to the failure that left it: the launch of one
+    /// instance, once, and only until something else is tried.
+    ///
+    /// A dialog headed "Geode could not renew Notch's Microsoft sign-in" shown
+    /// next to "that instance is already running" was two contradictory
+    /// reasons on screen at once, which is what asking the account's state
+    /// instead of the failure used to do.
+    #[test]
+    fn an_offline_play_offer_answers_one_launch_and_no_other() {
+        let state = AppState::new(
+            crate::paths::Paths {
+                root: std::env::temp_dir().join("geode-offline-offer"),
+            },
+            crate::config::Config::default(),
+        );
+
+        // Nothing has failed, so there is nothing to offer.
+        assert_eq!(state.take_offline_play_offer("survival"), None);
+
+        state.offer_offline_play("survival".into(), "Notch".into());
+        // Not the instance the dialog would be about.
+        assert_eq!(state.take_offline_play_offer("creative"), None);
+        // And asking about one is a question, not an answer: there is one slot
+        // for every instance, and taking from it before reading whose it was
+        // meant a row nobody failed to launch could destroy a live offer.
+        assert_eq!(
+            state.take_offline_play_offer("survival"),
+            Some("Notch".to_string()),
+            "an offer was destroyed by a question about another instance",
+        );
+
+        // Answered once, and not again: the error it belongs to is on screen
+        // once.
+        state.offer_offline_play("survival".into(), "Notch".into());
+        assert_eq!(
+            state.take_offline_play_offer("survival"),
+            Some("Notch".to_string())
+        );
+        assert_eq!(state.take_offline_play_offer("survival"), None);
+
+        // And a launch that gets as far as refusing for another reason clears
+        // it first, so the refusal is answered on its own terms.
+        state.offer_offline_play("survival".into(), "Notch".into());
+        state.clear_offline_offer();
+        assert_eq!(state.take_offline_play_offer("survival"), None);
     }
 }

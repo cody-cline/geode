@@ -38,15 +38,20 @@ cargo test --lib           # unit tests — offline, fast, the ones that gate a 
 cargo clippy --all-targets # expected to be clean; treat a warning as a failure
 ```
 
-`npm test` runs `node --test src/lib/*.test.mjs` — today that is five files,
+`npm test` runs `node --test src/lib/*.test.mjs` — today that is six files,
 `src/lib/share.test.mjs`, `src/lib/blocked.test.mjs`,
-`src/lib/pack-update.test.mjs`, `src/lib/update.test.mjs` and
-`src/lib/types.test.mjs`. The last one is the only check anywhere that
+`src/lib/pack-update.test.mjs`, `src/lib/update.test.mjs`,
+`src/lib/types.test.mjs` and `src/lib/retarget.test.mjs`. The last two are
+worth knowing apart. `types.test.mjs` is the only check anywhere that
 `types.ts` really mirrors the Rust struct it claims to — it reads the text of
 `types.ts` and `Settings.tsx` and asserts that the `close_to_tray` field
 arrived in both, because a field left out of the hand-written mirror reads as
 `undefined`, which is falsy, so a toggle renders off while Rust has the
-setting on and `tsc` sees nothing wrong. All five also
+setting on and `tsc` sees nothing wrong. `retarget.test.mjs` pins what spans
+two files: that a re-target applied in place puts the Settings tab's own copy
+of the loader back in step, or the save bar writes the old loader over the one
+every jar was just rebuilt for, and that the dialog's world warning claims
+only what the dialog actually knows. All six also
 check a few invariants by reading the `.tsx` that holds them, because there is
 no DOM or React renderer under `npm test`. Everything else on the frontend is
 gated by `tsc` alone, which is strict (`noUnusedLocals`,
@@ -87,7 +92,7 @@ reads Sinytra Connector's real files for exactly this reason. The same trap in
 reverse: a server kind's mod loader is a fact about that software, not a guess
 (Banner is Fabric-based, not NeoForge — `ServerKind::mod_loader`).
 
-**`commands.rs` stays thin: validate, delegate, return.** 154 of the 155
+**`commands.rs` stays thin: validate, delegate, return.** 165 of the 166
 `#[tauri::command]` functions live there (the odd one out is
 `deeplink::take_pending_join`), and logic belongs in the module that owns it so
 the headless path can reach it too. A new command must be added in **two**
@@ -97,7 +102,18 @@ that they agree, and a command missing from the list simply fails at runtime.
 **Error text is user-facing copy.** `Error` serialises to its `Display` string
 for the frontend, so write variants a person can read, not a debug dump. Use
 `.ctx("what I was doing")` (the `Context` trait in `error.rs`) so a failure deep
-in the download pipeline still says which file or step it came from.
+in the download pipeline still says which file or step it came from. Two
+registers, and the screens mix them badly when a third appears: a refusal that
+states a fact is a lowercase fragment with no full stop ("no backup called
+`{name}`"), and one that tells somebody what to do first is a capitalised
+sentence, punctuated, with its reason as a second sentence ("Stop the game
+before backing up a world. Minecraft keeps…"). A provider's own structured
+error field may be read out when the body really parsed as that shape — a raw
+response body never is. `describe_oauth_error` is both halves: it passes
+Microsoft's documented `error_description` through, first line only and capped,
+because "AADSTS700082: the refresh token has expired" is the whole answer, and
+it says nothing of a body that is not that shape, after 300 characters of a
+503's HTML used to become the toast.
 
 **Secrets never cross the IPC boundary.** `Config::redacted()` replaces the
 CurseForge key with booleans before the frontend sees it (there is a test named
@@ -177,6 +193,16 @@ and `server/run.rs` installs them again when a start finds them gone. That
 pair has to stay a pair: thinning the backup without the reinstall is a backup
 that restores to a server which will not boot. The same rule governs a pack —
 a mod that a provider can name travels as a reference, never as bytes.
+
+The inverse is just as load-bearing, and `instance/worlds.rs` is where it
+bites: a **world** backup carries the whole world. There is no upstream to
+re-fetch a region file from and nothing that could promise to put a missing one
+back, so there is no equivalent of that reinstall and therefore no thinning.
+Deleting a world takes a backup first, which is why `world-backups/` sits
+outside `.minecraft` — a copy has to outlive the world it is a copy of. And a
+*client's* world cannot be flushed the way a server's can be asked to
+`save-all flush`: there is nothing to type at, so every operation on a world is
+refused outright while the game is running.
 
 **A transfer deletes nothing until the other side is proved complete.** Moving
 a server (`server/transfer.rs`) is a copy that is verified *by content* — a
@@ -279,7 +305,7 @@ hundreds.
 
 ```
 config.json  accounts.json  hosts.json
-instances/<id>/         instance.json, media/, .minecraft/
+instances/<id>/         instance.json, media/, world-backups/, .minecraft/
 servers/<id>/           server.json, share.json, media/, run/, backups/
 plans/<id>.json         versionless mod lists
 versions/<id>/          merged (mc + loader) manifest and jar

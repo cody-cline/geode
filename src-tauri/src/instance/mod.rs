@@ -4,8 +4,13 @@ pub mod jar;
 pub mod logs;
 pub mod modpack;
 pub mod multiplayer;
+/// The byte-level NBT walk `servers.dat` and `level.dat` share.
+pub mod nbt;
 pub mod pack_update;
 pub mod prism;
+pub mod replan;
+pub mod retarget;
+pub mod worlds;
 
 use serde::{Deserialize, Serialize};
 

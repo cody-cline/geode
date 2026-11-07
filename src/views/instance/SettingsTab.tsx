@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { Copy, Loader2, PackageOpen, Trash2 } from "lucide-react";
+import { Copy, Loader2, PackageOpen, Route, Trash2 } from "lucide-react";
 
 import ExportModal from "../../components/ExportModal";
 import ImageField from "../../components/ImageField";
 import Modal from "../../components/Modal";
+import ReplanModal from "../../components/ReplanModal";
 import StatusNote from "../../components/StatusNote";
 import { api } from "../../lib/api";
 import {
@@ -18,6 +19,7 @@ import type {
   Instance,
   InstanceOverrides,
   LastServerSync,
+  RetargetReport,
   YourSetting,
 } from "../../lib/types";
 
@@ -86,6 +88,8 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
   const [duplicating, setDuplicating] = useState(false);
   const [changingServerSide, setChangingServerSide] = useState(false);
   const [changingSettings, setChangingSettings] = useState(false);
+  /** The "where else could this run?" dialog, open or not. */
+  const [asking, setAsking] = useState(false);
   const [systemMemory, setSystemMemory] = useState<number | null>(null);
   /**
    * What the last update from this instance's server changed in its settings
@@ -229,6 +233,21 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
       reportError("Could not change that setting back", e);
     } finally {
       setReverting(null);
+    }
+  }
+
+  /**
+   * A re-target applied from the "where else could this run?" dialog has
+   * landed. The Mod loader section below holds its own copy of the pair, taken
+   * when this tab opened; left alone after a move landed *here*, it would read
+   * as an unsaved change and Save would write the old loader back over the one
+   * every jar was just rebuilt for. A move that landed on a copy left this
+   * instance exactly as it was, so there is nothing to put back.
+   */
+  function retargetLanded(report: RetargetReport) {
+    if (!report.appliedToCopy) {
+      setLoader(report.loader as typeof loader);
+      setLoaderVersion(report.loaderVersion);
     }
   }
 
@@ -384,10 +403,28 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
               </div>
             )}
           </div>
+          {/* The Minecraft version used to be dead text here. It is the one
+              thing on this screen nobody can change without re-checking every
+              mod, so it asks that question instead of offering a dropdown. */}
           <p className="hint">
-            Minecraft {instance.mcVersion}. Changing the loader keeps your mods
-            folder as-is — mods built for a different loader will not load.
+            Minecraft{" "}
+            <button
+              className={styles.askVersion}
+              onClick={() => setAsking(true)}
+              title="See which Minecraft versions and loaders this instance's mods could run on"
+            >
+              {instance.mcVersion}
+            </button>
+            . Changing the loader keeps your mods folder as-is — mods built for
+            a different loader will not load.
           </p>
+          <button
+            className={`btn btn-sm ${styles.ask}`}
+            onClick={() => setAsking(true)}
+          >
+            <Route size={14} />
+            Where else could this run?
+          </button>
         </section>
 
         <section className={styles.section}>
@@ -735,6 +772,14 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
 
       {exporting && (
         <ExportModal instance={instance} onClose={() => setExporting(false)} />
+      )}
+
+      {asking && (
+        <ReplanModal
+          instance={instance}
+          onApplied={retargetLanded}
+          onClose={() => setAsking(false)}
+        />
       )}
 
       {confirmDelete && (

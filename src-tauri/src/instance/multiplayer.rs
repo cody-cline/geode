@@ -15,6 +15,10 @@
 //! `server/properties.rs`'s rule in binary: the file is somebody else's, so
 //! anything we do not understand is copied through untouched.
 //!
+//! The walk itself is [`super::nbt`], where `level.dat` reads it too. It
+//! started here; it moved when the second caller arrived, because two copies
+//! of it is two places to get somebody's file wrong.
+//!
 //! The format, from the format documentation and from twelve real files on
 //! this machine, every one of which agreed:
 //!
@@ -48,25 +52,17 @@
 use std::path::Path;
 
 use crate::error::{Error, Result};
+use crate::instance::nbt::{
+    java_utf8, put_string, put_text, Reader, TAG_BYTE, TAG_COMPOUND, TAG_END, TAG_LIST, TAG_STRING,
+};
 
 /// Minecraft's own port, filled in where an address names none, so
 /// `play.example.com` and `play.example.com:25565` are one server rather than
 /// two rows.
 use crate::share::link::GAME_PORT as DEFAULT_PORT;
 
-const TAG_END: u8 = 0;
-const TAG_BYTE: u8 = 1;
-const TAG_SHORT: u8 = 2;
-const TAG_INT: u8 = 3;
-const TAG_LONG: u8 = 4;
-const TAG_FLOAT: u8 = 5;
-const TAG_DOUBLE: u8 = 6;
-const TAG_BYTE_ARRAY: u8 = 7;
-const TAG_STRING: u8 = 8;
-const TAG_LIST: u8 = 9;
-const TAG_COMPOUND: u8 = 10;
-const TAG_INT_ARRAY: u8 = 11;
-const TAG_LONG_ARRAY: u8 = 12;
+/// What this file is called in an error a person reads.
+const SUBJECT: &str = "this instance's multiplayer list";
 
 /// What [`ensure`] found and did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -288,123 +284,7 @@ struct Row<'a> {
 }
 
 fn unreadable(why: &str) -> Error {
-    Error::msg(format!(
-        "this instance's multiplayer list could not be read, so it was left alone: {why}"
-    ))
-}
-
-/// How deep one value may nest before the file is called unreadable.
-///
-/// The walk below is recursive, and a Rust stack overflow is an abort rather
-/// than an error — so without a ceiling a file nested deeply enough takes the
-/// launcher down with it instead of reaching `unreadable`, which is the one
-/// thing this module promises. Real rows nest three deep.
-const MAX_DEPTH: usize = 64;
-
-struct Reader<'a> {
-    bytes: &'a [u8],
-    at: usize,
-    depth: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, at: 0, depth: 0 }
-    }
-
-    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        let end = self.at.checked_add(n).ok_or_else(|| unreadable("it ends partway through"))?;
-        let slice = self
-            .bytes
-            .get(self.at..end)
-            .ok_or_else(|| unreadable("it ends partway through"))?;
-        self.at = end;
-        Ok(slice)
-    }
-
-    fn u8(&mut self) -> Result<u8> {
-        Ok(self.take(1)?[0])
-    }
-
-    fn u16(&mut self) -> Result<u16> {
-        let b = self.take(2)?;
-        Ok(u16::from_be_bytes([b[0], b[1]]))
-    }
-
-    fn i32(&mut self) -> Result<i32> {
-        let b = self.take(4)?;
-        Ok(i32::from_be_bytes([b[0], b[1], b[2], b[3]]))
-    }
-
-    /// A length-prefixed string: a tag's name, and a string tag's payload too,
-    /// which have the same shape.
-    fn text(&mut self) -> Result<&'a [u8]> {
-        let len = self.u16()? as usize;
-        self.take(len)
-    }
-
-    /// Step over one tag's payload without decoding any of it.
-    ///
-    /// Every size here is the format's, and getting one wrong is how a walk
-    /// ends up reading a length out of the middle of somebody's server icon —
-    /// which is why the round-trip test breaks this function first.
-    fn skip(&mut self, tag: u8) -> Result<()> {
-        match tag {
-            TAG_BYTE => self.take(1).map(|_| ()),
-            TAG_SHORT => self.take(2).map(|_| ()),
-            TAG_INT | TAG_FLOAT => self.take(4).map(|_| ()),
-            TAG_LONG | TAG_DOUBLE => self.take(8).map(|_| ()),
-            TAG_BYTE_ARRAY => {
-                let n = self.count()?;
-                self.take(n).map(|_| ())
-            }
-            TAG_STRING => self.text().map(|_| ()),
-            TAG_LIST => {
-                let element = self.u8()?;
-                let n = self.i32()?;
-                for _ in 0..n.max(0) {
-                    self.nested(element)?;
-                }
-                Ok(())
-            }
-            TAG_COMPOUND => loop {
-                let tag = self.u8()?;
-                if tag == TAG_END {
-                    return Ok(());
-                }
-                self.text()?;
-                self.nested(tag)?;
-            },
-            TAG_INT_ARRAY => {
-                let n = self.count()?;
-                self.take(n * 4).map(|_| ())
-            }
-            TAG_LONG_ARRAY => {
-                let n = self.count()?;
-                self.take(n * 8).map(|_| ())
-            }
-            // TAG_End has no payload, so it cannot be a value either.
-            other => Err(unreadable(&format!(
-                "it holds a kind of data this reader does not know (NBT tag {other})"
-            ))),
-        }
-    }
-
-    /// Step over a value held inside another one, a level further in.
-    fn nested(&mut self, tag: u8) -> Result<()> {
-        if self.depth >= MAX_DEPTH {
-            return Err(unreadable("its values nest deeper than this reader goes"));
-        }
-        self.depth += 1;
-        let stepped = self.skip(tag);
-        self.depth -= 1;
-        stepped
-    }
-
-    /// An array's length. Negative means a writer spelled "none" that way.
-    fn count(&mut self) -> Result<usize> {
-        Ok(self.i32()?.max(0) as usize)
-    }
+    crate::instance::nbt::unreadable(SUBJECT, why)
 }
 
 /// Read a whole file, finding the `servers` list and the rows in it.
@@ -418,7 +298,7 @@ fn parse(bytes: &[u8]) -> Result<List<'_>> {
         // the mistake a reader of either file makes.
         return Err(unreadable("it is compressed, and a multiplayer list is not"));
     }
-    let mut r = Reader::new(bytes);
+    let mut r = Reader::new(bytes, SUBJECT);
     if r.u8()? != TAG_COMPOUND {
         return Err(unreadable("it does not start with an NBT compound"));
     }
@@ -550,7 +430,7 @@ fn empty_list_with(rows: &[Vec<u8>]) -> Vec<u8> {
 /// a resource-pack answer, an accepted code of conduct and a mod's own key all
 /// survive because none of them is looked at.
 fn rewritten(row: &[u8], name: &str, address: &str) -> Result<Vec<u8>> {
-    let mut r = Reader::new(row);
+    let mut r = Reader::new(row, SUBJECT);
     let mut out = Vec::with_capacity(row.len() + 64);
     let (mut named, mut addressed) = (false, false);
 
@@ -611,56 +491,6 @@ fn new_row(name: &str, address: &str) -> Vec<u8> {
     out
 }
 
-/// A length-prefixed string's bytes, as NBT holds them.
-fn put_text(out: &mut Vec<u8>, bytes: &[u8]) {
-    out.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
-    out.extend_from_slice(bytes);
-}
-
-/// A whole `TAG_String` entry: its tag, its key, and its text.
-fn put_string(out: &mut Vec<u8>, key: &[u8], text: &str) {
-    out.push(TAG_STRING);
-    put_text(out, key);
-    put_text(out, &java_utf8(text));
-}
-
-/// Java's own UTF-8, which is what an NBT string holds.
-///
-/// It differs from UTF-8 in two places: U+0000 is two bytes rather than one,
-/// and anything above U+FFFF is the two three-byte halves of its UTF-16
-/// surrogate pair rather than one four-byte sequence. The second is not a
-/// curiosity — a server name with an emoji in it is the ordinary case, and
-/// written as plain UTF-8 the game reads the name as mojibake from that
-/// character on.
-fn java_utf8(text: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(text.len());
-    for ch in text.chars() {
-        let c = ch as u32;
-        match c {
-            0 => out.extend_from_slice(&[0xC0, 0x80]),
-            0x1..=0x7F => out.push(c as u8),
-            0x80..=0x7FF => out.extend_from_slice(&[0xC0 | (c >> 6) as u8, 0x80 | (c & 0x3F) as u8]),
-            0x800..=0xFFFF => out.extend_from_slice(&three(c)),
-            _ => {
-                let rest = c - 0x1_0000;
-                out.extend_from_slice(&three(0xD800 | (rest >> 10)));
-                out.extend_from_slice(&three(0xDC00 | (rest & 0x3FF)));
-            }
-        }
-    }
-    out
-}
-
-/// One code unit in the three-byte form, which is how a surrogate half is
-/// written as well as an ordinary character in that range.
-fn three(c: u32) -> [u8; 3] {
-    [
-        0xE0 | (c >> 12) as u8,
-        0x80 | ((c >> 6) & 0x3F) as u8,
-        0x80 | (c & 0x3F) as u8,
-    ]
-}
-
 /// Read back what we are about to write, before the rename makes it the
 /// player's list.
 ///
@@ -685,6 +515,7 @@ fn check_our_own_work(bytes: &[u8], rows: usize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::instance::nbt::{TAG_INT, TAG_INT_ARRAY};
 
     /// A list in the layout the real files are in, so the fixtures under test
     /// are the thing the game writes rather than a shape of our own.
@@ -1047,26 +878,6 @@ mod tests {
             assert!(err.to_string().contains("left alone"), "{what}: {err}");
             assert_eq!(std::fs::read(file(&dir)).unwrap(), bytes, "{what} was written over");
         }
-    }
-
-    /// A name past the basic plane is written the way the game reads it: two
-    /// three-byte surrogate halves, not UTF-8's four bytes.
-    ///
-    /// Break it with `str::as_bytes()` and a name with an emoji in it arrives
-    /// as mojibake.
-    #[test]
-    fn a_name_outside_the_basic_plane_is_written_the_way_the_game_reads_it() {
-        assert_eq!(java_utf8("A"), b"A");
-        // U+00A7, the section sign colour codes use.
-        assert_eq!(java_utf8("\u{a7}"), vec![0xC2, 0xA7]);
-        // U+1F600, which plain UTF-8 writes as f0 9f 98 80.
-        assert_eq!(
-            java_utf8("\u{1f600}"),
-            vec![0xED, 0xA0, 0xBD, 0xED, 0xB8, 0x80]
-        );
-        assert_eq!("\u{1f600}".len(), 4, "plain UTF-8 writes it in four bytes");
-        // U+0000, which Java never writes as one zero byte.
-        assert_eq!(java_utf8("\0"), vec![0xC0, 0x80]);
     }
 
     /// Written by rename, so a crash leaves the old list rather than half a
