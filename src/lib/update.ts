@@ -102,6 +102,28 @@ export function putOffLine(version: string, configured: boolean): StatusLine {
 }
 
 /**
+ * What a failed check says went wrong, in one clause.
+ *
+ * Not the backend's own words. What comes up from a failed check is this
+ * app's context chain — "asking GitHub which Geode is the latest:
+ * https://api.github.com/repos/cody-cline/geode/releases/latest returned HTTP
+ * 404 Not Found" — and a request URL is a line for a log, not for somebody
+ * who wanted to know whether there is a newer version of their launcher. The
+ * precedent is `describe_oauth_error`, which passes Microsoft's documented
+ * `error_description` through because "the refresh token has expired" is the
+ * whole answer, and says nothing of a body that is not that shape. Nothing in
+ * a failed check is that shape: GitHub was not reached, or did not answer
+ * with a version list, and which of the two it was changes nothing the person
+ * reading this can do about it. So the panel says the part that is theirs —
+ * nothing changed, and here are both ways on — and the words underneath go to
+ * the console, where a bug report can still find them.
+ *
+ * "Could not get an answer" rather than "could not reach GitHub", because a
+ * 403 from a rate limit reached it perfectly well and still answered nothing.
+ */
+const COULD_NOT_ASK = "Geode could not get an answer from GitHub about newer versions";
+
+/**
  * The line when the check itself failed and there is nothing to report but
  * that.
  *
@@ -111,6 +133,9 @@ export function putOffLine(version: string, configured: boolean): StatusLine {
  * Geode" for ever with no retry, no link and no version comparison. Saying
  * what went wrong is the smaller half of the fix; having anything on screen to
  * press is the larger one.
+ *
+ * Takes what to say rather than reading it off an error, so that choice is
+ * made once, at the one caller, where `COULD_NOT_ASK` explains it.
  */
 export function checkFailedLine(message: string): StatusLine {
   return {
@@ -134,6 +159,9 @@ export function checkFailedLine(message: string): StatusLine {
  * Then "Not now", which takes Install off the screen and so has to take the
  * sentence describing Install with it. Then whatever the status says. Only a
  * status that has never arrived reads as still looking.
+ *
+ * `failure` decides which line this is and is not read out in it — see
+ * `COULD_NOT_ASK`.
  */
 export function panelLine(args: {
   status: UpdateStatus | null;
@@ -141,7 +169,7 @@ export function panelLine(args: {
   putOff: boolean;
 }): StatusLine {
   const { status, failure, putOff } = args;
-  if (failure) return checkFailedLine(failure);
+  if (failure) return checkFailedLine(COULD_NOT_ASK);
   if (!status) {
     return {
       tone: "info",

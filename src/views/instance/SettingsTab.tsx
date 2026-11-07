@@ -39,6 +39,30 @@ function textOrNull(value: string): string | null {
   return trimmed === "" ? null : trimmed;
 }
 
+/**
+ * Which heading on this form each override is written under.
+ *
+ * So the save bar can name what it would write, in the words somebody just
+ * scrolled past, rather than saying only "You have unsaved changes" — which
+ * is the one thing the bar being there already tells them. Keyed by every
+ * override there is, so a new one has to be filed under a heading here before
+ * this compiles, and listed in the order the sections appear below, because a
+ * `Set` keeps what it was given first.
+ */
+const OVERRIDE_SECTION: Record<keyof InstanceOverrides, string> = {
+  memoryMb: "Java & performance",
+  javaArgs: "Java & performance",
+  javaPath: "Java & performance",
+  width: "Window",
+  height: "Window",
+  fullscreen: "Window",
+  quickPlayServer: "Window",
+  env: "Environment",
+  wrapperCommand: "Environment",
+  preLaunchCommand: "Hooks",
+  postExitCommand: "Hooks",
+};
+
 /** The environment as a textarea shows it: one `NAME=value` per line. */
 function envToText(env: Record<string, string> | undefined): string {
   return Object.entries(env ?? {})
@@ -143,13 +167,24 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loader, instance.mcVersion]);
 
-  const dirty =
-    name !== instance.name ||
-    group !== (instance.group ?? "") ||
-    notes !== instance.notes ||
-    loader !== instance.loader ||
-    loaderVersion !== instance.loaderVersion ||
-    JSON.stringify(overrides) !== JSON.stringify(instance.overrides);
+  // What Save would write, named rather than counted: the loader is on this
+  // same form, and it is the one field here that decides what the next launch
+  // downloads rather than only what this screen says.
+  const loaderChanged = loader !== instance.loader;
+  const changed: string[] = [];
+  if (name !== instance.name) changed.push("the name");
+  if (group !== (instance.group ?? "")) changed.push("the group");
+  if (notes !== instance.notes) changed.push("the notes");
+  if (loaderChanged) changed.push("the mod loader");
+  else if (loaderVersion !== instance.loaderVersion) changed.push("the loader version");
+  const sections = new Set<string>();
+  for (const key of Object.keys(OVERRIDE_SECTION) as (keyof InstanceOverrides)[]) {
+    if (JSON.stringify(overrides[key]) !== JSON.stringify(instance.overrides[key])) {
+      sections.add(OVERRIDE_SECTION[key]);
+    }
+  }
+  changed.push(...sections);
+  const dirty = changed.length > 0;
 
   async function save() {
     setSaving(true);
@@ -283,6 +318,14 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
   return (
     <div className={styles.scroll}>
       <div className={styles.form}>
+        <p className={styles.saveModel}>
+          The fields on this form are written when you press Save, on the bar
+          that appears as soon as there is something to write. Choosing a
+          picture
+          {instance.joined ? ", or either switch under Server," : ""} takes
+          effect at once instead.
+        </p>
+
         <section className={styles.section}>
           <h2 className={styles.sectionTitle}>Identity</h2>
 
@@ -748,7 +791,11 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
 
       {dirty && (
         <div className={`save-bar ${styles.saveBar}`}>
-          <span className="save-hint">You have unsaved changes.</span>
+          <span className="save-hint">
+            Unsaved: {changed.join(", ")}.
+            {loaderChanged &&
+              " Saving stores the choice; the loader itself is set up the next time you press Play."}
+          </span>
           <button
             className="btn"
             onClick={() => {
