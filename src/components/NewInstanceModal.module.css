@@ -28,7 +28,7 @@
 .loaderActive:hover {
   background: color-mix(in srgb, var(--accent) 15%, transparent);
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .loaderVersion {
@@ -122,7 +122,7 @@
 .versionActive:hover {
   background: color-mix(in srgb, var(--accent) 13%, transparent);
   border-left-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .versionId {
@@ -187,5 +187,5 @@
 
 .foundHint {
   font-size: 12px;
-  color: var(--accent);
+  color: var(--accent-text);
 }

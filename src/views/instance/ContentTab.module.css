@@ -40,7 +40,7 @@
 .kindActive,
 .kindActive:hover {
   background: color-mix(in srgb, var(--accent) 14%, transparent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .tools {
@@ -76,7 +76,7 @@
   border-bottom: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
   font-size: 13px;
   font-weight: 500;
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .updateBanner span {
@@ -217,7 +217,7 @@
 /* The Keep-on-this-server button while it is on. Accent rather than a warning
    colour: it is a choice the admin made, not something going wrong. */
 .keptHere {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 /* The ignore-the-Minecraft-version button while it is on. A warning colour and
@@ -239,7 +239,7 @@
 
 .offerLead {
   margin: 0 0 8px;
-  color: var(--accent);
+  color: var(--accent-text);
   line-height: 1.5;
 }
 

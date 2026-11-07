@@ -177,7 +177,7 @@
 
 .tabActive,
 .tabActive:hover {
-  color: var(--accent);
+  color: var(--accent-text);
   border-bottom-color: var(--accent);
 }
 

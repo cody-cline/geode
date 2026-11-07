@@ -62,7 +62,7 @@
    visible without counting. */
 .fieldChanged .label,
 .fieldChanged > label {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .control {

@@ -27,14 +27,45 @@ export default function Modal({
   // view and would be left floating over whatever replaced it.
   useBackHandler(true, onClose, "overlay");
 
+  // Move focus in so Escape and Tab act on the dialog, not whatever was behind
+  // it, and hand it back to whatever opened this when the dialog goes. Its own
+  // effect, with no dependencies, because it must happen once: parents pass
+  // `onClose` as an inline arrow, so an effect keyed on it re-runs whenever the
+  // parent renders — and re-running this one would pull focus out of the field
+  // somebody is typing in.
+  useEffect(() => {
+    const opener = document.activeElement;
+    panel.current?.focus();
+    return () => {
+      if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
+    };
+  }, []);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (e.key !== "Tab" || !panel.current) return;
+      // Tab stays inside. A dialog that lets it out leaves the keyboard on a
+      // screen the dialog is covering, pressing things nobody can see.
+      const stops = panel.current.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      );
+      if (stops.length === 0) return;
+      const first = stops[0];
+      const last = stops[stops.length - 1];
+      const here = document.activeElement;
+      if (e.shiftKey && (here === first || here === panel.current)) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && here === last) {
+        e.preventDefault();
+        first.focus();
+      }
     };
     document.addEventListener("keydown", onKey);
-    // Move focus in so Escape and Tab act on the dialog, not whatever was
-    // behind it.
-    panel.current?.focus();
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
 

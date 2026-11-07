@@ -109,7 +109,7 @@
 }
 
 .askVersion:hover {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 /* The bar itself is `.save-bar` in global.css — the fade-in it used to be

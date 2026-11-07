@@ -55,7 +55,7 @@
 .navActive,
 .navActive:hover {
   background: color-mix(in srgb, var(--accent) 13%, transparent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .content {
@@ -129,7 +129,7 @@
 .themeActive,
 .themeActive:hover {
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-text);
   background: color-mix(in srgb, var(--accent) 9%, transparent);
 }
 
@@ -267,7 +267,7 @@
   gap: 5px;
   font-size: 12px;
   font-weight: 600;
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .details {
@@ -426,7 +426,7 @@
 .aboutMark {
   width: 44px;
   height: 44px;
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .aboutName {
@@ -464,7 +464,7 @@
 }
 
 .checkOk {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .checkBad {

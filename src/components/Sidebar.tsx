@@ -78,6 +78,7 @@ export default function Sidebar() {
       <nav className={styles.nav}>
         <button
           className={clsx(styles.navItem, isActive({ view: "library" }) && styles.navActive)}
+          aria-current={isActive({ view: "library" }) ? "page" : undefined}
           onClick={() => navigate({ view: "library" })}
         >
           <Boxes size={17} />
@@ -86,6 +87,7 @@ export default function Sidebar() {
         </button>
         <button
           className={clsx(styles.navItem, isActive({ view: "browse" }) && styles.navActive)}
+          aria-current={isActive({ view: "browse" }) ? "page" : undefined}
           onClick={() => navigate({ view: "browse" })}
         >
           <Compass size={17} />
@@ -97,6 +99,9 @@ export default function Sidebar() {
             styles.navItem,
             (route.view === "plans" || route.view === "plan") && styles.navActive,
           )}
+          aria-current={
+            route.view === "plans" || route.view === "plan" ? "page" : undefined
+          }
           onClick={() => navigate({ view: "plans" })}
         >
           <ClipboardList size={17} />
@@ -109,6 +114,9 @@ export default function Sidebar() {
             (route.view === "servers" || route.view === "server") &&
               styles.navActive,
           )}
+          aria-current={
+            route.view === "servers" || route.view === "server" ? "page" : undefined
+          }
           onClick={() => navigate({ view: "servers" })}
         >
           <ServerIcon size={17} />
@@ -241,6 +249,7 @@ export default function Sidebar() {
 
         <button
           className={clsx(styles.navItem, isActive({ view: "settings" }) && styles.navActive)}
+          aria-current={isActive({ view: "settings" }) ? "page" : undefined}
           onClick={() => navigate({ view: "settings" })}
         >
           <SettingsIcon size={17} />

@@ -40,7 +40,7 @@
 }
 
 .ok .icon {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .info .icon {

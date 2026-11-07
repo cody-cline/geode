@@ -118,7 +118,7 @@
 .sourceActive:hover {
   background: color-mix(in srgb, var(--accent) 15%, transparent);
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .actions {
@@ -173,7 +173,7 @@
 
 .tabActive,
 .tabActive:hover {
-  color: var(--accent);
+  color: var(--accent-text);
   border-bottom-color: var(--accent);
 }
 
@@ -260,6 +260,6 @@
   gap: 5px;
   font-size: 12px;
   font-weight: 600;
-  color: var(--accent);
+  color: var(--accent-text);
   flex-shrink: 0;
 }

@@ -535,10 +535,136 @@ export const useStore = create<State>((set, get) => ({
 
 export function applyTheme(config: Config) {
   const root = document.documentElement;
-  root.dataset.theme = config.theme === "light" ? "light" : "dark";
+  const light = config.theme === "light";
+  root.dataset.theme = light ? "light" : "dark";
   root.style.setProperty("--accent", config.accent);
   // Pick readable ink for buttons filled with the accent colour.
   root.style.setProperty("--accent-ink", contrastInk(config.accent));
+  // And the mirror-image question: the accent used *as* text, on this theme's
+  // paper rather than on itself.
+  root.style.setProperty("--accent-text", accentText(config.accent, light));
+  // Quiet text that lands on a tint of the accent rather than on a surface.
+  root.style.setProperty("--text-on-tint", textOnTint(config.accent, light));
+}
+
+/** Every background this theme writes `--accent-text` on, lightest-vs-darkest. */
+const SURFACES = {
+  dark: ["#0b0f14", "#11171f", "#161d27", "#1c2531"],
+  light: ["#f5f7fa", "#ffffff", "#f0f3f7", "#e6ebf1"],
+};
+
+function channels(hex: string): [number, number, number] | null {
+  const m = /^#?([\da-f]{6})$/i.exec(hex.trim());
+  if (!m) return null;
+  const int = parseInt(m[1], 16);
+  return [(int >> 16) & 255, (int >> 8) & 255, int & 255];
+}
+
+function relativeLuminance([r, g, b]: [number, number, number]): number {
+  const [lr, lg, lb] = [r, g, b].map((c) => {
+    const s = c / 255;
+    return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * lr + 0.7152 * lg + 0.0722 * lb;
+}
+
+function ratio(a: [number, number, number], b: [number, number, number]): number {
+  const [hi, lo] = [relativeLuminance(a), relativeLuminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+/**
+ * The accent as a colour to be *read in*, which is not the same question as
+ * the accent as a colour to paint with.
+ *
+ * `--accent` is a fill: a button, a bar, a tint behind a badge, and it is
+ * whatever the user picked. Used as text it has to hold its own against the
+ * page instead, and the default green that reads at 10:1 on this app's near
+ * black reads at 1.7:1 on its white — a word nobody can make out. So the
+ * accent is walked toward the paper's opposite until the worst background it
+ * lands on clears 4.5:1, and the result is published as its own property.
+ *
+ * Its own tint counts as a background: a badge paints that tint from
+ * `--accent` and then writes this on top, so the two are measured together.
+ *
+ * Twenty steps, then give up and answer with the theme's body colour. Giving
+ * up has to mean *legible*, never *nearly the accent*: an accent this cannot
+ * satisfy is one no amount of nudging will save, and ordinary text is the one
+ * answer that is always readable. `contrastInk` gives up the same way and
+ * says why.
+ */
+function accentText(hex: string, light: boolean): string {
+  const accent = channels(hex);
+  if (!accent) return light ? "#131a22" : "#e6edf3";
+  const paper = channels(light ? "#ffffff" : "#11171f")!;
+  const against = [
+    ...SURFACES[light ? "light" : "dark"].map((s) => channels(s)!),
+    tint(accent, paper, 0.14),
+  ];
+  return walk(accent, light, against);
+}
+
+/**
+ * Quiet text sitting on a tint of the accent instead of on a surface — the
+ * sidebar's shortcut hint on whichever row is current, and nothing else today.
+ *
+ * Derived rather than written down for the reason the tint itself is: its
+ * background is a percentage of a colour the user chose, and the picker takes
+ * any colour at all. A fixed grey can be made to work for the eight swatches
+ * and still fail on a white accent, where 18% over this theme's surface lifts
+ * the row far enough that the only greys that clear it are lighter than
+ * `--text-dim` — which would print the quiet tier louder than the ordinary
+ * one. So it starts from `--text-faint` and moves only as far as it must.
+ */
+function textOnTint(hex: string, light: boolean): string {
+  const accent = channels(hex);
+  const faint = channels(light ? "#5e6974" : "#8795a5")!;
+  if (!accent) return `#${faint.map((c) => c.toString(16).padStart(2, "0")).join("")}`;
+  const paper = channels(light ? "#ffffff" : "#11171f")!;
+  // Both the resting tint and the hover one, so pointing at the row does not
+  // undo it.
+  const against = [tint(accent, paper, 0.13), tint(accent, paper, 0.18)];
+  return walk(faint, light, against);
+}
+
+/** `pct` of `fg` painted over `bg`, which is what `color-mix` leaves behind. */
+function tint(
+  fg: [number, number, number],
+  bg: [number, number, number],
+  pct: number,
+): [number, number, number] {
+  return fg.map((c, i) => Math.round(c * pct + bg[i] * (1 - pct))) as [
+    number,
+    number,
+    number,
+  ];
+}
+
+/**
+ * Move a colour toward this theme's far end until it clears 4.5:1 on every
+ * background it has to sit on.
+ *
+ * Twenty steps, then give up and answer with the theme's body colour. Giving
+ * up has to mean *legible*, never *nearly the colour asked for*: a colour this
+ * cannot satisfy is one no amount of nudging will save, and ordinary text is
+ * the one answer that is always readable. `contrastInk` gives up the same way
+ * and says why.
+ */
+function walk(
+  from: [number, number, number],
+  light: boolean,
+  against: [number, number, number][],
+): string {
+  for (let step = 0; step <= 20; step++) {
+    const t = step / 20;
+    const moved = from.map((c) =>
+      Math.round(light ? c * (1 - t) : c + (255 - c) * t),
+    ) as [number, number, number];
+    if (against.every((s) => ratio(moved, s) >= 4.5)) {
+      return `#${moved.map((c) => c.toString(16).padStart(2, "0")).join("")}`;
+    }
+  }
+  return light ? "#131a22" : "#e6edf3";
 }
 
 /** Relative luminance test, so a pale accent gets dark text and vice versa. */
