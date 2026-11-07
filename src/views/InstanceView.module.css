@@ -165,6 +165,41 @@
   flex-shrink: 0;
 }
 
+/* ---------------------------------------------------------------------------
+   Picking one of a set: three shapes, and which one a strip gets.
+   ---------------------------------------------------------------------------
+   This screen had four idioms for it within two clicks of each other — the
+   underline below, an accent-filled segment in the Content tab, a bordered
+   trough in the Logs tab, and the Logs tab's level filter borrowing the
+   Content tab's segment although it filters rather than navigates. Two
+   questions settle which shape a strip gets, in this order.
+
+   **What level is it?** The strip that swaps the whole screen below the
+   header — Content, Worlds, Logs, Settings — is an underline: an
+   `--accent-text` label with a 2px `--accent` rule under it, pulled down over
+   the band's own bottom border. There is one of these per screen (here, and
+   the same rules again in `ServerView.module.css`), and nothing nested inside
+   a section may borrow it. A second underlined strip reads as a second set of
+   sections.
+
+   **What does it do?** Inside a section, a strip that *swaps the panel* below
+   it is navigation, and is drawn as a segment: 30px tall, `--radius-sm`, 13px,
+   no fill until it is chosen and then a 14% `--accent` wash with an
+   `--accent-text` label. The Content tab's kinds, the Logs tab's two views,
+   the server's Content folders and Browse's kinds are all that one shape. A
+   control that *narrows what is already in the panel* is a filter, and is
+   drawn as a pill: `--radius-pill`, outlined rather than filled, smaller than
+   a segment. The Logs tab's levels and Browse's categories are these.
+   Navigation and filtering are different acts, and somebody who learns the
+   second from the first has learned it wrong.
+
+   The accent says "this one is chosen" in all three; the shape is what says
+   what choosing it does. The roles follow the same split, because drawing it
+   right and leaving the ARIA saying something else is the worse defect: a
+   panel-swapper is a `tablist` of `tab`s naming the panel each controls, a
+   one-of-several filter is a `radiogroup` of `radio`s. Both take their
+   keyboard from `src/lib/rovingFocus.ts`, which is the one thing they share.
+   --------------------------------------------------------------------------- */
 .tabs {
   display: flex;
   gap: 2px;

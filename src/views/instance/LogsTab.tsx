@@ -152,12 +152,30 @@ export default function LogsTab({ instanceId }: { instanceId: string }) {
         tabIndex={0}
       >
       <div className={styles.toolbar}>
-        <div className={styles.levels}>
+        {/* One of four, and what it picks narrows the lines already in this
+            panel rather than swapping the panel — so a radio group and not a
+            tab set, which is also why these are drawn as pills and the strip
+            above them as segments. Same keyboard either way: one tab stop for
+            the row, arrows between the four from there and the one they land
+            on in force. Named here, since there is no heading to point at. */}
+        <div
+          className={styles.levels}
+          role="radiogroup"
+          aria-label="Log level"
+          onKeyDown={(e) => {
+            const next = rovingKey(e, LEVELS);
+            if (next) setLevel(next);
+          }}
+        >
           {LEVELS.map((l) => (
             <button
               key={l}
               className={clsx(styles.levelTab, level === l && styles.levelActive)}
               onClick={() => setLevel(l)}
+              role="radio"
+              aria-checked={level === l}
+              tabIndex={level === l ? 0 : -1}
+              data-roving={l}
             >
               {l === "ALL" ? "All" : l}
             </button>

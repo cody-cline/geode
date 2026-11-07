@@ -166,6 +166,12 @@
   flex-shrink: 0;
 }
 
+/* This screen's section strip, and the second of the two underlines in the
+   app — the other is the instance view's, and the spec both answer to is
+   written at the top of `InstanceView.module.css`. The underline is the
+   top-level shape and only the top level has it: a strip inside one of these
+   sections is a segment (`.folderTab` below) or, if it filters rather than
+   navigates, a pill. */
 .tabs {
   display: flex;
   align-items: center;
@@ -229,9 +235,15 @@
   flex-direction: column;
 }
 
-/* The folder switcher inside the Content tab. Its own classes rather than the
-   nav's: these are a segmented control sitting in a toolbar, and giving them
-   the nav's underline would read as a second row of tabs. */
+/* The folder switcher inside the Content tab: a segment, to the spec at the
+   top of `InstanceView.module.css`, because it is navigation one level down
+   from the strip above — giving it that strip's underline would read as a
+   second row of sections.
+   These three rules are currently unreferenced: the server's Content tab
+   borrows `.kinds` and `.kindTab` from `instance/ContentTab.module.css`, which
+   are this same segment to the pixel. Left here rather than removed, since
+   they are nothing this task made unused — but anything that revives them
+   should be the segment and not a fourth drawing of it. */
 .folderTab {
   height: 30px;
   padding: 0 12px;
