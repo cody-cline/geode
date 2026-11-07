@@ -78,11 +78,17 @@ interface State {
   navigate: (route: Route) => void;
   goBack: () => void;
   /**
-   * Overlays that want back for themselves, outermost first. Registered
-   * through `useBackHandler` rather than touched directly.
+   * Things that want back for themselves, outermost first. Registered through
+   * `useBackHandler` rather than touched directly. `overlay` marks the ones
+   * drawn above the whole window rather than in place of a screen — see that
+   * hook for why the difference is worth carrying.
    */
-  backHandlers: { id: number; run: () => void }[];
-  pushBackHandler: (id: number, run: () => void) => void;
+  backHandlers: { id: number; run: () => void; overlay: boolean }[];
+  pushBackHandler: (
+    id: number,
+    run: () => void,
+    kind: "overlay" | "inline",
+  ) => void;
   popBackHandler: (id: number) => void;
 
   config: Config | null;
@@ -169,8 +175,10 @@ export const useStore = create<State>((set, get) => ({
     ),
 
   backHandlers: [],
-  pushBackHandler: (id, run) =>
-    set((s) => ({ backHandlers: [...s.backHandlers, { id, run }] })),
+  pushBackHandler: (id, run, kind) =>
+    set((s) => ({
+      backHandlers: [...s.backHandlers, { id, run, overlay: kind === "overlay" }],
+    })),
   popBackHandler: (id) =>
     set((s) => ({ backHandlers: s.backHandlers.filter((h) => h.id !== id) })),
 

@@ -53,3 +53,42 @@ test("no binding is a letter, so none can take one of the webview's", async () =
     );
   }
 });
+
+// Three screens claim back without being on top of anything: browsing inside
+// an instance, adding to a plan, and an opened pack. The sidebar is still
+// beside all three, still printing these keys. The first version of the gate
+// asked whether *any* back handler was registered, which made every binding
+// dead there while the same sidebar row clicked with the mouse still worked —
+// a printed key that silently does nothing, which is the one thing the test
+// above exists to prevent.
+test("a screen that claims back does not switch the shortcuts off", async () => {
+  const app = await source("../App.tsx");
+  // From the press onwards, with the line breaks taken out so the shape is
+  // readable whatever the formatter did to it.
+  const gate = app
+    .slice(app.indexOf("shortcutRoute(e)"))
+    .replace(/\s+/g, " ");
+
+  assert.ok(
+    /backHandlers\.some\( *\(?\w+\)? *=> *\w+\.overlay *\)/.test(gate),
+    "the shortcut gate no longer asks which back handlers are overlays, so an " +
+      "ordinary screen that claims back now kills every printed binding",
+  );
+  assert.ok(
+    !/backHandlers\.length/.test(gate),
+    "the shortcut gate counts back handlers again, which is what made the " +
+      "bindings dead inside an instance",
+  );
+});
+
+// Every dialog in the app is drawn by `Modal`, so one call decides for all of
+// them. It has to be the overlay kind: a dialog is drawn outside the view and
+// would be left hanging over whatever a shortcut put behind it.
+test("a dialog registers as an overlay, so it does hold the shortcuts", async () => {
+  const modal = await source("../components/Modal.tsx");
+  assert.ok(
+    /useBackHandler\(\s*true,\s*onClose,\s*"overlay"\s*\)/.test(modal),
+    "Modal no longer claims back as an overlay, so a shortcut pressed with a " +
+      "dialog open would change the screen underneath it",
+  );
+});

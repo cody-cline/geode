@@ -22,8 +22,10 @@ export default function Modal({
 }) {
   const panel = useRef<HTMLDivElement>(null);
 
-  // A dialog is dismissed by back, never navigated past.
-  useBackHandler(true, onClose);
+  // A dialog is dismissed by back, never navigated past — and nothing else
+  // may change the screen under it either, because this is drawn outside the
+  // view and would be left floating over whatever replaced it.
+  useBackHandler(true, onClose, "overlay");
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

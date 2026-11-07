@@ -102,8 +102,9 @@ export default function ProjectPanel({
   }, [onClose]);
 
   // Back closes the panel before it changes screen — it is the thing in front
-  // of you, so it is what the gesture is aimed at.
-  useBackHandler(true, onClose);
+  // of you, so it is what the gesture is aimed at. An overlay for the same
+  // reason a dialog is: it sits over the list rather than in place of it.
+  useBackHandler(true, onClose, "overlay");
 
   const blocked = !project.distributionAllowed;
   const isModpack = project.kind === "modpack";

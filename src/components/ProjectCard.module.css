@@ -278,10 +278,12 @@
   color: var(--connector-text);
 }
 
-/* The three fixed parts of this row — icon, gaps, action column — cost 212px
-   whatever is left for the summary, and at the narrowest width the window
-   supports that left the summary less than the icon. See the matching rule in
-   Browse.module.css: between them the summary keeps about a third more. */
+/* The three fixed parts of this row — the 64px icon, two 16px gaps and the
+   action column, which settles on its 96px floor because "Install…" measures
+   less — cost 192px before the row's own padding, whatever is left over for
+   the summary. At the narrowest width the window supports that left the
+   summary the 188px named in the matching rule in Browse.module.css, where it
+   truncated mid-word. Between them the summary keeps about a third more. */
 @media (max-width: 1100px) {
   .row {
     gap: 12px;

@@ -53,9 +53,19 @@ export default function App() {
       // that reaches every screen. A dialog is a mode, though — a shortcut
       // that changed the screen behind one would leave it floating over a
       // view it was never opened from — so an open overlay takes the press
-      // instead, and it says so by holding a back handler.
+      // instead.
+      //
+      // Overlays only, not every back handler. Browsing inside an instance,
+      // adding to a plan and an opened pack all claim back as well, and they
+      // are screens rather than things on top of one: the sidebar is still
+      // beside them printing these very keys, and gating on the whole stack
+      // made all five of them dead there while the same row clicked with the
+      // mouse still worked.
       const route = shortcutRoute(e);
-      if (route && useStore.getState().backHandlers.length === 0) {
+      const overlaid = useStore
+        .getState()
+        .backHandlers.some((h) => h.overlay);
+      if (route && !overlaid) {
         e.preventDefault();
         useStore.getState().navigate(route);
       }
