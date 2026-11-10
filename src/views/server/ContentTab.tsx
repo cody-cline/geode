@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 
 import { api } from "../../lib/api";
-import { fileSize, providerLabel } from "../../lib/format";
+import { fileSize, providerLabel, shownName } from "../../lib/format";
 import { useStore } from "../../lib/store";
 import type {
   ContentItem,
@@ -603,7 +603,7 @@ export default function ServerContentTab({
             return (
               <div
                 key={item.fileName}
-                className={clsx(styles.row, !item.enabled && styles.disabled)}
+                className={styles.row}
               >
                 <label className={styles.toggle}>
                   <input
@@ -625,6 +625,20 @@ export default function ServerContentTab({
                 <div className={styles.itemText}>
                   <div className={styles.itemTitle}>
                     <span className={styles.itemName}>{item.name}</span>
+                    {/* The same word the instance's list says, for the same
+                        reason: the row used to say it by being drawn at half
+                        strength, which reads as "loading" as readily as "off"
+                        and put its text under 2.5:1. These two panes are one
+                        screen and share a stylesheet, so they had to stop
+                        together. */}
+                    {!item.enabled && (
+                      <span
+                        className="badge"
+                        title="Turned off, and still here. The loader skips it — the box on the left puts it back."
+                      >
+                        disabled
+                      </span>
+                    )}
                     {item.dependency && (
                       <span className="badge" title="Installed as a dependency">
                         dependency
@@ -659,7 +673,7 @@ export default function ServerContentTab({
                   </div>
                   <div className={styles.itemMeta}>
                     {item.version && <span>{item.version}</span>}
-                    <span className={styles.fileName}>{item.fileName}</span>
+                    <span className={styles.fileName}>{shownName(item.fileName)}</span>
                     <span>{fileSize(item.size)}</span>
                   </div>
                 </div>

@@ -192,10 +192,6 @@
   border-color: var(--border-strong);
 }
 
-.disabled {
-  opacity: 0.5;
-}
-
 .toggle input {
   accent-color: var(--accent);
   cursor: pointer;
@@ -281,13 +277,6 @@
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 10%, var(--surface));
   box-shadow: inset 3px 0 0 var(--accent);
-}
-
-/* A disabled row is drawn at half strength, and a selection the eye cannot
-   find in the list is not one — which matters most here, since turning a batch
-   of disabled mods back on is the reason to select them. */
-.rowPicked.disabled {
-  opacity: 0.78;
 }
 
 .itemText {

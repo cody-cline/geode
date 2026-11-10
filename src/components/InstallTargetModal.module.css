@@ -109,17 +109,12 @@
   color: var(--accent-text);
 }
 
-/* Greyed, but still clickable — metadata is often behind reality. */
-.incompatible {
-  opacity: 0.5;
-}
-
-.incompatible:hover {
-  opacity: 0.75;
-}
-
+/* Still clickable, because metadata is often behind reality — and the row
+   already says why in words, next to a warning triangle. It used to say it a
+   second time by being drawn at half strength, which took its own explanation
+   down with it: the sentence telling you what is wrong was the least readable
+   thing on the row. The chip carries it alone now. */
 .incompatible.selected {
-  opacity: 1;
   border-color: color-mix(in srgb, var(--warn) 55%, transparent);
   background: color-mix(in srgb, var(--warn) 10%, transparent);
 }

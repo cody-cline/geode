@@ -306,7 +306,12 @@ test("the hint on the current sidebar row is readable with the default accent", 
 // and the kinds are named here with the reason each one is exempt.
 const MAY_DIM = [
   [/:disabled|\[disabled\]/, "a disabled control, which WCAG 1.4.3 exempts"],
-  [/\b(incompatible|unusable|rowOff|disabled)\b/, "an inactive row, same exemption"],
+  // Narrower than it reads: `unusable` is a destination that genuinely cannot
+  // be picked. `disabled` was here too and should not have been — a row whose
+  // mod is off is not an inactive component, because the toggle beside it and
+  // the delete at its end both work, so WCAG 1.4.3 never covered it. Both
+  // Content tabs say the word instead now.
+  [/\bunusable\b/, "a destination that cannot be chosen, which WCAG 1.4.3 exempts"],
   [/\bgroup\[data-empty\]/, "a group with nothing in it, likewise inactive"],
   [/\bemptyIcon\b/, "the drawing on an empty screen, not words"],
   [/\bsvg\b|\bimage\b/, "an icon rather than text"],

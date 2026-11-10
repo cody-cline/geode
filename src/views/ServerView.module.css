@@ -508,12 +508,6 @@
   background: var(--surface);
 }
 
-/* A disabled file is still there, just not loaded — dimmed rather than
-   hidden, so turning it back on is findable. */
-.rowOff {
-  opacity: 0.5;
-}
-
 .rowToggle input {
   accent-color: var(--accent);
   width: 15px;

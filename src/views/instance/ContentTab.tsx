@@ -17,7 +17,7 @@ import {
 
 import Modal from "../../components/Modal";
 import { api } from "../../lib/api";
-import { fileSize, providerLabel } from "../../lib/format";
+import { fileSize, providerLabel, shownName } from "../../lib/format";
 import { actionHint } from "../../lib/shortcuts";
 import { useActionShortcut } from "../../lib/useActionShortcut";
 import { useStore } from "../../lib/store";
@@ -51,20 +51,6 @@ function followRenames(selected: Set<string>, moves: Map<string, string>) {
   return next;
 }
 
-/**
- * The name on disk with the suffix that turns a file off taken back off it.
- *
- * `.disabled` is how a loader is made to ignore a jar, and it is nothing the
- * person reading this row did: they installed FerriteCore, not a renamed file.
- * The row now says it is disabled in a word, so printing the suffix only
- * repeats that in the filesystem's terms. Display only — `fileName` is still
- * the row's identity, the key a selection is held by, and the name every
- * command takes; `strip_disabled` in `instance/content.rs` is the same rule on
- * the side that does the renaming.
- */
-function shownName(fileName: string) {
-  return fileName.replace(/\.disabled$/, "");
-}
 
 export default function ContentTab({
   instance,
