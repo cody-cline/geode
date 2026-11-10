@@ -220,10 +220,15 @@
   border-color: var(--text-faint);
 }
 
+/* The edge is drawn in the accent's legible cast, not the accent itself. Raw
+   `--accent` is 1.62:1 on this rail in the light theme — against the 3:1 a
+   control's edge needs — so a chip marked as chosen by that border was marked
+   by nothing anybody could see. `--accent-text` is 5.71:1 there and the same
+   colour the label already uses. */
 .categoryActive,
 .categoryActive:hover {
   background: color-mix(in srgb, var(--accent) 15%, transparent);
-  border-color: var(--accent);
+  border-color: var(--accent-text);
   color: var(--accent-text);
 }
 

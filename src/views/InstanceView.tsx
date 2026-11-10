@@ -34,6 +34,7 @@ import { api } from "../lib/api";
 import { useBackHandler } from "../lib/useBackHandler";
 import { launchInstance } from "../lib/actions";
 import { hashHue, relativeTime } from "../lib/format";
+import { rovingKey } from "../lib/rovingFocus";
 import { formatDuration, useStore } from "../lib/store";
 import { EXPORT_FORMATS } from "../lib/share";
 import { LOADERS } from "../lib/types";
@@ -146,6 +147,11 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
     : (pack?.bannerUrl ?? pack?.iconUrl ?? null);
   const hue = hashHue(instance.id);
 
+  // A pack tab only where there is a pack, so the arrows step through the tabs
+  // this instance actually has rather than the six in the table.
+  const shownTabs = TABS.filter((t) => t.id !== "pack" || Boolean(pack?.projectId));
+  const tabIds = shownTabs.map((t) => t.id);
+
   return (
     <>
       <div className={clsx(styles.hero, hero && styles.heroArt)}>
@@ -253,12 +259,32 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
         </header>
       </div>
 
-      <nav className={styles.tabs}>
-        {TABS.filter((t) => t.id !== "pack" || Boolean(pack?.projectId)).map((t) => (
+      {/* The same tab set the server view carries, and said the same way —
+          the two screens are deliberately alike, and until now they were alike
+          to the eye and not to a screen reader. The role goes straight on the
+          nav because this strip holds tabs and nothing else; the server's
+          needed a wrapper, since its Clear button shares the row. One tab stop
+          for the strip, arrows between the tabs from there. */}
+      <nav
+        className={styles.tabs}
+        role="tablist"
+        aria-label="Instance sections"
+        onKeyDown={(e) => {
+          const next = rovingKey(e, tabIds);
+          if (next) setActive(next);
+        }}
+      >
+        {shownTabs.map((t) => (
           <button
             key={t.id}
+            id={`instance-tab-${t.id}`}
             className={clsx(styles.tab, active === t.id && styles.tabActive)}
             onClick={() => setActive(t.id)}
+            role="tab"
+            aria-selected={active === t.id}
+            aria-controls="instance-tabpanel"
+            tabIndex={active === t.id ? 0 : -1}
+            data-roving={t.id}
           >
             {t.label}
             {t.id === "logs" && logs && logs.length > 0 && (
@@ -268,7 +294,17 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
         ))}
       </nav>
 
-      <div className={styles.body}>
+      {/* One panel that swaps, since the tabs are local state rather than
+          routes, so every tab points at this element and it names the tab it
+          is showing. Focusable in its own right: several of these panels
+          scroll, and a panel reached by Tab is how the keyboard gets into one. */}
+      <div
+        className={styles.body}
+        id="instance-tabpanel"
+        role="tabpanel"
+        aria-labelledby={`instance-tab-${active}`}
+        tabIndex={0}
+      >
         {active === "content" && (
           <ContentTab instance={instance} onBrowse={() => setBrowsing(true)} />
         )}
