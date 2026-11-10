@@ -75,10 +75,13 @@ export default function Plans() {
           <h1 className={styles.heading}>Plans</h1>
           {/* The one sentence that says what a plan is lived only in the empty
               state, so it disappeared the moment somebody made one and was
-              never readable again. */}
+              never readable again. It is here now, which makes this the
+              screen's one explanation: the empty state said the same thing a
+              second time, in longer words, just below it. */}
           <p className={styles.lede}>
-            A list of mods with no Minecraft version attached. Geode works out
-            afterwards which loader and version can run all of them.
+            A list of mods with no Minecraft version and no loader attached.
+            Geode works out afterwards which loader and version can run all of
+            them.
           </p>
         </div>
         <button className="btn btn-primary" onClick={create} disabled={creating}>
@@ -96,19 +99,19 @@ export default function Plans() {
             ))}
           </div>
         ) : plans.length === 0 ? (
+          // What the subtitle above does not already say, and nothing more.
+          // This held the explanation a second time and a second button for
+          // the one act — New plan is in the header just above, is the primary
+          // button on this screen and is the one carrying the key, so the copy
+          // here points at it rather than competing with it.
           <div className={styles.empty}>
             <ClipboardList size={40} className={styles.emptyIcon} />
             <h2>Plan a pack before you build it</h2>
             <p>
-              A plan is a list of mods with no Minecraft version and no loader
-              attached. Collect what you want to play with, and Geode works out
-              afterwards which loader and version can actually run all of it —
-              preferring Fabric, then NeoForge, then Forge.
+              New plan, at the top of this screen, starts one. Add mods to it
+              as you come across them, and build it into an instance or a
+              server once the list is settled.
             </p>
-            <button className="btn btn-primary" onClick={create} disabled={creating}>
-              <Plus size={14} />
-              Start a plan
-            </button>
           </div>
         ) : (
           <div className={styles.grid}>

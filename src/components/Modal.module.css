@@ -49,12 +49,80 @@
   line-height: 1.5;
 }
 
+/* The cut at either end of this box said nothing about which of them was the
+   end of the content, so three dialogs sliced a version row, a tile and a
+   sentence in half and read as having finished.
+
+   Four background layers, painted first-on-top. Two shadows pinned to the box
+   (`scroll`), and over each one a patch of the panel's own colour pinned to the
+   *content* (`local`), which is the whole of the trick: at the top of the
+   scroll the first patch sits exactly over the top shadow and hides it, and the
+   moment the content moves the patch travels with it and the shadow is
+   uncovered. A dialog with nothing to scroll keeps both patches in place and
+   shows neither shadow, so this cannot say there is more where there is not —
+   a permanent fade on a short dialog is a lie and looks like a fault.
+
+   `--surface-3` is not a free choice of shade, and it is picked for two
+   reasons. It is this app's own chrome one step on, so it moves the way the
+   chrome moves: the footer is already lighter than the body in the dark theme
+   and darker than it in the light one, and so is this. The band therefore reads
+   as the footer's surface welling up and the content sliding under it, in both
+   themes, rather than as a seam that only makes sense in one. `--bg` is darker
+   than `--surface` in both and was the first thing tried; six to eleven values
+   of 255 apart per channel in the dark theme, it is not visible, which was
+   settled by looking at it rather than by arguing about it.
+
+   And it costs nothing to prove. `--surface-3` is a surface
+   `contrast.test.mjs` already measures every text colour against, and every
+   point of the ramp lies between it and `--surface`, which is measured too, so
+   no word ends up on a background no check can see. That is the same reason
+   this is a shadow behind the text rather than a fade over it: a fade is
+   `opacity` by another name, and the ratio it leaves a half-covered word at is
+   measured nowhere.
+
+   Multiple backgrounds and `background-attachment: local` are all of it, both
+   older than this app and both in WebKitGTK, which is the only engine Geode has
+   ever run on. `animation-timeline: scroll()` would say it directly and is not
+   there. The one thing a background cannot do is paint in front of the
+   element's own content, so where the clipped thing is an opaque tile the
+   shadow shows in the gutter beside it rather than across it — and the nested
+   scrollers, the version list in `NewInstanceModal` and the kind picker in
+   `NewServerModal`, are their own boxes and need their own copy of this. */
 .body {
   padding: 18px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 15px;
+  /* The corners matter on the two dialogs that have no footer under them —
+     Accounts and a world's backups, both lists, both long enough to scroll.
+     A background is clipped to its own box, so square corners here would fill
+     in the panel's rounded ones with the patch, or with the shadow. Behind a
+     footer the notch shows the panel's own `--surface` and is invisible. */
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+  background-image:
+    linear-gradient(var(--surface), var(--surface)),
+    linear-gradient(var(--surface), var(--surface)),
+    linear-gradient(
+      to bottom,
+      var(--surface-3),
+      color-mix(in srgb, var(--surface-3) 34%, transparent) 42%,
+      transparent
+    ),
+    linear-gradient(
+      to top,
+      var(--surface-3),
+      color-mix(in srgb, var(--surface-3) 34%, transparent) 42%,
+      transparent
+    );
+  background-position: top, bottom, top, bottom;
+  background-size:
+    100% 22px,
+    100% 22px,
+    100% 20px,
+    100% 20px;
+  background-attachment: local, local, scroll, scroll;
+  background-repeat: no-repeat;
 }
 
 .foot {

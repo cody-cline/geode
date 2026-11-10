@@ -106,15 +106,21 @@ export default function Servers() {
             </>
           )}
           {/* Beside New server rather than buried in Settings: bringing a
-              server back from a host is one of the two ways a server appears
-              in this list. */}
+              server over from another machine is one of the two ways a server
+              appears in this list.
+
+              "From a host" was what it said, which is a word this app uses for
+              a machine running `geoded` and the rest of the world uses for a
+              company that rents you one. Somebody who has never heard of the
+              first reads the second and presses it expecting to be sold
+              something. */}
           <button
             className="btn"
             onClick={() => setBringing(true)}
-            title="Move or copy a server from a machine running Geode headless"
+            title="Move or copy a server off another computer that is running Geode's headless host"
           >
             <Download size={14} />
-            From a host
+            From another machine
           </button>
           <button
             className={clsx("btn", servers.length > 0 && "btn-primary")}
@@ -137,15 +143,20 @@ export default function Servers() {
           <div className={styles.empty}>
             <ServerIcon size={40} className={styles.emptyIcon} />
             <h2>No servers yet</h2>
-            {/* The benefit before the brands. This was ten proper nouns and
-                two categories — "the hybrids and the proxies" — before it said
-                what any of them were for, and the dialog it leads to is the
-                thing that actually does the sorting. */}
+            {/* All of it for somebody who has never hosted a server, because
+                that is who is reading an empty one. It opened for them and
+                finished for an administrator — "the hybrids that take both,
+                and the proxies that sit in front of them" — which reads as
+                evidence the screen is not for you. The taxonomy is already
+                explained a tile at a time inside the dialog this leads to,
+                where there is room to say what each kind is and where nobody
+                meets it before they have asked for it. */}
             <p>
               A server your friends can join, running on this machine. Geode
-              finds the build, puts it in place, and gives you a console to run
-              it from — for plugin servers, modded ones, the hybrids that take
-              both, and the proxies that sit in front of them.
+              downloads the software, sets it up, and gives you a console to
+              start and stop it from. Creating one asks which software to run
+              and says what each kind is for, so there is nothing to look up
+              first.
             </p>
             <button className="btn btn-primary" onClick={() => setCreating(true)}>
               Create your first server
