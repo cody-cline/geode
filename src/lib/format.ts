@@ -114,3 +114,21 @@ export function initials(name: string): string {
   if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
   return (words[0][0] + words[1][0]).toUpperCase();
 }
+
+/**
+ * The name on disk with the suffix that turns a file off taken back off it.
+ *
+ * `.disabled` is how a loader is made to ignore a jar, and it is nothing the
+ * person reading the row did: they installed FerriteCore, not a renamed file.
+ * The row says it is disabled in a word, so printing the suffix only repeats
+ * that in the filesystem's terms. Display only — `fileName` is still the row's
+ * identity, the key a selection is held by, and the name every command takes;
+ * `strip_disabled` in `instance/content.rs` is the same rule on the side that
+ * does the renaming.
+ *
+ * Here rather than in either Content tab because there are two of them, the
+ * instance's and the server's, and they are one screen in two panes.
+ */
+export function shownName(fileName: string): string {
+  return fileName.replace(/\.disabled$/, "");
+}

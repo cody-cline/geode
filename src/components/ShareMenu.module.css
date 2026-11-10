@@ -1,12 +1,24 @@
 .wrap {
-  position: relative;
   display: inline-flex;
 }
 
+/* Fixed, and portalled to the body, because this menu drops out of a hero
+   that is `isolation: isolate` — and has to be, since the artwork and the
+   scrim under its text sit at negative z-index and would otherwise paint
+   behind the whole application. That isolation is a stacking context, so no
+   z-index written here could lift the menu above the page *below* the hero:
+   whatever the number, the part of the menu hanging past the hero's bottom
+   edge was painted over by the first row of the list underneath, and clicked
+   on by it too, which is how the last item in the menu came to be dead.
+   Leaving the subtree is the only thing that settles it.
+
+   40 is unchanged and still means the same place in the order: over the view,
+   under `ProjectPanel` (90), `Modal` (100), the progress dock (150) and the
+   toasts (200), all of which are things that appear over this menu rather
+   than under it. `left` and `top` arrive inline — see `place` in
+   ShareMenu.tsx, which is now the only thing that knows where this sits. */
 .menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
+  position: fixed;
   z-index: 40;
   min-width: 228px;
   padding: 5px;
@@ -36,6 +48,15 @@
 }
 
 .item:hover:not(:disabled) {
+  background: var(--surface-3);
+}
+
+/* Where the keyboard is, drawn the same way as where the pointer is — in a
+   menu the arrows walk the same highlight the mouse does. The global focus
+   ring stays on top of it; this is for the whole row reading as the one the
+   keyboard is on, which matters more here than anywhere else in the app now
+   that the arrows actually move. */
+.item:focus-visible {
   background: var(--surface-3);
 }
 

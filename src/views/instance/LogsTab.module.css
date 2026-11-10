@@ -15,28 +15,47 @@
   border-bottom: 1px solid var(--border);
 }
 
+/* All / INFO / WARN / ERROR. These narrow what is already in the panel rather
+   than swapping the panel, so they are pills and not the segments the strip
+   above them is drawn with — the filter shape of the spec at the top of
+   `InstanceView.module.css`, and the shape Browse's categories already use.
+   Outlined until one is on, then washed with the accent and bordered in the
+   accent's legible cast: `--accent` itself is 1.6:1 on a light background, so
+   a state carried by a border drawn in it is a state nobody can see, while
+   `--accent-text` is that same colour asked to be legible and `applyTheme`
+   recomputes it for whatever accent the user picked. Smaller than a segment,
+   because a filter is a qualifier on the panel and not a way into it. */
 .levels {
   display: flex;
-  gap: 3px;
+  gap: 5px;
 }
 
 .levelTab {
-  height: 29px;
-  padding: 0 11px;
-  border-radius: var(--radius-sm);
-  font-size: 12.5px;
+  height: 26px;
+  /* The segment's 12px rather than a pill's usual narrower inset: this row
+     sits 40px under the views strip in the same column, and the two read as
+     one column only if the first word of each starts at the same x. */
+  padding: 0 12px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-strong);
+  font-size: 12px;
   font-weight: 500;
   color: var(--text-dim);
+  transition:
+    background 0.12s var(--ease),
+    border-color 0.12s var(--ease),
+    color 0.12s var(--ease);
 }
 
 .levelTab:hover {
-  background: var(--surface-2);
+  border-color: var(--text-faint);
   color: var(--text);
 }
 
 .levelActive,
 .levelActive:hover {
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  border-color: var(--accent-text);
   color: var(--accent-text);
 }
 
@@ -172,22 +191,29 @@
 }
 
 /* Two ways to look at the same thing: what is happening now, and what happened
-   before. A quiet switch rather than another row of tabs, because the page
-   already has tabs and this is a choice within one of them. */
+   before. It swaps the whole panel below it, which makes it navigation one
+   level down from the screen's sections — so it is the same segment the
+   Content tab's kinds are drawn with, to the spec at the top of
+   `InstanceView.module.css`. It used to be a bordered trough with a neutral
+   fill, which was a fourth way of saying "one of these" on a screen two
+   clicks wide and the only one of the four that said it without the accent.
+   Bare rather than banded: the sections' own band sits directly above, and a
+   second band here would read as a second row of sections. Its left padding
+   is the toolbar's 22px, so the first label lands where the toolbar's does. */
 .views {
   display: flex;
-  gap: 2px;
+  gap: 4px;
+  padding: 12px 22px 0;
   margin-bottom: 12px;
-  padding: 3px;
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
   align-self: flex-start;
 }
 
 .viewTab {
-  padding: 5px 12px;
-  border-radius: 4px;
-  font-size: 12.5px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 500;
   color: var(--text-dim);
   transition:
     background 0.12s var(--ease),
@@ -195,13 +221,14 @@
 }
 
 .viewTab:hover {
+  background: var(--surface-2);
   color: var(--text);
 }
 
 .viewActive,
 .viewActive:hover {
-  background: var(--surface-3);
-  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent-text);
 }
 
 /* One element per panel, because that is what a tabpanel is — and the console
