@@ -185,11 +185,16 @@ export default function LogsTab({ instanceId }: { instanceId: string }) {
         <div className={styles.tools}>
           <div className={styles.searchWrap}>
             <Search size={14} className={styles.searchIcon} />
+            {/* Off on the same condition as Clear beside it, and for the same
+                reason Copy and Clear learned to go grey: there is nothing in
+                this panel to search. The level pills stay live — they are four
+                fixed values, not a claim that something here can be found. */}
             <input
               className={clsx("input", styles.search)}
               placeholder="Search output"
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
+              disabled={!logs || logs.length === 0}
             />
           </div>
           <button

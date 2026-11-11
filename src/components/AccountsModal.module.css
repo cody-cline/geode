@@ -224,6 +224,16 @@
   color: var(--text-dim);
 }
 
+/* The reason the field below it is locked. Full-strength text like the
+   sign-in notice above, and not `.hint`'s faint grey: this is the cause of
+   what the reader is looking at, not an aside about it. */
+.gate {
+  margin-bottom: 8px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text);
+}
+
 .offlineRow {
   display: flex;
   gap: 7px;
