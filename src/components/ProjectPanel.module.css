@@ -1,8 +1,15 @@
+/* The same scrim `Modal` draws, and it has to be: 45% black over this
+   theme's own surfaces composites to #090d11 and #06080b, which are the
+   surfaces, so the rows behind stayed fully legible and the screen read as
+   cut in half at the panel's edge rather than covered. The alpha is the
+   smaller half of the fix — 55% only reaches #080a0e — and the blur is what
+   actually puts the page behind this one out of reach. */
 .backdrop {
   position: fixed;
   inset: 0;
   z-index: 90;
-  background: rgb(0 0 0 / 0.45);
+  background: rgb(0 0 0 / 0.55);
+  backdrop-filter: blur(3px);
   display: flex;
   justify-content: flex-end;
   animation: fade 0.14s var(--ease);

@@ -631,16 +631,19 @@ h4 {
   overflow-wrap: anywhere;
 }
 
+/* One tier for all three, and the ceiling is the reason rather than taste:
+   this is a mod author's own `# Heading`, rendered inside a panel or a tab
+   whose title this app wrote. `ProjectPanel`'s title is 17px, so an 18px h1
+   in the description below it was the largest text on the screen — the
+   project appeared to be named twice, the second time louder, which is what
+   it looked like when the author had opened with their project's name. 15px
+   sits under all three containers that render this (17, 19, 20). */
 .prose h1,
 .prose h2,
 .prose h3 {
   color: var(--text);
   margin: 20px 0 8px;
   font-size: 15px;
-}
-
-.prose h1 {
-  font-size: 18px;
 }
 
 .prose p {
