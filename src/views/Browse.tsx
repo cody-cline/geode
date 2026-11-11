@@ -225,6 +225,9 @@ export default function Browse({
 
   const target = lockedInstance;
 
+  /** Browsing on nobody's behalf: the whole catalogue, with a page of its own. */
+  const globalBrowse = !lockedInstance && !plan && !server;
+
   // `sources` records what the user wants; `usableSources` is what we can
   // actually query. Keeping them apart means CurseForge stays selected — and
   // comes straight back — once a key is added, without ever showing a ticked
@@ -304,31 +307,76 @@ export default function Browse({
         : installed.has(`${project.provider}:${project.id}`) ||
           project.alsoOn.some((ref) => installed.has(`${ref.provider}:${ref.id}`));
 
-  // Which instances already have the project the picker is open for.
-  const [installedIn, setInstalledIn] = useState<Set<string>>(new Set());
+  /**
+   * Which instances hold each project, under every identity a project answers
+   * to.
+   *
+   * An instance's installed content is not in the store — `Instance` carries a
+   * mod count and the pack's files, but no project ids — so knowing costs four
+   * `listContent` calls per instance. They are paid once per instance list,
+   * here, and read by every row and by the picker; asked per card it would be
+   * the same four calls again for every instance, times however many hits the
+   * search returned.
+   */
+  const [heldBy, setHeldBy] = useState<Map<string, Instance[]>>(new Map());
+
   useEffect(() => {
-    if (!askTarget) return;
+    // Only global browse has anything to work out: where the destination is
+    // fixed, what it already holds is `installed` above, and nothing else asks.
+    if (!globalBrowse) {
+      setHeldBy(new Map());
+      return;
+    }
     let cancelled = false;
-    const key = `${askTarget.project.provider}:${askTarget.project.id}`;
-    const alt = askTarget.project.alsoOn.map((r) => `${r.provider}:${r.id}`);
-
-    Promise.all(
-      instances.map(async (i) => {
-        try {
-          const keys = await contentKeys(i.id);
-          return keys.has(key) || alt.some((a) => keys.has(a)) ? i.id : null;
-        } catch {
-          return null;
+    void Promise.all(
+      instances.map(
+        async (i) =>
+          [i, await contentKeys(i.id).catch(() => new Set<string>())] as const,
+      ),
+    ).then((pairs) => {
+      if (cancelled) return;
+      const map = new Map<string, Instance[]>();
+      for (const [instance, keys] of pairs) {
+        for (const key of keys) {
+          const held = map.get(key);
+          if (held) held.push(instance);
+          else map.set(key, [instance]);
         }
-      }),
-    ).then((ids) => {
-      if (!cancelled) setInstalledIn(new Set(ids.filter(Boolean) as string[]));
+      }
+      setHeldBy(map);
     });
-
     return () => {
       cancelled = true;
     };
-  }, [askTarget, instances, contentKeys]);
+  }, [globalBrowse, instances, contentKeys]);
+
+  /**
+   * The instances a hit is already in, deduplicated: a project installed from
+   * both providers into one instance answers to two keys and is still one
+   * instance.
+   *
+   * What the row says about this goes *beside* its install button and never
+   * instead of it, for the same reason `installed` stays empty here — a mod
+   * being in one instance is no argument against putting it in another.
+   */
+  const heldInstances = (project: Project): Instance[] => {
+    const seen = new Set<string>();
+    const held: Instance[] = [];
+    for (const key of projectKeys(project)) {
+      for (const instance of heldBy.get(key) ?? []) {
+        if (seen.has(instance.id)) continue;
+        seen.add(instance.id);
+        held.push(instance);
+      }
+    }
+    return held;
+  };
+
+  // Which instances already have the project the picker is open for, read off
+  // the map the rows read, so opening it asks the backend nothing new.
+  const installedIn = new Set(
+    askTarget ? heldInstances(askTarget.project).map((i) => i.id) : [],
+  );
 
   function requestInstall(project: Project, versionId?: string) {
     // Adding to a plan is the whole transaction: no version to choose, no
@@ -823,15 +871,30 @@ export default function Browse({
   return (
     <>
       <header className={styles.header}>
-        <div className={styles.searchWrap}>
-          <Search size={15} className={styles.searchIcon} />
-          <input
-            className={clsx("input", styles.search)}
-            placeholder={`Search ${kindLabel}`}
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            autoFocus
-          />
+        <div className={styles.headerMain}>
+          {/* Its own screen gets its own heading, the way Library, Plans and
+              Servers do. Not when it is standing in for a destination's "add
+              something" screen, though: the pill on the right is the heading
+              there, and it names the instance, plan or server you came from. */}
+          {globalBrowse && (
+            <div className={styles.headerText}>
+              <h1 className={styles.heading}>Browse</h1>
+              <p className={styles.lede}>
+                Mods, plugins, packs and shaders from Modrinth, CurseForge and
+                SpigotMC, searched at once and listed together.
+              </p>
+            </div>
+          )}
+          <div className={styles.searchWrap}>
+            <Search size={15} className={styles.searchIcon} />
+            <input
+              className={clsx("input", styles.search)}
+              placeholder={`Search ${kindLabel}`}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              autoFocus
+            />
+          </div>
         </div>
 
         <div className={styles.target}>
@@ -1191,6 +1254,7 @@ export default function Browse({
                     key={`${project.provider}:${project.id}`}
                     project={project}
                     installed={isInstalled(project)}
+                    inInstances={heldInstances(project).map((i) => i.name)}
                     installedInstance={packInstance(project)}
                     busy={installing === project.id}
                     progress={progressFor(project)}

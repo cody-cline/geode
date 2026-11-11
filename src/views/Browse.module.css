@@ -8,6 +8,35 @@
   border-bottom: 1px solid var(--border);
 }
 
+/* The heading stacks above the search rather than sitting beside it, because
+   the other half of this row is the "Adding to" pill and that belongs beside
+   both. Block layout, not a column flex: `.searchWrap` is `flex: 1` for the
+   row it is a child of in PlanPacks, and that would stretch it vertically
+   here. */
+.headerMain {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Margin here rather than on the search below it: the search is the only child
+   when there is no heading, and `.header` centres it against the pill. */
+.headerText {
+  margin-bottom: 11px;
+}
+
+.heading {
+  font-size: 17px;
+  letter-spacing: -0.01em;
+}
+
+.lede {
+  margin-top: 3px;
+  font-size: 12.5px;
+  color: var(--text-faint);
+  line-height: 1.5;
+  max-width: 62ch;
+}
+
 /* Wider than it was: the version and loader selects used to sit beside it and
    now narrow the list from the rail, so the search has this row to itself. */
 .searchWrap {

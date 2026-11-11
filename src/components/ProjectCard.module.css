@@ -59,6 +59,20 @@
   min-width: 0;
 }
 
+/* The title line's first item, and the one that can be squeezed: everything in
+   it belongs to the project's name, so a 940px window must take the squeeze out
+   of the name — which truncates — rather than wrap a provider badge onto a line
+   of its own. A flex row does not wrap by default, so the browser shrinks the
+   name rather than break this group; the controls after it are still free to
+   wrap onto a line of their own. */
+.nameGroup {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .name {
   font-size: 15px;
   letter-spacing: -0.01em;
@@ -79,10 +93,17 @@
   white-space: nowrap;
 }
 
+/* Shrinks ahead of the name — twice as readily — when the line is over-full.
+   The name is what the row is scanned for, so it gives up the last pixels
+   rather than the first. */
 .author {
   font-size: 12px;
   color: var(--text-faint);
   white-space: nowrap;
+  min-width: 0;
+  flex-shrink: 2;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .summary {
@@ -119,15 +140,18 @@
   white-space: nowrap;
 }
 
-.category::before {
+/* After the category rather than before it, so a separator can never begin a
+   line. As a prefix it was part of the chip it preceded, and this row wraps —
+   so a category pushed onto the next line took the middot with it and read
+   "· Optimization", hanging off nothing. `:first-of-type` was meant to spare
+   the first category and never could: the first `span` of that type in this row
+   is the download count, so no category ever matched it and every one of them
+   carried a leading middot.
+   The colour is the category's own rather than a partial `opacity`, which no
+   contrast check can measure. */
+.category:not(:last-child)::after {
   content: "·";
-  margin-right: 12px;
-  opacity: 0.6;
-}
-
-.category:first-of-type::before {
-  content: none;
-  margin-right: 0;
+  margin-left: 12px;
 }
 
 .action {
@@ -152,6 +176,18 @@
 .installedNote {
   font-size: 11px;
   color: var(--text-faint);
+}
+
+/* Under the install button, the way "Installed" sits under Play. Capped close
+   to the button's own width: an instance is called whatever somebody called it,
+   and this column's width is the summary's to lose. */
+.inInstances {
+  max-width: 108px;
+  font-size: 11px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Replaces the summary and stats mid-install: while something is downloading,

@@ -24,6 +24,7 @@ import styles from "./ProjectCard.module.css";
 export default function ProjectCard({
   project,
   installed,
+  inInstances,
   installedInstance,
   busy,
   progress,
@@ -38,6 +39,16 @@ export default function ProjectCard({
 }: {
   project: Project;
   installed?: boolean;
+  /**
+   * Names of the instances that already hold this project, when the row is not
+   * being browsed on one instance's behalf.
+   *
+   * Said beside the install button rather than in place of it: `installed`
+   * above replaces the button with "Added", which is only honest where there
+   * is one destination, and installing into a second instance is a perfectly
+   * ordinary thing to want.
+   */
+  inInstances?: string[];
   /**
    * For modpacks: the instance this pack already built. A pack defines an
    * instance, so installing it twice would just make a duplicate — the row
@@ -85,43 +96,51 @@ export default function ProjectCard({
 
       <div className={styles.text}>
         <div className={styles.titleRow}>
-          {/* The row's keyboard route in. The library and server cards wrap
-              their whole text block in a `<button>`, and that shape cannot be
-              borrowed here: this row already holds controls of its own — the
-              loader chooser further along this very line, and the install
-              button in the column at the end — and a button inside a button is
-              neither valid nor operable. `role="button"` on the row is the same
-              trap by another route, since a button's content is presentational
-              to a screen reader and would swallow both. So the name is the
-              control: named by the project, opening what clicking the row
-              opens, with every other control left as its sibling. */}
-          <h3 className={styles.name}>
-            <button
-              type="button"
-              className={styles.nameBtn}
-              onClick={(e) => {
-                e.stopPropagation();
-                onOpen();
-              }}
-            >
-              {project.name}
-            </button>
-          </h3>
-          {project.author && (
-            <span className={styles.author}>by {project.author}</span>
-          )}
-          <span className={clsx("badge", `badge-${project.provider}`)}>
-            {providerLabel(project.provider)}
-          </span>
-          {project.alsoOn.map((ref) => (
-            <span
-              key={ref.provider}
-              className={clsx("badge", `badge-${ref.provider}`)}
-              title="Also available here"
-            >
-              {providerLabel(ref.provider)}
+          {/* The name, who wrote it and where it is published travel together:
+              a provider badge that wrapped away from them landed on a line of
+              its own between the title and the summary, belonging to neither.
+              Inside this group the name is what gives, since it is the one
+              part with somewhere to go — it ellipsises. */}
+          <span className={styles.nameGroup}>
+            {/* The row's keyboard route in. The library and server cards wrap
+                their whole text block in a `<button>`, and that shape cannot
+                be borrowed here: this row already holds controls of its own —
+                the loader chooser further along this very line, and the
+                install button in the column at the end — and a button inside a
+                button is neither valid nor operable. `role="button"` on the
+                row is the same trap by another route, since a button's content
+                is presentational to a screen reader and would swallow both. So
+                the name is the control: named by the project, opening what
+                clicking the row opens, with every other control left as its
+                sibling. */}
+            <h3 className={styles.name}>
+              <button
+                type="button"
+                className={styles.nameBtn}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpen();
+                }}
+              >
+                {project.name}
+              </button>
+            </h3>
+            {project.author && (
+              <span className={styles.author}>by {project.author}</span>
+            )}
+            <span className={clsx("badge", `badge-${project.provider}`)}>
+              {providerLabel(project.provider)}
             </span>
-          ))}
+            {project.alsoOn.map((ref) => (
+              <span
+                key={ref.provider}
+                className={clsx("badge", `badge-${ref.provider}`)}
+                title="Also available here"
+              >
+                {providerLabel(ref.provider)}
+              </span>
+            ))}
+          </span>
           {fabricAlso ? (
             <span
               className={styles.loaderPick}
@@ -284,6 +303,18 @@ export default function ProjectCard({
             {busy ? <Loader2 size={12} className="spin" /> : <Plus size={13} />}
             {actionLabel ?? (directInstall ? "Install" : "Install…")}
           </button>
+        )}
+
+        {/* Outside the branches above, so it is always an addition to whatever
+            the row offers and never a replacement for it. One instance is
+            named; several are counted, because the column is narrow and a
+            list of names would not fit — they are on the tooltip instead. */}
+        {inInstances && inInstances.length > 0 && (
+          <span className={styles.inInstances} title={inInstances.join(", ")}>
+            {inInstances.length === 1
+              ? `In ${inInstances[0]}`
+              : `In ${inInstances.length} instances`}
+          </span>
         )}
       </div>
     </article>
