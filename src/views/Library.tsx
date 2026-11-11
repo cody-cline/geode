@@ -276,7 +276,11 @@ function InstanceCard({
             : preparing
               ? (progress?.stage ?? "Preparing…")
               : instance.lastPlayed
-                ? `Played ${relativeTime(instance.lastPlayed)}`
+                ? /* "Last played", the same words the instance's own header
+                     uses for the same fact. The card said "Played 3 days ago"
+                     and the header "Last played 3 days ago", which is one
+                     timestamp in two voices on two screens a click apart. */
+                  `Last played ${relativeTime(instance.lastPlayed)}`
                 : "Never played"}
         </span>
 

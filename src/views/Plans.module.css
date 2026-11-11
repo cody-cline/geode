@@ -147,6 +147,9 @@
   font-size: 13px;
   color: var(--text-dim);
   line-height: 1.6;
+  /* The gap to the button under it, the same one Library and Servers leave
+     under theirs. */
+  margin-bottom: 18px;
 }
 
 .lede {

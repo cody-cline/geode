@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import clsx from "clsx";
 import { ClipboardList, Loader2, Package, Plus, Trash2 } from "lucide-react";
 
 import Modal from "../components/Modal";
@@ -84,7 +85,16 @@ export default function Plans() {
             them.
           </p>
         </div>
-        <button className="btn btn-primary" onClick={create} disabled={creating}>
+        {/* Quiet while the page below is offering the same thing, the way
+            Library and Servers are: one primary per screen, and the one in
+            the middle of the page is the one with the explanation attached.
+            `!== 0` rather than `> 0` so the loading page, which offers
+            nothing, keeps the only button it has as the primary. */}
+        <button
+          className={clsx("btn", plans?.length !== 0 && "btn-primary")}
+          onClick={create}
+          disabled={creating}
+        >
           {creating ? <Loader2 size={14} className="spin" /> : <Plus size={14} />}
           New plan
           <kbd className={styles.newKey}>{actionHint("newThing")}</kbd>
@@ -100,18 +110,28 @@ export default function Plans() {
           </div>
         ) : plans.length === 0 ? (
           // What the subtitle above does not already say, and nothing more.
-          // This held the explanation a second time and a second button for
-          // the one act — New plan is in the header just above, is the primary
-          // button on this screen and is the one carrying the key, so the copy
-          // here points at it rather than competing with it.
+          // The explanation was here a second time, in longer words, and it
+          // is in the header now. The button was taken away with it, which
+          // left this page describing one — "New plan, at the top of this
+          // screen, starts one" — a sentence that only existed because there
+          // was nothing here to press. Library and Servers resolve the same
+          // two-primaries problem the other way round, and that is the one
+          // copied here: the button is on the page it belongs to and the
+          // header's goes quiet.
           <div className={styles.empty}>
             <ClipboardList size={40} className={styles.emptyIcon} />
             <h2>Plan a pack before you build it</h2>
             <p>
-              New plan, at the top of this screen, starts one. Add mods to it
-              as you come across them, and build it into an instance or a
-              server once the list is settled.
+              Add mods to it as you come across them, and build it into an
+              instance or a server once the list is settled.
             </p>
+            <button
+              className="btn btn-primary"
+              onClick={create}
+              disabled={creating}
+            >
+              Create your first plan
+            </button>
           </div>
         ) : (
           <div className={styles.grid}>
