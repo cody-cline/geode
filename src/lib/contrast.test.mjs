@@ -141,9 +141,21 @@ test("a badge's own text is readable on its own tint", async () => {
 // saturation and lightness from `global.css`, the second stop's hue from the
 // view — so changing any of them is measured here rather than mirrored here.
 //
-// Not covered: a hero with real artwork, where the background is a photograph
-// and the scrim is the whole answer, and the taller layout a pack summary
-// makes, which moves the version line up into less of the scrim.
+// The taller layout a pack summary makes is covered too, and it is the reason
+// two of these rows read what they read. A summary of one or two lines makes
+// the header taller without moving the text down the hero, so every row above
+// it sits at a smaller *fraction* of the hero and lands in less of the scrim —
+// the version line went to 3.67:1 that way. The answer was not a darker scrim,
+// which would have dimmed every banner in the app for a case most instances
+// never reach: the version line simply stopped using the secondary token on a
+// background that is a photograph, and the badges beside it were backed with a
+// surface. A badge mixed with `transparent` is the one thing here that no
+// scrim can rescue, because over real artwork there is no telling what is
+// under it.
+//
+// Still not covered: a hero with real artwork, where the background is
+// somebody's screenshot and the scrim is the whole answer for the two rows
+// that remain on it.
 // ---------------------------------------------------------------------------
 
 /** The wash's two stops, the second stop's hue offset, and the scrim's stops. */
@@ -160,6 +172,25 @@ async function hero() {
   const offset = view.match(/"--hero-hue-to":\s*\(hue \+ (\d+)\) % 360/);
   assert.ok(offset, "InstanceView no longer derives the wash's second hue from the first");
 
+  // The row's colour is read out of the stylesheet rather than written down
+  // here. A sweep that states the token it is measuring passes just as happily
+  // after somebody changes it, which is the one way this test could be worse
+  // than nothing.
+  const meta = css.slice(css.indexOf(".meta {"));
+  const ink = meta.slice(0, meta.indexOf("}")).match(/color:\s*var\((--[\w-]+)\)/);
+  assert.ok(ink, "the hero's version row no longer names a colour token");
+
+  // And that the badges beside it are not sitting on the wash. A badge mixes
+  // its tint with `transparent`; over artwork there is no telling what ends up
+  // behind it, so the hero backs it with a surface and this sweep leaves it to
+  // the token-against-surface check at the top of the file.
+  const badge = meta.slice(meta.indexOf(".meta :global(.badge) {"));
+  assert.ok(
+    /background-color:\s*var\(--surface-2\)/.test(badge.slice(0, badge.indexOf("}") + 1)),
+    "the hero's badges are no longer backed with a surface, so what they sit " +
+      "on is the wash again — and over real artwork, a photograph",
+  );
+
   const at = css.indexOf(".heroScrim {");
   assert.ok(at > 0, ".heroScrim is no longer in InstanceView.module.css");
   const scrim = [
@@ -175,7 +206,7 @@ async function hero() {
   );
   assert.ok(scrim.length >= 2, "the scrim is no longer a gradient of token stops");
 
-  return { stops, offset: Number(offset[1]), scrim };
+  return { stops, offset: Number(offset[1]), scrim, ink: ink[1] };
 }
 
 /** The scrim's own colour and coverage at `y` down the hero. Interpolated
@@ -204,16 +235,31 @@ function scrimAt(scrim, tokens, y) {
 // measured off the running app's pixels in the light theme — 2.90 for the
 // version, 3.21 for the loader pill, 4.42 for the play time — come out of this
 // arithmetic as 2.99, 3.17 and 4.27 at the hue that fits all three.
-const HERO = 22 + 82.75 + 18;
-const ROWS = [
-  { what: "the instance name", y: (22 + 34.5 / 2) / HERO, ink: "--text" },
-  { what: "the version line", y: (61.5 + 20 / 2) / HERO, ink: "--text-dim" },
-  { what: "the loader pill", y: (61.5 + 20 / 2) / HERO, ink: "--accent-text", tint: "--accent" },
-  { what: "the play-time line", y: (87.5 + 17.25 / 2) / HERO, ink: "--text-faint" },
-];
+//
+// A pack summary sits between the version line and the stats, at 13px over a
+// 1.5 line height with 7px above it, and is clamped at two lines — so the
+// header comes in three heights and each one has to carry its own text. The
+// badges are not here: they are backed with `--surface-2` in both heroes, so
+// what they sit on is a surface the sweep at the top of this file already
+// measures, not the wash.
+const LAYOUTS = [0, 19.5 + 7, 39 + 7].map((summary) => {
+  const hero = 22 + 82.75 + summary + 18;
+  return {
+    summary,
+    rows: [
+      { what: "the instance name", y: (22 + 34.5 / 2) / hero, ink: "--text" },
+      { what: "the version line", y: (61.5 + 20 / 2) / hero, ink: "META" },
+      {
+        what: "the play-time line",
+        y: (87.5 + summary + 17.25 / 2) / hero,
+        ink: "--text-faint",
+      },
+    ],
+  };
+});
 
 test("the hero's generated wash carries its text at every hue, in both themes", async () => {
-  const { stops, offset, scrim } = await hero();
+  const { stops, offset, scrim, ink } = await hero();
   for (const [name, tokens] of Object.entries(await themes())) {
     const [from, to] = stops.map((token) => {
       const pair = tokens[token];
@@ -228,14 +274,17 @@ test("the hero's generated wash carries its text at every hue, in both themes", 
       // point of it can fall between the stops rather than at one of them.
       for (let step = 0; step <= 20; step++) {
         const wash = over(ends[1], ends[0], step / 20);
-        for (const row of ROWS) {
+        for (const { summary, rows } of LAYOUTS)
+        for (const row of rows) {
           const { colour, alpha } = scrimAt(scrim, tokens, row.y);
           let behind = over(colour, wash, alpha);
           if (row.tint) behind = over(tokens[row.tint], behind, 0.14);
-          const ratio = contrast(tokens[row.ink], behind);
+          const ratio = contrast(tokens[row.ink === "META" ? ink : row.ink], behind);
           assert.ok(
             ratio >= AA,
-            `${name}: ${row.what} on the hue-${hue} wash, ${step}/20 along (${behind}), is ${ratio.toFixed(2)}:1, under ${AA}`,
+            `${name}: ${row.what} on the hue-${hue} wash, ${step}/20 along ` +
+              `(${behind}), with ${summary ? `a ${summary > 30 ? "two-line" : "one-line"} summary` : "no summary"}, ` +
+              `is ${ratio.toFixed(2)}:1, under ${AA}`,
           );
         }
       }

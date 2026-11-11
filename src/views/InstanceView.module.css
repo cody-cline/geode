@@ -134,6 +134,13 @@
   white-space: nowrap;
 }
 
+/* The hero writes over a photograph, or over a generated wash whose hue is the
+   instance's own — not over a flat surface — so the secondary token has no
+   business here. `--text-dim` is chosen to sit back from `--text` on a known
+   background; on an unknown one it is simply the first thing to go. A pack
+   summary of two lines makes this header taller, which lifts this row out of
+   the part of the scrim that was covering it, and at that point it measured
+   3.67:1. */
 .meta {
   display: flex;
   align-items: center;
@@ -141,7 +148,16 @@
   gap: 8px;
   margin-top: 5px;
   font-size: 12.5px;
-  color: var(--text-dim);
+  color: var(--text);
+}
+
+/* A badge mixes its tint with `transparent`, so what it actually sits on is
+   whatever is behind it — here a wash of any hue, or somebody's screenshot.
+   Backing it with a surface is the only answer that holds for a photograph,
+   which no amount of tuning the scrim can promise: the pill measured 4.05:1
+   on the wash and is 9.73:1 on this. */
+.meta :global(.badge) {
+  background-color: var(--surface-2);
 }
 
 .stats {
