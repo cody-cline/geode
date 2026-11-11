@@ -23,7 +23,7 @@ import {
 import Modal from "../../components/Modal";
 import Tooltip from "../../components/Tooltip";
 import { api } from "../../lib/api";
-import { fileSize, providerLabel, shownName } from "../../lib/format";
+import { fileSize, providerLabel, shownName, titleIsFileName } from "../../lib/format";
 import { rovingKey } from "../../lib/rovingFocus";
 import { actionHint } from "../../lib/shortcuts";
 import { useActionShortcut } from "../../lib/useActionShortcut";
@@ -1173,9 +1173,14 @@ export default function ContentTab({
                   </div>
                   <div className={styles.itemMeta}>
                     {item.version && <span>{item.version}</span>}
-                    <span className={styles.fileName}>
-                      {shownName(item.fileName)}
-                    </span>
+                    {/* Left out when the title above is already this name: a
+                        jar nobody can put a project to is titled by its file,
+                        and printing it again here only said it twice. */}
+                    {!titleIsFileName(item.fileName, item.name) && (
+                      <span className={styles.fileName}>
+                        {shownName(item.fileName)}
+                      </span>
+                    )}
                     <span>{fileSize(item.size)}</span>
                   </div>
                 </div>
@@ -1339,9 +1344,11 @@ export default function ContentTab({
             {deletable.map((item) => (
               <li key={item.fileName}>
                 <span className={styles.confirmName}>{item.name}</span>
-                <span className={styles.fileName}>
-                  {shownName(item.fileName)}
-                </span>
+                {!titleIsFileName(item.fileName, item.name) && (
+                  <span className={styles.fileName}>
+                    {shownName(item.fileName)}
+                  </span>
+                )}
               </li>
             ))}
           </ul>

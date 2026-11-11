@@ -132,3 +132,21 @@ export function initials(name: string): string {
 export function shownName(fileName: string): string {
   return fileName.replace(/\.disabled$/, "");
 }
+
+/**
+ * Whether a row's title is already the file's name, so the row should not go
+ * on to print it a second time.
+ *
+ * A mod Geode installed has a title from its provider — "FerriteCore" over
+ * `ferritecore-7.0.0.jar`, which is two facts. A jar somebody dropped into the
+ * folder themselves has no provider and nothing else to be called, so the
+ * title falls back to the file name and the line beneath it repeated that name
+ * word for word, in a second font, as though it were telling you something.
+ * Every untracked row said everything it had to say twice.
+ *
+ * Beside `shownName` because it is the same comparison: the suffix is off
+ * both sides or the renamed file never matches the title it was given.
+ */
+export function titleIsFileName(fileName: string, name: string): boolean {
+  return shownName(fileName) === name;
+}

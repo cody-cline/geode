@@ -18,7 +18,7 @@ import {
 
 import Tooltip from "../../components/Tooltip";
 import { api } from "../../lib/api";
-import { fileSize, providerLabel, shownName } from "../../lib/format";
+import { fileSize, providerLabel, shownName, titleIsFileName } from "../../lib/format";
 import { rovingKey } from "../../lib/rovingFocus";
 import { useStore } from "../../lib/store";
 import type {
@@ -561,7 +561,9 @@ export default function ServerContentTab({
           {clientOnly.map((mod) => (
             <div key={mod.file} className={styles.offerRow}>
               <span className={styles.offerName}>{mod.name}</span>
-              <span className={styles.fileName}>{mod.file}</span>
+              {!titleIsFileName(mod.file, mod.name) && (
+                <span className={styles.fileName}>{mod.file}</span>
+              )}
               <button
                 className="btn btn-sm"
                 onClick={() =>
@@ -758,7 +760,11 @@ export default function ServerContentTab({
                   </div>
                   <div className={styles.itemMeta}>
                     {item.version && <span>{item.version}</span>}
-                    <span className={styles.fileName}>{shownName(item.fileName)}</span>
+                    {/* See the same line in the instance's pane: a row whose
+                        title is its file name does not repeat it here. */}
+                    {!titleIsFileName(item.fileName, item.name) && (
+                      <span className={styles.fileName}>{shownName(item.fileName)}</span>
+                    )}
                     <span>{fileSize(item.size)}</span>
                   </div>
                 </div>
