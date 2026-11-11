@@ -1,3 +1,33 @@
+/* The three ways in that are not this form — see the comment above them in the
+   modal. A box on `--bg` rather than a bare row, so the group reads as a thing
+   of its own set into the dialog instead of as the first field of the form it
+   replaces; the same frame the version list below it has, for the same reason.
+   The buttons are `btn-sm` against the footer's full-height Cancel and Create,
+   which is the other half of saying these are not those. */
+.otherWays {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+
+.otherWaysLead {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+/* Wraps rather than squeezes: three buttons and a narrow window is a second
+   line, not three cramped labels. */
+.otherWaysRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
 /* A column rather than a row of chips: each option now carries a sentence, and
    a sentence does not fit in a chip. Two columns where there is room, because
    five stacked rows push the Minecraft version picker off the bottom of the

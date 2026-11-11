@@ -286,36 +286,6 @@ export default function NewInstanceModal({ onClose }: { onClose: () => void }) {
       width={620}
       footer={
         <>
-          <button className="btn btn-ghost" onClick={importPack} disabled={creating}>
-            <FileArchive size={15} />
-            Import modpack
-          </button>
-          {/* An instance folder rather than a file: a Prism or MultiMC
-              instance is a directory, and a zipped one goes through the
-              button beside this. */}
-          <button
-            className="btn btn-ghost"
-            onClick={importFolder}
-            disabled={creating}
-            title="Import a Prism or MultiMC instance folder"
-          >
-            <FolderOpen size={15} />
-            Import folder
-          </button>
-          {/* A joined server becomes an instance like any other, so this is
-              where someone looking to add one would go looking. */}
-          <button
-            className="btn btn-ghost"
-            onClick={() => {
-              onClose();
-              openJoin();
-            }}
-            disabled={creating}
-          >
-            <Users size={15} />
-            Join a server
-          </button>
-          <div style={{ flex: 1 }} />
           <button className="btn" onClick={onClose}>
             Cancel
           </button>
@@ -326,6 +296,61 @@ export default function NewInstanceModal({ onClose }: { onClose: () => void }) {
         </>
       }
     >
+      {/* The three other ways in, and they are not footer buttons. A footer
+          holds what acts on the form above it — Cancel and Create — while these
+          three throw that form away and build the instance out of something
+          that already exists. In the same row as Create they read as five
+          peers, and "Join a server" standing beside it in a dialog called New
+          instance read as a mistake.
+
+          So they come to the top instead, in a box of their own, and before the
+          form rather than after it: somebody who has a pack on disk should find
+          that out before picking a Minecraft version they will not use. A box,
+          small buttons and a line saying what they are — a route, then the
+          form. */}
+      <div className={styles.otherWays}>
+        <p className={styles.otherWaysLead}>
+          Already have a pack, an instance or a server? Start from that instead.
+          Each of these brings its own Minecraft version and loader, so nothing
+          below applies.
+        </p>
+        <div className={styles.otherWaysRow}>
+          <button
+            className="btn btn-sm"
+            onClick={importPack}
+            disabled={creating}
+          >
+            <FileArchive size={14} />
+            Import modpack
+          </button>
+          {/* An instance folder rather than a file: a Prism or MultiMC
+              instance is a directory, and a zipped one goes through the
+              button beside this. */}
+          <button
+            className="btn btn-sm"
+            onClick={importFolder}
+            disabled={creating}
+            title="Import a Prism or MultiMC instance folder"
+          >
+            <FolderOpen size={14} />
+            Import folder
+          </button>
+          {/* A joined server becomes an instance like any other, so this is
+              where someone looking to add one would go looking. */}
+          <button
+            className="btn btn-sm"
+            onClick={() => {
+              onClose();
+              openJoin();
+            }}
+            disabled={creating}
+          >
+            <Users size={14} />
+            Join a server
+          </button>
+        </div>
+      </div>
+
       <div>
         <label className="label" htmlFor="instance-name">
           Name

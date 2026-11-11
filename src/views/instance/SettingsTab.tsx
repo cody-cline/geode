@@ -832,9 +832,11 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
       {confirmDelete && (
         <Modal
           title={`Delete ${instance.name}?`}
-          subtitle="This removes the instance folder, including its worlds, configs and mods. It cannot be undone."
+          subtitle="This removes the instance folder, including its worlds, configs and mods. Nothing is backed up first, and it cannot be undone."
           onClose={() => setConfirmDelete(false)}
-          width={420}
+          // 460 is the width of the world-delete dialog this one now refers to:
+          // the same question asked about more, asked at the same size.
+          width={460}
           footer={
             <>
               <button className="btn" onClick={() => setConfirmDelete(false)}>
@@ -846,6 +848,20 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
             </>
           }
         >
+          {/* The worlds, said out loud, because this screen's neighbour teaches
+              the opposite rule. Deleting one world on the Worlds tab zips it
+              first and says so, which is a promise a person generalises: they
+              learn that Geode will not let them lose a save. Deleting the whole
+              instance takes no backup of anything, and the world backups that
+              tab made are inside this folder too, so they go as well. "It
+              cannot be undone" does not carry any of that — it is the sentence
+              every delete dialog in every application says. */}
+          <p style={{ fontSize: 13, color: "var(--text-dim)", lineHeight: 1.6 }}>
+            Deleting a single world on the Worlds tab backs it up first. This
+            does not: every world in this instance goes with the folder, and so
+            do the world backups already taken on that tab, which are kept
+            inside it. Copy out anything you want to keep first.
+          </p>
           <p style={{ fontSize: 13, color: "var(--text-dim)", lineHeight: 1.6 }}>
             Shared downloads (Minecraft versions, libraries, assets) stay put and
             will be reused by your other instances.

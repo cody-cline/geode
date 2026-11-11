@@ -83,11 +83,20 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
   // added there appears here without this list knowing it exists.
   const shareItems: ShareItem[] = [
     { kind: "group", label: "Save a file" },
+    // No icon on these four. All four carried the same cube, which says they
+    // are the same thing — and the whole reason there are four is that they are
+    // not. Four *different* glyphs would only have hidden that: there is no
+    // icon vocabulary for a Modrinth pack against a CurseForge one, Lucide
+    // carries neither mark, and a box, an archive and a stack of layers are
+    // three shapes a reader has to learn that encode nothing. What tells these
+    // rows apart is the format's name and its extension, and the row prints
+    // both already. So the one item in this menu that is not a file keeps its
+    // glyph and these have none: having an icon at all is now the difference,
+    // which is one somebody can actually see.
     ...(Object.keys(EXPORT_FORMATS) as PackFormat[]).map((format) => ({
       kind: "item" as const,
       label: EXPORT_FORMATS[format].filter,
       hint: `.${EXPORT_FORMATS[format].ext}`,
-      icon: <Package size={14} />,
       onSelect: () => setExportAs(format),
     })),
     { kind: "rule" },
