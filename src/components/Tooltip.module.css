@@ -1,0 +1,30 @@
+/* The bubble. Fixed, and portalled to the body — see the comment on `.menu`
+   in `ShareMenu.module.css` for the stacking context both have to leave.
+
+   120 puts it over the view and over `Modal` (100), because a dialog's own
+   controls can carry one, and under the progress dock (150) and the toasts
+   (200), which are the app speaking rather than a thing being pointed at.
+
+   `pointer-events: none` so the bubble can never take the hover from the
+   element that opened it, which is how a tooltip ends up flickering under a
+   pointer that has not moved. 12px rather than the 11px the badges and the
+   printed keys use: this is a sentence to read, not a label to glance at.
+
+   `left` and `top` arrive inline — see `place` in Tooltip.tsx, which is the
+   only thing that knows where one of these sits. */
+.bubble {
+  position: fixed;
+  z-index: 120;
+  max-width: 280px;
+  padding: 7px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.5;
+  white-space: normal;
+  pointer-events: none;
+}

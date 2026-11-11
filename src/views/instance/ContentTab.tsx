@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { KeyboardEvent } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import clsx from "clsx";
 import {
@@ -16,6 +17,7 @@ import {
 } from "lucide-react";
 
 import Modal from "../../components/Modal";
+import Tooltip from "../../components/Tooltip";
 import { api } from "../../lib/api";
 import { fileSize, providerLabel, shownName } from "../../lib/format";
 import { rovingKey } from "../../lib/rovingFocus";
@@ -54,6 +56,122 @@ function followRenames(selected: Set<string>, moves: Map<string, string>) {
   return next;
 }
 
+/** A row of the list, carrying the file name that identifies it. */
+const ROW = "[data-row]";
+
+/**
+ * Everything in a row that has been taken out of the tab order, which is the
+ * row's own arrow walk.
+ *
+ * Written as the absence of a tab stop rather than as a list of the controls,
+ * because that is the invariant worth keeping: a control added to a row has to
+ * be given `tabIndex={-1}` or the list goes back to costing a tab stop per
+ * button — and giving it one puts it in this walk with no further thought. A
+ * disabled control is skipped, since focusing one tells nobody anything.
+ */
+const IN_ROW = '[tabindex="-1"]:not(:disabled)';
+
+/**
+ * The list's keyboard, bound to the grid rather than to a row.
+ *
+ * The longest list in this app was reachable by Tab alone: every row's three
+ * or four controls were a stop of their own, so six mods cost about twenty-one
+ * presses and an eighty-mod pack about three hundred, with no arrow key doing
+ * anything at all. So the **row** is the tab stop — one for the whole list —
+ * and the keys below are what reaches everything inside it:
+ *
+ * - **Up and Down** move between rows, always landing on the row itself rather
+ *   than on the control that happens to sit above or below. A row holds one,
+ *   two or four buttons depending on the folder and the file, so a column
+ *   position is not a thing to keep; and landing on the row is what gets the
+ *   whole row read out.
+ * - **Left and Right** walk the controls of the row the keyboard is on,
+ *   wrapping. Wrapping is what keeps both ends of a row cheap: Right from the
+ *   row is its first control and Left from the row is its last, so Delete is
+ *   one press away however many badges sit in between.
+ * - **Home and End** are the first and last row.
+ * - **Space and Enter** take the row into the selection, where there is one to
+ *   take it into — see `select` below.
+ *
+ * Why not `rovingKey`, which every pick-one strip in this app uses: that
+ * helper's contract is that the option the arrows land on is *chosen*, exactly
+ * as clicking it would choose it, and it treats its group as one axis. Neither
+ * holds here. Landing on a row must not select it, landing on a button must
+ * not press it, and this is two nested axes rather than one. The same
+ * distinction `ShareMenu` makes about its own arrows.
+ *
+ * `select` is optional because the two panes differ in exactly one way: the
+ * instance's list can be selected from, the server's cannot, and a key that
+ * does nothing is better left unclaimed than bound to nothing.
+ */
+export function rowKeys(
+  e: KeyboardEvent<HTMLElement>,
+  select?: (fileName: string, extend: boolean) => void,
+) {
+  const grid = e.currentTarget;
+  const row = (e.target as HTMLElement).closest<HTMLElement>(ROW);
+  const file = row?.dataset.row;
+  if (!row || !file) return;
+
+  // A `<select>` owns every key while the keyboard is in it — the same rule
+  // `shortcuts.ts` keeps for a bare binding, and for the same reason: an arrow
+  // on a closed select is how its value is changed, so walking the row from
+  // one would be this handler answering a press meant to pick an option. The
+  // server's Side control is the one of these in a row, and Shift+Tab is the
+  // way back out to the row, which is the grid's one tab stop.
+  if (e.target instanceof HTMLSelectElement) return;
+
+  const rows = Array.from(grid.querySelectorAll<HTMLElement>(ROW));
+  const at = rows.indexOf(row);
+
+  /** A row, clamped at the ends: a list is a place, and the top of it is not
+   *  somewhere Down should arrive at. The press is swallowed either way, so it
+   *  never scrolls the panel out from under the row it was pointed at. */
+  const toRow = (to: number) => {
+    e.preventDefault();
+    rows[Math.max(0, Math.min(to, rows.length - 1))]?.focus();
+  };
+
+  switch (e.key) {
+    case "ArrowDown":
+      return toRow(at + 1);
+    case "ArrowUp":
+      return toRow(at - 1);
+    case "Home":
+      return toRow(0);
+    case "End":
+      return toRow(rows.length - 1);
+    case "ArrowRight":
+    case "ArrowLeft": {
+      const controls = Array.from(row.querySelectorAll<HTMLElement>(IN_ROW));
+      if (controls.length === 0) return;
+      e.preventDefault();
+      const step = e.key === "ArrowRight" ? 1 : -1;
+      const from = controls.indexOf(e.target as HTMLElement);
+      // From the row — or from anything else that is not one of the controls —
+      // a step in either direction means the end it points at.
+      const to =
+        from < 0
+          ? step > 0
+            ? 0
+            : controls.length - 1
+          : (from + step + controls.length) % controls.length;
+      controls[to].focus();
+      return;
+    }
+    case " ":
+    case "Enter":
+      // Only on the row. On a control these are the control's own: Space
+      // toggles the checkbox the keyboard is on and Enter presses the button,
+      // and taking either would be this handler answering for a press that was
+      // aimed at something specific.
+      if (e.target !== row || !select) return;
+      e.preventDefault();
+      select(file, e.shiftKey);
+      return;
+  }
+}
+
 
 export default function ContentTab({
   instance,
@@ -78,6 +196,8 @@ export default function ContentTab({
   // click last landed on so Shift can measure a span from it.
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [anchor, setAnchor] = useState<string | null>(null);
+  // The row the keyboard was last on, which is the row that answers Tab.
+  const [keyed, setKeyed] = useState<string | null>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
   const [askingDelete, setAskingDelete] = useState(false);
   const filterBox = useRef<HTMLInputElement>(null);
@@ -215,6 +335,11 @@ export default function ContentTab({
       setSelected((prev) =>
         followRenames(prev, new Map([[item.fileName, renamed]])),
       );
+      // And the tab stop follows the rename too. Turning a file off renames it
+      // on disk, so the row it was on is replaced by one with a different key:
+      // without this, disabling the fifth mod puts the list's one tab stop
+      // back on the first.
+      setKeyed((k) => (k === item.fileName ? renamed : k));
       await load();
     } catch (e) {
       reportError("Could not toggle that file", e);
@@ -432,6 +557,19 @@ export default function ContentTab({
   const trackedCount = items?.filter((i) => i.projectId).length ?? 0;
   const untrackedCount = items?.filter((i) => i.fromDisk).length ?? 0;
 
+  // The one row that answers Tab. Checked against the list rather than
+  // trusted, because `keyed` outlives the folder and the filter it was set in.
+  const rowStop = shown?.some((i) => i.fileName === keyed)
+    ? keyed
+    : shown?.[0]?.fileName;
+
+  // Said once, because the button says it to the pointer and to the keyboard
+  // and the disabled button says it to neither.
+  const updateReason =
+    trackedCount === 0
+      ? "Nothing here was installed from Modrinth or CurseForge"
+      : "Check for newer versions";
+
   return (
     <div className={styles.wrap}>
       <div className={styles.toolbar}>
@@ -483,68 +621,84 @@ export default function ContentTab({
                 home is the thing it acts on. */}
             <kbd className={styles.searchKey}>{actionHint("focusFilter")}</kbd>
           </div>
-          {/* The way into selecting at all, and the one place the gesture is
+          {/* The way into selecting at all, and the one place either gesture is
               written down: an icon that appears on hover explains itself to
-              nobody who has not hovered it. */}
+              nobody who has not hovered it, and arrow keys explain themselves
+              to nobody at all. A real tooltip rather than a `title`, because an
+              explanation that is the only home a gesture has cannot be one only
+              a mouse can read. */}
           {shown && shown.length > 1 && (
-            <button
-              className="btn"
-              onClick={() => setSelected(new Set(shown.map((i) => i.fileName)))}
-              title={`Select all ${shown.length} files listed here, to enable, disable or delete them together. One at a time: click a row's icon, then Shift-click another to take everything between them.`}
+            <Tooltip
+              text={`Select all ${shown.length} files listed here, to enable, disable or delete them together. One at a time: click a row's icon, then Shift-click another to take everything between them. From the keyboard: Up and Down move between rows, Space takes the row you are on and Shift+Space takes every row back to the last one you took.`}
             >
-              <ListChecks size={14} />
-              Select all
-            </button>
+              <button
+                className="btn"
+                onClick={() => setSelected(new Set(shown.map((i) => i.fileName)))}
+              >
+                <ListChecks size={14} />
+                Select all
+              </button>
+            </Tooltip>
           )}
           {/* The three occasional controls. Below the width the pane narrows
               at they keep the icon and drop the word, which is what leaves the
               primary action at the end of this row room to be read — each one
-              says in `aria-label` what it no longer spells out, and `title`
-              is on all three because a tooltip is the only name an icon
-              has. */}
-          <button
-            className={clsx("btn", styles.toolCollapse)}
-            onClick={addFiles}
-            title="Add a file from this computer"
-            aria-label="Add file"
-          >
-            <FilePlus2 size={14} />
-            <span className={styles.toolLabel}>Add file</span>
-          </button>
-          {untrackedCount > 0 && (
+              says in `aria-label` what it no longer spells out, and each one
+              carries a real tooltip because at that width the sentence is the
+              only name the icon has, and a `title` is a name only a mouse can
+              read. */}
+          <Tooltip text="Add a file from this computer">
             <button
               className={clsx("btn", styles.toolCollapse)}
-              onClick={linkUntracked}
-              disabled={linking}
-              title="Match untracked files against Modrinth and CurseForge by file hash"
-              aria-label={`Identify ${untrackedCount} untracked file${untrackedCount === 1 ? "" : "s"}`}
+              onClick={addFiles}
+              aria-label="Add file"
             >
-              {linking ? (
+              <FilePlus2 size={14} />
+              <span className={styles.toolLabel}>Add file</span>
+            </button>
+          </Tooltip>
+          {untrackedCount > 0 && (
+            <Tooltip text="Match untracked files against Modrinth and CurseForge by file hash">
+              <button
+                className={clsx("btn", styles.toolCollapse, styles.toolCounted)}
+                onClick={linkUntracked}
+                disabled={linking}
+                aria-label={`Identify ${untrackedCount} untracked file${untrackedCount === 1 ? "" : "s"}`}
+              >
+                {linking ? (
+                  <Loader2 size={14} className="spin" />
+                ) : (
+                  <Link2 size={14} />
+                )}
+                <span className={styles.toolLabel}>Identify</span>
+                {/* Outside the label, so the collapse takes the word and
+                    leaves the number. How many files are waiting is the
+                    signal; "Identify" is the part you can work out from the
+                    icon. */}
+                <span className={styles.toolCount}>{untrackedCount}</span>
+              </button>
+            </Tooltip>
+          )}
+          <Tooltip text={updateReason}>
+            <button
+              className={clsx("btn", styles.toolCollapse)}
+              onClick={checkUpdates}
+              disabled={checking || trackedCount === 0}
+              // Kept, and only while the button is off. A disabled control
+              // receives neither focus nor a pointer, so the tooltip above
+              // cannot open on one and the platform's own is the only thing
+              // left that can say why there is nothing to check.
+              title={trackedCount === 0 ? updateReason : undefined}
+              aria-label="Check updates"
+            >
+              {checking ? (
                 <Loader2 size={14} className="spin" />
               ) : (
-                <Link2 size={14} />
+                <RefreshCw size={14} />
               )}
-              <span className={styles.toolLabel}>Identify {untrackedCount}</span>
+              <span className={styles.toolLabel}>Check updates</span>
             </button>
-          )}
-          <button
-            className={clsx("btn", styles.toolCollapse)}
-            onClick={checkUpdates}
-            disabled={checking || trackedCount === 0}
-            title={
-              trackedCount === 0
-                ? "Nothing here was installed from Modrinth or CurseForge"
-                : "Check for newer versions"
-            }
-            aria-label="Check updates"
-          >
-            {checking ? (
-              <Loader2 size={14} className="spin" />
-            ) : (
-              <RefreshCw size={14} />
-            )}
-            <span className={styles.toolLabel}>Check updates</span>
-          </button>
+          </Tooltip>
           <button className="btn btn-primary" onClick={onBrowse}>
             Browse
           </button>
@@ -635,9 +789,9 @@ export default function ContentTab({
 
       {/* The one panel the four kinds swap, so each of them points at it and it
           names the kind it is showing. Focusable in its own right: it scrolls,
-          and while it is loading or empty, or showing rows whose first stop is
-          a long way down, Tab out of the strip would otherwise skip the list
-          the strip exists to switch. */}
+          and while it is loading or empty there is nothing inside it to focus,
+          so Tab out of the strip would otherwise skip the list the strip exists
+          to switch. */}
       <div
         className={styles.list}
         id="instance-content-panel"
@@ -668,20 +822,59 @@ export default function ContentTab({
             )}
           </div>
         ) : (
-          shown.map((item) => {
+          /* A grid, which is the one ARIA shape that fits what a row of this
+             list is. A listbox was the tempting answer — the rows really are
+             selectable, and `aria-selected` would say so — but an option may
+             not hold working controls, and every row here holds three or four
+             that act independently of each other and of the selection. A grid
+             is two axes with arbitrary widgets in its cells, and its documented
+             keyboard is the one implemented in `rowKeys`: the row is the tab
+             stop, Up and Down move between rows, Left and Right along one.
+
+             No `aria-colcount`: a row holds one, two or four buttons depending
+             on the folder and the file, so the cell that carries them carries
+             a different number each time, and a column count that is not the
+             same twice is worse than none. The name comes from the kind tab
+             above rather than from a second string to keep in step with it. */
+          <div
+            className={styles.rows}
+            role="grid"
+            aria-labelledby={`instance-content-tab-${kind}`}
+            aria-multiselectable="true"
+            onKeyDown={(e) =>
+              rowKeys(e, (file, extend) => {
+                const row = shown.find((i) => i.fileName === file);
+                if (row) pick(row, extend);
+              })
+            }
+            // Where the keyboard is, recorded as it arrives, so the row it is
+            // on is the row Tab comes back to. Bound to the grid because focus
+            // bubbles in React and the row is not always the element focused —
+            // it may be one of the controls inside it.
+            onFocus={(e) => {
+              const row = (e.target as HTMLElement).closest<HTMLElement>("[data-row]");
+              if (row?.dataset.row) setKeyed(row.dataset.row);
+            }}
+          >
+          {shown.map((item) => {
             const update = updateFor(item);
             const isPicked = selected.has(item.fileName);
             return (
               <div
                 key={item.fileName}
                 className={clsx(styles.row, isPicked && styles.rowPicked)}
+                role="row"
+                aria-selected={isPicked}
+                data-row={item.fileName}
+                tabIndex={item.fileName === rowStop ? 0 : -1}
               >
-                <label className={styles.toggle}>
+                <label className={styles.toggle} role="gridcell">
                   <input
                     type="checkbox"
                     checked={item.enabled}
                     onChange={() => toggle(item)}
                     aria-label={`${item.enabled ? "Disable" : "Enable"} ${item.name}`}
+                    tabIndex={-1}
                   />
                 </label>
 
@@ -696,29 +889,32 @@ export default function ContentTab({
                     settled it. The accent still says "picked", as a bar down
                     the edge of the row, which is not a mark that can be read
                     as this file being on. */}
-                <button
-                  type="button"
-                  className={clsx(
-                    styles.itemIcon,
-                    styles.pick,
-                    isPicked && styles.picked,
-                  )}
-                  onClick={(e) => pick(item, e.shiftKey)}
-                  title="Select this file. Shift-click another to take everything between them."
-                  aria-label={`${isPicked ? "Deselect" : "Select"} ${item.name}`}
-                  aria-pressed={isPicked}
-                >
-                  {item.iconUrl ? (
-                    <img src={item.iconUrl} alt="" loading="lazy" />
-                  ) : (
-                    <Package size={16} />
-                  )}
-                  <span className={styles.pickMark} aria-hidden="true">
-                    <Check size={14} />
-                  </span>
-                </button>
+                <div className={styles.cell} role="gridcell">
+                  <button
+                    type="button"
+                    className={clsx(
+                      styles.itemIcon,
+                      styles.pick,
+                      isPicked && styles.picked,
+                    )}
+                    onClick={(e) => pick(item, e.shiftKey)}
+                    title="Select this file. Shift-click another to take everything between them."
+                    aria-label={`${isPicked ? "Deselect" : "Select"} ${item.name}`}
+                    aria-pressed={isPicked}
+                    tabIndex={-1}
+                  >
+                    {item.iconUrl ? (
+                      <img src={item.iconUrl} alt="" loading="lazy" />
+                    ) : (
+                      <Package size={16} />
+                    )}
+                    <span className={styles.pickMark} aria-hidden="true">
+                      <Check size={14} />
+                    </span>
+                  </button>
+                </div>
 
-                <div className={styles.itemText}>
+                <div className={styles.itemText} role="gridcell">
                   <div className={styles.itemTitle}>
                     <span className={styles.itemName}>{item.name}</span>
                     {/* First in the line, because it is the most important
@@ -733,47 +929,68 @@ export default function ContentTab({
                         inactive component, which this is not: the toggle beside
                         it and the delete button at the end both work. The mod
                         is off, not the row. */}
+                    {/* Each of these is one word whose meaning is the sentence
+                        attached to it, and until now that sentence was a
+                        `title` — which is to say it was there for a mouse and
+                        for nothing else. "untracked" is the plainest case: the
+                        word is jargon, and what it means existed only in a
+                        native tooltip that never opens on focus and never on
+                        touch.
+
+                        So each carries a real tooltip and a `tabIndex` of -1,
+                        which puts it in its row's arrow walk and in no tab
+                        order at all. That is the trade and it is only this
+                        cheap because of the grid above: as four more *tab*
+                        stops a row these would have undone the whole of what
+                        the grid is for, but as four more steps in a walk that
+                        wraps they cost nothing at either end of the row — the
+                        buttons are still one press left of the row, the
+                        checkbox one press right of it, and the badges sit in
+                        the middle where the least-pressing information in the
+                        row belongs. The provider badge below takes neither,
+                        because "Modrinth" is not a word that needs a sentence
+                        and a focus stop that explains nothing is dead weight. */}
                     {!item.enabled && (
-                      <span
-                        className="badge"
-                        title="Turned off, and still here. The loader skips it — the box on the left puts it back."
-                      >
-                        disabled
-                      </span>
+                      <Tooltip text="Turned off, and still here. The loader skips it — the box on the left puts it back.">
+                        <span className="badge" tabIndex={-1}>
+                          disabled
+                        </span>
+                      </Tooltip>
                     )}
                     {item.dependency && (
-                      <span className="badge" title="Installed as a dependency">
-                        dependency
-                      </span>
+                      <Tooltip text="Installed as a dependency">
+                        <span className="badge" tabIndex={-1}>
+                          dependency
+                        </span>
+                      </Tooltip>
                     )}
                     {item.fromDisk && (
-                      <span className="badge" title="Added manually — not tracked for updates">
-                        untracked
-                      </span>
+                      <Tooltip text="Added manually — not tracked for updates">
+                        <span className="badge" tabIndex={-1}>
+                          untracked
+                        </span>
+                      </Tooltip>
                     )}
                     {item.origin === "server" && (
-                      <span
-                        className="badge"
-                        title="From the server's pack. You can turn it off, but the server decides what is installed."
-                      >
-                        server
-                      </span>
+                      <Tooltip text="From the server's pack. You can turn it off, but the server decides what is installed.">
+                        <span className="badge" tabIndex={-1}>
+                          server
+                        </span>
+                      </Tooltip>
                     )}
                     {item.origin === "server" && item.sided?.side === "server" && (
-                      <span
-                        className="badge"
-                        title="Only the server needs this. Turn all of these on or off in Settings, under Server."
-                      >
-                        server-side
-                      </span>
+                      <Tooltip text="Only the server needs this. Turn all of these on or off in Settings, under Server.">
+                        <span className="badge" tabIndex={-1}>
+                          server-side
+                        </span>
+                      </Tooltip>
                     )}
                     {item.ignoreGameVersion && (
-                      <span
-                        className="badge"
-                        title="Its Minecraft version is ignored. Geode takes its newest build for this instance’s loader, whatever Minecraft version that build was made for, instead of refusing to find one."
-                      >
-                        any version
-                      </span>
+                      <Tooltip text="Its Minecraft version is ignored. Geode takes its newest build for this instance’s loader, whatever Minecraft version that build was made for, instead of refusing to find one.">
+                        <span className="badge" tabIndex={-1}>
+                          any version
+                        </span>
+                      </Tooltip>
                     )}
                     {/* Spelled out, the way Browse spells it. "MR" and
                         "Modrinth" are the same provider two screens apart,
@@ -794,74 +1011,85 @@ export default function ContentTab({
                   </div>
                 </div>
 
-                {update && (
-                  <button
-                    className="btn btn-sm btn-primary"
-                    onClick={() => applyUpdate(update)}
-                    disabled={updating !== null}
-                    title={`Update to ${update.newVersionNumber}`}
-                  >
-                    {updating === update.projectId ? (
-                      <Loader2 size={12} className="spin" />
-                    ) : (
-                      <ArrowUpCircle size={13} />
-                    )}
-                    Update
-                  </button>
-                )}
-
-                {/* Offered only where it could mean anything: a mod, from a
-                    platform that can be asked for another build, and not one
-                    the server owns. The title is the one place this is
-                    explained, and it says the risk in plain words — a mod
-                    running outside what it declares can stop the game
-                    starting, and nothing here has looked inside the jar. */}
-                {kind === "mod" &&
-                  item.provider &&
-                  item.origin !== "server" && (
+                {/* The row's buttons, as one cell. How many there are depends
+                    on the folder and on the file, so one cell each would give
+                    the grid a column count that is never the same twice; the
+                    arrows walk the buttons rather than the cells, so nothing
+                    is lost by holding them together. */}
+                <div className={styles.actions} role="gridcell">
+                  {update && (
                     <button
-                      className={clsx(
-                        "btn btn-ghost btn-icon btn-sm",
-                        item.ignoreGameVersion && styles.anyVersion,
-                      )}
-                      onClick={() =>
-                        void ignoreVersion(item, !item.ignoreGameVersion)
-                      }
-                      title={
-                        item.ignoreGameVersion
-                          ? `Ignoring the Minecraft version: its newest build for this loader is used whatever version it was built for, and it may stop the game starting. Press to require a build for Minecraft ${instance.mcVersion} again.`
-                          : `Ignore the Minecraft version: use its newest build for this loader even when its author has not listed Minecraft ${instance.mcVersion}. Mods usually run on a little newer than they say — but one that does not can stop the game starting, and nothing here has read the jar. The loader is still matched.`
-                      }
-                      aria-label={
-                        item.ignoreGameVersion
-                          ? `Require a build for Minecraft ${instance.mcVersion} for ${item.name}`
-                          : `Ignore the Minecraft version for ${item.name}`
-                      }
-                      aria-pressed={item.ignoreGameVersion ?? false}
+                      className="btn btn-sm btn-primary"
+                      onClick={() => applyUpdate(update)}
+                      disabled={updating !== null}
+                      title={`Update to ${update.newVersionNumber}`}
+                      tabIndex={-1}
                     >
-                      <Unlock size={14} />
+                      {updating === update.projectId ? (
+                        <Loader2 size={12} className="spin" />
+                      ) : (
+                        <ArrowUpCircle size={13} />
+                      )}
+                      Update
                     </button>
                   )}
 
-                {/* The server's own mods stay. Offering a button that always
-                    fails is worse than not offering one, so the row explains
-                    itself instead — turning it off is right there. */}
-                <button
-                  className="btn btn-ghost btn-icon btn-sm"
-                  onClick={() => remove(item)}
-                  disabled={item.origin === "server"}
-                  title={
-                    item.origin === "server"
-                      ? "From the server's pack — turn it off instead"
-                      : "Delete"
-                  }
-                  aria-label={`Delete ${item.name}`}
-                >
-                  <Trash2 size={14} />
-                </button>
+                  {/* Offered only where it could mean anything: a mod, from a
+                      platform that can be asked for another build, and not one
+                      the server owns. The title is the one place this is
+                      explained, and it says the risk in plain words — a mod
+                      running outside what it declares can stop the game
+                      starting, and nothing here has looked inside the jar. */}
+                  {kind === "mod" &&
+                    item.provider &&
+                    item.origin !== "server" && (
+                      <button
+                        className={clsx(
+                          "btn btn-ghost btn-icon btn-sm",
+                          item.ignoreGameVersion && styles.anyVersion,
+                        )}
+                        onClick={() =>
+                          void ignoreVersion(item, !item.ignoreGameVersion)
+                        }
+                        title={
+                          item.ignoreGameVersion
+                            ? `Ignoring the Minecraft version: its newest build for this loader is used whatever version it was built for, and it may stop the game starting. Press to require a build for Minecraft ${instance.mcVersion} again.`
+                            : `Ignore the Minecraft version: use its newest build for this loader even when its author has not listed Minecraft ${instance.mcVersion}. Mods usually run on a little newer than they say — but one that does not can stop the game starting, and nothing here has read the jar. The loader is still matched.`
+                        }
+                        aria-label={
+                          item.ignoreGameVersion
+                            ? `Require a build for Minecraft ${instance.mcVersion} for ${item.name}`
+                            : `Ignore the Minecraft version for ${item.name}`
+                        }
+                        aria-pressed={item.ignoreGameVersion ?? false}
+                        tabIndex={-1}
+                      >
+                        <Unlock size={14} />
+                      </button>
+                    )}
+
+                  {/* The server's own mods stay. Offering a button that always
+                      fails is worse than not offering one, so the row explains
+                      itself instead — turning it off is right there. */}
+                  <button
+                    className="btn btn-ghost btn-icon btn-sm"
+                    onClick={() => remove(item)}
+                    disabled={item.origin === "server"}
+                    title={
+                      item.origin === "server"
+                        ? "From the server's pack — turn it off instead"
+                        : "Delete"
+                    }
+                    aria-label={`Delete ${item.name}`}
+                    tabIndex={-1}
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
               </div>
             );
-          })
+          })}
+          </div>
         )}
       </div>
 
