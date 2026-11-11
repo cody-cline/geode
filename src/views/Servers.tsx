@@ -150,13 +150,22 @@ export default function Servers() {
                 evidence the screen is not for you. The taxonomy is already
                 explained a tile at a time inside the dialog this leads to,
                 where there is room to say what each kind is and where nobody
-                meets it before they have asked for it. */}
+                meets it before they have asked for it.
+
+                The first sentence used to be "A server your friends can join,
+                running on this machine", and nothing anywhere said that a
+                friend outside the house cannot reach it until the network is
+                dealt with — which they found out when somebody said it would
+                not connect. It is one clause now rather than a lecture: an
+                empty screen is where a promise is made, and the dialog this
+                button opens is where the two ways of keeping it belong. */}
             <p>
-              A server your friends can join, running on this machine. Geode
-              downloads the software, sets it up, and gives you a console to
-              start and stop it from. Creating one asks which software to run
-              and says what each kind is for, so there is nothing to look up
-              first.
+              A server running on this machine: anyone on your own network can
+              join it, and friends further away once its port is open to the
+              internet. Geode downloads the software, sets it up, and gives you
+              a console to start and stop it from. Creating one asks which
+              software to run and says what each kind is for, so there is
+              nothing to look up first.
             </p>
             <button className="btn btn-primary" onClick={() => setCreating(true)}>
               Create your first server

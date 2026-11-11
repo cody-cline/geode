@@ -15,23 +15,75 @@
    and Create still pinned in the footer and enabled, so a server could be made
    without ever seeing which version it would run. Giving the scroll to the
    picker instead keeps them on screen: this takes whatever room is left after
-   them and scrolls what will not fit, down to a floor of a heading and two
-   rows of tiles, because a picker shrunk to nothing is no better than a
-   version field nobody saw.
+   them and scrolls what will not fit, down to a floor of a heading, the
+   sentence under it and a row of tiles with the next row showing beneath,
+   because a picker shrunk to nothing is no better than a version field nobody
+   saw. That floor was 132px while a heading stood alone over the tiles; the
+   two groups that carry the real choice explain themselves now, and three
+   lines of explanation spent the whole of it on words — which is how a number
+   set once stops meaning the thing it was set to mean.
    The rule below is the boundary the dialog's subtitle already describes — the
-   software above it, the version it runs below — and the edge that says this
-   part has more than it is showing. The negative margins cancel the padding
-   that keeps a tile's focus ring from being clipped by the scroll box, so the
-   tiles still line up with everything else in the body. */
+   software above it, the version it runs below. The negative margins cancel
+   the padding that keeps a tile's focus ring from being clipped by the scroll
+   box, so the tiles still line up with everything else in the body.
+
+   The rule alone was not enough, and that was the bug: a line is where the
+   box ends either way, so a sentence sliced through the middle read as
+   something failing to draw rather than as four more tiles below. The four
+   background layers are `Modal.module.css`'s answer for the dialog's own
+   body, which that file explains at length and which is the same trick here —
+   two shadows pinned to the box and, over each, a patch of the panel's colour
+   pinned to the content, so a picker with nothing left to scroll shows
+   neither. The patch is `--surface` rather than the `--bg` the tiles use,
+   because what it has to match is whatever sits behind *this* box, and that
+   is the dialog body. It is taller than the shadow it covers, or a few pixels
+   of the shadow survive at rest and the picker says there is more above it
+   when there is not.
+
+   One thing is worse here than it is there, and it is worth knowing before
+   anybody reports it as a mistake: a background cannot paint in front of the
+   element's own content, and these tiles are opaque (`--bg`). So the band
+   shows in the gaps — between the two columns, between the rows, and across
+   the headings and their sentences, which carry no background of their own —
+   and not across a tile, whose own blurb can still be cut mid-line. What it
+   buys is an edge that reads as an edge everywhere nothing opaque is in the
+   way, which a rule on its own never did; the floor above is what keeps a
+   whole row of tiles and a slice of the next in view, which is the other half
+   of the answer. A fade laid over the top would cover the tiles as well, and
+   it would be `opacity` by another name: `contrast.test.mjs` can measure a
+   colour on a colour and cannot measure a half-covered word. */
 .groups {
   display: flex;
   flex-direction: column;
   gap: 11px;
   overflow-y: auto;
-  min-height: 132px;
+  min-height: 178px;
   margin: -4px -4px 0;
   padding: 4px 4px 14px;
   border-bottom: 1px solid var(--border);
+  background-image:
+    linear-gradient(var(--surface), var(--surface)),
+    linear-gradient(var(--surface), var(--surface)),
+    linear-gradient(
+      to bottom,
+      var(--surface-3),
+      color-mix(in srgb, var(--surface-3) 34%, transparent) 42%,
+      transparent
+    ),
+    linear-gradient(
+      to top,
+      var(--surface-3),
+      color-mix(in srgb, var(--surface-3) 34%, transparent) 42%,
+      transparent
+    );
+  background-position: top, bottom, top, bottom;
+  background-size:
+    100% 20px,
+    100% 20px,
+    100% 18px,
+    100% 18px;
+  background-attachment: local, local, scroll, scroll;
+  background-repeat: no-repeat;
 }
 
 /* The proxies are not another kind of server, so they do not sit in the same
@@ -83,6 +135,14 @@
     background 0.12s var(--ease);
 }
 
+/* The name and whatever marks the tile on one line, so a marker reads as part
+   of the name rather than as the first words of the sentence below it. */
+.kindHead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .kindName {
   font-size: 13px;
   font-weight: 600;
@@ -124,7 +184,14 @@
   line-height: 1.55;
 }
 
-/* Something is missing and Geode can fix it — stated, not warned about. */
+/* Something this server still needs — stated, not warned about.
+
+   Two of them, and one box: Git for a Spigot build, which Geode can go and
+   fetch and so carries a button, and the port a friend outside the house
+   comes in through, which nobody but the person reading can open. One shape
+   because they are one sentence in two registers of effort, and because the
+   second has no business being quieter — it is the thing nothing else in this
+   app says at a moment anybody would read it. */
 .needs {
   display: flex;
   gap: 10px;
