@@ -16,6 +16,7 @@ import {
 
 import { api } from "../../lib/api";
 import { fileSize, providerLabel, shownName } from "../../lib/format";
+import { rovingKey } from "../../lib/rovingFocus";
 import { useStore } from "../../lib/store";
 import type {
   ContentItem,
@@ -396,6 +397,12 @@ export default function ServerContentTab({
   const untrackedCount = items?.filter((i) => i.fromDisk).length ?? 0;
   const noun = PICKS[folder].label.toLowerCase();
 
+  // Which folder carries the strip's one tab stop. Normally the chosen one —
+  // but what a server can hold is read off the server and changes under this
+  // screen (adding Cardboard grows a Plugins folder), so a folder that has gone
+  // must not leave the strip with no tab stop at all and nothing to Tab into.
+  const folderStop = folders.some((f) => f.id === folder) ? folder : folders[0]?.id;
+
   if (folders.length === 0) {
     return (
       <div className={styles.wrap}>
@@ -413,15 +420,37 @@ export default function ServerContentTab({
   return (
     <div className={styles.wrap}>
       <div className={styles.toolbar}>
-        <div className={styles.kinds}>
+        {/* The instance tab's strip, said the same way — it swaps the list
+            below it, and the roles belong on it for the same reason. The role
+            goes straight on the strip: it holds the folders and nothing else,
+            since the tools beside it are a sibling of this element rather than
+            a child. */}
+        <div
+          className={styles.kinds}
+          role="tablist"
+          aria-label="Content folders"
+          onKeyDown={(e) => {
+            const next = rovingKey(
+              e,
+              folders.map((f) => f.id),
+            );
+            if (next) setFolder(next);
+          }}
+        >
           {folders.map((option) => (
             <button
               key={option.id}
+              id={`server-content-tab-${option.id}`}
               className={clsx(
                 styles.kindTab,
                 folder === option.id && styles.kindActive,
               )}
               onClick={() => setFolder(option.id)}
+              role="tab"
+              aria-selected={folder === option.id}
+              aria-controls="server-content-panel"
+              tabIndex={option.id === folderStop ? 0 : -1}
+              data-roving={option.id}
             >
               {option.label}
             </button>
@@ -560,7 +589,17 @@ export default function ServerContentTab({
         </div>
       )}
 
-      <div className={styles.list}>
+      {/* The one panel the folders swap, named by whichever of them is showing.
+          Focusable because it is the thing the strip switches and it scrolls:
+          while it is loading or empty, Tab out of the strip would otherwise
+          skip it entirely. */}
+      <div
+        className={styles.list}
+        id="server-content-panel"
+        role="tabpanel"
+        aria-labelledby={`server-content-tab-${folderStop}`}
+        tabIndex={0}
+      >
         {shown === null ? (
           <div className={styles.skeletons}>
             {Array.from({ length: 5 }, (_, i) => (

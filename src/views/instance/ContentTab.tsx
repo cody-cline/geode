@@ -18,6 +18,7 @@ import {
 import Modal from "../../components/Modal";
 import { api } from "../../lib/api";
 import { fileSize, providerLabel, shownName } from "../../lib/format";
+import { rovingKey } from "../../lib/rovingFocus";
 import { actionHint } from "../../lib/shortcuts";
 import { useActionShortcut } from "../../lib/useActionShortcut";
 import { useStore } from "../../lib/store";
@@ -31,6 +32,8 @@ const KINDS: { id: ContentKind; label: string; extensions: string[] }[] = [
   { id: "shaderpack", label: "Shaders", extensions: ["zip"] },
   { id: "datapack", label: "Data Packs", extensions: ["zip"] },
 ];
+
+const KIND_IDS = KINDS.map((k) => k.id);
 
 /**
  * A selection, with every file that has just been renamed following its row.
@@ -432,12 +435,33 @@ export default function ContentTab({
   return (
     <div className={styles.wrap}>
       <div className={styles.toolbar}>
-        <div className={styles.kinds}>
+        {/* A tab set nested inside the screen's own: this strip swaps the list
+            below it, which is the act `InstanceView.module.css` describes, and
+            it was drawn as that act's shape while saying nothing at all. The
+            role goes straight on the strip because it holds the four kinds and
+            nothing else — the tools beside it are a sibling of this element,
+            not a child, so there is no stray button to wrap away from. One tab
+            stop for the strip, arrows between the kinds from there. */}
+        <div
+          className={styles.kinds}
+          role="tablist"
+          aria-label="Content folders"
+          onKeyDown={(e) => {
+            const next = rovingKey(e, KIND_IDS);
+            if (next) setKind(next);
+          }}
+        >
           {KINDS.map((k) => (
             <button
               key={k.id}
+              id={`instance-content-tab-${k.id}`}
               className={clsx(styles.kindTab, kind === k.id && styles.kindActive)}
               onClick={() => setKind(k.id)}
+              role="tab"
+              aria-selected={kind === k.id}
+              aria-controls="instance-content-panel"
+              tabIndex={kind === k.id ? 0 : -1}
+              data-roving={k.id}
             >
               {k.label}
             </button>
@@ -609,7 +633,18 @@ export default function ContentTab({
         </div>
       )}
 
-      <div className={styles.list}>
+      {/* The one panel the four kinds swap, so each of them points at it and it
+          names the kind it is showing. Focusable in its own right: it scrolls,
+          and while it is loading or empty, or showing rows whose first stop is
+          a long way down, Tab out of the strip would otherwise skip the list
+          the strip exists to switch. */}
+      <div
+        className={styles.list}
+        id="instance-content-panel"
+        role="tabpanel"
+        aria-labelledby={`instance-content-tab-${kind}`}
+        tabIndex={0}
+      >
         {shown === null ? (
           <div className={styles.skeletons}>
             {Array.from({ length: 5 }, (_, i) => (
