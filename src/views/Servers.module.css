@@ -1,6 +1,0 @@
-
-/* The key, printed inside the button it presses. Dimmer than the label and
-   held off it, so the button still reads as its words first. */
-.newKey {
-  margin-left: 2px;
-}
