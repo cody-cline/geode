@@ -46,7 +46,6 @@ const LISTS = [
     empty: "Nobody is whitelisted.",
     remove: "Remove",
     placeholder: "Minecraft name",
-    takes: "name" as const,
     reason: false,
     level: false,
   },
@@ -59,7 +58,6 @@ const LISTS = [
     empty: "No operators.",
     remove: "Remove",
     placeholder: "Minecraft name",
-    takes: "name" as const,
     reason: false,
     level: true,
   },
@@ -72,7 +70,6 @@ const LISTS = [
     empty: "Nobody is banned.",
     remove: "Lift the ban",
     placeholder: "Minecraft name",
-    takes: "name" as const,
     reason: true,
     level: false,
   },
@@ -85,7 +82,6 @@ const LISTS = [
     empty: "No addresses are banned.",
     remove: "Lift the ban",
     placeholder: "203.0.113.9",
-    takes: "ip" as const,
     reason: true,
     level: false,
   },
@@ -436,13 +432,23 @@ export default function PlayersTab({ server }: { server: Server }) {
     // of this view wraps itself in: without it this one neither padded nor
     // scrolled, and the ban lists below the fold could not be reached at all.
     <div className={clsx(viewStyles.settings, styles.stack)}>
-      {/* What direction changes take, said once, before any of them. */}
+      {/* What direction changes take and how a name becomes an identity,
+          said once, before any of them. The second of those used to be a note
+          under each card, which put the same sentence on the screen three
+          times with only the file name differing — and the rule is not the
+          file's, it is this screen's. "Where a list is keyed by UUID" rather
+          than "these files are": banned-ips.json is keyed by address, and it
+          is one of the four cards below. */}
       <p className="hint">
         {lists.running
           ? "This server is running, so it owns these files: changes go through its console, and what it says back is shown as it said it."
           : "This server is stopped, so these files are Geode's to edit. This is also the only way to set an operator's level — /op has no level argument."}{" "}
         Names are shown as the server recorded them; a Minecraft name can change
-        hands, so the UUID beneath each one is the identity.
+        hands, so the UUID beneath each one is the identity.{" "}
+        {!lists.running &&
+          (lists.onlineMode
+            ? "Where a list is keyed by UUID, a name is checked with Mojang before anything is written, and one Mojang does not know is reported rather than guessed at."
+            : "This server has authentication off, so a UUID is the one Minecraft itself derives from the name — no lookup needed.")}
       </p>
 
       {lists.running && !lists.console.known && (
@@ -785,20 +791,15 @@ function ListPane({
         </button>
       </div>
 
-      {!addable ? (
+      {/* The only note left here is the one that is actually about this
+          card: what this server cannot be asked to do, and which file to edit
+          instead. How a name is resolved is the same for every list and is
+          said once at the top. */}
+      {!addable && (
         <p className="hint">
           Geode has not seen the command this needs on this server, so it is not
           offered. Stop the server to edit {config.file} directly.
         </p>
-      ) : (
-        config.takes === "name" &&
-        !lists.running && (
-          <p className="hint">
-            {lists.onlineMode
-              ? `${config.file} is keyed by UUID, so the name is checked with Mojang before anything is written. A name Mojang does not know is reported rather than guessed at.`
-              : "This server has authentication off, so the UUID is the one Minecraft itself derives from the name — no lookup needed."}
-          </p>
-        )
       )}
 
       {config.level && lists.running && (
