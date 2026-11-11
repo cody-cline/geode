@@ -32,11 +32,22 @@ function groupOf(kind: ServerKindInfo): Group {
   return "plain";
 }
 
+/**
+ * What each group of server software does for you, in the words of somebody
+ * who has not hosted one before.
+ *
+ * Two of these used to say "Bukkit", which is the one insider word on a screen
+ * that is otherwise careful not to use any — and it is a lineage, not a
+ * capability: somebody who knows it already recognises Paper and Spigot by
+ * name, and somebody who does not learns nothing they can act on. A plugin is
+ * a plugin. The distinction that matters here is plugins against mods, and
+ * that is the distinction these say.
+ */
 const GROUP_LABEL: Record<Group, string> = {
-  plugins: "Runs Bukkit-style plugins",
+  plugins: "Runs plugins",
   plain: "Runs no plugins or mods",
   mods: "Runs mods",
-  both: "Runs Bukkit plugins and mods side by side",
+  both: "Runs plugins and mods side by side",
   proxy: "Not a server",
 };
 
