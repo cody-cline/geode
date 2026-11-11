@@ -146,7 +146,11 @@ export default function Plans() {
                     <Package size={11} />
                     {plan.mods.length} mod{plan.mods.length === 1 ? "" : "s"}
                     <span className={styles.dot} />
-                    edited {relativeTime(plan.updatedAt)}
+                    {/* "Last edited", the shape the Library card's "Last
+                        played" and the Servers card's "Last started" already
+                        use for the same fact. This was the third of three and
+                        the only lowercase one. */}
+                    Last edited {relativeTime(plan.updatedAt)}
                   </p>
                   {plan.notes.trim() && (
                     <p className={styles.cardNotes}>{plan.notes}</p>

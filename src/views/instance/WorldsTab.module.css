@@ -177,12 +177,28 @@
   opacity: 0.45;
 }
 
+/* Library's measure, so the one empty screen inside an instance and the one
+   outside it name their state in the same size. */
+.empty h2 {
+  font-size: 17px;
+  margin-bottom: 8px;
+}
+
 .empty p {
   font-size: 13px;
   color: var(--text-dim);
   max-width: 380px;
   margin: 0 auto;
   line-height: 1.6;
+}
+
+/* A filter that matched nothing. One line, the way Library and Servers say
+   it — the screen is not empty, the query is. */
+.noResults {
+  padding: 48px;
+  text-align: center;
+  color: var(--text-faint);
+  font-size: 13px;
 }
 
 /* ---------------------------------------------------------------------------

@@ -283,6 +283,16 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
         <label className="label" htmlFor="offline-name">
           Offline account
         </label>
+        {/* Above the field and the button it locks, not under them. It sat
+            below, where it read as general help about offline accounts rather
+            than as the reason these two are grey — and a reason that arrives
+            after the control has been tried is not a reason. */}
+        {!ownsTheGame && (
+          <p className={styles.gate}>
+            Add a Microsoft account first. An offline account plays a copy of
+            Minecraft you already own, so Geode asks once who owns it.
+          </p>
+        )}
         <div className={styles.offlineRow}>
           <input
             id="offline-name"
@@ -302,11 +312,12 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
             Add
           </button>
         </div>
-        <p className="hint">
-          {ownsTheGame
-            ? "Offline accounts work for single-player and LAN. Servers with online mode enabled will reject them."
-            : "Add a Microsoft account first. An offline account plays a copy of Minecraft you already own, so Geode asks once who owns it."}
-        </p>
+        {ownsTheGame && (
+          <p className="hint">
+            Offline accounts work for single-player and LAN. Servers with
+            online mode enabled will reject them.
+          </p>
+        )}
       </div>
     </Modal>
   );

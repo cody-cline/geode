@@ -196,11 +196,17 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
       <div className={styles.toolbar}>
         <div className={styles.searchWrap}>
           <Search size={14} className={styles.searchIcon} />
+          {/* Off while there is nothing to filter, which is what the
+              Dependencies tab's own Find box already does. A live box over an
+              empty list answered "No worlds yet. Play the instance to make
+              one" with "No world matches “zzz”" — a correct sentence and the
+              wrong diagnosis of why the screen is empty. */}
           <input
             className={clsx("input", styles.search)}
             placeholder="Filter worlds"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
+            disabled={!worlds || worlds.length === 0}
           />
         </div>
 
@@ -253,15 +259,30 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
               <div key={i} className="skeleton" style={{ height: 58 }} />
             ))}
           </div>
-        ) : shown.length === 0 ? (
+        ) : worlds?.length === 0 ? (
+          /* The shape Library and Plans use, less the button: the thing that
+             makes a world is the game, not this screen, and the two ways to
+             bring one in are already a press away in the toolbar above. A
+             third copy of them here is the two-primaries problem those screens
+             solved by not duplicating. What the heading and the body add is
+             what the one sentence left out — that worlds come from inside
+             Minecraft, and which two forms an import takes. */
           <div className={styles.empty}>
-            <Earth size={32} className={styles.emptyIcon} />
+            <Earth size={40} className={styles.emptyIcon} />
+            <h2>No worlds yet</h2>
             <p>
-              {filter
-                ? `No world matches “${filter}”.`
-                : "No worlds yet. Play the instance to make one, or import a world you already have."}
+              Minecraft makes the worlds: launch this instance, create one in
+              the game, and it is listed here. A world you already have can
+              come in instead — as the .zip a download arrives in, or the
+              folder another launcher keeps it in.
             </p>
           </div>
+        ) : shown.length === 0 ? (
+          /* A filter that matched nothing, which is a different fact from an
+             empty instance and gets the one line Library and Servers give it
+             rather than a screen of its own. Only reachable with worlds in the
+             list, because the box above is off without them. */
+          <p className={styles.noResults}>No world matches “{filter}”.</p>
         ) : (
           shown.map((world) => {
             const kept = backupsFor(world.folder);
