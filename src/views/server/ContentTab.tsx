@@ -8,6 +8,8 @@ import {
   Link2,
   Loader2,
   Package,
+  Power,
+  PowerOff,
   RefreshCw,
   Search,
   Server as ServerIcon,
@@ -677,16 +679,13 @@ export default function ServerContentTab({
                 data-row={item.fileName}
                 tabIndex={item.fileName === rowStop ? 0 : -1}
               >
-                <label className={styles.toggle} role="gridcell">
-                  <input
-                    type="checkbox"
-                    checked={item.enabled}
-                    onChange={() => toggle(item)}
-                    aria-label={`${item.enabled ? "Disable" : "Enable"} ${item.name}`}
-                    tabIndex={-1}
-                  />
-                </label>
-
+                {/* No checkbox at the head of a row here. On the instance's
+                    list that column is the selection, which this pane does not
+                    have, and the two panes are one screen — a box in the same
+                    place meaning "loaded" on one and "picked" on the other is
+                    worse than no box. So whether this server loads the file is
+                    a button among the row's other buttons, where every other
+                    verb in the row already is. */}
                 <div className={styles.itemIcon} role="gridcell">
                   {item.iconUrl ? (
                     <img src={item.iconUrl} alt="" loading="lazy" />
@@ -717,7 +716,7 @@ export default function ServerContentTab({
                         there. The provider badge takes neither: "Modrinth" is
                         not a word that needs a sentence. */}
                     {!item.enabled && (
-                      <Tooltip text="Turned off, and still here. The loader skips it — the box on the left puts it back.">
+                      <Tooltip text="Still here, and this server skips it.">
                         <span className="badge" tabIndex={-1}>
                           disabled
                         </span>
@@ -786,6 +785,24 @@ export default function ServerContentTab({
                       Update
                     </button>
                   )}
+
+                  {/* Whether this server loads the file, which used to be the
+                      checkbox at the head of the row. The glyph carries the
+                      state rather than a colour. */}
+                  <Tooltip text={item.enabled ? "Turn off" : "Turn on"}>
+                    <button
+                      className="btn btn-ghost btn-icon btn-sm"
+                      onClick={() => toggle(item)}
+                      aria-label={`${item.enabled ? "Disable" : "Enable"} ${item.name}`}
+                      tabIndex={-1}
+                    >
+                      {item.enabled ? (
+                        <Power size={14} />
+                      ) : (
+                        <PowerOff size={14} />
+                      )}
+                    </button>
+                  </Tooltip>
 
                   {folder === "mod" && (
                     <select

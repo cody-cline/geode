@@ -1,15 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { KeyboardEvent } from "react";
+import type { KeyboardEvent, ReactNode } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import clsx from "clsx";
 import {
   ArrowUpCircle,
-  Check,
   FilePlus2,
   Link2,
   ListChecks,
   Loader2,
+  Lock,
+  MoreHorizontal,
   Package,
+  Plus,
+  Power,
+  PowerOff,
   RefreshCw,
   Search,
   Trash2,
@@ -173,6 +177,149 @@ export function rowKeys(
 }
 
 
+/** One of the folder's occasional acts, as the menu below draws it. */
+type MoreItem = {
+  label: string;
+  /** A fragment to the right of the label — a count, or why it is off. */
+  note?: string;
+  icon: ReactNode;
+  disabled?: boolean;
+  onSelect: () => void;
+};
+
+/**
+ * The acts that are not why anybody opened this screen.
+ *
+ * Three controls stood in the toolbar for things done once a month: adding a
+ * file by hand, checking for updates, and taking every row into a selection.
+ * They were the same size and weight as the filter box, which is the tool for
+ * the one thing this screen is *for*, and they pushed the primary action off
+ * the edge at the width the window can open to. So they are behind one press,
+ * which is what a disclosure is: not hiding, but saying which things are the
+ * subject and which are the drawer.
+ *
+ * Not portalled, where `ShareMenu` has to be: that one drops out of a hero
+ * carrying `isolation: isolate` and could not escape it. This toolbar is a
+ * plain block below the hero, so an absolutely-positioned menu paints over
+ * the list underneath it and is clicked on by it.
+ *
+ * `open` belongs to the screen rather than to this component because the
+ * screen's Escape binding has to stand aside while the menu is up — the same
+ * rule `useActionShortcut` keeps for a dialog, one level down.
+ */
+function MoreMenu({
+  open,
+  setOpen,
+  busy,
+  items,
+}: {
+  open: boolean;
+  setOpen: (open: boolean) => void;
+  /** Something the menu launched is still running, said on the button. */
+  busy?: string;
+  items: MoreItem[];
+}) {
+  const wrap = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+
+  // Closing puts the keyboard back on the button, for the reason `ShareMenu`
+  // spells out: the item pressed is about to stop existing, and focus left on
+  // it strands the keyboard at the top of the document.
+  const close = useCallback(() => {
+    trigger.current?.focus();
+    setOpen(false);
+  }, [setOpen]);
+
+  useEffect(() => {
+    if (!open) return;
+    const stops = () =>
+      Array.from(
+        wrap.current?.querySelectorAll<HTMLButtonElement>(
+          "[data-menuitem]:not(:disabled)",
+        ) ?? [],
+      );
+    // The keyboard goes in as the menu opens, which is what makes the arrows
+    // below worth binding at all.
+    stops()[0]?.focus();
+
+    const away = (e: MouseEvent) => {
+      if (!wrap.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const keys = (e: globalThis.KeyboardEvent) => {
+      // The button answers for itself; the press that opened the menu is still
+      // bubbling when this listener goes on.
+      if (e.target === trigger.current) return;
+      // Tab is not prevented: the keyboard carries on out of the toolbar from
+      // the button, which is where `close` has just put it.
+      if (e.key === "Escape" || e.key === "Tab") return close();
+      const step = e.key === "ArrowDown" ? 1 : e.key === "ArrowUp" ? -1 : 0;
+      if (step === 0) return;
+      const list = stops();
+      if (list.length === 0) return;
+      e.preventDefault();
+      const from = list.indexOf(document.activeElement as HTMLButtonElement);
+      list[(from + step + list.length) % list.length].focus();
+    };
+    // A scroll closes it rather than moving it: the toolbar does not scroll,
+    // so what moved is the list the menu is hanging over. Captured, because
+    // the thing that scrolls is a pane inside the view.
+    document.addEventListener("mousedown", away);
+    document.addEventListener("keydown", keys);
+    document.addEventListener("scroll", close, true);
+    return () => {
+      document.removeEventListener("mousedown", away);
+      document.removeEventListener("keydown", keys);
+      document.removeEventListener("scroll", close, true);
+    };
+  }, [open, close, setOpen]);
+
+  return (
+    <div className={styles.more} ref={wrap}>
+      <button
+        ref={trigger}
+        className="btn btn-icon"
+        onClick={() => setOpen(!open)}
+        onKeyDown={(e) => {
+          if (e.key !== "ArrowDown") return;
+          e.preventDefault();
+          setOpen(true);
+        }}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={busy ?? "More"}
+      >
+        {busy ? (
+          <Loader2 size={16} className="spin" />
+        ) : (
+          <MoreHorizontal size={16} />
+        )}
+      </button>
+
+      {open && (
+        <div className={styles.menu} role="menu" aria-label="More">
+          {items.map((item) => (
+            <button
+              key={item.label}
+              data-menuitem
+              role="menuitem"
+              className={styles.menuItem}
+              disabled={item.disabled}
+              onClick={() => {
+                close();
+                item.onSelect();
+              }}
+            >
+              {item.icon}
+              <span>{item.label}</span>
+              {item.note && <span className={styles.menuNote}>{item.note}</span>}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ContentTab({
   instance,
   onBrowse,
@@ -200,6 +347,9 @@ export default function ContentTab({
   const [keyed, setKeyed] = useState<string | null>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
   const [askingDelete, setAskingDelete] = useState(false);
+  // Whether the toolbar's drawer is open, held here because Escape means
+  // something else on this screen and the drawer has first call on it.
+  const [moreOpen, setMoreOpen] = useState(false);
   const filterBox = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
@@ -307,8 +457,12 @@ export default function ContentTab({
   });
 
   // Not prevented: Escape has no default of its own here, and anything else
-  // listening for it should still get it.
+  // listening for it should still get it. The toolbar's drawer is one of those
+  // — it is a mode on top of this screen, the way a dialog is a mode on top of
+  // the app, so a press that dismisses it must not also empty the selection
+  // underneath.
   useActionShortcut("clearSelection", () => {
+    if (moreOpen) return;
     setSelected((prev) => (prev.size === 0 ? prev : new Set<string>()));
     setAnchor(null);
   });
@@ -556,19 +710,19 @@ export default function ContentTab({
 
   const trackedCount = items?.filter((i) => i.projectId).length ?? 0;
   const untrackedCount = items?.filter((i) => i.fromDisk).length ?? 0;
+  /** What the primary button offers to add, and the folder's name in prose. */
+  const noun = KINDS.find((k) => k.id === kind)!.label.toLowerCase();
+  // A filter over nothing can only ever say "nothing matches", which turns an
+  // empty folder into a result — so it is off until there is something to
+  // filter, including while the folder is still being read. The same rule the
+  // Worlds, Logs and dependency-graph tabs keep.
+  const canFilter = (items?.length ?? 0) > 0;
 
   // The one row that answers Tab. Checked against the list rather than
   // trusted, because `keyed` outlives the folder and the filter it was set in.
   const rowStop = shown?.some((i) => i.fileName === keyed)
     ? keyed
     : shown?.[0]?.fileName;
-
-  // Said once, because the button says it to the pointer and to the keyboard
-  // and the disabled button says it to neither.
-  const updateReason =
-    trackedCount === 0
-      ? "Nothing here was installed from Modrinth or CurseForge"
-      : "Check for newer versions";
 
   return (
     <div className={styles.wrap}>
@@ -606,57 +760,38 @@ export default function ContentTab({
           ))}
         </div>
 
+        {/* The tools, in the order they are reached for. The filter is the one
+            that gives way: it takes whatever room the rest leave, which is why
+            this row is one row at every width rather than two at most of them.
+            Three things used to sit between it and the primary action, each
+            the same size and weight as the thing people actually came here to
+            press. */}
         <div className={styles.tools}>
-          <div className={styles.searchWrap}>
+          <div className={clsx(styles.searchWrap, styles.searchGrow)}>
             <Search size={14} className={styles.searchIcon} />
             <input
               ref={filterBox}
-              className={clsx("input", styles.search, styles.searchHinted)}
+              className={clsx("input", styles.search, canFilter && styles.searchHinted)}
               placeholder="Filter"
               value={filter}
+              disabled={!canFilter}
               onChange={(e) => setFilter(e.target.value)}
             />
-            {/* The binding, printed in the box it reaches. The sidebar is
-                where a screen's shortcut is discoverable; an action's only
-                home is the thing it acts on. */}
-            <kbd className={styles.searchKey}>{actionHint("focusFilter")}</kbd>
+            {/* The binding, printed in the box it reaches, and only while the
+                box can be reached — a key printed on something switched off is
+                a promise nothing keeps. The sidebar is where a screen's
+                shortcut is discoverable; an action's only home is the thing it
+                acts on. */}
+            {canFilter && (
+              <kbd className={styles.searchKey}>{actionHint("focusFilter")}</kbd>
+            )}
           </div>
-          {/* The way into selecting at all, and the one place either gesture is
-              written down: an icon that appears on hover explains itself to
-              nobody who has not hovered it, and arrow keys explain themselves
-              to nobody at all. A real tooltip rather than a `title`, because an
-              explanation that is the only home a gesture has cannot be one only
-              a mouse can read. */}
-          {shown && shown.length > 1 && (
-            <Tooltip
-              text={`Select all ${shown.length} files listed here, to enable, disable or delete them together. One at a time: click a row's icon, then Shift-click another to take everything between them. From the keyboard: Up and Down move between rows, Space takes the row you are on and Shift+Space takes every row back to the last one you took.`}
-            >
-              <button
-                className="btn"
-                onClick={() => setSelected(new Set(shown.map((i) => i.fileName)))}
-              >
-                <ListChecks size={14} />
-                Select all
-              </button>
-            </Tooltip>
-          )}
-          {/* The three occasional controls. Below the width the pane narrows
-              at they keep the icon and drop the word, which is what leaves the
-              primary action at the end of this row room to be read — each one
-              says in `aria-label` what it no longer spells out, and each one
-              carries a real tooltip because at that width the sentence is the
-              only name the icon has, and a `title` is a name only a mouse can
-              read. */}
-          <Tooltip text="Add a file from this computer">
-            <button
-              className={clsx("btn", styles.toolCollapse)}
-              onClick={addFiles}
-              aria-label="Add file"
-            >
-              <FilePlus2 size={14} />
-              <span className={styles.toolLabel}>Add file</span>
-            </button>
-          </Tooltip>
+          {/* The one occasional control still in the open, because it is not
+              really a command but a count: files are sitting here that nothing
+              can update, and this number is the only at-a-glance signal that
+              anything is waiting. It appears only when there are some. Below
+              the width the pane narrows at it keeps the icon and the number
+              and drops the word. */}
           {untrackedCount > 0 && (
             <Tooltip text="Match untracked files against Modrinth and CurseForge by file hash">
               <button
@@ -672,35 +807,57 @@ export default function ContentTab({
                 )}
                 <span className={styles.toolLabel}>Identify</span>
                 {/* Outside the label, so the collapse takes the word and
-                    leaves the number. How many files are waiting is the
-                    signal; "Identify" is the part you can work out from the
-                    icon. */}
+                    leaves the number. */}
                 <span className={styles.toolCount}>{untrackedCount}</span>
               </button>
             </Tooltip>
           )}
-          <Tooltip text={updateReason}>
-            <button
-              className={clsx("btn", styles.toolCollapse)}
-              onClick={checkUpdates}
-              disabled={checking || trackedCount === 0}
-              // Kept, and only while the button is off. A disabled control
-              // receives neither focus nor a pointer, so the tooltip above
-              // cannot open on one and the platform's own is the only thing
-              // left that can say why there is nothing to check.
-              title={trackedCount === 0 ? updateReason : undefined}
-              aria-label="Check updates"
-            >
-              {checking ? (
-                <Loader2 size={14} className="spin" />
-              ) : (
-                <RefreshCw size={14} />
-              )}
-              <span className={styles.toolLabel}>Check updates</span>
-            </button>
-          </Tooltip>
+          <MoreMenu
+            open={moreOpen}
+            setOpen={setMoreOpen}
+            busy={checking ? "Checking for updates" : undefined}
+            items={[
+              ...(shown && shown.length > 1
+                ? [
+                    {
+                      label: "Select all",
+                      note: `${shown.length}`,
+                      icon: <ListChecks size={14} />,
+                      onSelect: () =>
+                        setSelected(new Set(shown.map((i) => i.fileName))),
+                    },
+                  ]
+                : []),
+              {
+                label: "Add a file from this computer",
+                icon: <FilePlus2 size={14} />,
+                onSelect: () => void addFiles(),
+              },
+              {
+                label: "Check for updates",
+                // The reason, where a disabled button could only have carried
+                // it in a `title` — which is to say to a pointer and to
+                // nothing else.
+                note: trackedCount === 0 ? "nothing tracked here" : undefined,
+                icon: <RefreshCw size={14} />,
+                disabled: checking || trackedCount === 0,
+                onSelect: () => void checkUpdates(),
+              },
+            ]}
+          />
+          {/* The one filled button on the screen, and what it does is the
+              second reason anybody opened it. The folder's own name rather
+              than "Browse": what this press is for is putting something in
+              *here*, and the screen it opens is the means. The noun goes at
+              the width the pane narrows at — the strip on the left of this
+              row has been saying which folder all along. */}
           <button className="btn btn-primary" onClick={onBrowse}>
-            Browse
+            <Plus size={15} />
+            {/* One flex item, so the gap between the icon and the word is the
+                button's own and the space before the noun is a space. */}
+            <span>
+              Add<span className={styles.addNoun}>{` ${noun}`}</span>
+            </span>
           </button>
         </div>
       </div>
@@ -788,16 +945,22 @@ export default function ContentTab({
       )}
 
       {/* The one panel the four kinds swap, so each of them points at it and it
-          names the kind it is showing. Focusable in its own right: it scrolls,
-          and while it is loading or empty there is nothing inside it to focus,
-          so Tab out of the strip would otherwise skip the list the strip exists
-          to switch. */}
+          names the kind it is showing.
+
+          Focusable only while it is empty, which is the whole reason — not
+          that it scrolls. A panel with rows in it, or with the button the
+          true-empty state offers, already answers Tab through what is inside
+          it, and a stop on the panel as well is a press that lands nowhere a
+          person can see. The two states with nothing to focus are the folder
+          still being read, and a filter that has matched none of it. `-1`
+          rather than no attribute at all, so a panel holding focus when the
+          rows arrive keeps it instead of dropping the keyboard on `<body>`. */}
       <div
         className={styles.list}
         id="instance-content-panel"
         role="tabpanel"
         aria-labelledby={`instance-content-tab-${kind}`}
-        tabIndex={0}
+        tabIndex={shown === null || (shown.length === 0 && canFilter) ? 0 : -1}
       >
         {shown === null ? (
           <div className={styles.skeletons}>
@@ -805,21 +968,28 @@ export default function ContentTab({
               <div key={i} className="skeleton" style={{ height: 54 }} />
             ))}
           </div>
-        ) : shown.length === 0 ? (
+        ) : /* Which empty this is, read off the folder rather than off the
+               filter box. A filter left behind from another folder used to
+               turn "no shaders yet" into "nothing matches 'sodium'", which is
+               an empty folder reported as a search result — and the box is
+               switched off in that state now, so the two agree. */
+        items && items.length === 0 ? (
           <div className={styles.empty}>
             <Package size={32} className={styles.emptyIcon} />
             <p>
-              {filter
-                ? `Nothing matches “${filter}”.`
-                : instance.loader === "vanilla" && kind === "mod"
-                  ? "This is a vanilla instance — switch it to a mod loader in Settings to use mods."
-                  : `No ${KINDS.find((k) => k.id === kind)?.label.toLowerCase()} yet.`}
+              {instance.loader === "vanilla" && kind === "mod"
+                ? "This is a vanilla instance — switch it to a mod loader in Settings to use mods."
+                : `No ${noun} yet.`}
             </p>
-            {!filter && (
-              <button className="btn btn-primary btn-sm" onClick={onBrowse}>
-                Find some
-              </button>
-            )}
+            <button className="btn btn-primary btn-sm" onClick={onBrowse}>
+              <Plus size={14} />
+              Add {noun}
+            </button>
+          </div>
+        ) : shown.length === 0 ? (
+          <div className={styles.empty}>
+            <Package size={32} className={styles.emptyIcon} />
+            <p>Nothing matches “{filter}”.</p>
           </div>
         ) : (
           /* A grid, which is the one ARIA shape that fits what a row of this
@@ -868,50 +1038,49 @@ export default function ContentTab({
                 data-row={item.fileName}
                 tabIndex={item.fileName === rowStop ? 0 : -1}
               >
-                <label className={styles.toggle} role="gridcell">
+                {/* Selecting, and the only checkbox on the row.
+
+                    There used to be two marks here 20px apart: a square box
+                    that decided whether the game loads the file, and — on
+                    hover only — a round one that decided whether the next
+                    press acts on it, drawn *over* the artwork, so pointing at
+                    a row replaced the one thing the row is about. A selection
+                    affordance that exists only under a pointer cannot be come
+                    across by a keyboard at all, which is why the gesture ended
+                    up written out in a tooltip four sentences long.
+
+                    So the leading column is selection, which is what a leading
+                    column of checkboxes means everywhere else, and it is
+                    always there; the artwork is artwork again; and whether the
+                    game loads the file is a button among the row's other
+                    buttons, where the rest of the verbs are. Two things fall
+                    out of that and both are better than what they replaced:
+                    the accent now means one thing on this row — checked here,
+                    and the bar down the edge in `.rowPicked` — and Space means
+                    the same thing on the row and on the first control in it,
+                    where before it selected on the one and toggled the mod on
+                    the other. */}
+                <label className={styles.selectCell} role="gridcell">
                   <input
                     type="checkbox"
-                    checked={item.enabled}
-                    onChange={() => toggle(item)}
-                    aria-label={`${item.enabled ? "Disable" : "Enable"} ${item.name}`}
+                    checked={isPicked}
+                    // Shift off the event the browser raised, so the gesture
+                    // is the same from the pointer and from Space.
+                    onChange={(e) => {
+                      const raised = e.nativeEvent;
+                      pick(item, raised instanceof MouseEvent && raised.shiftKey);
+                    }}
+                    aria-label={`Select ${item.name}`}
                     tabIndex={-1}
                   />
                 </label>
 
-                {/* Selecting, and deliberately not a second checkbox: the
-                    square one to the left decides whether the game loads this
-                    file, which is a different question from whether the next
-                    press is about to act on it. Round, over the artwork, and
-                    drawn in text-on-background rather than the accent the
-                    checkbox beside it takes — two accent ticks 20px apart
-                    meant two unrelated things in the same colour, and the
-                    accent is the user's to choose, so no other hue would have
-                    settled it. The accent still says "picked", as a bar down
-                    the edge of the row, which is not a mark that can be read
-                    as this file being on. */}
-                <div className={styles.cell} role="gridcell">
-                  <button
-                    type="button"
-                    className={clsx(
-                      styles.itemIcon,
-                      styles.pick,
-                      isPicked && styles.picked,
-                    )}
-                    onClick={(e) => pick(item, e.shiftKey)}
-                    title="Select this file. Shift-click another to take everything between them."
-                    aria-label={`${isPicked ? "Deselect" : "Select"} ${item.name}`}
-                    aria-pressed={isPicked}
-                    tabIndex={-1}
-                  >
-                    {item.iconUrl ? (
-                      <img src={item.iconUrl} alt="" loading="lazy" />
-                    ) : (
-                      <Package size={16} />
-                    )}
-                    <span className={styles.pickMark} aria-hidden="true">
-                      <Check size={14} />
-                    </span>
-                  </button>
+                <div className={styles.itemIcon} role="gridcell">
+                  {item.iconUrl ? (
+                    <img src={item.iconUrl} alt="" loading="lazy" />
+                  ) : (
+                    <Package size={16} />
+                  )}
                 </div>
 
                 <div className={styles.itemText} role="gridcell">
@@ -951,7 +1120,7 @@ export default function ContentTab({
                         because "Modrinth" is not a word that needs a sentence
                         and a focus stop that explains nothing is dead weight. */}
                     {!item.enabled && (
-                      <Tooltip text="Turned off, and still here. The loader skips it — the box on the left puts it back.">
+                      <Tooltip text="Still here, and the loader skips it.">
                         <span className="badge" tabIndex={-1}>
                           disabled
                         </span>
@@ -1034,57 +1203,102 @@ export default function ContentTab({
                     </button>
                   )}
 
+                  {/* Whether the game loads this file, which used to be the
+                      checkbox at the head of the row — see the selection
+                      column above for why it moved. The glyph carries the
+                      state rather than a colour: a row that is off shows the
+                      press that puts it back. */}
+                  <Tooltip text={item.enabled ? "Turn off" : "Turn on"}>
+                    <button
+                      className="btn btn-ghost btn-icon btn-sm"
+                      onClick={() => toggle(item)}
+                      aria-label={`${item.enabled ? "Disable" : "Enable"} ${item.name}`}
+                      tabIndex={-1}
+                    >
+                      {item.enabled ? (
+                        <Power size={14} />
+                      ) : (
+                        <PowerOff size={14} />
+                      )}
+                    </button>
+                  </Tooltip>
+
                   {/* Offered only where it could mean anything: a mod, from a
                       platform that can be asked for another build, and not one
-                      the server owns. The title is the one place this is
-                      explained, and it says the risk in plain words — a mod
-                      running outside what it declares can stop the game
-                      starting, and nothing here has looked inside the jar. */}
+                      the server owns.
+
+                      The padlock used to be open in both states, which said
+                      the opposite of the truth half the time: not ignoring the
+                      version is the *locked* state, since a build for this
+                      Minecraft version is what Geode insists on. Shut when it
+                      insists, open when it has been told not to, and the
+                      colour is the second thing it says rather than the only
+                      one. */}
                   {kind === "mod" &&
                     item.provider &&
                     item.origin !== "server" && (
-                      <button
-                        className={clsx(
-                          "btn btn-ghost btn-icon btn-sm",
-                          item.ignoreGameVersion && styles.anyVersion,
-                        )}
-                        onClick={() =>
-                          void ignoreVersion(item, !item.ignoreGameVersion)
-                        }
-                        title={
+                      <Tooltip
+                        text={
                           item.ignoreGameVersion
-                            ? `Ignoring the Minecraft version: its newest build for this loader is used whatever version it was built for, and it may stop the game starting. Press to require a build for Minecraft ${instance.mcVersion} again.`
-                            : `Ignore the Minecraft version: use its newest build for this loader even when its author has not listed Minecraft ${instance.mcVersion}. Mods usually run on a little newer than they say — but one that does not can stop the game starting, and nothing here has read the jar. The loader is still matched.`
+                            ? `Require a build for Minecraft ${instance.mcVersion} again.`
+                            : "Ignore the Minecraft version. Its newest build for this loader is used instead, which may stop the game starting."
                         }
-                        aria-label={
-                          item.ignoreGameVersion
-                            ? `Require a build for Minecraft ${instance.mcVersion} for ${item.name}`
-                            : `Ignore the Minecraft version for ${item.name}`
-                        }
-                        aria-pressed={item.ignoreGameVersion ?? false}
-                        tabIndex={-1}
                       >
-                        <Unlock size={14} />
-                      </button>
+                        <button
+                          className={clsx(
+                            "btn btn-ghost btn-icon btn-sm",
+                            item.ignoreGameVersion && styles.anyVersion,
+                          )}
+                          onClick={() =>
+                            void ignoreVersion(item, !item.ignoreGameVersion)
+                          }
+                          aria-label={
+                            item.ignoreGameVersion
+                              ? `Require a build for Minecraft ${instance.mcVersion} for ${item.name}`
+                              : `Ignore the Minecraft version for ${item.name}`
+                          }
+                          aria-pressed={item.ignoreGameVersion ?? false}
+                          tabIndex={-1}
+                        >
+                          {item.ignoreGameVersion ? (
+                            <Unlock size={14} />
+                          ) : (
+                            <Lock size={14} />
+                          )}
+                        </button>
+                      </Tooltip>
                     )}
 
                   {/* The server's own mods stay. Offering a button that always
                       fails is worse than not offering one, so the row explains
-                      itself instead — turning it off is right there. */}
-                  <button
-                    className="btn btn-ghost btn-icon btn-sm"
-                    onClick={() => remove(item)}
-                    disabled={item.origin === "server"}
-                    title={
+                      itself instead — turning it off is right there.
+
+                      Both tooltips, and a `title` as well for the one state
+                      the bubble cannot reach: a disabled control receives
+                      neither a pointer nor focus, so the platform's own is all
+                      that is left to say why this press is not on offer. */}
+                  <Tooltip
+                    text={
                       item.origin === "server"
                         ? "From the server's pack — turn it off instead"
                         : "Delete"
                     }
-                    aria-label={`Delete ${item.name}`}
-                    tabIndex={-1}
                   >
-                    <Trash2 size={14} />
-                  </button>
+                    <button
+                      className="btn btn-ghost btn-icon btn-sm"
+                      onClick={() => remove(item)}
+                      disabled={item.origin === "server"}
+                      title={
+                        item.origin === "server"
+                          ? "From the server's pack — turn it off instead"
+                          : undefined
+                      }
+                      aria-label={`Delete ${item.name}`}
+                      tabIndex={-1}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </Tooltip>
                 </div>
               </div>
             );
@@ -1102,7 +1316,7 @@ export default function ContentTab({
       {askingDelete && (
         <Modal
           title={`Delete ${deletable.length} file${deletable.length === 1 ? "" : "s"}?`}
-          subtitle={`Removed from this instance's ${KINDS.find((k) => k.id === kind)?.label.toLowerCase()} folder. It cannot be undone.`}
+          subtitle={`Removed from this instance's ${noun} folder. It cannot be undone.`}
           onClose={() => setAskingDelete(false)}
           width={480}
           footer={
