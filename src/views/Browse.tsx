@@ -56,8 +56,13 @@ const SORTS: { id: SortBy; label: string }[] = [
 
 const PAGE_SIZE = 30;
 
-/** How many category chips the rail shows before asking to be opened. */
-const CATEGORY_PREVIEW = 10;
+/** The arrows inside the category chips, by the step each one moves. */
+const CHIP_STEP: Record<string, number> = {
+  ArrowLeft: -1,
+  ArrowUp: -1,
+  ArrowRight: 1,
+  ArrowDown: 1,
+};
 
 /** Loaders have fixed capitalisation ("NeoForge"), so never title-case them. */
 function loaderLabel(id: string): string {
@@ -159,11 +164,11 @@ export default function Browse({
   const [categories, setCategories] = useState<string[]>([]);
   const [available, setAvailable] = useState<string[]>([]);
   /**
-   * Whether the whole category list is open. Modrinth publishes twenty-one for
-   * mods, and as a wall of equal-weight chips they were the tallest thing on
-   * the screen while being the last thing anyone reaches for.
+   * The chip carrying the rail's one tab stop, held as a category name rather
+   * than a position: the list is replaced wholesale when the kind tab changes,
+   * and twenty-one names are not twenty-one of anything else.
    */
-  const [allCategories, setAllCategories] = useState(false);
+  const [activeChip, setActiveChip] = useState("");
   /** Last instance installed into, used to preselect the picker. */
   const [lastTargetId, setLastTargetId] = useState<string>("");
   const [filterVersion, setFilterVersion] = useState("");
@@ -631,7 +636,6 @@ export default function Browse({
       .then(setAvailable)
       .catch(() => setAvailable([]));
     setCategories([]);
-    setAllCategories(false);
   }, [kind]);
 
   // Only the in-instance view scopes automatically — there the destination is
@@ -868,19 +872,11 @@ export default function Browse({
   const kindStop = kinds.some((k) => k.id === kind) ? kind : kinds[0]?.id;
 
   /**
-   * The categories on show while the list is collapsed: the first few, plus
-   * any that are already picked. A chosen filter must never be hidden by the
-   * thing that hides unchosen ones — the list would be narrowed by something
-   * the screen no longer mentions.
+   * Which chip holds the rail's tab stop. The one the keyboard was last on,
+   * else the first — the kind tab replaces every chip, and a group where no
+   * chip is reachable is a group the keyboard cannot get into at all.
    */
-  const shownCategories = useMemo(() => {
-    if (allCategories) return available;
-    const head = available.slice(0, CATEGORY_PREVIEW);
-    return [
-      ...head,
-      ...available.slice(CATEGORY_PREVIEW).filter((c) => categories.includes(c)),
-    ];
-  }, [allCategories, available, categories]);
+  const chipStop = available.includes(activeChip) ? activeChip : available[0];
 
   /**
    * Which row holds the grid's tab stop. The one the keyboard was last on,
@@ -897,6 +893,46 @@ export default function Browse({
   function rememberRow(e: FocusEvent<HTMLElement>) {
     const row = e.target.closest<HTMLElement>("[data-row]");
     if (row?.dataset.row) setActiveRow(row.dataset.row);
+  }
+
+  /**
+   * The arrow keys inside the category chips, which is the other half of what
+   * `role="toolbar"` promises: one tab stop for the whole group, the arrows
+   * walking between the chips from there, and the toggling done by Space or
+   * Enter — which a `<button>` answers itself, so nothing here touches them.
+   * Twenty-one filters as twenty-one tab stops is the same bill the results
+   * grid stopped paying, charged one panel to the left.
+   *
+   * Not `rovingKey`, and not for the reason the grid is not: that helper's
+   * contract is that the option the arrows land on is *chosen* by landing on
+   * it, which is right for one-of-N and ruinous here — these are independent
+   * toggles, so a walk across the rail would switch on every filter it passed
+   * and re-run the search for each. `aria-pressed` stays for the same reason:
+   * each chip is on or off by itself, and nothing in the group is selected.
+   *
+   * Every arrow walks the one line, wrapping at both ends. A chip cloud is a
+   * line in reading order however many rows it wraps onto — unlike the results
+   * grid, where a row is a place and `rovingKey`'s own geometry pass reads each
+   * option's `top` to find one. Here the rows are an accident of the rail's
+   * width, so Down meaning "the next chip" is the only thing it can mean that
+   * is the same at every window size.
+   *
+   * The chips are read off the DOM at the moment of the press, so a kind tab
+   * swapping the whole list needs no bookkeeping.
+   */
+  function moveInCategories(e: KeyboardEvent<HTMLElement>) {
+    const step = CHIP_STEP[e.key];
+    if (!step) return;
+    if (!(e.target instanceof HTMLElement)) return;
+
+    const chips = [
+      ...e.currentTarget.querySelectorAll<HTMLElement>("[data-chip]"),
+    ];
+    const at = chips.indexOf(e.target);
+    if (at < 0) return;
+
+    e.preventDefault();
+    chips[(at + step + chips.length) % chips.length]?.focus();
   }
 
   /**
@@ -1270,13 +1306,38 @@ export default function Browse({
           {available.length > 0 && (
             <section className={styles.filterSection}>
               <h3 className={styles.filterTitle}>Categories</h3>
-              <div className={styles.categories}>
-                {/* Several can be on at once, so these are toggles rather than
-                    a radio group — `aria-pressed` each, and no arrow keys to
-                    claim. The tick is the second channel: on and off were an
-                    accent tint and nothing else, which is the one difference a
-                    screen reader cannot read out and some eyes cannot see. */}
-                {shownCategories.map((category) => {
+              {/* Several can be on at once, so these are toggles rather than a
+                  radio group — `aria-pressed` each, and a toolbar rather than
+                  a tab set or a radio group, which is the one of the three
+                  roles whose keyboard contract does not choose what it lands
+                  on. See `moveInCategories`.
+                  All of them, no longer the first ten with the rest behind a
+                  "more": a cut made at ten of an alphabetical list makes the
+                  alphabet into a ranking, which is how Cursed came to be the
+                  second thing in this rail and Optimization was not in it at
+                  all. Nothing upstream publishes an order worth cutting by —
+                  Modrinth's `/tag/category` gives a name and a project type —
+                  and the thing that made twenty-one chips expensive was
+                  twenty-one tab stops, which is what the toolbar above
+                  settles. What is left is height, in the last section of a
+                  rail that already scrolls, so what it pushes below the fold
+                  is itself. */}
+              <div
+                className={styles.categories}
+                role="toolbar"
+                aria-label="Filter by category"
+                onKeyDown={moveInCategories}
+                // Where the keyboard is, recorded as it arrives, so the chip
+                // it is on is the chip Tab comes back to.
+                onFocus={(e) => {
+                  const chip = e.target.dataset.chip;
+                  if (chip) setActiveChip(chip);
+                }}
+              >
+                {/* The tick is the second channel: on and off were an accent
+                    tint and nothing else, which is the one difference a screen
+                    reader cannot read out and some eyes cannot see. */}
+                {available.map((category) => {
                   const on = categories.includes(category);
                   return (
                     <button
@@ -1284,6 +1345,8 @@ export default function Browse({
                       className={clsx(styles.categoryChip, on && styles.categoryActive)}
                       aria-pressed={on}
                       onClick={() => toggleCategory(category)}
+                      tabIndex={category === chipStop ? 0 : -1}
+                      data-chip={category}
                     >
                       {titleCase(category)}
                       {on && <Check size={11} aria-hidden="true" />}
@@ -1291,22 +1354,6 @@ export default function Browse({
                   );
                 })}
               </div>
-              {available.length > shownCategories.length && (
-                <button
-                  className={styles.moreCategories}
-                  onClick={() => setAllCategories(true)}
-                >
-                  {available.length - shownCategories.length} more
-                </button>
-              )}
-              {allCategories && available.length > CATEGORY_PREVIEW && (
-                <button
-                  className={styles.moreCategories}
-                  onClick={() => setAllCategories(false)}
-                >
-                  Show fewer
-                </button>
-              )}
             </section>
           )}
         </aside>
