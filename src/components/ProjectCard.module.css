@@ -19,6 +19,18 @@
   background: var(--surface-2);
 }
 
+/* The row's first cell: the thing itself. The artwork and the words are one
+   cell rather than two because the artwork is decoration — `alt=""`, or two
+   letters standing in where there is no icon — so a cell of its own would be a
+   column with nothing to read in it, announced on every row down the list. */
+.main {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex: 1;
+  min-width: 0;
+}
+
 .icon {
   width: 64px;
   height: 64px;
@@ -61,10 +73,15 @@
 
 /* The title line's first item, and the one that can be squeezed: everything in
    it belongs to the project's name, so a 940px window must take the squeeze out
-   of the name — which truncates — rather than wrap a provider badge onto a line
-   of its own. A flex row does not wrap by default, so the browser shrinks the
-   name rather than break this group; the controls after it are still free to
-   wrap onto a line of their own. */
+   of this group rather than wrap a provider badge onto a line of its own. A
+   flex row does not wrap by default, so the browser shrinks what is inside it
+   rather than break the group; the controls after it are still free to wrap
+   onto a line of their own.
+   What gives, in order: the second provider is a `+1` before anything else
+   happens at all, then the author ellipsises, and only then the name. The
+   order used to be the other way round — the name went first because it was
+   the only thing here that *could* go — which spent the row's identity on a
+   badge that repeats what the panel says anyway. */
 .nameGroup {
   display: flex;
   align-items: center;
@@ -93,17 +110,28 @@
   white-space: nowrap;
 }
 
-/* Shrinks ahead of the name — twice as readily — when the line is over-full.
-   The name is what the row is scanned for, so it gives up the last pixels
-   rather than the first. */
+/* Shrinks ahead of the name, and by eight times as much: shrinkage is shared
+   out in proportion to the factor, so on an over-full line the author's pixels
+   go first and the name only starts giving once the author has nearly nothing
+   left. At 2 the two gave together, which is how "Cloth Config API by
+   shedaniel" became "Cloth Confi… by she…" — both unreadable instead of one
+   whole and one short. */
 .author {
   font-size: 12px;
   color: var(--text-faint);
   white-space: nowrap;
   min-width: 0;
-  flex-shrink: 2;
+  flex-shrink: 8;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* The providers a project is *also* on, as a count. Badge-shaped so it sits in
+   the same run as the one real provider badge, but neutral: it stands for one
+   provider or two, and a colour would claim to say which. */
+.alsoOn {
+  padding: 0 6px;
+  font-variant-numeric: tabular-nums;
 }
 
 .summary {
@@ -117,10 +145,13 @@
   overflow: hidden;
 }
 
+/* One line, always. It used to wrap, and what wrapped at 940 was the end of
+   the category run: a second 29px line carrying one word, and before it, on
+   the line above, the separator that belonged to that word. */
 .metaRow {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 12px;
   margin-top: 2px;
 }
@@ -134,24 +165,26 @@
   white-space: nowrap;
 }
 
-.category {
+/* The whole category run in one span, with its separators written into the
+   string in `ProjectCard.tsx` rather than drawn by CSS around each name.
+   Two attempts at the CSS shape both put a middot at the edge of a line: as a
+   `::before` it began one ("· Optimization"), and moved to an `::after` it
+   ended one ("Decoration ·"), because either way it is attached to a box the
+   line can break away from. A separator between two names inside one
+   non-wrapping string has no such box — there is no second line for it to be
+   left on, and it is never first or last in the string.
+   What gives on a tight line is this run, which is the least of the three
+   things on it: the stats keep their words and this one ellipsises, with the
+   full list on the tooltip.
+   The colour is the run's own rather than a partial `opacity`, which no
+   contrast check can measure. */
+.categories {
   font-size: 11.5px;
   color: var(--text-faint);
   white-space: nowrap;
-}
-
-/* After the category rather than before it, so a separator can never begin a
-   line. As a prefix it was part of the chip it preceded, and this row wraps —
-   so a category pushed onto the next line took the middot with it and read
-   "· Optimization", hanging off nothing. `:first-of-type` was meant to spare
-   the first category and never could: the first `span` of that type in this row
-   is the download count, so no category ever matched it and every one of them
-   carried a leading middot.
-   The colour is the category's own rather than a partial `opacity`, which no
-   contrast check can measure. */
-.category:not(:last-child)::after {
-  content: "·";
-  margin-left: 12px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .action {
@@ -161,6 +194,31 @@
   align-items: flex-end;
   gap: 5px;
   min-width: 96px;
+}
+
+/* Quiet on purpose. Every row in the list has one of these, and twenty filled
+   accent buttons is twenty things shouting the same thing: emphasis that
+   applies to everything marks nothing. It is `.btn-danger`'s shape in the
+   accent instead — a wash of the colour, an edge of it, and the label in the
+   legible cast — which keeps the action obviously the action without making
+   the list a wall of green. The one filled button left in the list is Play, on
+   the rare row that is already an instance.
+   14% and 32% are `.badge-accent`'s mix, so the label's ratio is the one
+   `contrast.test.mjs` already measures on all four surfaces; the hover wash is
+   the darkest this may go and still clear 4.5:1 (4.63 at the worst, which is
+   `--surface-3` in the light theme). The edge takes `--accent-text` on hover
+   rather than `--accent`, for the reason `.categoryActive` gives in
+   Browse.module.css: the raw accent is 1.62:1 on a light surface. */
+.install {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 32%, transparent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.install:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-color: var(--accent-text);
 }
 
 .installed {
@@ -180,14 +238,17 @@
 
 /* Under the install button, the way "Installed" sits under Play. Capped close
    to the button's own width: an instance is called whatever somebody called it,
-   and this column's width is the summary's to lose. */
+   and this column's width is the summary's to lose. It wraps within that cap
+   rather than running on and ellipsising at the first word, because "Already
+   in Showcase" has to survive the cap to say anything — and wrapping costs the
+   row nothing, since the summary beside it is two lines tall anyway. */
 .inInstances {
-  max-width: 108px;
+  max-width: 96px;
   font-size: 11px;
+  line-height: 1.35;
   color: var(--text-faint);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  text-align: right;
+  overflow-wrap: anywhere;
 }
 
 /* Replaces the summary and stats mid-install: while something is downloading,
@@ -334,6 +395,21 @@
   .row {
     gap: 12px;
     padding: 14px 14px;
+  }
+
+  .main {
+    gap: 12px;
+  }
+
+  /* The title line's own gaps tighten with everything else, which is the last
+     6px "Cloth Config API by shedaniel" needed to render whole at 940: with
+     the second provider already collapsed the line was still three pixels
+     over. Four things on this line means three gaps, so this is the cheapest
+     width on it — two pixels each, against a name that was losing four
+     characters. */
+  .titleRow,
+  .nameGroup {
+    gap: 6px;
   }
 
   .icon {
