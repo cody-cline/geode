@@ -6,6 +6,7 @@ import {
   ArchiveRestore,
   Copy,
   Earth,
+  FileArchive,
   FolderInput,
   Loader2,
   Pencil,
@@ -147,6 +148,11 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
     }
   }
 
+  // The two buttons reach the same import — the backend takes a path and looks
+  // at what is on the end of it — and differ in exactly one thing, which is
+  // what each can pick: a `.zip` file, or a directory. So that is what their
+  // labels say. Their keys are apart so the spinner lands on the button that
+  // was pressed; it used to be one key, and a folder import spun the other.
   async function importWorld() {
     // A world travels as a zip, and sits on disk as a folder — so both are
     // offered rather than making somebody zip a folder to bring it in.
@@ -157,7 +163,7 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
     });
     if (typeof picked !== "string") return;
     await run(
-      "import",
+      "importZip",
       "Nothing was imported",
       () => api.importWorld(instance.id, picked),
       (world) => ({
@@ -171,7 +177,7 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
     const picked = await openDialog({ multiple: false, directory: true });
     if (typeof picked !== "string") return;
     await run(
-      "import",
+      "importFolder",
       "Nothing was imported",
       () => api.importWorld(instance.id, picked),
       (world) => ({
@@ -182,6 +188,8 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
   }
 
   const running = instance.running;
+  /** One import at a time, whichever of the two buttons started it. */
+  const importing = busy === "importZip" || busy === "importFolder";
 
   return (
     <div className={styles.wrap}>
@@ -200,23 +208,28 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
           <button
             className="btn"
             onClick={importFolder}
-            disabled={running || busy === "import"}
-            title="Bring in a world that is a folder on this machine"
+            disabled={running || importing}
+            title="Bring in a world that is already a folder on this machine — another launcher's saves, or one copied off a server"
           >
-            <FolderInput size={14} />
-            Import folder
-          </button>
-          <button
-            className="btn btn-primary"
-            onClick={importWorld}
-            disabled={running || busy === "import"}
-          >
-            {busy === "import" ? (
+            {busy === "importFolder" ? (
               <Loader2 size={14} className="spin" />
             ) : (
               <FolderInput size={14} />
             )}
-            Import a world
+            Import a folder
+          </button>
+          <button
+            className="btn btn-primary"
+            onClick={importWorld}
+            disabled={running || importing}
+            title="Bring in a world that arrived as a .zip, the way a downloaded one does"
+          >
+            {busy === "importZip" ? (
+              <Loader2 size={14} className="spin" />
+            ) : (
+              <FileArchive size={14} />
+            )}
+            Import a .zip
           </button>
         </div>
       </div>

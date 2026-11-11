@@ -331,6 +331,14 @@
   color: var(--text-faint);
 }
 
+/* Under the field it puts back, because this screen has no save bar to hang a
+   revert off. `flex-start` because the section stretches what is in it, and a
+   button the full width of the form reads as the section's own action rather
+   than one small way out of the box above. */
+.resetArgs {
+  align-self: flex-start;
+}
+
 .javaGrid {
   display: flex;
   flex-direction: column;

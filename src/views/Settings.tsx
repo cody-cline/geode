@@ -13,6 +13,7 @@ import {
   Palette,
   Pipette,
   RefreshCw,
+  RotateCcw,
   Server as ServerIcon,
   Share2,
   Trash2,
@@ -89,6 +90,25 @@ function hexAccent(raw: string): string {
   const hex = raw.trim().toLowerCase();
   return /^#[\da-f]{6}$/.test(hex) ? hex : ACCENTS[0].hex;
 }
+
+/**
+ * The JVM flags a fresh Geode starts with, the same string as
+ * `default_java_args()` in `src-tauri/src/config.rs`.
+ *
+ * Copied, because nothing hands it over: `get_config` returns the value in
+ * force, and once somebody has typed over it there is nothing in that payload
+ * saying what was there before. Reading the Rust file at build time was the
+ * other option and is not one — `config.rs` also holds the CurseForge key, so
+ * a `?raw` import of it would put that key in the webview bundle, which is the
+ * one thing `Config::redacted()` exists to prevent.
+ *
+ * So it is a copy, the way `ACCENTS[0]` above is a copy of `default_accent()`,
+ * and the two have to be edited together: retune the flags in Rust and leave
+ * this alone, and Reset to default goes on offering the old tuning.
+ */
+const DEFAULT_JAVA_ARGS =
+  "-XX:+UnlockExperimentalVMOptions -XX:+UseG1GC -XX:G1NewSizePercent=20 " +
+  "-XX:G1ReservePercent=20 -XX:MaxGCPauseMillis=50 -XX:G1HeapRegionSize=32M";
 
 export default function Settings() {
   const route = useStore((s) => s.route);
@@ -373,6 +393,12 @@ function JavaSettings({ update }: { update: Updater }) {
   const [installing, setInstalling] = useState<number | null>(null);
   const [args, setArgs] = useState(config.javaArgs);
 
+  /** The box's one way to disk, so clicking away and Reset take the same one. */
+  const saveArgs = (next: string) => {
+    setArgs(next);
+    if (next !== config.javaArgs) void update({ javaArgs: next });
+  };
+
   const refresh = () =>
     api
       .detectJava()
@@ -445,13 +471,31 @@ function JavaSettings({ update }: { update: Updater }) {
           rows={3}
           value={args}
           onChange={(e) => setArgs(e.target.value)}
-          onBlur={() => args !== config.javaArgs && update({ javaArgs: args })}
+          onBlur={() => saveArgs(args)}
         />
         {/* "Saved when you click away" used to be here and nowhere else, so
             this was the only field on any of these screens that said what
             happens to it. The line at the top of the screen says it for all
             of them. */}
         <p className="hint">Instances can override this individually.</p>
+        {/* The only instant-save box on these screens holding something
+            nobody could type again from memory: clearing it and clicking away
+            used to leave no way back short of deleting the Geode folder,
+            because the tuning it ships with is written nowhere a person can
+            read. Shown only when the box is not already holding it, so there
+            is no button offering to do nothing. `preventDefault` on the press
+            keeps the focus in the box above, which stops its blur saving the
+            value being thrown away a moment before this saves the default. */}
+        {args.trim() !== DEFAULT_JAVA_ARGS && (
+          <button
+            className={clsx("btn btn-sm", styles.resetArgs)}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => saveArgs(DEFAULT_JAVA_ARGS)}
+          >
+            <RotateCcw size={13} />
+            Reset to default
+          </button>
+        )}
       </section>
 
       <section className={styles.section}>

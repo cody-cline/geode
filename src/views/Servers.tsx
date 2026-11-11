@@ -309,8 +309,12 @@ function ServerCard({
           ) : !server.installed ? (
             "Not installed"
           ) : server.lastStarted ? (
+            // "Last started", the words the server's own header uses for this
+            // fact — a server is started where an instance is played, but the
+            // shape is one shape. The card said "Ran 3 days ago" to the
+            // header's "Last started 3 days ago".
             <>
-              <Clock size={11} /> Ran {relativeTime(server.lastStarted)}
+              <Clock size={11} /> Last started {relativeTime(server.lastStarted)}
             </>
           ) : (
             "Never started"
