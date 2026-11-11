@@ -55,7 +55,11 @@
      of. The pair stands or falls together, so neither value moves alone; see
      the test that measures it. */
   --danger: #fa8585;
+  /* A warning as *text*, which on this theme the warning colour itself
+     answers — the split exists for the light theme, where it does not. The
+     providers above carry the same two-value shape for the same reason. */
   --warn: #fbbf24;
+  --warn-text: #fbbf24;
   --info: #60a5fa;
 
   /* Sinytra Connector's own colour. A supported route, just not the preferred
@@ -132,15 +136,20 @@
      which is the default, the one that was looked at, and already correct —
      is untouched. */
   --accent-text: #256f40;
-  --modrinth-text: #0f7539;
-  --curseforge-text: #ab4726;
-  --spiget-text: #806019;
+  --modrinth-text: #0e7037;
+  --curseforge-text: #983f22;
+  --spiget-text: #7a5b18;
   /* Darkened for the same reason as the dark theme's, and it was worse here:
      4.39:1 at rest on a dialog's footer and 3.66:1 on hover. */
   --danger: #8f3c3c;
   --warn: #836313;
+  /* `.badge-warn` writes this colour on a 14% wash of *itself*, so darkening
+     the one token darkened its own backdrop with it and half the correction
+     came back. 3.90:1 on `--surface-3`, which is what a Browse row becomes
+     under the pointer. The wash keeps `--warn`; the word takes this. */
+  --warn-text: #6d5210;
   --info: #3c689d;
-  --connector-text: #6d5aa2;
+  --connector-text: #645395;
 
   --accent-ink: #04140a;
   --shadow-sm: 0 1px 2px rgb(16 24 40 / 0.06);
@@ -504,7 +513,7 @@ h4 {
 .badge-warn {
   background: color-mix(in srgb, var(--warn) 14%, transparent);
   border-color: color-mix(in srgb, var(--warn) 32%, transparent);
-  color: var(--warn);
+  color: var(--warn-text);
 }
 
 .divider {

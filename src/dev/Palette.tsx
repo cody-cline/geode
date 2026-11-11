@@ -74,7 +74,7 @@ export default function Palette() {
                 <div style={{ fontSize: 11.5, fontFamily: "var(--mono)" }}>
                   {token}
                 </div>
-                <div style={{ fontSize: 10.5, color: "var(--text-faint)" }}>{use}</div>
+                <div style={{ fontSize: 11, color: "var(--text-faint)" }}>{use}</div>
               </div>
             </div>
           ))}

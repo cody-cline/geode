@@ -104,23 +104,37 @@ test("every text colour is readable on every surface, in both themes", async () 
   }
 });
 
-// A badge writes its provider's colour on a 14% wash of that same colour, so
-// the pair stands or falls together and neither value may be changed alone.
-test("a badge's own text is readable on its own tint", async () => {
+// A badge writes a colour on a wash of that same colour, so the pair stands or
+// falls together and neither value may be changed alone.
+//
+// Both halves of this used to be written down here, and both were wrong. The
+// list of variants was typed out, so `.badge-accent` and `.badge-warn` were
+// simply missing. And the wash was composited over `--surface` — but it is
+// mixed with `transparent`, so what it really lands on is whatever the badge
+// sits on, and `--surface` happens to be the one surface where every variant
+// passes. A Browse row turns `--surface-2` under the pointer and `--warn`
+// came out at 3.90:1 on `--surface-3`. So the variants are read out of the
+// stylesheet and measured against every surface.
+test("a badge's own text is readable on its own tint, wherever it sits", async () => {
+  const css = await readFile(new URL("../styles/global.css", import.meta.url), "utf8");
   const pairs = [
-    ["--modrinth", "--modrinth-text"],
-    ["--curseforge", "--curseforge-text"],
-    ["--spiget", "--spiget-text"],
-    ["--connector", "--connector-text"],
-  ];
+    ...css.matchAll(
+      /\.badge-[\w-]+\s*\{[^}]*?background:\s*color-mix\(in srgb, var\((--[\w-]+)\) ([\d.]+)%[^}]*?color:\s*var\((--[\w-]+)\)[^}]*?\}/g,
+    ),
+  ].map(([, brand, pct, text]) => [brand, text, Number(pct) / 100]);
+  assert.ok(pairs.length >= 5, `only ${pairs.length} badge variants were found in global.css`);
+
   for (const [name, tokens] of Object.entries(await themes())) {
-    for (const [brand, text] of pairs) {
-      const tint = over(tokens[brand], tokens["--surface"], 0.14);
-      const ratio = contrast(tokens[text], tint);
-      assert.ok(
-        ratio >= AA,
-        `${name}: ${text} (${tokens[text]}) on its own tint ${tint} is ${ratio.toFixed(2)}:1, under ${AA}`,
-      );
+    for (const [brand, text, pct] of pairs) {
+      for (const surface of SURFACES) {
+        const tint = over(tokens[brand], tokens[surface], pct);
+        const ratio = contrast(tokens[text], tint);
+        assert.ok(
+          ratio >= AA,
+          `${name}: ${text} (${tokens[text]}) on its own ${pct * 100}% tint over ` +
+            `${surface} (${tint}) is ${ratio.toFixed(2)}:1, under ${AA}`,
+        );
+      }
     }
   }
 });
@@ -386,7 +400,10 @@ test("nothing dims text with opacity, which no check here can see", async () => 
     for (const block of css.matchAll(/([^{}]*)\{([^{}]*)\}/g)) {
       // `stroke-opacity` and `fill-opacity` paint one shape; they do not
       // composite an element and its children the way `opacity` does.
-      const dim = block[2].match(/(?<![-\w])opacity:\s*(0?\.\d+)/);
+      // `0.5`, `.5` and `50%` are the same instruction; only the first two
+      // were being looked for. None of the third form exists today, which is
+      // exactly why it would have gone in unnoticed.
+      const dim = block[2].match(/(?<![-\w])opacity:\s*(0?\.\d+|\d{1,2}%)/);
       if (!dim) continue;
       const selector = block[1].trim().split("\n").pop().trim();
       const allowed = MAY_DIM.find(([pattern]) => pattern.test(selector));
