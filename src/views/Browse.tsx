@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { FocusEvent, KeyboardEvent } from "react";
 import clsx from "clsx";
 import {
   AlertTriangle,
@@ -63,12 +64,14 @@ function loaderLabel(id: string): string {
   return LOADERS.find((l) => l.id === id)?.label ?? titleCase(id);
 }
 
+/** A hit's own identity: what it is listed as, and what its row is called. */
+function rowId(p: Project): string {
+  return `${p.provider}:${p.id}`;
+}
+
 /** Every identity a hit answers to, so cross-provider listings match. */
 function projectKeys(p: Project): string[] {
-  return [
-    `${p.provider}:${p.id}`,
-    ...p.alsoOn.map((r) => `${r.provider}:${r.id}`),
-  ];
+  return [rowId(p), ...p.alsoOn.map((r) => `${r.provider}:${r.id}`)];
 }
 
 /**
@@ -188,6 +191,17 @@ export default function Browse({
   const [selected, setSelected] = useState<Project | null>(null);
   const [installed, setInstalled] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(0);
+  /**
+   * The row carrying the results grid's one tab stop, held as a row's id
+   * rather than its position.
+   *
+   * The list grows under the keyboard: "Load more" appends a page, and the
+   * merge that folds an already-seen project out of it means the page you get
+   * is not the page you asked for. A position would be a tab stop moving under
+   * somebody who moved nothing; an id is still the same row afterwards, and is
+   * simply not found when a new search has replaced the lot.
+   */
+  const [activeRow, setActiveRow] = useState("");
 
   // Mods ask where they should go; packs do not, because they answer that
   // themselves by building the instance.
@@ -868,6 +882,94 @@ export default function Browse({
     ];
   }, [allCategories, available, categories]);
 
+  /**
+   * Which row holds the grid's tab stop. The one the keyboard was last on,
+   * else the first — a new search replaces every row, and a grid where no row
+   * is reachable is a grid the keyboard cannot get into at all.
+   */
+  const stopRow = hits.some((p) => rowId(p) === activeRow)
+    ? activeRow
+    : hits.length > 0
+      ? rowId(hits[0])
+      : "";
+
+  /** Keeps the tab stop where the keyboard actually is, however it got there. */
+  function rememberRow(e: FocusEvent<HTMLElement>) {
+    const row = e.target.closest<HTMLElement>("[data-row]");
+    if (row?.dataset.row) setActiveRow(row.dataset.row);
+  }
+
+  /**
+   * The arrow keys inside the results, which is the contract `role="grid"`
+   * promises: Up and Down between rows, Left and Right between the controls of
+   * the row you are on. Twenty results carry sixty-odd controls, and as plain
+   * tab stops there was no way across them and no way out of the middle.
+   *
+   * Not `rovingKey`, deliberately. That helper is the radio group's contract —
+   * the option the arrows land on is *chosen* by landing on it — and a search
+   * result is not chosen by being looked at. Nor can its geometry pass be
+   * borrowed: it reads each option's `top` to find the rows, and a row's own
+   * controls disagree there by design, the name sitting on the first line of a
+   * text block while the install button is centred against the whole of it.
+   *
+   * Everything below is read off the DOM at the moment of the press — which
+   * row it came from, which row is next, what each one holds — so a page of
+   * results arriving mid-session needs no bookkeeping. The new rows are simply
+   * there to be walked onto.
+   */
+  function moveInResults(e: KeyboardEvent<HTMLElement>) {
+    const across = e.key === "ArrowLeft" || e.key === "ArrowRight";
+    const down = e.key === "ArrowDown";
+    if (!across && !down && e.key !== "ArrowUp") return;
+
+    const target = e.target;
+    if (!(target instanceof HTMLElement)) return;
+    const from = target.closest("[data-row]");
+    if (!from) return;
+
+    // A disabled control is skipped rather than landed on, so a blocked mod —
+    // whose install cannot be pressed — is a row of one control.
+    const controls = (row: Element) => [
+      ...row.querySelectorAll<HTMLElement>("button:not(:disabled)"),
+    ];
+    const here = controls(from);
+    const at = here.indexOf(target);
+    if (at < 0) return;
+
+    // Swallowed whether or not it moves anything, so an arrow at the edge of
+    // the grid does not scroll the results out from under the row it was
+    // pointed at.
+    e.preventDefault();
+
+    if (across) {
+      const step = e.key === "ArrowRight" ? 1 : -1;
+      here[(at + step + here.length) % here.length]?.focus();
+      return;
+    }
+
+    // Up and Down stop at the first and last row rather than wrapping, which
+    // is what `rovingFocus` does for a grid and for the same reason: this list
+    // is twenty rows and growing, and being thrown from one end of it to the
+    // other is a move somebody has to go looking for their focus after.
+    //
+    // They move by *cell* rather than by how many controls along you are: a
+    // row that offers a loader to choose between carries two more buttons than
+    // its neighbours, all of them in the same cell as the name, so counting
+    // controls put Down from one install button on the next row's loader
+    // chooser. Landing on the first control of the cell underneath is the
+    // column holding, which is what a grid's Down means.
+    const row = down ? from.nextElementSibling : from.previousElementSibling;
+    if (!row) return;
+    const cells = (of: Element) => [...of.querySelectorAll("[role=gridcell]")];
+    const cell = target.closest("[role=gridcell]");
+    const column = cell ? Math.max(0, cells(from).indexOf(cell)) : 0;
+    const landing = cells(row)[column];
+    const first = landing?.querySelector<HTMLElement>("button:not(:disabled)");
+    // A cell can have nothing to land on — a blocked mod's install is disabled
+    // — so the row's first control takes the press rather than nothing at all.
+    (first ?? controls(row)[0])?.focus();
+  }
+
   return (
     <>
       <header className={styles.header}>
@@ -1248,11 +1350,26 @@ export default function Browse({
             </div>
           ) : (
             <>
-              <div className={styles.list}>
+              {/* A list whose items each carry controls of their own is a
+                  grid, and `listbox` would be the wrong borrowing: its options
+                  are things you pick one of, and these are rows you act on
+                  without the list ever holding a selection. The role is only
+                  half of it — a grid that does not answer its arrows is worse
+                  than an unnamed list, because it has promised keys that do
+                  nothing — so `moveInResults` is the other half. */}
+              <div
+                className={styles.list}
+                role="grid"
+                aria-label={`${kindLabel} found`}
+                onKeyDown={moveInResults}
+                onFocus={rememberRow}
+              >
                 {hits.map((project) => (
                   <ProjectCard
-                    key={`${project.provider}:${project.id}`}
+                    key={rowId(project)}
                     project={project}
+                    rowKey={rowId(project)}
+                    tabStop={rowId(project) === stopRow}
                     installed={isInstalled(project)}
                     inInstances={heldInstances(project).map((i) => i.name)}
                     installedInstance={packInstance(project)}
