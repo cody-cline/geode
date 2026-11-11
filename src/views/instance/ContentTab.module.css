@@ -49,22 +49,50 @@
   color: var(--accent-text);
 }
 
-/* Up to six controls, the last of them the primary action. Nothing in here
-   shrinks — `.btn` is `white-space: nowrap` — so a group too wide for the row
-   used to run straight off the window and cut `Browse` down to `Bro`. Wrapping
-   is the floor under that: whatever a label turns out to measure on a platform
-   nobody here has typed on, the overflow becomes a second line instead of
-   something unreachable. The query at the foot of this file is what keeps it
-   from needing one at the width the window can open to. */
+/* The tools, which end at the one primary action. Nothing in a `.btn` shrinks
+   — they are `white-space: nowrap` — so a group too wide for the row used to
+   run straight off the window and cut `Browse` down to `Bro`, and then, with
+   wrapping put under it, simply became a second band of chrome at every width
+   the app is ever opened at. The answer is that one member gives way instead:
+   the filter box below takes what the rest leave. Wrapping stays as the floor
+   under *that*, for whatever a label turns out to measure on a platform nobody
+   here has typed on.
+
+   `flex: 1` so this group owns the space the kind strip does not, which is
+   what gives the filter something to grow into. */
 .tools {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  flex: 1;
   gap: 7px;
   flex-wrap: wrap;
 }
 
 .searchWrap {
   position: relative;
+}
+
+/* The filter, as the one control in this row that gives way. It is the tool
+   for the thing this screen is *for* — seeing what is installed — so it is
+   worth the room it can get and worth being narrow rather than absent. The
+   floor is where "Filter" and the key printed beside it still both fit; the
+   ceiling is the width it had when it was fixed. The server's Content tab
+   shares `.searchWrap` and is deliberately not given this: its toolbar is a
+   different set of controls and nothing there has been rebuilt to suit. */
+.searchGrow {
+  /* The basis is the *floor*, not the preference, and that is the whole
+     trick: flexbox decides where to wrap from an item's basis and never from
+     how far it could shrink, so a box asking for 200 and willing to take 132
+     pushed the primary action onto a second line rather than giving up a
+     pixel. Asking for 132 and growing into whatever is spare puts the two
+     questions the right way round. */
+  flex: 1 1 132px;
+  max-width: 200px;
+}
+
+.searchGrow .search {
+  width: 100%;
 }
 
 .searchIcon {
@@ -113,6 +141,81 @@
    button turns `--surface-3` under the pointer. 11px is the floor for
    functional text in this app and this is at it; the weight is what carries
    it. */
+/* What the primary button is adding, dropped at the width the pane narrows at.
+   The kind strip at the other end of this row has been saying which folder all
+   along, so "Add" alone is never ambiguous — and "Add resource packs" is the
+   longest string in the toolbar by some way. */
+.addNoun {
+  white-space: pre;
+}
+
+/* The drawer the occasional acts live in. Absolutely positioned rather than
+   portalled, where `ShareMenu` has to be portalled: that one drops out of a
+   hero carrying `isolation: isolate` and could not escape the stacking context
+   whatever z-index it asked for. This toolbar is a plain block below the hero,
+   so a positioned child of it paints over — and is clicked on before — the
+   list that sits underneath. */
+.more {
+  position: relative;
+  display: inline-flex;
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% + 7px);
+  right: 0;
+  z-index: 20;
+  min-width: 232px;
+  padding: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  box-shadow: var(--shadow);
+}
+
+.menuItem {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 9px;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 12.5px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+/* Where the keyboard is, drawn the way where the pointer is is drawn — in a
+   menu the arrows walk the same highlight the mouse does. */
+.menuItem:hover:not(:disabled),
+.menuItem:focus-visible {
+  background: var(--surface-3);
+}
+
+/* A colour rather than an opacity, so what this ends up at is a pairing some
+   check can read — see the sweep in `contrast.test.mjs`. */
+.menuItem:disabled {
+  color: var(--text-dim);
+  cursor: default;
+}
+
+.menuItem svg {
+  flex: none;
+  color: var(--text-dim);
+}
+
+/* A count, or the reason the item above it is off. */
+.menuNote {
+  margin-left: auto;
+  padding-left: 12px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
 .toolCount {
   display: inline-flex;
   align-items: center;
@@ -235,28 +338,18 @@
   border-color: var(--border-strong);
 }
 
-/* A row's cells. Four of them: the enable box, the artwork, the name and the
-   row's own buttons. `role="gridcell"` goes straight on to the element that is
-   already there wherever that element is not a control — putting it on a
-   `<button>` would take the button's own role away — so these two classes
-   exist for the two places it has to be a wrapper instead.
+/* The cell holding a row's buttons. `role="gridcell"` goes straight on to the
+   element that is already there wherever that element is not a control —
+   putting it on a `<button>` would take the button's own role away — so this
+   class exists for the one place it has to be a wrapper instead. It adds no
+   spacing of its own beyond repeating the row's 11px between the buttons.
 
-   Neither adds spacing of its own. The one holding the buttons repeats the
-   row's own 11px gap between them, so a row measures exactly what it measured
-   when they were the row's direct children.
-
-   Why the buttons are one cell rather than one each: a row holds one, two or
-   four of them depending on the folder and what the file is, and a column
-   count that changes per row is a column count worth nothing to anybody. The
-   arrows do not read these boundaries — they walk whatever in the row has been
-   taken out of the tab order, which is what lets the badges inside the name
-   cell be reached too. */
-.cell {
-  display: flex;
-  align-items: center;
-  flex: none;
-}
-
+   Why they are one cell rather than one each: a row holds two, three or four
+   of them depending on the folder and what the file is, and a column count
+   that changes per row is a column count worth nothing to anybody. The arrows
+   do not read these boundaries — they walk whatever in the row has been taken
+   out of the tab order, which is what lets the badges inside the name cell be
+   reached too. */
 .actions {
   display: flex;
   align-items: center;
@@ -264,7 +357,17 @@
   flex: none;
 }
 
-.toggle input {
+/* The one checkbox on a row, and what it means is which rows the next press
+   acts on. It takes the accent, which on this row now says one thing and one
+   thing only: this is checked, and `.rowPicked` below draws the same accent
+   down the edge of the row. */
+.selectCell {
+  display: flex;
+  align-items: center;
+  flex: none;
+}
+
+.selectCell input {
   accent-color: var(--accent);
   cursor: pointer;
   width: 15px;
@@ -287,57 +390,6 @@
   width: 100%;
   height: 100%;
   object-fit: cover;
-}
-
-/* Selecting a row, which is not the same control as the checkbox beside it:
-   that one decides whether the game loads the file. The tick is round and sits
-   over the artwork precisely so the one square box on a row stays the enable
-   toggle it has always been. Shown on hover as well as when selected, so the
-   gesture can be found by pointing at a row rather than by being told.
-
-   Round was not enough on its own. The enable checkbox takes `accent-color`,
-   so a selected row drew an accent tick 20px from an accent tick that means
-   something else entirely — and since the accent is the user's to choose, no
-   second hue is safe either: pick blue for selection and somebody with a blue
-   accent is back where they started. The selected mark is therefore drawn in
-   the one pair that is never the accent, text on background, and the accent
-   says the same thing in a form that is not a mark at all — see `.rowPicked`
-   below. */
-.pick {
-  position: relative;
-  padding: 0;
-}
-
-.pickMark {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  background: color-mix(in srgb, var(--bg) 62%, transparent);
-  opacity: 0;
-  transition: opacity 0.12s var(--ease);
-}
-
-.pick:hover .pickMark,
-.pick:focus-visible .pickMark,
-.picked .pickMark {
-  opacity: 1;
-}
-
-.pickMark svg {
-  width: 17px;
-  height: 17px;
-  padding: 2px;
-  border-radius: var(--radius-pill);
-  border: 1.5px solid var(--text-faint);
-  background: var(--surface);
-  color: transparent;
-}
-
-.picked .pickMark svg {
-  border-color: var(--text);
-  background: var(--text);
-  color: var(--bg);
 }
 
 /* A band, and a bar down the leading edge of it. The bar is what a tick cannot
@@ -447,8 +499,19 @@
 }
 
 /* The side control on a server's Mods rows. Narrow enough to sit among the
-   row's buttons, and the same height as the small ones beside it. */
-.sideChoice {
+   row's buttons, and the same height as the small ones beside it.
+
+   Written through `.actions`, which is the only part of this that is new, and
+   it is a correction rather than a flourish: every declaration below except
+   the last two was being thrown away. `global.css` has
+   `.input, .select, .textarea { width: 100%; height: 34px; padding: 0 11px }`,
+   one class deep like this rule and landing after it, so the select was
+   taking the full width of the cell and the four icon buttons beside it were
+   squashed from 28px to 16 — in a row that then ran off the right of the pane
+   at the width the window opens to. The same specificity trap the media query
+   at the foot of this file spells out for `.btn`, which is where the shape of
+   the fix comes from. */
+.actions .sideChoice {
   width: auto;
   height: 28px;
   font-size: 12px;
@@ -504,17 +567,19 @@
 
 /* The toolbar at a window the size the window is allowed to be.
    `tauri.conf.json` opens as small as 940px; the sidebar takes 198 of that and
-   this toolbar's own padding another 44, leaving 698 for a right-hand group
-   that wants 763 with every word in it — so the last control in the row, the
-   primary one, was the part that went off the edge.
+   this toolbar's own padding another 44, leaving 698 for the kind strip and
+   everything to the right of it. Six controls used to want 763 of that on
+   their own, so the primary one — the last in the row — was the part that went
+   off the edge, and the row wrapped into a second band at every width.
 
-   What collapses is decided by what each control is worth. The four kind tabs,
-   the Filter box with its key printed in it, the way into selecting (the one
-   place Shift-click is written down) and `Browse` keep their words: each is
-   either how you get somewhere from here or the only home a gesture has. The
-   three that drop to their icon are the occasional ones, and each keeps its
-   name in `aria-label` and its sentence in `title`, so the pointer and the
-   screen reader are told what the row no longer spells out.
+   Two of them are gone into the drawer and the filter now gives way, which is
+   most of the answer. This is the rest of it: the two words that are longest
+   and least load-bearing go.
+
+   `Identify` keeps its number. The count is not a label — see `.toolCount` —
+   it is the only at-a-glance signal that anything is waiting, and hiding it
+   with the word was an information regression that left the number alive in
+   `aria-label` and nowhere a person could see.
 
    The same 1100px the sidebar narrows at, in `global.css`. One number because
    the pane behind this toolbar changes width at exactly that point, so the two
@@ -529,13 +594,12 @@
     padding: 0;
   }
 
-  .tools .toolLabel {
+  .tools .toolLabel,
+  .tools .addNoun {
     display: none;
   }
 
-  /* Except that a button carrying a count keeps the room to print it. The
-     count is not a label — see `.toolCount` — so the one button that has one
-     collapses to its icon *and* its number rather than to its icon alone. */
+  /* Except that a button carrying a count keeps the room to print it. */
   .tools .toolCounted {
     width: auto;
     padding: 0 9px;
