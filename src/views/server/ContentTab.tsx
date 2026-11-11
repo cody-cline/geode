@@ -14,6 +14,7 @@ import {
   Trash2,
 } from "lucide-react";
 
+import Tooltip from "../../components/Tooltip";
 import { api } from "../../lib/api";
 import { fileSize, providerLabel, shownName } from "../../lib/format";
 import { rovingKey } from "../../lib/rovingFocus";
@@ -30,6 +31,11 @@ import type {
 // screen with different folders behind them, and a second copy of these rules
 // would start identical and drift.
 import styles from "../instance/ContentTab.module.css";
+
+// And its list keyboard, for exactly the same reason: one list, two folders
+// behind it. What a row is — the one tab stop, arrows between rows and along
+// one — is a fact about this screen, and the screen is over there.
+import { rowKeys } from "../instance/ContentTab";
 
 /**
  * The folders a server actually has. Narrower than `ContentKind`: a server has
@@ -131,6 +137,8 @@ export default function ServerContentTab({
   const [updating, setUpdating] = useState<UpdateCandidate | null>(null);
   const [linking, setLinking] = useState(false);
   const [addingCardboard, setAddingCardboard] = useState(false);
+  // The row the keyboard was last on, which is the row that answers Tab.
+  const [keyed, setKeyed] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -403,6 +411,12 @@ export default function ServerContentTab({
   // must not leave the strip with no tab stop at all and nothing to Tab into.
   const folderStop = folders.some((f) => f.id === folder) ? folder : folders[0]?.id;
 
+  // The one row that answers Tab. Checked against the list rather than
+  // trusted, because `keyed` outlives the folder and the filter it was set in.
+  const rowStop = shown?.some((i) => i.fileName === keyed)
+    ? keyed
+    : shown?.[0]?.fileName;
+
   if (folders.length === 0) {
     return (
       <div className={styles.wrap}>
@@ -591,8 +605,8 @@ export default function ServerContentTab({
 
       {/* The one panel the folders swap, named by whichever of them is showing.
           Focusable because it is the thing the strip switches and it scrolls:
-          while it is loading or empty, Tab out of the strip would otherwise
-          skip it entirely. */}
+          while it is loading or empty there is nothing inside it to focus, so
+          Tab out of the strip would otherwise skip it entirely. */}
       <div
         className={styles.list}
         id="server-content-panel"
@@ -630,7 +644,23 @@ export default function ServerContentTab({
             )}
           </div>
         ) : (
-          shown.map((item) => {
+          /* The instance list's grid, said the same way and for the same
+             reasons — see the comment on that one. The two differences are
+             both about selection: this pane has none, so the grid is not
+             multi-selectable, its rows claim no `aria-selected`, and `rowKeys`
+             is handed nothing to do on Space. A key that does nothing is
+             better left unclaimed than bound to nothing. */
+          <div
+            className={styles.rows}
+            role="grid"
+            aria-labelledby={`server-content-tab-${folderStop}`}
+            onKeyDown={(e) => rowKeys(e)}
+            onFocus={(e) => {
+              const row = (e.target as HTMLElement).closest<HTMLElement>("[data-row]");
+              if (row?.dataset.row) setKeyed(row.dataset.row);
+            }}
+          >
+          {shown.map((item) => {
             const update = updateFor(item);
             // Only in Mods: every row in Client mods is a client mod by virtue
             // of the folder it is in, and a badge on each would say nothing.
@@ -643,17 +673,21 @@ export default function ServerContentTab({
               <div
                 key={item.fileName}
                 className={styles.row}
+                role="row"
+                data-row={item.fileName}
+                tabIndex={item.fileName === rowStop ? 0 : -1}
               >
-                <label className={styles.toggle}>
+                <label className={styles.toggle} role="gridcell">
                   <input
                     type="checkbox"
                     checked={item.enabled}
                     onChange={() => toggle(item)}
                     aria-label={`${item.enabled ? "Disable" : "Enable"} ${item.name}`}
+                    tabIndex={-1}
                   />
                 </label>
 
-                <div className={styles.itemIcon}>
+                <div className={styles.itemIcon} role="gridcell">
                   {item.iconUrl ? (
                     <img src={item.iconUrl} alt="" loading="lazy" />
                   ) : (
@@ -661,7 +695,7 @@ export default function ServerContentTab({
                   )}
                 </div>
 
-                <div className={styles.itemText}>
+                <div className={styles.itemText} role="gridcell">
                   <div className={styles.itemTitle}>
                     <span className={styles.itemName}>{item.name}</span>
                     {/* The same word the instance's list says, for the same
@@ -670,26 +704,38 @@ export default function ServerContentTab({
                         and put its text under 2.5:1. These two panes are one
                         screen and share a stylesheet, so they had to stop
                         together. */}
+                    {/* Each of these is a word whose meaning is the sentence
+                        attached to it, and a `title` carries a sentence to the
+                        pointer and to nothing else — not to a focus, not to a
+                        touch. `side` is the one that makes it plainest: "both"
+                        and "side not declared" are the same badge shape saying
+                        two different things about whose word a side is on, and
+                        all of that was readable only by hovering. So each
+                        carries a real tooltip and a `tabIndex` of -1, which
+                        puts it in its row's arrow walk and in no tab order at
+                        all — the same trade the instance list makes, argued
+                        there. The provider badge takes neither: "Modrinth" is
+                        not a word that needs a sentence. */}
                     {!item.enabled && (
-                      <span
-                        className="badge"
-                        title="Turned off, and still here. The loader skips it — the box on the left puts it back."
-                      >
-                        disabled
-                      </span>
+                      <Tooltip text="Turned off, and still here. The loader skips it — the box on the left puts it back.">
+                        <span className="badge" tabIndex={-1}>
+                          disabled
+                        </span>
+                      </Tooltip>
                     )}
                     {item.dependency && (
-                      <span className="badge" title="Installed as a dependency">
-                        dependency
-                      </span>
+                      <Tooltip text="Installed as a dependency">
+                        <span className="badge" tabIndex={-1}>
+                          dependency
+                        </span>
+                      </Tooltip>
                     )}
                     {item.fromDisk && (
-                      <span
-                        className="badge"
-                        title="Added by hand — not tracked for updates"
-                      >
-                        untracked
-                      </span>
+                      <Tooltip text="Added by hand — not tracked for updates">
+                        <span className="badge" tabIndex={-1}>
+                          untracked
+                        </span>
+                      </Tooltip>
                     )}
                     {item.provider && (
                       <span className={clsx("badge", `badge-${item.provider}`)}>
@@ -697,17 +743,18 @@ export default function ServerContentTab({
                       </span>
                     )}
                     {side && (
-                      <span className="badge" title={side.title}>
-                        {side.label}
-                      </span>
+                      <Tooltip text={side.title}>
+                        <span className="badge" tabIndex={-1}>
+                          {side.label}
+                        </span>
+                      </Tooltip>
                     )}
                     {item.keepOnServer && (
-                      <span
-                        className="badge"
-                        title="Kept on this server. No pack carries this file: not its bytes, not a link to it, not even its name."
-                      >
-                        kept here
-                      </span>
+                      <Tooltip text="Kept on this server. No pack carries this file: not its bytes, not a link to it, not even its name.">
+                        <span className="badge" tabIndex={-1}>
+                          kept here
+                        </span>
+                      </Tooltip>
                     )}
                   </div>
                   <div className={styles.itemMeta}>
@@ -717,105 +764,118 @@ export default function ServerContentTab({
                   </div>
                 </div>
 
-                {update && (
-                  <button
-                    className="btn btn-sm btn-primary"
-                    onClick={() => applyUpdate(update)}
-                    disabled={updating !== null}
-                    title={`Update to ${update.newVersionNumber}`}
-                  >
-                    {updating && sameUpdate(updating, update) ? (
-                      <Loader2 size={12} className="spin" />
-                    ) : (
-                      <ArrowUpCircle size={13} />
-                    )}
-                    Update
-                  </button>
-                )}
+                {/* The row's controls, as one cell. A row here holds one of
+                    them in Plugins and five in Mods, so one cell each would
+                    give the grid a column count that is never the same twice;
+                    the arrows walk the controls rather than the cells, so
+                    nothing is lost by holding them together. */}
+                <div className={styles.actions} role="gridcell">
+                  {update && (
+                    <button
+                      className="btn btn-sm btn-primary"
+                      onClick={() => applyUpdate(update)}
+                      disabled={updating !== null}
+                      title={`Update to ${update.newVersionNumber}`}
+                      tabIndex={-1}
+                    >
+                      {updating && sameUpdate(updating, update) ? (
+                        <Loader2 size={12} className="spin" />
+                      ) : (
+                        <ArrowUpCircle size={13} />
+                      )}
+                      Update
+                    </button>
+                  )}
 
-                {folder === "mod" && (
-                  <select
-                    className={clsx("select", styles.sideChoice)}
-                    value={chosen}
-                    onChange={(e) =>
-                      void chooseSide(
-                        item,
-                        (e.target.value || null) as
-                          | "client"
-                          | "server"
-                          | "both"
-                          | null,
-                      )
-                    }
-                    aria-label={`Which side ${item.name} belongs on`}
-                    title="Which side this mod belongs on. Worked out from its jar and its listing until you say otherwise, and your answer is what the pack tells players. A mod only players need belongs in Client mods — the move button does that."
-                  >
-                    <option value="">Side: worked out</option>
-                    {/* Not offered, because leaving a client-only mod in Mods
-                        has the server load it anyway; shown when something
-                        else recorded it, so this never misreports the mod. */}
-                    {chosen === "client" && (
-                      <option value="client">Side: client only</option>
-                    )}
-                    <option value="server">Side: server only</option>
-                    <option value="both">Side: both sides</option>
-                  </select>
-                )}
+                  {folder === "mod" && (
+                    <select
+                      className={clsx("select", styles.sideChoice)}
+                      value={chosen}
+                      onChange={(e) =>
+                        void chooseSide(
+                          item,
+                          (e.target.value || null) as
+                            | "client"
+                            | "server"
+                            | "both"
+                            | null,
+                        )
+                      }
+                      aria-label={`Which side ${item.name} belongs on`}
+                      title="Which side this mod belongs on. Worked out from its jar and its listing until you say otherwise, and your answer is what the pack tells players. A mod only players need belongs in Client mods — the move button does that."
+                      tabIndex={-1}
+                    >
+                      <option value="">Side: worked out</option>
+                      {/* Not offered, because leaving a client-only mod in Mods
+                          has the server load it anyway; shown when something
+                          else recorded it, so this never misreports the mod. */}
+                      {chosen === "client" && (
+                        <option value="client">Side: client only</option>
+                      )}
+                      <option value="server">Side: server only</option>
+                      <option value="both">Side: both sides</option>
+                    </select>
+                  )}
 
-                {(folder === "mod" || folder === "clientmod") && (
-                  <button
-                    className={clsx(
-                      "btn btn-ghost btn-icon btn-sm",
-                      item.keepOnServer && styles.keptHere,
-                    )}
-                    onClick={() => void keepHere(item, !item.keepOnServer)}
-                    title={
-                      item.keepOnServer
-                        ? "Kept on this server. Press to let players have it again."
-                        : "Keep on this server: players get nothing of this file. For your own tooling, and for a jar whose licence forbids passing it on."
-                    }
-                    aria-label={
-                      item.keepOnServer
-                        ? `Let players have ${item.name}`
-                        : `Keep ${item.name} on this server`
-                    }
-                    aria-pressed={item.keepOnServer ?? false}
-                  >
-                    <ServerIcon size={14} />
-                  </button>
-                )}
+                  {(folder === "mod" || folder === "clientmod") && (
+                    <button
+                      className={clsx(
+                        "btn btn-ghost btn-icon btn-sm",
+                        item.keepOnServer && styles.keptHere,
+                      )}
+                      onClick={() => void keepHere(item, !item.keepOnServer)}
+                      title={
+                        item.keepOnServer
+                          ? "Kept on this server. Press to let players have it again."
+                          : "Keep on this server: players get nothing of this file. For your own tooling, and for a jar whose licence forbids passing it on."
+                      }
+                      aria-label={
+                        item.keepOnServer
+                          ? `Let players have ${item.name}`
+                          : `Keep ${item.name} on this server`
+                      }
+                      aria-pressed={item.keepOnServer ?? false}
+                      tabIndex={-1}
+                    >
+                      <ServerIcon size={14} />
+                    </button>
+                  )}
 
-                {(folder === "mod" || folder === "clientmod") && (
+                  {(folder === "mod" || folder === "clientmod") && (
+                    <button
+                      className="btn btn-ghost btn-icon btn-sm"
+                      onClick={() => void move(item)}
+                      disabled={server.running}
+                      title={
+                        server.running
+                          ? "Stop the server to move mods between folders"
+                          : folder === "mod"
+                            ? "Move to Client mods — players get it, this server stops loading it"
+                            : "Move to Mods — this server loads it too. A mod that itself says it only runs in players' games goes back to Client mods when the server starts."
+                      }
+                      aria-label={`Move ${item.name} to ${
+                        folder === "mod" ? "Client mods" : "Mods"
+                      }`}
+                      tabIndex={-1}
+                    >
+                      <ArrowLeftRight size={14} />
+                    </button>
+                  )}
+
                   <button
                     className="btn btn-ghost btn-icon btn-sm"
-                    onClick={() => void move(item)}
-                    disabled={server.running}
-                    title={
-                      server.running
-                        ? "Stop the server to move mods between folders"
-                        : folder === "mod"
-                          ? "Move to Client mods — players get it, this server stops loading it"
-                          : "Move to Mods — this server loads it too. A mod that itself says it only runs in players' games goes back to Client mods when the server starts."
-                    }
-                    aria-label={`Move ${item.name} to ${
-                      folder === "mod" ? "Client mods" : "Mods"
-                    }`}
+                    onClick={() => remove(item)}
+                    title="Delete"
+                    aria-label={`Delete ${item.name}`}
+                    tabIndex={-1}
                   >
-                    <ArrowLeftRight size={14} />
+                    <Trash2 size={14} />
                   </button>
-                )}
-
-                <button
-                  className="btn btn-ghost btn-icon btn-sm"
-                  onClick={() => remove(item)}
-                  title="Delete"
-                  aria-label={`Delete ${item.name}`}
-                >
-                  <Trash2 size={14} />
-                </button>
+                </div>
               </div>
             );
-          })
+          })}
+          </div>
         )}
       </div>
     </div>

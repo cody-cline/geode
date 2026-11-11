@@ -101,6 +101,32 @@
   pointer-events: none;
 }
 
+/* How many files are waiting to be identified, printed on the button that
+   identifies them. Not part of `.toolLabel`, and that is the whole point of
+   it: the label is a word the pointer can do without below the width this
+   toolbar collapses at, while the count is the only at-a-glance signal that
+   anything needs attention at all. Hiding the two together read as a
+   shortening and was an information regression — the number survived in
+   `aria-label` and nowhere a person could see.
+
+   Its own fill rather than the button's, so it is still a count after the
+   button turns `--surface-3` under the pointer. 11px is the floor for
+   functional text in this app and this is at it; the weight is what carries
+   it. */
+.toolCount {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+}
+
 .updateBanner {
   display: flex;
   align-items: center;
@@ -175,6 +201,17 @@
   gap: 5px;
 }
 
+/* The rows, as the grid they are. Its own element rather than the panel above,
+   because a grid owns rows and nothing else and the panel also holds the
+   skeletons and the empty state — and because the panel is the tab panel the
+   four kinds swap, which is a role of its own. The column layout and the gap
+   come down here with the rows they space. */
+.rows {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
 .row {
   display: flex;
   align-items: center;
@@ -183,6 +220,12 @@
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
   background: var(--surface);
+  /* The row is the one tab stop for the whole list and the arrows walk it, so
+     it is scrolled into view by being focused rather than by being clicked.
+     The focus ring is drawn 2px *outside* the row — `:focus-visible` in
+     `global.css` — and a row brought to the very edge of the scroller has that
+     ring cut in half, which is the one part of the row that has to be seen. */
+  scroll-margin: 6px;
   transition:
     border-color 0.12s var(--ease),
     opacity 0.12s var(--ease);
@@ -190,6 +233,35 @@
 
 .row:hover {
   border-color: var(--border-strong);
+}
+
+/* A row's cells. Four of them: the enable box, the artwork, the name and the
+   row's own buttons. `role="gridcell"` goes straight on to the element that is
+   already there wherever that element is not a control — putting it on a
+   `<button>` would take the button's own role away — so these two classes
+   exist for the two places it has to be a wrapper instead.
+
+   Neither adds spacing of its own. The one holding the buttons repeats the
+   row's own 11px gap between them, so a row measures exactly what it measured
+   when they were the row's direct children.
+
+   Why the buttons are one cell rather than one each: a row holds one, two or
+   four of them depending on the folder and what the file is, and a column
+   count that changes per row is a column count worth nothing to anybody. The
+   arrows do not read these boundaries — they walk whatever in the row has been
+   taken out of the tab order, which is what lets the badges inside the name
+   cell be reached too. */
+.cell {
+  display: flex;
+  align-items: center;
+  flex: none;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  flex: none;
 }
 
 .toggle input {
@@ -459,5 +531,13 @@
 
   .tools .toolLabel {
     display: none;
+  }
+
+  /* Except that a button carrying a count keeps the room to print it. The
+     count is not a label — see `.toolCount` — so the one button that has one
+     collapses to its icon *and* its number rather than to its icon alone. */
+  .tools .toolCounted {
+    width: auto;
+    padding: 0 9px;
   }
 }
