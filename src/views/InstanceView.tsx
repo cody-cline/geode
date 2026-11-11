@@ -305,14 +305,21 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
 
       {/* One panel that swaps, since the tabs are local state rather than
           routes, so every tab points at this element and it names the tab it
-          is showing. Focusable in its own right: several of these panels
-          scroll, and a panel reached by Tab is how the keyboard gets into one. */}
+          is showing.
+
+          Not a tab stop of its own. A panel earns one when there is nothing
+          inside it to reach, which is the only way a keyboard gets into a
+          scrolling region with no controls — but this element neither scrolls
+          nor is ever empty: all six tabs open with a strip, a toolbar or a
+          form, and the panels that really do scroll are inside them and
+          answer for themselves. The stop it used to take was in front of every
+          one of those, with a focus ring drawn as a rule across the whole top
+          edge of the screen. */}
       <div
         className={styles.body}
         id="instance-tabpanel"
         role="tabpanel"
         aria-labelledby={`instance-tab-${active}`}
-        tabIndex={0}
       >
         {active === "content" && (
           <ContentTab instance={instance} onBrowse={() => setBrowsing(true)} />
