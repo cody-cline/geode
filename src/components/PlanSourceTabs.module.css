@@ -1,20 +1,24 @@
+/* The segment at the shared spec — 30px, `--radius-sm`, 13px, no fill until it
+   is chosen and then a 14% `--accent` wash with an `--accent-text` label — so
+   this strip, Browse's kinds and the two Content tabs' folders are one shape.
+   The spec and the reasoning are at the top of `InstanceView.module.css`.
+
+   No trough. The bordered `--surface-2` well this used to draw around a 26px
+   fill was a fifth idiom for the act the other four agree on, and it sat in the
+   same row as two of them. */
 .tabs {
   display: inline-flex;
-  gap: 2px;
-  padding: 2px;
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
-  border: 1px solid var(--border);
+  gap: 4px;
 }
 
 .tab {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 26px;
-  padding: 0 11px;
-  border-radius: 5px;
-  font-size: 12.5px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
   font-weight: 500;
   color: var(--text-dim);
   white-space: nowrap;
@@ -24,11 +28,12 @@
 }
 
 .tab:hover {
+  background: var(--surface-2);
   color: var(--text);
 }
 
 .active,
 .active:hover {
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
   color: var(--accent-text);
 }
