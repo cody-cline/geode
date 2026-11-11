@@ -82,6 +82,7 @@ const TEXT = [
   "--accent-text",
   "--danger",
   "--warn",
+  "--warn-text",
   "--info",
   "--connector-text",
   "--modrinth-text",
@@ -115,24 +116,63 @@ test("every text colour is readable on every surface, in both themes", async () 
 // passes. A Browse row turns `--surface-2` under the pointer and `--warn`
 // came out at 3.90:1 on `--surface-3`. So the variants are read out of the
 // stylesheet and measured against every surface.
-test("a badge's own text is readable on its own tint, wherever it sits", async () => {
-  const css = await readFile(new URL("../styles/global.css", import.meta.url), "utf8");
-  const pairs = [
-    ...css.matchAll(
-      /\.badge-[\w-]+\s*\{[^}]*?background:\s*color-mix\(in srgb, var\((--[\w-]+)\) ([\d.]+)%[^}]*?color:\s*var\((--[\w-]+)\)[^}]*?\}/g,
-    ),
-  ].map(([, brand, pct, text]) => [brand, text, Number(pct) / 100]);
-  assert.ok(pairs.length >= 5, `only ${pairs.length} badge variants were found in global.css`);
+test("anything written on a wash is readable, wherever that wash sits", async () => {
+  // Every rule in the app that writes a colour on a `color-mix(…, transparent)`
+  // wash — not only the `.badge-*` ones, and not only `global.css`.
+  //
+  // This started as the badge check and was wrong twice over. It listed the
+  // variants by hand, so two were missing; and it composited them over
+  // `--surface`, which happens to be the one surface where they all pass. Both
+  // were fixed — and it was still wrong, in a third way that is the whole
+  // reason it now walks the tree: it only ever read `global.css`. The pattern
+  // repeats 44 times in the module stylesheets, and the token invented to fix
+  // `.badge-warn` was used in exactly one place, because one place was all this
+  // test could see. `.nearVersion` in `PlanView.module.css` is the same badge
+  // by another name, declared in a module, and it shipped at 3.94:1.
+  //
+  // A wash mixed with `transparent` lands on whatever is behind it, and that
+  // is not knowable from the rule, so every surface has to clear.
+  const files = [];
+  const walk = async (at) => {
+    for (const entry of await readdir(at, { withFileTypes: true })) {
+      const next = new URL(`${entry.name}${entry.isDirectory() ? "/" : ""}`, at);
+      if (entry.isDirectory()) await walk(next);
+      else if (entry.name.endsWith(".css")) files.push(next);
+    }
+  };
+  await walk(new URL("../", import.meta.url));
+
+  const pairs = [];
+  for (const file of files) {
+    const text = await readFile(file, "utf8");
+    const where = file.pathname.split("/src/")[1];
+    for (const block of text.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      const body = block[2];
+      const wash = body.match(
+        /background(?:-color)?:\s*color-mix\(in srgb, var\((--[\w-]+)\) ([\d.]+)%,\s*transparent\)/,
+      );
+      const ink = body.match(/(?<!-)\bcolor:\s*var\((--[\w-]+)\)/);
+      if (!wash || !ink) continue;
+      pairs.push({
+        where: `${where} ${block[1].trim().split("\n").pop().trim()}`,
+        ink: ink[1],
+        wash: wash[1],
+        pct: Number(wash[2]) / 100,
+      });
+    }
+  }
+  assert.ok(pairs.length > 30, `only ${pairs.length} washed rules were found; the sweep is not reading the tree`);
 
   for (const [name, tokens] of Object.entries(await themes())) {
-    for (const [brand, text, pct] of pairs) {
+    for (const { where, ink, wash, pct } of pairs) {
+      if (!tokens[ink] || !tokens[wash]) continue;
       for (const surface of SURFACES) {
-        const tint = over(tokens[brand], tokens[surface], pct);
-        const ratio = contrast(tokens[text], tint);
+        const behind = over(tokens[wash], tokens[surface], pct);
+        const ratio = contrast(tokens[ink], behind);
         assert.ok(
           ratio >= AA,
-          `${name}: ${text} (${tokens[text]}) on its own ${pct * 100}% tint over ` +
-            `${surface} (${tint}) is ${ratio.toFixed(2)}:1, under ${AA}`,
+          `${name}: ${where} writes ${ink} (${tokens[ink]}) on a ${pct * 100}% ` +
+            `${wash} wash over ${surface} (${behind}) — ${ratio.toFixed(2)}:1, under ${AA}`,
         );
       }
     }
