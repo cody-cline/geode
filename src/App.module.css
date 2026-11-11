@@ -5,6 +5,48 @@
   background: var(--bg);
 }
 
+/* The keyboard's way past the sidebar, shown only while it has focus.
+
+   Taken out of flow, which is load-bearing twice over: `.app` is a two-column
+   grid, and an in-flow child here would take the sidebar's column and push it
+   into the screen's; and a control that is 1px wide for all but one moment of
+   its life must not reserve a corner of the layout for that moment.
+
+   Clipped rather than hidden. `display: none` and `visibility: hidden` both
+   take an element out of the tab order, which is the one thing this is for, so
+   it is folded down to a point instead and unfolded by the ring below. */
+.skip {
+  position: fixed;
+  top: 10px;
+  left: 10px;
+  /* Above the whole scale — a dialog is 100, a tooltip 120, the dock 150,
+     a toast 200 — because the single moment this is visible is the moment it
+     must not be behind anything. */
+  z-index: 300;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+/* The idiom the hover-revealed row controls already use: the keyboard gets
+   what the pointer gets, at the moment the keyboard arrives. The ring itself
+   is `:focus-visible` in global.css. */
+.skip:focus-visible {
+  width: auto;
+  height: auto;
+  padding: 8px 14px;
+  overflow: visible;
+  clip-path: none;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+}
+
 .main {
   position: relative;
   overflow: hidden;

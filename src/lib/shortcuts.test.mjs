@@ -9,6 +9,12 @@
 // row, and is printed on the thing it presses — which is why `PRINTED_IN`
 // below says, per action, which file has to be the one printing it.
 //
+// A second rule joins it at the bottom of this file, about the same keyboard:
+// a key that opens a screen has to take the keyboard there, and there has to
+// be a way past the sidebar that is not nine presses. Both are printed-key
+// promises of the same kind — one that moves the screen and leaves the person
+// is a key that did half of what it said.
+//
 // Checked by reading the files, the way `retarget.test.mjs` checks what spans
 // two files: `npm test` has no DOM and no React renderer, so the hint cannot be
 // rendered and looked at here. Plain JavaScript for the same reason those are:
@@ -227,4 +233,96 @@ test("a screen's own shortcut holds off while a dialog is open", async () => {
         "its own listener answers to none of the rules above",
     );
   }
+});
+
+// Where a press *lands*, which is the other half of a route binding being worth
+// printing. Four of the five used to change the screen and leave the keyboard
+// behind; the fifth landed in Browse's search box and only because that field
+// asks for focus when it mounts. A key that moves the screen and not the
+// person has done half of what the sidebar promised, and on a window nobody
+// has tabbed into yet it leaves them nine stops short of the screen they asked
+// for — which is the same nine the skip link below exists to clear.
+test("a route shortcut takes the keyboard to the screen it opens", async () => {
+  const app = (await source("../App.tsx")).replace(/\s+/g, " ");
+
+  const at = app.indexOf("function focusScreen");
+  assert.ok(at > 0, "App no longer has a function that moves the keyboard into the screen");
+  const move = app.slice(at);
+
+  // Inside the screen, not at the window: the nine stops this is getting past
+  // are all outside `main`, so looking anywhere wider would find the first of
+  // them again.
+  assert.match(
+    move.slice(0, move.indexOf("}")),
+    /querySelector\("main"\)/,
+    "the move no longer starts from the main region, so it can land on one of " +
+      "the very stops it exists to get past",
+  );
+  // And onto something Tab can come back to. A roving group parks `-1` on its
+  // unchosen members, so landing on one of those is landing nowhere.
+  assert.ok(
+    move.includes(':not([tabindex="-1"])'),
+    "the landing no longer skips what Tab cannot reach, so a route shortcut " +
+      "can put the keyboard on a roving group's unchosen member",
+  );
+  assert.match(
+    move,
+    /main\.tabIndex = -1; main\.focus\(\)/,
+    "a screen with nothing to press now swallows the press instead of handing " +
+      "the keyboard the region, which is the only way into a page of words",
+  );
+
+  // The press asks for it. Both halves live in `App` — the branch that
+  // navigates, and an effect that runs once the screen it asked for is up —
+  // so what is pinned here is that the branch does not stop at `navigate`.
+  const branch = app.slice(
+    app.indexOf("navigate(route);"),
+    app.indexOf("window.addEventListener"),
+  );
+  assert.match(
+    branch,
+    /set\w+\(/,
+    "a route shortcut changes the screen and asks for nothing else, so the " +
+      "keyboard stays wherever it was — which for four of the five is the sidebar",
+  );
+});
+
+// The way past those nine, which did not exist in this app at all. Nothing
+// else in `src/` offers one, so a keyboard reaching the window had to press
+// through the whole sidebar on every route, every time.
+test("the skip link is the first thing Tab reaches, and shows itself when it has it", async () => {
+  const app = await source("../App.tsx");
+  const css = await source("../App.module.css");
+
+  assert.ok(
+    app.includes("styles.skip") &&
+      app.indexOf("styles.skip") < app.indexOf("<Sidebar />"),
+    "the skip link is not in front of the sidebar, which makes it one more of " +
+      "the stops it exists to get past rather than the way past them",
+  );
+  // The same move the shortcuts make, so the two cannot drift into landing in
+  // different places.
+  assert.match(
+    app.replace(/\s+/g, " "),
+    /className=\{styles\.skip\} onClick=\{focusScreen\}/,
+    "the skip link no longer lands where a route shortcut lands, so there are " +
+      "two answers to where the screen begins",
+  );
+
+  const at = css.indexOf(".skip {");
+  assert.ok(at > 0, "App.module.css no longer styles the skip link");
+  const rule = css.slice(at, css.indexOf("}", at));
+  // The one thing that cannot be done to it. Both of these take an element out
+  // of the tab order, and being in the tab order while out of sight is the
+  // whole of what this control is.
+  assert.ok(
+    !/display:\s*none|visibility:\s*hidden/.test(rule),
+    "the skip link is hidden in a way that takes it out of the tab order, so " +
+      "it can never be focused and therefore never seen",
+  );
+  assert.ok(
+    css.includes(".skip:focus-visible"),
+    "nothing brings the skip link back into sight when it has focus, so the " +
+      "keyboard lands on a control nobody can read",
+  );
 });
