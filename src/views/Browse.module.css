@@ -261,20 +261,6 @@
   color: var(--accent-text);
 }
 
-/* Reads as the end of the chip list rather than another chip, which is why it
-   is not one. */
-.moreCategories {
-  margin-top: 8px;
-  font-size: 11.5px;
-  color: var(--text-dim);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
-.moreCategories:hover {
-  color: var(--text);
-}
-
 .results {
   overflow-y: auto;
   padding: 18px 22px 90px;

@@ -61,10 +61,13 @@ export default function ProjectCard({
    * Names of the instances that already hold this project, when the row is not
    * being browsed on one instance's behalf.
    *
-   * Said beside the install button rather than in place of it: `installed`
-   * above replaces the button with "Added", which is only honest where there
-   * is one destination, and installing into a second instance is a perfectly
-   * ordinary thing to want.
+   * It cannot replace the button the way `installed` above does: that one has
+   * a single destination behind it and can say "Added", while this is a mod
+   * that is in one instance and not another, and installing it into a second
+   * is a perfectly ordinary thing to want. So it changes what the button
+   * *says* instead — "Install elsewhere…", which only means anything about a
+   * mod that is already somewhere — and the row states where before offering
+   * it rather than after.
    */
   inInstances?: string[];
   /**
@@ -93,6 +96,9 @@ export default function ProjectCard({
 }) {
   const isModpack = project.kind === "modpack";
   const blocked = !project.distributionAllowed;
+  // The instances this is already in, which only global browse can know: where
+  // the destination is fixed, what it holds is `installed` above instead.
+  const heldIn = inInstances ?? [];
 
   // While installing, the row's job is to report the install. The blurb and
   // stats are not going anywhere, so they yield to the bar.
@@ -297,6 +303,27 @@ export default function ProjectCard({
       </div>
 
       <div className={styles.action} role="gridcell">
+        {/* Before whatever the row offers, not after it, and never instead of
+            it. The app already knows this, and it used to be the quietest type
+            on the row, below the button, wrapping to two ragged lines — read
+            as a footnote to the action rather than as the answer it is. One
+            instance is named; several are counted, because the column is
+            narrow and a list of names would not fit, so they are on the
+            tooltip. "In Showcase" rather than "Already in Showcase" now that
+            it sits above the button: what made "Already" necessary was being
+            *under* one, where "In Showcase" read as where the button would put
+            it. Above a button that says "elsewhere", the tick and the colour
+            are the tense. */}
+        {heldIn.length > 0 && (
+          <span className={styles.heldIn} title={heldIn.join(", ")}>
+            <Check size={12} />
+            <span className={styles.heldName}>
+              {heldIn.length === 1
+                ? `In ${heldIn[0]}`
+                : `In ${heldIn.length} instances`}
+            </span>
+          </span>
+        )}
         {installedInstance ? (
           <>
             {/* The one filled button in the list, and the reason the others
@@ -343,7 +370,15 @@ export default function ProjectCard({
           </span>
         ) : (
           <button
-            className={clsx("btn btn-sm", styles.install)}
+            // The accent wash is the row's offer of something new. A row that
+            // is already in an instance is not making that offer — it is
+            // offering a second copy, which is a real thing to want and a
+            // quieter one — so it keeps the plain button and leaves the wash
+            // to the nineteen rows in twenty that have something to add.
+            className={clsx(
+              "btn btn-sm",
+              heldIn.length === 0 ? styles.install : styles.elsewhere,
+            )}
             tabIndex={-1}
             onClick={(e) => {
               e.stopPropagation();
@@ -357,28 +392,35 @@ export default function ProjectCard({
                   ? "Add to the plan"
                   : viaConnector
                     ? "Installs the Fabric build, plus Sinytra Connector, Forgified Fabric API and Connector Extras"
-                    : directInstall
-                      ? undefined
-                      : "Choose an instance to install into"
+                    : heldIn.length > 0
+                      ? "Choose another instance to install into"
+                      : directInstall
+                        ? undefined
+                        : "Choose an instance to install into"
             }
           >
-            {busy ? <Loader2 size={12} className="spin" /> : <Plus size={13} />}
-            {actionLabel ?? (directInstall ? "Install" : "Install…")}
+            {/* The plus is what gives on a held row, and it is the only thing
+                on this button that can. It draws the word "Install" a second
+                time, which is the word already doing the least work here —
+                what this button says that the others do not is "elsewhere".
+                Twenty pixels, and the column is sized by this button, so they
+                come back to the title line beside it: with them and the
+                tighter padding in the stylesheet's 1100 block, "Cloth Config
+                API by shedaniel" still renders whole at 940, which the gaps on
+                that line were tuned for once already. The spinner is state
+                rather than decoration, so it stays. */}
+            {busy ? (
+              <Loader2 size={12} className="spin" />
+            ) : heldIn.length > 0 ? null : (
+              <Plus size={13} />
+            )}
+            {actionLabel ??
+              (heldIn.length > 0
+                ? "Install elsewhere…"
+                : directInstall
+                  ? "Install"
+                  : "Install…")}
           </button>
-        )}
-
-        {/* Outside the branches above, so it is always an addition to whatever
-            the row offers and never a replacement for it. One instance is
-            named; several are counted, because the column is narrow and a
-            list of names would not fit — they are on the tooltip instead.
-            "Already" because "In Showcase" under a button reads as where the
-            button would put it, which is the opposite of what it says. */}
-        {inInstances && inInstances.length > 0 && (
-          <span className={styles.inInstances} title={inInstances.join(", ")}>
-            {inInstances.length === 1
-              ? `Already in ${inInstances[0]}`
-              : `Already in ${inInstances.length} instances`}
-          </span>
         )}
       </div>
     </article>

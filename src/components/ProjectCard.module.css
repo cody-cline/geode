@@ -236,19 +236,42 @@
   color: var(--text-faint);
 }
 
-/* Under the install button, the way "Installed" sits under Play. Capped close
-   to the button's own width: an instance is called whatever somebody called it,
-   and this column's width is the summary's to lose. It wraps within that cap
-   rather than running on and ellipsising at the first word, because "Already
-   in Showcase" has to survive the cap to say anything — and wrapping costs the
-   row nothing, since the summary beside it is two lines tall anyway. */
-.inInstances {
-  max-width: 96px;
-  font-size: 11px;
-  line-height: 1.35;
-  color: var(--text-faint);
-  text-align: right;
-  overflow-wrap: anywhere;
+/* Above the install button rather than below it, and in the colour and weight
+   "Added" uses, because it is the same kind of fact: you have this. It was
+   `--text-faint` at 11px under the button — the quietest words on a row whose
+   loudest thing was an offer the app already knew the answer to.
+   Capped under what "Install elsewhere…" measures below it — at either of the
+   two paddings that button takes — so naming an instance can never be the
+   thing that sets this column's width and takes the pixels out of the title
+   line. The name ellipsises inside that cap instead of wrapping: a second line
+   was what made "Already in Showcase" two ragged ones, and the whole list of
+   names is on the tooltip either way. */
+.heldIn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 120px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent-text);
+}
+
+/* An SVG is a flex item like any other and shrinks like one: against a long
+   instance name the tick came out 6.4px wide and half drawn, which is a worse
+   mark than none. The name is what gives here, and it has the cap above to
+   give within. */
+.heldIn svg {
+  flex-shrink: 0;
+}
+
+/* The truncation belongs on the text and not on `.heldIn`, which is a flex
+   container where the name is an anonymous item `text-overflow` never reaches —
+   the same trap `.lockedName` in Browse.module.css names. */
+.heldName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Replaces the summary and stats mid-install: while something is downloading,
@@ -419,5 +442,18 @@
 
   .action {
     min-width: 0;
+  }
+
+  /* "Install elsewhere…" is the widest label this column ever holds, and the
+     column is sized by it, so the title line beside it pays the difference out
+     of the name. Three pixels a side is what buys that back, measured at 940:
+     "Cloth Config API by shedaniel" renders whole from 8px down, and "Fabric
+     API by modmuss50" — which carries a fourth thing on its title line, the
+     second provider's count — from 7px down. The same trade the gaps above
+     make, and the same two names they were tightened for: the cheapest width
+     on the row against the row's own identity. Only here, because only here
+     is the row short of width. */
+  .elsewhere {
+    padding: 0 7px;
   }
 }
