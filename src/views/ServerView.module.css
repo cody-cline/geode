@@ -454,6 +454,27 @@
   margin-top: 26px;
 }
 
+/* And a section that follows anything else, which is the case the rule above
+   cannot see. The Automation tab is one pane holding two halves: `BackupsPane`
+   renders this `.settings` div, and `SchedulesSection` renders its `.section`
+   *inside* it, after the backups. So there is only ever one `.section` there,
+   it has no `.section` before it to be adjacent to, and "On a timer" sat 18px
+   under the previous half's paragraph and 44px above its own — a heading
+   closer to the section it is not part of than to the one it names. */
+.settings > * + .section {
+  margin-top: 26px;
+}
+
+/* A note under a section is a footnote to whatever the section just showed,
+   which is either its empty-state line or its rows. `* { margin: 0 }` in
+   global.css left it touching both, so the sentence about flushing the world
+   ran straight on from the sentence about there being nothing scheduled and
+   the two read as one paragraph. */
+.pending + .pending,
+.rows + .pending {
+  margin-top: 10px;
+}
+
 .sectionTitle {
   font-size: 11px;
   font-weight: 700;
