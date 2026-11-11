@@ -790,7 +790,7 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
       </div>
 
       {dirty && (
-        <div className={`save-bar ${styles.saveBar}`}>
+        <div className={"save-bar"}>
           <span className="save-hint">
             Unsaved: {changed.join(", ")}.
             {loaderChanged &&

@@ -131,10 +131,6 @@
 /* The bar itself is `.save-bar` in global.css — the fade-in it used to be
    alone in having now belongs to all three. Only the bottom margin is this
    tab's: it cancels `.scroll`'s 120px bottom padding. */
-.saveBar {
-  margin-bottom: -120px;
-}
-
 /* What the last update from the server changed, under the switch that stops
    it. A list rather than a sentence: a setting, what it was, and the button
    that puts it back. */

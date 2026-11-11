@@ -91,10 +91,17 @@
    side ones cancel `.content`'s padding, which is 26px here rather than the
    22px that class assumes, and the bottom one cancels what `.content` reserves
    for the bar. */
+/* No `margin-bottom` here. Each of these scrollers reserves bottom padding so
+   the last control can clear the bar, and cancelling that padding with a
+   negative margin on the bar does not remove the space — it lifts the bar off
+   the bottom of the scrollport by exactly that much. On the instance's form
+   that put it 120px up, floating across the page with the final section
+   scrolling underneath: at full scroll the MANAGE heading was hidden and
+   Duplicate, Export and Delete instance were left below a bar that belongs to
+   the form above them. */
 .saveBar {
   margin-right: -26px;
   margin-left: -26px;
-  margin-bottom: -100px;
 }
 
 .form {

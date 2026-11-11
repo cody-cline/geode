@@ -486,10 +486,6 @@
 /* The bar itself is `.save-bar` in global.css. Only the bottom margin is this
    screen's: it cancels `.pane`'s 90px bottom padding so the bar sits flush
    against the bottom of the pane. */
-.saveBar {
-  margin-bottom: -90px;
-}
-
 /* Installed content ------------------------------------------------------- */
 
 .contentHead {

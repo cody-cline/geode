@@ -1473,7 +1473,7 @@ function SettingsTab({ server }: { server: Server }) {
       )}
 
       {dirty && (
-        <div className={clsx("save-bar", styles.saveBar)}>
+        <div className={"save-bar"}>
           <span className="save-hint">You have unsaved changes.</span>
           <button className="btn" onClick={() => setDraft(server.settings)}>
             Discard

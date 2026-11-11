@@ -129,7 +129,3 @@
    alone in having now belongs to all three, so the bar stacks over the rows it
    covers everywhere. Only the bottom margin is this tab's: it cancels the
    containing pane's 90px bottom padding. */
-.saveBar {
-  margin-bottom: -90px;
-}
-
