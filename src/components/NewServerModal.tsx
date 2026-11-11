@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
-import { GitBranch, Loader2, Server as ServerIcon } from "lucide-react";
+import { GitBranch, Globe, Loader2, Server as ServerIcon } from "lucide-react";
 
 import Modal from "./Modal";
 import { api } from "../lib/api";
@@ -51,6 +51,56 @@ const GROUP_LABEL: Record<Group, string> = {
   proxy: "Not a server",
 };
 
+/**
+ * The thing worth knowing about a whole group, said once above its tiles
+ * rather than repeated on each of them.
+ *
+ * Two of these are older than the other two, and which two says a lot: the
+ * group to walk past and the group that is not a server at all were explained,
+ * and the two somebody actually has to choose between — "Runs plugins" and
+ * "Runs mods", eight of the fourteen tiles — were four names apiece and a
+ * sentence each about speed. That is the one distinction a newcomer most needs
+ * and least knows, and it is not about the software: it is about who has to
+ * install something.
+ *
+ * Both of the new claims come off `ServerKind` rather than from here.
+ * `takes_plugins` is loading Bukkit-style plugins out of `plugins/`, which
+ * happens inside the server's own process and touches nothing of a player's;
+ * `takes_mods` is loading mods out of `mods/`, the kind of thing that has to
+ * match at both ends. "Usually" is doing real work in the second one — a
+ * server-only mod exists — and saying it flatly would be a promise about
+ * somebody else's jar.
+ */
+const GROUP_NOTE: Record<Group, string | null> = {
+  plugins:
+    "A plugin runs on the server and nowhere else. Players join with Minecraft exactly as it comes and install nothing, which is why most of what a small server wants — land claims, teleports, moderation — is a plugin.",
+  // "Runs no plugins or mods" has nothing left to explain.
+  plain: null,
+  mods:
+    "A mod usually has to be in every player's game as well as on the server, so everyone needs the same list. Sharing the server hands that list to anyone joining through Geode; anybody else assembles it themselves.",
+  // The caveat that applies to all three, and the reason not to reach for one
+  // by default.
+  both:
+    "These bolt the two worlds together, and both sides say so: a mod or a plugin that works alone can still break here. Pick one only if you need both at once.",
+  // Said before the tile is pressed rather than after. A proxy looks like
+  // every other choice here and is the one that cannot be played on.
+  proxy:
+    "A proxy hosts no world of its own. It stands in front of servers you already have and passes players between them.",
+};
+
+/**
+ * The kind the dialog opens on, and the one tile marked as the usual answer.
+ *
+ * One constant for both, because the marker and the preselection disagreeing
+ * would be worse than having neither. Paper was already preselected and its
+ * blurb already opens "The usual choice" — but a recommendation that is three
+ * words inside one of fourteen bodies of copy is not one anybody scanning
+ * fourteen tiles will find, so the tile carries a marker as well. What Paper
+ * *is* still comes from the kind; this only says which tile to look at first,
+ * and "usually" is the whole claim — it is not the only good answer here.
+ */
+const USUAL = "paper";
+
 export default function NewServerModal({
   onClose,
   onCreated,
@@ -62,7 +112,7 @@ export default function NewServerModal({
   const refreshServers = useStore((s) => s.refreshServers);
 
   const [kinds, setKinds] = useState<ServerKindInfo[] | null>(null);
-  const [kind, setKind] = useState("paper");
+  const [kind, setKind] = useState(USUAL);
   const [versions, setVersions] = useState<string[] | null>(null);
   const [version, setVersion] = useState("");
   const [name, setName] = useState("");
@@ -154,7 +204,16 @@ export default function NewServerModal({
       .then((list) => {
         if (cancelled) return;
         setVersions(list);
-        setVersion(list[0] ?? "");
+        // Nothing preselected, and the newest least of all. This took
+        // `list[0]`, which is the newest the upstream publishes — and on the
+        // day a version ships that is the one version nobody's friends are on
+        // yet, so the dialog answered the question it could not possibly know
+        // the answer to. It is also the only choice here that cannot be taken
+        // back: `ServerPatch` carries no version, nothing in Geode moves a
+        // server from one to another, and Minecraft upgrades a world the first
+        // time a newer version opens it and never puts it back. So it is
+        // asked. Create is already disabled while this is empty.
+        setVersion("");
       })
       .catch(() => !cancelled && setVersions([]));
     return () => {
@@ -235,24 +294,8 @@ export default function NewServerModal({
                 <p className={styles.groupLabel} id={`kinds-${group.key}`}>
                   {GROUP_LABEL[group.key]}
                 </p>
-                {/* Said before the tile is pressed rather than after. A proxy
-                    looks like every other choice here and is the one that
-                    cannot be played on, so the sentence belongs above it. */}
-                {group.key === "proxy" && (
-                  <p className={styles.groupNote}>
-                    A proxy hosts no world of its own. It stands in front of
-                    servers you already have and passes players between them.
-                  </p>
-                )}
-                {/* Said once above the three rather than three times on the
-                    tiles. It is the caveat that applies to all of them and the
-                    reason not to reach for one by default. */}
-                {group.key === "both" && (
-                  <p className={styles.groupNote}>
-                    These bolt the two worlds together, and both sides say so:
-                    a mod or a plugin that works alone can still break here.
-                    Pick one only if you need both at once.
-                  </p>
+                {GROUP_NOTE[group.key] && (
+                  <p className={styles.groupNote}>{GROUP_NOTE[group.key]}</p>
                 )}
                 {/* The group wraps the tiles alone. Its heading and its note
                     sit outside it and name it by id, so the listbox owns
@@ -275,7 +318,19 @@ export default function NewServerModal({
                       )}
                       onClick={() => setKind(option.id)}
                     >
-                      <span className={styles.kindName}>{option.name}</span>
+                      <span className={styles.kindHead}>
+                        <span className={styles.kindName}>{option.name}</span>
+                        {/* Part of the tile's name to a screen reader as well,
+                            which is the same bargain the blurb already makes:
+                            this is the one option the list is steering toward
+                            and that should not be a thing only sighted
+                            scanning can find. */}
+                        {option.id === USUAL && (
+                          <span className="badge badge-accent">
+                            Usually this one
+                          </span>
+                        )}
+                      </span>
                       <span className={styles.kindBlurb}>{option.blurb}</span>
                     </button>
                   ))}
@@ -300,6 +355,7 @@ export default function NewServerModal({
                     value={version}
                     onChange={(e) => setVersion(e.target.value)}
                   >
+                    <option value="">Choose a version</option>
                     {versions.map((v) => (
                       <option key={v} value={v}>
                         {v}
@@ -319,6 +375,53 @@ export default function NewServerModal({
                   placeholder={suggested}
                   onChange={(e) => setName(e.target.value)}
                 />
+              </div>
+            </div>
+
+            {/* Under the row rather than under the select, because the row is
+                two fields wide and a four-line hint inside one of them leaves
+                the other hanging at the top of it. Only for a server anyone
+                plays on: a proxy's version is the proxy software's own, which
+                is what the label above already says, and no player has to
+                match it. */}
+            {chosen && !chosen.isProxy && (
+              <p className={styles.note}>
+                Everyone who joins has to be on this same version, and nothing
+                moves a server to another one later. Pick what your friends
+                already play rather than the newest.
+              </p>
+            )}
+
+            {/* The promise the Servers screen makes is "a server your friends
+                can join", and until now the whole subject of how a friend
+                outside the house reaches it lived in Settings → Server
+                sharing — a pane about Geode's *pack* port, written for
+                somebody who already knows what a tunnel is, and no reason for
+                a first-time host to ever open. They found out when a friend
+                said it would not connect.
+
+                So it is said here, where the server is made, and said about
+                the port that actually matters. `portmap.rs` opens
+                `ShareConfig::port` (25590), which is the port packs come
+                down; the game is on the server's own `server-port` and
+                nothing in Geode opens it. Not a warning and not a promise
+                either — `portmap.rs` is explicit that a router saying yes is
+                not players connecting, so this says what has to be true and
+                who has to do it. */}
+            <div className={styles.needs}>
+              <Globe size={15} />
+              <div className={styles.needsBody}>
+                <strong>
+                  Friends outside your own network need a port opened.
+                </strong>
+                <p>
+                  Anyone on this network can join as soon as the server is
+                  running. Anyone further away needs Minecraft&apos;s port
+                  forwarded to this computer on your router, or handed to a
+                  tunnel such as playit.gg — the port Geode opens on your
+                  router carries packs, not the game. Nothing here can test it
+                  from outside, so the first real check is a friend connecting.
+                </p>
               </div>
             </div>
 
