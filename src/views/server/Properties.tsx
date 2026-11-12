@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
 import { AlertTriangle, Eye, EyeOff, Loader2, Zap } from "lucide-react";
 
-import { api } from "../../lib/api";
+import { api, errorMessage } from "../../lib/api";
 import { useStore } from "../../lib/store";
 import {
   CREATION_ONLY,
@@ -75,13 +75,36 @@ export default function Properties({ server }: { server: Server }) {
   const [filter, setFilter] = useState("");
   const [saving, setSaving] = useState(false);
   const [portClash, setPortClash] = useState<string[]>([]);
+  /**
+   * Why the file could not be read, when it could not.
+   *
+   * Not the same as the file not being there. `properties.rs` answers a
+   * missing file with an empty list, which is the case the copy below is
+   * written for, so this catch only ever fires on a real failure — a
+   * permission, a bad mount, the call itself. Every time it did, the screen
+   * said the server had never started.
+   */
+  const [failed, setFailed] = useState<string | null>(null);
 
-  useEffect(() => {
+  const load = useCallback(() => {
     api
       .readServerProperties(server.id)
-      .then(setProps)
-      .catch(() => setProps([]));
-  }, [server.id]);
+      .then((found) => {
+        setProps(found);
+        setFailed(null);
+      })
+      .catch((e) => {
+        // It also used to be swallowed whole: no toast, no mark on the screen,
+        // nothing anywhere to say a read had failed at all.
+        reportError("Could not read this server's settings", e);
+        setProps([]);
+        setFailed(errorMessage(e));
+      });
+  }, [server.id, reportError]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
 
   const changedCount = Object.keys(edited).length;
   const valueOf = (p: ServerProperty) => edited[p.key] ?? p.value;
@@ -184,6 +207,23 @@ export default function Properties({ server }: { server: Server }) {
 
   if (props === null) {
     return <div className="skeleton" style={{ height: 120 }} />;
+  }
+
+  if (failed) {
+    // Before the empty state, and not sharing its port-clash warning: that
+    // branch asks about UNWRITTEN_PORT, so a server whose port was not read
+    // could be warned about a clash on a port it does not have.
+    return (
+      <div className={styles.readFailed}>
+        <p className="hint">
+          Could not read this server&apos;s settings, so what is in the file is
+          unknown — this is not a server that has never started. {failed}
+        </p>
+        <button className="btn btn-sm" onClick={load}>
+          Try again
+        </button>
+      </div>
+    );
   }
 
   if (props.length === 0) {

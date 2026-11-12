@@ -170,3 +170,13 @@
   line-height: 1.6;
   color: var(--text-dim);
 }
+
+/* The read-failure note and its retry. The note is the same `.warn` line the
+   online panel uses; the button beside it is what the lists need and that
+   panel does not, since asking again there is already a control of its own. */
+.loadFailed {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}

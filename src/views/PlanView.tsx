@@ -16,7 +16,7 @@ import {
 import PlanPacks from "./PlanPacks";
 import type { PlanSource } from "../components/PlanSourceTabs";
 import Browse from "./Browse";
-import { api } from "../lib/api";
+import { api, errorMessage } from "../lib/api";
 import { providerLabel, releaseDates, titleCase } from "../lib/format";
 import { modKey, planModFromProject } from "../lib/plan";
 import { useBackHandler } from "../lib/useBackHandler";
@@ -59,6 +59,15 @@ export default function PlanView({ id }: { id: string }) {
 
   const [plan, setPlan] = useState<Plan | null>(null);
   const [resolution, setResolution] = useState<PlanResolution | null>(null);
+  /**
+   * Why the resolve did not answer, when it did not.
+   *
+   * `resolution` staying null cannot tell the two apart on its own, and the
+   * branch that reads it states a conclusion rather than an absence — so the
+   * difference between "nothing runs these mods" and "nobody could ask" is the
+   * difference between a verdict and a guess wearing one.
+   */
+  const [resolveFailed, setResolveFailed] = useState<string | null>(null);
   const [dates, setDates] = useState<Map<string, string>>(new Map());
   const [resolving, setResolving] = useState(false);
   const [chosen, setChosen] = useState(0);
@@ -92,8 +101,12 @@ export default function PlanView({ id }: { id: string }) {
       if (seq !== resolveSeq.current) return;
       setResolution(found);
       setChosen(0);
+      setResolveFailed(null);
     } catch (e) {
-      if (seq === resolveSeq.current) reportError("Could not work out a version", e);
+      if (seq === resolveSeq.current) {
+        reportError("Could not work out a version", e);
+        setResolveFailed(errorMessage(e));
+      }
     } finally {
       if (seq === resolveSeq.current) setResolving(false);
     }
@@ -537,6 +550,27 @@ export default function PlanView({ id }: { id: string }) {
                 <div key={i} className="skeleton" style={{ height: 74 }} />
               ))}
             </div>
+          ) : resolveFailed ? (
+            /* Before the verdict, because the verdict is a computed answer and
+               this is the absence of one. `resolvePlan` asks Modrinth and
+               CurseForge about every mod on the plan, so one unreachable
+               provider used to produce "No loader and version combination runs
+               any of these mods" — a confident conclusion about a list that is
+               very likely fine, plus an instruction to go and audit it. The
+               plan is an evening's collecting; the resolve is a network call.
+               Re-check in the header is already live in this state. */
+            <>
+              <p className={styles.railNote}>
+                Could not work out which versions run these mods, so nothing
+                here is a verdict on the list. Re-check above once the reason
+                below is sorted.
+              </p>
+              {/* On its own line because it is the backend's sentence, not
+                  this screen's, and a refusal that states a fact is written
+                  as a lowercase fragment with no full stop — which runs
+                  straight into the next sentence if it is set inline. */}
+              <p className={styles.railWhy}>{resolveFailed}</p>
+            </>
           ) : !resolution || resolution.targets.length === 0 ? (
             <p className={styles.railNote}>
               No loader and version combination runs any of these mods. Check

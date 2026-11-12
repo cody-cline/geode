@@ -129,3 +129,13 @@
    alone in having now belongs to all three, so the bar stacks over the rows it
    covers everywhere. Only the bottom margin is this tab's: it cancels the
    containing pane's 90px bottom padding. */
+
+/* The read-failure note and its retry, side by side. The note is a `hint`
+   like the one for a file that is genuinely not there yet; only the button
+   beside it is new. */
+.readFailed {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}

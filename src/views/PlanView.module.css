@@ -512,3 +512,12 @@
   color: var(--text-faint) !important;
   line-height: 1.6;
 }
+
+/* The backend's own sentence about why the resolve did not answer, under this
+   screen's sentence about what that means. */
+.railWhy {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-faint);
+}

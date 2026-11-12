@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 
 import Modal from "../../components/Modal";
-import { api } from "../../lib/api";
+import { api, errorMessage } from "../../lib/api";
 import { useStore } from "../../lib/store";
 import type {
   OnlinePlayers,
@@ -203,12 +203,29 @@ export default function PlayersTab({ server }: { server: Server }) {
   const [busy, setBusy] = useState(false);
   const [ask, setAsk] = useState<Ask | null>(null);
 
+  /**
+   * Why the lists could not be read, when they could not.
+   *
+   * The same shape as `onlineProblem` below, for the same reason: the tab had
+   * a real error state for who is online and none for the four lists the tab
+   * is made of. A failed read left `lists` null, which is the skeleton — so
+   * the surface went on claiming to be fetching, with the toast gone in nine
+   * seconds and nothing on screen to say otherwise.
+   */
+  const [listsProblem, setListsProblem] = useState<string | null>(null);
+
   const load = useCallback(
     () =>
       api
         .serverPlayerLists(server.id)
-        .then(setLists)
-        .catch((e) => reportError("Could not read this server's player lists", e)),
+        .then((found) => {
+          setLists(found);
+          setListsProblem(null);
+        })
+        .catch((e) => {
+          reportError("Could not read this server's player lists", e);
+          setListsProblem(errorMessage(e));
+        }),
     [server.id, reportError],
   );
 
@@ -282,7 +299,20 @@ export default function PlayersTab({ server }: { server: Server }) {
   }
 
   if (!lists) {
-    return <div className="skeleton" style={{ height: 160 }} />;
+    return listsProblem ? (
+      <div className={styles.loadFailed}>
+        <p className={styles.warn}>
+          <AlertTriangle size={13} />
+          Could not read this server&apos;s player lists, so none of them are
+          shown. {listsProblem}
+        </p>
+        <button className="btn btn-sm" onClick={() => void load()}>
+          Try again
+        </button>
+      </div>
+    ) : (
+      <div className="skeleton" style={{ height: 160 }} />
+    );
   }
 
   /**
