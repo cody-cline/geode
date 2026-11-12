@@ -28,7 +28,9 @@ export default function Sidebar() {
   const route = useStore((s) => s.route);
   const navigate = useStore((s) => s.navigate);
   const instances = useStore((s) => s.instances);
+  const instancesError = useStore((s) => s.instancesError);
   const servers = useStore((s) => s.servers);
+  const serversError = useStore((s) => s.serversError);
   const accounts = useStore((s) => s.accounts);
   const progress = useStore((s) => s.progress);
   const shareStatus = useStore((s) => s.shareStatus);
@@ -139,8 +141,15 @@ export default function Sidebar() {
 
       <div className={styles.sections}>
       <div className={styles.instanceList}>
+        {/* "Nothing here yet" is a claim about the folder; it is only true
+            when the folder was read. The screens these lists lead to draw the
+            same distinction at full length. */}
         {recent.length === 0 && (
-          <p className={styles.emptyHint}>Nothing here yet — create one.</p>
+          <p className={styles.emptyHint}>
+            {instancesError
+              ? "Could not read your instances."
+              : "Nothing here yet — create one."}
+          </p>
         )}
         {recent.map((instance) => {
           const busy = progress[`launch:${instance.id}`];
@@ -180,7 +189,9 @@ export default function Sidebar() {
 
       <div className={styles.instanceList}>
         {servers.length === 0 && (
-          <p className={styles.emptyHint}>No servers yet.</p>
+          <p className={styles.emptyHint}>
+            {serversError ? "Could not read your servers." : "No servers yet."}
+          </p>
         )}
         {servers.slice(0, 8).map((server) => (
           <button

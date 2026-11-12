@@ -33,6 +33,7 @@ type Sort = "recent" | "name" | "kind";
 export default function Servers() {
   const servers = useStore((s) => s.servers);
   const loaded = useStore((s) => s.serversLoaded);
+  const loadError = useStore((s) => s.serversError);
   const refreshServers = useStore((s) => s.refreshServers);
   const navigate = useStore((s) => s.navigate);
 
@@ -138,6 +139,21 @@ export default function Servers() {
             {Array.from({ length: 6 }, (_, i) => (
               <div key={i} className="skeleton" style={{ height: 148 }} />
             ))}
+          </div>
+        ) : loadError && servers.length === 0 ? (
+          /* The same order as Library, for the same reason: an unread list is
+             not an empty one. */
+          <div className={styles.empty}>
+            <AlertTriangle size={40} className={styles.emptyIcon} />
+            <h2>Could not read your servers</h2>
+            <p>
+              Which is not the same as having none. Nothing has been changed or
+              removed — the list could not be read, so what is in it is unknown.
+            </p>
+            <p className={styles.why}>{loadError}</p>
+            <button className="btn" onClick={() => void refreshServers()}>
+              Try again
+            </button>
           </div>
         ) : servers.length === 0 ? (
           <div className={styles.empty}>

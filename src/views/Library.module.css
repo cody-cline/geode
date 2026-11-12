@@ -272,6 +272,16 @@
   margin-bottom: 18px;
 }
 
+/* The backend's own sentence about why a read failed, under this screen's
+   sentence about what that means. Quieter, because it is evidence rather than
+   the point, and it is the one line here Geode did not write. Servers imports
+   this sheet and uses it for the same thing. */
+.why {
+  font-size: 12px;
+  color: var(--text-faint);
+  margin: -8px 0 18px;
+}
+
 /* The body of the stop question. Same measure as the world dialogs' note,
    because it is the same kind of sentence: what this costs, before it costs
    it. */

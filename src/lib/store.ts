@@ -103,10 +103,20 @@ interface State {
 
   instances: Instance[];
   instancesLoaded: boolean;
+  /**
+   * Why the list could not be read, when it could not.
+   *
+   * `instances` staying `[]` after a failed read is what makes a screen say
+   * "No instances yet", which is a different claim from "I could not look" and
+   * the wrong one. Loaded-and-empty and loaded-and-unknown are two states, and
+   * one flag cannot hold both.
+   */
+  instancesError: string | null;
   refreshInstances: () => Promise<void>;
 
   servers: Server[];
   serversLoaded: boolean;
+  serversError: string | null;
   refreshServers: () => Promise<void>;
   /** Console output per server, newest last. */
   serverLogs: Record<string, ServerLine[]>;
@@ -219,23 +229,33 @@ export const useStore = create<State>((set, get) => ({
 
   instances: [],
   instancesLoaded: false,
+  instancesError: null,
   refreshInstances: async () => {
     try {
-      set({ instances: await api.listInstances(), instancesLoaded: true });
+      set({
+        instances: await api.listInstances(),
+        instancesLoaded: true,
+        instancesError: null,
+      });
     } catch (e) {
       get().reportError("Could not load instances", e);
-      set({ instancesLoaded: true });
+      set({ instancesLoaded: true, instancesError: errorMessage(e) });
     }
   },
 
   servers: [],
   serversLoaded: false,
+  serversError: null,
   refreshServers: async () => {
     try {
-      set({ servers: await api.listServers(), serversLoaded: true });
+      set({
+        servers: await api.listServers(),
+        serversLoaded: true,
+        serversError: null,
+      });
     } catch (e) {
       get().reportError("Could not load servers", e);
-      set({ serversLoaded: true });
+      set({ serversLoaded: true, serversError: errorMessage(e) });
     }
   },
   serverLogs: {},

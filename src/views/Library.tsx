@@ -4,6 +4,7 @@ import clsx from "clsx";
 import {
   Boxes,
   Layers,
+  TriangleAlert,
   Loader2,
   Play,
   Search,
@@ -32,6 +33,8 @@ type Sort = "recent" | "name" | "played";
 export default function Library() {
   const instances = useStore((s) => s.instances);
   const loaded = useStore((s) => s.instancesLoaded);
+  const loadError = useStore((s) => s.instancesError);
+  const refreshInstances = useStore((s) => s.refreshInstances);
   const navigate = useStore((s) => s.navigate);
 
   const [search, setSearch] = useState("");
@@ -136,6 +139,24 @@ export default function Library() {
             {Array.from({ length: 6 }, (_, i) => (
               <div key={i} className="skeleton" style={{ height: 148 }} />
             ))}
+          </div>
+        ) : loadError && instances.length === 0 ? (
+          /* Before the empty state, because they are different claims and only
+             one of them is ours to make. An unread list is not an empty one,
+             and this screen is the first thing Geode shows: telling somebody
+             their instances are not there, on the front door, over a read that
+             failed, is the worst version of guessing. */
+          <div className={styles.empty}>
+            <TriangleAlert size={40} className={styles.emptyIcon} />
+            <h2>Could not read your instances</h2>
+            <p>
+              Which is not the same as having none. Nothing has been changed or
+              removed — the list could not be read, so what is in it is unknown.
+            </p>
+            <p className={styles.why}>{loadError}</p>
+            <button className="btn" onClick={() => void refreshInstances()}>
+              Try again
+            </button>
           </div>
         ) : instances.length === 0 ? (
           <div className={styles.empty}>
