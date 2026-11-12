@@ -192,6 +192,17 @@
   line-height: 1.6;
 }
 
+/* The backend's own sentence about why a read failed, under the screen's
+   sentence about what that means. Quieter than the explanation above it
+   because it is evidence rather than the point, and it is the one line here
+   this app did not write. */
+.why {
+  margin: 10px auto 16px;
+  font-size: 12px;
+  color: var(--text-faint);
+  max-width: 380px;
+}
+
 /* A filter that matched nothing. One line, the way Library and Servers say
    it — the screen is not empty, the query is. */
 .noResults {

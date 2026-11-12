@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 
 import Modal from "../../components/Modal";
-import { api } from "../../lib/api";
+import { api, errorMessage } from "../../lib/api";
 import { GAME_MODES, fileSize, relativeTime } from "../../lib/format";
 import { savedByNewer } from "../../lib/mcversion";
 import { useStore } from "../../lib/store";
@@ -52,6 +52,15 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
   const reportError = useStore((s) => s.reportError);
 
   const [worlds, setWorlds] = useState<World[] | null>(null);
+  /**
+   * Why the folder could not be read, when it could not.
+   *
+   * A world is the one thing in this app with nothing upstream to fetch it
+   * back from, so the difference between "there are none" and "I could not
+   * look" is the difference between a fact and a false alarm about data
+   * nobody can restore.
+   */
+  const [failed, setFailed] = useState<string | null>(null);
   const [backups, setBackups] = useState<WorldBackup[]>([]);
   const [filter, setFilter] = useState("");
   const [asking, setAsking] = useState<Asking>(null);
@@ -66,9 +75,13 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
       ]);
       setWorlds(found);
       setBackups(kept);
+      setFailed(null);
     } catch (e) {
       reportError("Could not read this instance's worlds", e);
+      // Still [] rather than null, so the skeletons stop; the branch for this
+      // is checked before the one for an empty folder.
       setWorlds([]);
+      setFailed(errorMessage(e));
     }
   }, [instance.id, reportError]);
 
@@ -258,6 +271,28 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
             {Array.from({ length: 4 }, (_, i) => (
               <div key={i} className="skeleton" style={{ height: 58 }} />
             ))}
+          </div>
+        ) : failed ? (
+          /* Before the empty state, and the reason is the whole file: the
+             folder was not read, so whether it holds twenty worlds or none is
+             not known here. Saying "No worlds yet" and inviting somebody to go
+             and make one is the same mistake the filter box above already has
+             a comment about — a correct-sounding sentence and the wrong
+             diagnosis of why the screen is empty — except that this screen is
+             about the one thing Geode cannot fetch again, so being wrong here
+             reads as "they are gone". */
+          <div className={styles.empty}>
+            <TriangleAlert size={40} className={styles.emptyIcon} />
+            <h2>Could not read this instance&apos;s worlds</h2>
+            <p>
+              Which is not the same as there being none. Nothing here has been
+              changed or removed — the folder was not read, so what is in it is
+              unknown.
+            </p>
+            <p className={styles.why}>{failed}</p>
+            <button className="btn" onClick={() => void load()}>
+              Try again
+            </button>
           </div>
         ) : worlds?.length === 0 ? (
           /* The shape Library and Plans use, less the button: the thing that
