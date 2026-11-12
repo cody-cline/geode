@@ -20,7 +20,7 @@ import ServerTargetModal from "../components/ServerTargetModal";
 import InstanceIcon from "../components/InstanceIcon";
 import ProjectCard from "../components/ProjectCard";
 import ProjectPanel from "../components/ProjectPanel";
-import { api } from "../lib/api";
+import { api, errorMessage } from "../lib/api";
 import { titleCase } from "../lib/format";
 import { rovingKey } from "../lib/rovingFocus";
 import { useStore } from "../lib/store";
@@ -190,6 +190,14 @@ export default function Browse({
 
   const [hits, setHits] = useState<Project[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
+  /**
+   * Why the newest search did not answer, when it did not.
+   *
+   * Separate from `warnings`, which a search that *worked* returns to say a
+   * provider was skipped. This one means there is no answer at all, and the
+   * screen has to stop presenting the absence of results as a result.
+   */
+  const [failed, setFailed] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [exhausted, setExhausted] = useState(false);
@@ -771,6 +779,7 @@ export default function Browse({
           ],
         };
 
+        setFailed(null);
         setWarnings(results.warnings);
         setExhausted(results.hits.length < PAGE_SIZE / 2);
         setHits((prev) => {
@@ -783,7 +792,19 @@ export default function Browse({
           ];
         });
       } catch (e) {
-        if (seq === requestSeq.current) reportError("Search failed", e);
+        if (seq === requestSeq.current) {
+          reportError("Search failed", e);
+          setFailed(errorMessage(e));
+          // A first page that failed leaves nothing known about this query, and
+          // what was on screen belongs to the last one. Keeping it would hand
+          // somebody the previous search's results under the words they just
+          // typed. A later page is more of a query that did work, so its rows
+          // stay and only the strip above them says the rest did not arrive.
+          if (page === 0) {
+            setHits([]);
+            setWarnings([]);
+          }
+        }
       } finally {
         if (seq === requestSeq.current) {
           setLoading(false);
@@ -1376,11 +1397,33 @@ export default function Browse({
             </div>
           ))}
 
+          {/* Rows on screen and a failure both: the rows are this query's
+              earlier pages, so they stand, and only the part that did not
+              arrive is reported. With no rows the strip would be saying it
+              above nothing, and the branch below says it instead. */}
+          {failed && hits.length > 0 && (
+            <div className={styles.failed}>
+              <AlertTriangle size={14} />
+              Could not load more results. {failed}
+            </div>
+          )}
+
           {loading ? (
             <div className={styles.list}>
               {Array.from({ length: 7 }, (_, i) => (
                 <div key={i} className="skeleton" style={{ height: 94 }} />
               ))}
+            </div>
+          ) : failed ? (
+            /* Not "Nothing found": nothing was looked through. The three
+               suggestions that state offers — search differently, widen the
+               sources, clear the filters — are all about a search that ran,
+               and following any of them would have been wasted on a search
+               that did not. */
+            <div className={styles.empty}>
+              <AlertTriangle size={30} className={styles.emptyIcon} />
+              <p>The search failed, so there is nothing here to read.</p>
+              <p className={styles.emptyHint}>{failed}</p>
             </div>
           ) : hits.length === 0 ? (
             <div className={styles.empty}>
