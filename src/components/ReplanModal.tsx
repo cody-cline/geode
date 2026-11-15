@@ -386,6 +386,21 @@ export default function ReplanModal({
           {moved.repointed.some((one) => one.ignoredGameVersion) && (
             <section className={planStyles.blockers}>
               <h3 className={planStyles.blockTitle}>Carried over anyway</h3>
+              {/* The loader and the version are one pair for the whole move,
+                  and the warning is about a set, so both belong to the
+                  section. Printed inside the map they were repeated once per
+                  mod — which made "this is the first thing to turn off" name
+                  four different mods, and so name none of them. The row keeps
+                  the two things that differ: which mod, and which build it
+                  landed on. */}
+              <p className={styles.blockNote}>
+                Nothing is published for {loaderLabel(moved.loader)}{" "}
+                {moved.mcVersion}, so each of these ignores the Minecraft
+                version and was installed on a build made for another one.
+                They are on, and for any one of them, whether it runs is not something Geode can tell you
+                — if the game stops starting, one of these is the first thing
+                to turn off.
+              </p>
               {moved.repointed
                 .filter((one) => one.ignoredGameVersion)
                 .map((one) => (
@@ -395,15 +410,9 @@ export default function ReplanModal({
                       <span
                         className={clsx(planStyles.blockWhere, styles.wraps)}
                       >
-                        Nothing is published for {loaderLabel(moved.loader)}{" "}
-                        {moved.mcVersion}, so its{" "}
                         {one.viaVersion
-                          ? `${one.viaVersion} build`
-                          : "newest build"}{" "}
-                        was installed because this mod ignores the Minecraft
-                        version. It is on, and whether it runs is not something
-                        Geode can tell you — if the game stops starting, this is
-                        the first thing to turn off.
+                          ? `on its ${one.viaVersion} build`
+                          : "on its newest build"}
                       </span>
                     </span>
                   </div>
@@ -623,6 +632,17 @@ export default function ReplanModal({
                   <h3 className={planStyles.blockTitle}>
                     Would be carried over
                   </h3>
+                  {/* Same split as the applied half below: the pair and the
+                      rule are the section's, and the only thing that varies
+                      per mod is where it is actually published. */}
+                  <p className={styles.blockNote}>
+                    Nothing is published for {loaderLabel(target.loader)}{" "}
+                    {target.gameVersion}, and each of these ignores the
+                    Minecraft version, so the newest build its author has
+                    published for {loaderLabel(target.loader)} would be
+                    installed instead of turning it off. Whether any of them
+                    runs is not something Geode can tell you.
+                  </p>
                   {carried.map((one) => (
                     <div
                       key={`${one.provider}:${one.projectId}`}
@@ -630,19 +650,13 @@ export default function ReplanModal({
                     >
                       <span className={planStyles.blockText}>
                         <span className={planStyles.blockName}>{one.name}</span>
-                        <span
-                          className={clsx(planStyles.blockWhere, styles.wraps)}
-                        >
-                          Nothing is published for {loaderLabel(target.loader)}{" "}
-                          {target.gameVersion}, and this mod ignores the
-                          Minecraft version, so the newest build its author has
-                          published for {loaderLabel(target.loader)} would be
-                          installed instead of turning it off.{" "}
-                          {one.elsewhere && one.elsewhere.length > 0
-                            ? `Published for ${one.elsewhere.join(", ")}. `
-                            : ""}
-                          Whether it runs is not something Geode can tell you.
-                        </span>
+                        {one.elsewhere && one.elsewhere.length > 0 && (
+                          <span
+                            className={clsx(planStyles.blockWhere, styles.wraps)}
+                          >
+                            Published for {one.elsewhere.join(", ")}
+                          </span>
+                        )}
                       </span>
                     </div>
                   ))}

@@ -80,3 +80,13 @@
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
+
+/* What is true of every mod in a blockers section, said once above the list
+   instead of once per row. Sits between the section's heading and its rows,
+   so it reads as the heading's sentence rather than the first row's. */
+.blockNote {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
