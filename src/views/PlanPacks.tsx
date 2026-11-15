@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
 import {
+  AlertTriangle,
   ArrowLeft,
   Check,
   ClipboardList,
@@ -16,7 +17,7 @@ import InstanceIcon from "../components/InstanceIcon";
 import PlanSourceTabs from "../components/PlanSourceTabs";
 import type { PlanSource } from "../components/PlanSourceTabs";
 import ProjectPanel from "../components/ProjectPanel";
-import { api } from "../lib/api";
+import { api, errorMessage } from "../lib/api";
 import { compactNumber, providerLabel } from "../lib/format";
 import { modKey, planModFromProject } from "../lib/plan";
 import { useBackHandler } from "../lib/useBackHandler";
@@ -58,14 +59,40 @@ export default function PlanPacks({
   onSource: (next: PlanSource) => void;
 }) {
   const instances = useStore((s) => s.instances);
+  const instancesError = useStore((s) => s.instancesError);
+  const refreshInstances = useStore((s) => s.refreshInstances);
   const reportError = useStore((s) => s.reportError);
 
   const [tab, setTab] = useState<Tab>("installed");
   const [query, setQuery] = useState("");
   const [debounced, setDebounced] = useState("");
   const [packs, setPacks] = useState<Project[] | null>(null);
+  /**
+   * Why the search did not answer, when it did not.
+   *
+   * Without it `setPacks([])` lands on "No modpacks found for “Create”", which
+   * names the user's own query back at them: a provider being down reads as
+   * nothing of that name existing on Modrinth. Browse's search keeps the same
+   * state for the same reason.
+   */
+  const [searchFailed, setSearchFailed] = useState<string | null>(null);
   const [open, setOpen] = useState<OpenPack | null>(null);
   const [mods, setMods] = useState<PlanMod[] | null>(null);
+  /**
+   * Why the open pack's contents could not be read, when they could not.
+   *
+   * `mods` at `[]` heads the list "0 mods" and then says nothing in the pack
+   * could be identified as a project — which is a verdict on a manifest, and
+   * is what this screen says when a pack really does list only loose files.
+   * Nothing read a manifest here.
+   */
+  const [modsFailed, setModsFailed] = useState<string | null>(null);
+  /**
+   * Counted up by "Try again" below. The read is keyed on which pack is open,
+   * and asking for the same pack a second time is not a different pack, so
+   * there is nothing in `open` for a retry to change.
+   */
+  const [attempt, setAttempt] = useState(0);
   const [description, setDescription] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
 
@@ -112,9 +139,11 @@ export default function PlanPacks({
         limit: 30,
       });
       setPacks(results.hits);
+      setSearchFailed(null);
     } catch (e) {
       reportError("Could not search modpacks", e);
       setPacks([]);
+      setSearchFailed(errorMessage(e));
     }
   }, [debounced, reportError]);
 
@@ -129,6 +158,7 @@ export default function PlanPacks({
     if (!open) return;
     let cancelled = false;
     setMods(null);
+    setModsFailed(null);
     setDescription(null);
     setExpanded(false);
 
@@ -154,6 +184,7 @@ export default function PlanPacks({
           if (cancelled) return;
           reportError("Could not read that instance", e);
           setMods([]);
+          setModsFailed(errorMessage(e));
         });
       setDescription(instance.pack?.summary ?? instance.notes ?? "");
       return () => {
@@ -169,6 +200,7 @@ export default function PlanPacks({
         if (cancelled) return;
         reportError(`Could not read ${project.name}`, e);
         setMods([]);
+        setModsFailed(errorMessage(e));
       });
     api
       .getProjectDescription(project.provider, project.id)
@@ -178,7 +210,7 @@ export default function PlanPacks({
     return () => {
       cancelled = true;
     };
-  }, [open, reportError]);
+  }, [open, attempt, reportError]);
 
   const missing = useMemo(
     () => (mods ?? []).filter((mod) => !inPlan.has(modKey(mod))),
@@ -319,9 +351,14 @@ export default function PlanPacks({
 
             <div className={styles.modsHead}>
               <h3 className={styles.modsTitle}>
+                {/* No count when nothing was counted. "0 mods" is a number
+                    somebody can act on, and a failed read did not produce
+                    one. */}
                 {mods === null
                   ? "Reading the pack…"
-                  : `${mods.length} mod${mods.length === 1 ? "" : "s"}`}
+                  : modsFailed
+                    ? "Could not read the pack"
+                    : `${mods.length} mod${mods.length === 1 ? "" : "s"}`}
               </h3>
               {mods !== null && missing.length === 0 && mods.length > 0 && (
                 <span className={styles.allIn}>
@@ -336,6 +373,27 @@ export default function PlanPacks({
                 {Array.from({ length: 6 }, (_, i) => (
                   <div key={i} className="skeleton" style={{ height: 52 }} />
                 ))}
+              </div>
+            ) : modsFailed ? (
+              /* Before the line below, which is a verdict on what a pack
+                 lists — the one it gets when a pack really does hold only
+                 loose files. Nothing read a manifest here, so nothing is
+                 entitled to that conclusion. Back is the only other way out
+                 of this screen and it leads away from the pack, so the retry
+                 belongs here. */
+              <div className={styles.note}>
+                <p>
+                  The mods in this pack could not be read, so this is not a
+                  pack with nothing to copy. Your plan is untouched.
+                </p>
+                <p className="hint">{modsFailed}</p>
+                <button
+                  className="btn"
+                  style={{ marginTop: 12 }}
+                  onClick={() => setAttempt((n) => n + 1)}
+                >
+                  Try again
+                </button>
               </div>
             ) : mods.length === 0 ? (
               <p className={styles.note}>
@@ -397,7 +455,26 @@ export default function PlanPacks({
             )}
           </div>
         ) : tab === "installed" ? (
-          instances.length === 0 ? (
+          instancesError && instances.length === 0 ? (
+            /* The store keeps why the list could not be read, and this tab is
+               one of the screens that would otherwise report it as having
+               nothing in it. */
+            <div className={browse.empty}>
+              <AlertTriangle size={30} className={browse.emptyIcon} />
+              <p>
+                Your instances could not be read, so this is not an empty
+                list. Nothing has been removed.
+              </p>
+              <p className={browse.emptyHint}>{instancesError}</p>
+              <button
+                className="btn"
+                style={{ marginTop: 14 }}
+                onClick={() => void refreshInstances()}
+              >
+                Try again
+              </button>
+            </div>
+          ) : instances.length === 0 ? (
             <div className={browse.empty}>
               <Info size={30} className={browse.emptyIcon} />
               <p>You have no instances to copy from yet.</p>
@@ -431,6 +508,25 @@ export default function PlanPacks({
             {Array.from({ length: 6 }, (_, i) => (
               <div key={i} className="skeleton" style={{ height: 76 }} />
             ))}
+          </div>
+        ) : searchFailed ? (
+          /* Browse's words, because it is the same failure on the other search
+             surface: not "No modpacks found", which names the query back at
+             somebody as if the provider had answered. It carries the retry
+             that Browse leaves out, though — there the rail re-runs the search
+             on any filter change, and here the search box is the only live
+             control, so the way back would be to retype the query. */
+          <div className={browse.empty}>
+            <AlertTriangle size={30} className={browse.emptyIcon} />
+            <p>The search failed, so there is nothing here to read.</p>
+            <p className={browse.emptyHint}>{searchFailed}</p>
+            <button
+              className="btn"
+              style={{ marginTop: 14 }}
+              onClick={() => void searchPacks()}
+            >
+              Try again
+            </button>
           </div>
         ) : packs.length === 0 ? (
           <div className={browse.empty}>
