@@ -533,8 +533,16 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
                   <span>
                     {list.length === 1 ? "1 backup" : `${list.length} backups`}
                   </span>
-                  <span>{fileSize(list[0].size)}</span>
-                  <span>{relativeTime(list[0].createdAt)}</span>
+                  {/* The whole group's size, because the count beside it is the
+                      whole group's. Printing the newest one's bytes here read
+                      as the size of all of them — on the one row in this app
+                      that is somebody deciding whether a thing they cannot
+                      re-download is worth keeping. The timestamp is the
+                      newest and says so. */}
+                  <span>
+                    {fileSize(list.reduce((n, b) => n + b.size, 0))}
+                  </span>
+                  <span>newest {relativeTime(list[0].createdAt)}</span>
                 </div>
               </div>
               <button

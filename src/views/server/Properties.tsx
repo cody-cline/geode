@@ -169,8 +169,23 @@ export default function Properties({ server }: { server: Server }) {
       cancelled = true;
     };
   }, [server.id, props, port, askClash]);
+  /**
+   * Record an edit, and forget it again when it comes back to where it started.
+   *
+   * Every keystroke and every toggle used to go into `edited` and stay there,
+   * and nothing compared the new value with the old one — so typing a
+   * character and deleting it, or ticking a box and unticking it, left the
+   * save bar up saying "1 setting changed. Restart the server to apply." A
+   * count of keys touched is not a count of keys changed, and this one is
+   * attached to an instruction to restart a server.
+   */
   const edit = (key: string, value: string) =>
-    setEdited((was) => ({ ...was, [key]: value }));
+    setEdited((was) => {
+      const next = { ...was };
+      if (value === props?.find((p) => p.key === key)?.value) delete next[key];
+      else next[key] = value;
+      return next;
+    });
 
   const shown = useMemo(() => {
     const query = filter.trim().toLowerCase();

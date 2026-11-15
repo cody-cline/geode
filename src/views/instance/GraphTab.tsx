@@ -840,7 +840,15 @@ export default function GraphTab({
             Try again
           </button>
         </div>
-      ) : field.nodes.length === 0 ? (
+      ) : items.length === 0 ? (
+        /* The folder, not the field. `field.nodes` has had the ubiquitous
+           libraries taken out of it, so an instance holding nothing but
+           Fabric API — which is where a new Fabric instance starts, and the
+           one somebody is most likely to open this tab on — had an empty node
+           set and was told "No mods installed yet" about a folder with a mod
+           in it. That case belongs below, where `nothingToGraph` already has
+           the sentence for it: everything here depends only on the thing that
+           is hidden. */
         <div className={styles.centre}>
           <Share2 size={28} className={styles.emptyIcon} />
           <p>No {many} installed yet.</p>
