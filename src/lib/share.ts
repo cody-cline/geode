@@ -1229,54 +1229,6 @@ export function arrivalLine(view: PackLinkView): StatusLine {
   };
 }
 
-/**
- * What an export did with the instance's content, for the moment before it is
- * published.
- *
- * A pack that carries somebody else's jar as bytes is about to be put on a
- * public URL, which is a redistribution decision and not just a transfer. So
- * the counts the export actually produced are shown — not a promise about what
- * usually happens — and the files that could not go in at all are named while
- * there are few enough to read.
- */
-export function publishSummary(report: ExportReport): string[] {
-  const lines: string[] = [];
-  const embedded =
-    report.embeddedUnknown + report.embeddedElsewhere + report.embeddedTurnedOff;
-  if (report.referenced > 0) {
-    lines.push(
-      `${report.referenced} ${report.referenced === 1 ? "file travels" : "files travel"} as a reference, fetched by whoever installs the pack.`,
-    );
-  }
-  if (embedded > 0) {
-    const why: string[] = [];
-    if (report.embeddedUnknown > 0) {
-      why.push(`${report.embeddedUnknown} because no provider could name ${report.embeddedUnknown === 1 ? "it" : "them"}`);
-    }
-    if (report.embeddedElsewhere > 0) {
-      why.push(`${report.embeddedElsewhere} because this format cannot carry a reference to ${report.embeddedElsewhere === 1 ? "it" : "them"}`);
-    }
-    if (report.embeddedTurnedOff > 0) {
-      why.push(`${report.embeddedTurnedOff} because ${report.embeddedTurnedOff === 1 ? "it is" : "they are"} turned off`);
-    }
-    lines.push(
-      `${embedded} ${embedded === 1 ? "file travels" : "files travel"} as bytes — ${why.join(", ")}. Uploading publishes ${embedded === 1 ? "that copy" : "those copies"}.`,
-    );
-  }
-  if (report.unnameable.length > 0) {
-    const named =
-      report.unnameable.length <= 5
-        ? `: ${report.unnameable.join(", ")}`
-        : "";
-    lines.push(
-      `${report.unnameable.length} ${report.unnameable.length === 1 ? "file" : "files"} could not go in at all${named}.`,
-    );
-  }
-  for (const trouble of report.trouble) lines.push(sentence(trouble));
-  if (lines.length === 0) lines.push("This pack carries no mods at all.");
-  return lines;
-}
-
 /** Said once, where the link is made, because it cannot be taken back. */
 export const PUBLIC_LINK_WARNING =
   "Anyone with this link can download the pack, and that cannot be undone for anyone who already has it. Remove the file from wherever you put it to stop the link working.";

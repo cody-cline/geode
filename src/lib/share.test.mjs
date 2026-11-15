@@ -43,7 +43,6 @@ import {
   outcomeLine,
   packStep,
   publicLinkLine,
-  publishSummary,
   pushingHint,
   parsePort,
   readOutHint,
@@ -938,37 +937,6 @@ test("the arrival line names the host parsing proved, not one the link claimed",
     arrivalLine({ host: "files.example.com", hash: "" }).title,
     /files\.example\.com/,
   );
-});
-
-test("publishSummary says references and published bytes apart", () => {
-  const [references, bytes] = publishSummary(
-    report({ referenced: 31, embeddedUnknown: 2 }),
-  );
-  assert.match(references, /31 files travel as a reference/);
-  assert.match(bytes, /2 files travel as bytes/);
-  assert.match(bytes, /no provider could name them/);
-  assert.match(bytes, /Uploading publishes those copies/);
-
-  // One of each reads as one of each.
-  const single = publishSummary(report({ referenced: 1, embeddedTurnedOff: 1 }));
-  assert.match(single[0], /1 file travels as a reference/);
-  assert.match(single[1], /because it is turned off/);
-
-  // Nothing to say is said rather than left blank.
-  assert.deepEqual(publishSummary(report()), ["This pack carries no mods at all."]);
-});
-
-test("publishSummary names the files that could not go in while there are few enough", () => {
-  const few = publishSummary(report({ unnameable: ["mods/odd.jar", "mods/older.jar"] }));
-  assert.match(few[0], /mods\/odd\.jar/);
-  assert.match(few[0], /mods\/older\.jar/);
-
-  const many = publishSummary(report({ unnameable: Array.from({ length: 9 }, (_, i) => `m${i}.jar`) }));
-  assert.match(many[0], /^9 files could not go in at all\.$/);
-
-  // Trouble the export ran into is carried through, ended properly.
-  const [trouble] = publishSummary(report({ trouble: ["CurseForge was not asked"] }));
-  assert.equal(trouble, "CurseForge was not asked.");
 });
 
 test("the public-link check reads as a confirmation or as a warning", () => {
