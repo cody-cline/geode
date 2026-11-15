@@ -4,7 +4,7 @@ import { AlertTriangle, Check, Loader2, Package, Plus } from "lucide-react";
 
 import InstanceIcon from "./InstanceIcon";
 import Modal from "./Modal";
-import { api } from "../lib/api";
+import { api, errorMessage } from "../lib/api";
 import { useStore } from "../lib/store";
 import { LOADERS } from "../lib/types";
 import type { Instance, Loader, Project, ProjectVersion } from "../lib/types";
@@ -17,7 +17,10 @@ import styles from "./InstallTargetModal.module.css";
  * Judged against the project's actual files where they are known, because
  * `project.loaders` and `project.gameVersions` are independent unions: a mod
  * listing both Fabric and 1.21.1 does not necessarily have a Fabric file *for*
- * 1.21.1. Falls back to those unions only while the files are still loading.
+ * 1.21.1. Falls back to those unions whenever the real file list is unknown —
+ * while it is still loading, and equally when the read for it failed, which is
+ * why `files` is left null in that case and the dialog says so once above the
+ * list rather than letting `[]` pass for a complete answer.
  *
  * Incompatible instances are shown greyed rather than hidden, and stay
  * selectable: metadata frequently lags reality, and refusing outright would
@@ -119,18 +122,32 @@ export default function InstallTargetModal({
   // file behind it. Each file carries its loaders and game versions together,
   // so pairing them here means every combination on offer is real.
   const [files, setFiles] = useState<ProjectVersion[] | null>(null);
+  /**
+   * Why that list could not be read, when it could not.
+   *
+   * The catch used to set `[]`, which told two lies from one failure. An empty
+   * `versionOptions` says the project "has no downloadable files listed", and
+   * `compatibility` reads `[]` as a complete answer rather than as the absence
+   * of one, so every instance in the list came back `no Fabric build` and the
+   * effect below quietly flipped the dialog into New instance mode. A provider
+   * being briefly unreachable turned "install this mod" into a verdict on the
+   * mod. So `files` stays null and this says what actually happened.
+   */
+  const [filesFailed, setFilesFailed] = useState<string | null>(null);
+  const [filesAsked, setFilesAsked] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
+    setFilesFailed(null);
     // Unfiltered on purpose — this is what defines the choices.
     api
       .getProjectVersions(project.provider, project.id)
       .then((list) => !cancelled && setFiles(list))
-      .catch(() => !cancelled && setFiles([]));
+      .catch((e) => !cancelled && setFilesFailed(errorMessage(e)));
     return () => {
       cancelled = true;
     };
-  }, [project.provider, project.id]);
+  }, [project.provider, project.id, filesAsked]);
 
   const installable = useMemo(
     () => (files ?? []).filter((f) => !f.blockedReason && f.files.length > 0),
@@ -296,6 +313,30 @@ export default function InstallTargetModal({
         </div>
       )}
 
+      {/* Said once here rather than on every row. The marks below are judged
+          from `project.loaders` and `project.gameVersions` while the real file
+          list is unknown, and those are the flattened unions `compatibility`
+          only ever meant to lean on for the moment before the files land — so
+          a row with no warning on it is weaker evidence than usual, and that
+          is worth knowing before picking one. */}
+      {mode === "existing" && filesFailed && (
+        <div>
+          <p className={styles.emptyNote}>
+            Could not read the versions {project.name} publishes, so what fits
+            below is judged from what the project lists rather than from its
+            actual files.
+          </p>
+          <p className="hint">{filesFailed}</p>
+          <button
+            className="btn btn-sm"
+            style={{ marginTop: 8 }}
+            onClick={() => setFilesAsked((n) => n + 1)}
+          >
+            Try again
+          </button>
+        </div>
+      )}
+
       {mode === "existing" ? (
         <div className={styles.list}>
           {ordered.map((instance) => {
@@ -346,7 +387,26 @@ export default function InstallTargetModal({
         </div>
       ) : (
         <>
-          {files === null ? (
+          {filesFailed ? (
+            /* Before both branches below. One of them claims to still be
+               reading and the other that the project publishes nothing, and
+               neither is true of a read that came back with an error. */
+            <div>
+              <p className={styles.emptyNote}>
+                Could not read the versions {project.name} publishes, so there
+                is nothing here to build an instance from. Not that it
+                publishes none — the list was not read.
+              </p>
+              <p className="hint">{filesFailed}</p>
+              <button
+                className="btn btn-sm"
+                style={{ marginTop: 8 }}
+                onClick={() => setFilesAsked((n) => n + 1)}
+              >
+                Try again
+              </button>
+            </div>
+          ) : files === null ? (
             <p className={styles.note}>
               <Loader2 size={12} className="spin" />
               Reading the versions {project.name} publishes…

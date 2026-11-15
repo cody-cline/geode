@@ -14,7 +14,7 @@ import {
   X,
 } from "lucide-react";
 
-import { api } from "../lib/api";
+import { api, errorMessage } from "../lib/api";
 import { rovingKey } from "../lib/rovingFocus";
 import { renderProviderBody } from "../lib/richtext";
 import { useBackHandler } from "../lib/useBackHandler";
@@ -68,19 +68,54 @@ export default function ProjectPanel({
   const [source, setSource] = useState(availableSources[0]);
 
   const [description, setDescription] = useState<string | null>(null);
+  /**
+   * Why the description could not be fetched, when it could not.
+   *
+   * `""` is the sentinel for a provider that answered with an empty body, and
+   * the catch used to set it too — so a fetch that failed rendered "No
+   * description available." as the first thing anybody read about the mod,
+   * About being this panel's default tab.
+   */
+  const [descriptionFailed, setDescriptionFailed] = useState<string | null>(
+    null,
+  );
   const [versions, setVersions] = useState<ProjectVersion[] | null>(null);
+  /**
+   * Why the version list could not be fetched, when it could not.
+   *
+   * `[]` rendered "No versions for Minecraft 1.21.1 on Fabric" under a tab
+   * labelled "Versions (0)" — two agreeing, specific claims about the mod, out
+   * of a request that never got an answer. This panel is the main route to
+   * deciding whether a mod will work, and "none for your setup" is the one
+   * answer that makes somebody stop looking.
+   */
+  const [versionsFailed, setVersionsFailed] = useState<string | null>(null);
+  const [descriptionAsked, setDescriptionAsked] = useState(0);
+  const [versionsAsked, setVersionsAsked] = useState(0);
   const [tab, setTab] = useState<"about" | "versions">("about");
   const navigate = useStore((st) => st.navigate);
 
+  // Two reads, two effects. They were one, and a Try again for either would
+  // then have thrown the other's answer away and fetched it over again.
   useEffect(() => {
     let cancelled = false;
     setDescription(null);
-    setVersions(null);
+    setDescriptionFailed(null);
 
     api
       .getProjectDescription(source.provider, source.id)
       .then((body) => !cancelled && setDescription(body))
-      .catch(() => !cancelled && setDescription(""));
+      .catch((e) => !cancelled && setDescriptionFailed(errorMessage(e)));
+
+    return () => {
+      cancelled = true;
+    };
+  }, [source, descriptionAsked]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setVersions(null);
+    setVersionsFailed(null);
 
     const loader =
       project.kind === "mod" && target && target.loader !== "vanilla"
@@ -90,12 +125,12 @@ export default function ProjectPanel({
     api
       .getProjectVersions(source.provider, source.id, target?.mcVersion ?? null, loader)
       .then((list) => !cancelled && setVersions(list))
-      .catch(() => !cancelled && setVersions([]));
+      .catch((e) => !cancelled && setVersionsFailed(errorMessage(e)));
 
     return () => {
       cancelled = true;
     };
-  }, [source, target, project.kind]);
+  }, [source, target, project.kind, versionsAsked]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -324,7 +359,27 @@ export default function ProjectPanel({
                   ))}
                 </div>
               )}
-              {description === null ? (
+              {descriptionFailed ? (
+                /* Before the empty-body branch, and borrowing the sentence the
+                   installed-pack panel already uses for the same situation:
+                   nothing arrived, so whether this project has a description
+                   is not something this panel found out. */
+                <div className={styles.muted}>
+                  <p>
+                    Could not reach the project page, so the description is not
+                    shown. Not that there is none — the summary above is what
+                    the search result carried.
+                  </p>
+                  <p className="hint">{descriptionFailed}</p>
+                  <button
+                    className="btn btn-sm"
+                    style={{ marginTop: 10 }}
+                    onClick={() => setDescriptionAsked((n) => n + 1)}
+                  >
+                    Try again
+                  </button>
+                </div>
+              ) : description === null ? (
                 <div className={styles.loading}>
                   <Loader2 size={16} className="spin" />
                 </div>
@@ -340,6 +395,25 @@ export default function ProjectPanel({
                 />
               )}
             </>
+          ) : versionsFailed ? (
+            /* Before the empty branch, which names the Minecraft version and
+               the loader and so reads as an answer about this mod and this
+               instance. The count beside the tab label stays off for the same
+               reason — "Versions (0)" is the same claim in two characters. */
+            <div className={styles.muted}>
+              <p>
+                Could not read the versions {project.name} publishes. Not that
+                there are none for this setup — the list was not read.
+              </p>
+              <p className="hint">{versionsFailed}</p>
+              <button
+                className="btn btn-sm"
+                style={{ marginTop: 10 }}
+                onClick={() => setVersionsAsked((n) => n + 1)}
+              >
+                Try again
+              </button>
+            </div>
           ) : versions === null ? (
             <div className={styles.loading}>
               <Loader2 size={16} className="spin" />
