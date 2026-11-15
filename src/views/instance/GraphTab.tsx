@@ -1,6 +1,15 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import clsx from "clsx";
-import { Crosshair, Loader2, Minus, Plus, RotateCcw, Search, Share2 } from "lucide-react";
+import {
+  Crosshair,
+  Loader2,
+  Minus,
+  Plus,
+  RotateCcw,
+  Search,
+  Share2,
+  TriangleAlert,
+} from "lucide-react";
 import {
   forceCollide,
   forceLink,
@@ -11,7 +20,7 @@ import {
   type Simulation,
 } from "d3-force";
 
-import { api } from "../../lib/api";
+import { api, errorMessage } from "../../lib/api";
 import { useStore } from "../../lib/store";
 import type { ContentItem, ContentKind } from "../../lib/types";
 
@@ -406,6 +415,27 @@ export default function GraphTab({
   const many = `${one}s`;
 
   const [items, setItems] = useState<ContentItem[] | null>(null);
+  /**
+   * Why the folder could not be read, when it could not.
+   *
+   * An empty node set is drawn as "No mods installed yet", so a folder nobody
+   * could read came out as the graph's answer. `nothingToGraph` above exists
+   * because a field of unlabelled discs "reads as the graph having crashed
+   * rather than as the answer it is" — this is that care owed to the other
+   * direction, where a crash was reading as the answer.
+   */
+  const [failed, setFailed] = useState<string | null>(null);
+  /**
+   * Bumped by Try again below.
+   *
+   * The folder is read in an effect keyed on the thing being graphed, and
+   * nothing else on this tab re-reads it — the toolbar only zooms and
+   * searches what is already drawn. So the retry has to make that effect run
+   * again rather than reach for a second copy of the read. It is in that
+   * effect's dependencies for no other reason, which is also the reason not
+   * to tidy it out of them: the button goes dead.
+   */
+  const [attempt, setAttempt] = useState(0);
   const [query, setQuery] = useState("");
   const [focus, setFocus] = useState<string | null>(null);
   // Where the pointer is, or — the same question answered by the other input —
@@ -438,20 +468,28 @@ export default function GraphTab({
         ? api.listServerContent(id, folder)
         : api.listContent(id, folder);
     listing
-      .then((found) => !cancelled && setItems(found))
+      .then((found) => {
+        if (cancelled) return;
+        setItems(found);
+        setFailed(null);
+      })
       .catch((e) => {
         if (!cancelled) {
           reportError(
             `Could not read the ${folder === "plugin" ? "plugins" : "mods"} folder`,
             e,
           );
+          // Still [] rather than left alone, so another folder's nodes are not
+          // drawn under this folder's name; the branch for this is checked
+          // before the one for a folder with nothing in it.
           setItems([]);
+          setFailed(errorMessage(e));
         }
       });
     return () => {
       cancelled = true;
     };
-  }, [id, source, folder, reportError]);
+  }, [id, source, folder, attempt, reportError]);
 
   const field = useMemo(() => buildField(items ?? []), [items]);
 
@@ -779,6 +817,28 @@ export default function GraphTab({
       {items === null ? (
         <div className={styles.centre}>
           <Loader2 size={20} className="spin" />
+        </div>
+      ) : failed ? (
+        /* Before the empty field, because an unread folder is not an empty
+           one. This is the sibling of the fix the worlds tab got and the one
+           place it was missed: the catch emptied the node set, which is drawn
+           as "No {many} installed yet" — the graph stating as its answer that
+           there is nothing to graph, over a folder it never saw. */
+        <div className={styles.centre}>
+          <TriangleAlert size={28} className={styles.emptyIcon} />
+          <p>
+            Could not read the {many} folder, which is not the same as there
+            being nothing to graph. Nothing has been changed or removed — the
+            folder was not read, so what is in it is unknown.
+          </p>
+          {/* On its own line because it is the backend's sentence, not this
+              screen's: a refusal that states a fact is a lowercase fragment
+              with no full stop, which runs into the next sentence if it is set
+              inline. */}
+          <p className="hint">{failed}</p>
+          <button className="btn btn-sm" onClick={() => setAttempt((n) => n + 1)}>
+            Try again
+          </button>
         </div>
       ) : field.nodes.length === 0 ? (
         <div className={styles.centre}>

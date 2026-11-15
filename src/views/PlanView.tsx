@@ -58,6 +58,26 @@ export default function PlanView({ id }: { id: string }) {
   const refreshServers = useStore((s) => s.refreshServers);
 
   const [plan, setPlan] = useState<Plan | null>(null);
+  /**
+   * Why the plan could not be opened, when it could not.
+   *
+   * `plan` staying null is the loading branch, so a read that gave up left
+   * this view spinning — claiming to be fetching a plan nobody is fetching,
+   * with the toast gone in nine seconds and nothing on screen to say
+   * otherwise. Navigating away and back runs the same failing read into the
+   * same spinner.
+   */
+  const [openFailed, setOpenFailed] = useState<string | null>(null);
+  /**
+   * Bumped by Try again on that failure.
+   *
+   * The plan is read in the effect below, and until it lands there is no
+   * header and no rail — so unlike a failed resolve, which Re-check in the
+   * header already re-runs, there is nothing on screen that could ask again.
+   * It is in that effect's dependencies for no other reason, which is also
+   * the reason not to tidy it out of them: the button goes dead.
+   */
+  const [attempt, setAttempt] = useState(0);
   const [resolution, setResolution] = useState<PlanResolution | null>(null);
   /**
    * Why the resolve did not answer, when it did not.
@@ -114,6 +134,10 @@ export default function PlanView({ id }: { id: string }) {
 
   useEffect(() => {
     let cancelled = false;
+    // A fresh attempt is not the last one's failure, so the spinner comes back
+    // while this one is in flight rather than the retry button sitting there
+    // looking unpressed.
+    setOpenFailed(null);
     api
       .getPlan(id)
       .then(async (loaded) => {
@@ -137,11 +161,15 @@ export default function PlanView({ id }: { id: string }) {
         // view; the backend caches per project, so reopening is nearly free.
         if (plan.mods.length > 0) void resolve();
       })
-      .catch((e) => !cancelled && reportError("Could not open that plan", e));
+      .catch((e) => {
+        if (cancelled) return;
+        reportError("Could not open that plan", e);
+        setOpenFailed(errorMessage(e));
+      });
     return () => {
       cancelled = true;
     };
-  }, [id, resolve, reportError]);
+  }, [id, attempt, resolve, reportError]);
 
   // Snapshots included, because the resolver offers whatever these mods
   // publish for and some of them publish for a snapshot — a candidate with no
@@ -301,7 +329,29 @@ export default function PlanView({ id }: { id: string }) {
   }
 
   if (!plan) {
-    return (
+    // Before the spinner, because a read that has given up is not a read in
+    // progress. Neither this screen's header nor its rail exists yet in this
+    // state, so a spinner left up is the whole view: nothing to read, nothing
+    // to press, and no way back in except the sidebar.
+    return openFailed ? (
+      <div className={styles.loading}>
+        <div className={styles.empty}>
+          <AlertTriangle size={34} className={styles.emptyIcon} />
+          <p>
+            Could not open this plan, which is not the same as it being gone.
+            Nothing has been changed or removed — the plan was not read, so what
+            is on it is unknown.
+          </p>
+          {/* On its own line, the way the rail says the same kind of thing
+              below: it is the backend's sentence, and a refusal that states a
+              fact is a lowercase fragment with no full stop. */}
+          <p className={styles.emptyHint}>{openFailed}</p>
+          <button className="btn" onClick={() => setAttempt((n) => n + 1)}>
+            Try again
+          </button>
+        </div>
+      </div>
+    ) : (
       <div className={styles.loading}>
         <Loader2 size={20} className="spin" />
       </div>
