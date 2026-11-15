@@ -6,7 +6,7 @@ import ImageField from "../../components/ImageField";
 import Modal from "../../components/Modal";
 import ReplanModal from "../../components/ReplanModal";
 import StatusNote from "../../components/StatusNote";
-import { api } from "../../lib/api";
+import { api, errorMessage } from "../../lib/api";
 import {
   forbiddenPlayerHint,
   lastSyncLine,
@@ -103,6 +103,17 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
   const [envText, setEnvText] = useState(() => envToText(instance.overrides.env));
 
   const [loaderVersions, setLoaderVersions] = useState<string[]>([]);
+  /**
+   * Why the loader's builds could not be read, when they could not.
+   *
+   * An empty list takes the select's one-option fallback, which holds
+   * whatever build the instance is on — indistinguishable from a loader that
+   * really publishes one build. Somebody trying to move off a broken build
+   * then has nothing to move to and nothing saying why.
+   */
+  const [versionsFailed, setVersionsFailed] = useState<string | null>(null);
+  /** Bumped by the Try again beside that select, for the same reason. */
+  const [askVersions, setAskVersions] = useState(0);
   const [loader, setLoader] = useState(instance.loader);
   const [loaderVersion, setLoaderVersion] = useState(instance.loaderVersion);
 
@@ -121,6 +132,22 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
    * changed one.
    */
   const [sync, setSync] = useState<LastServerSync | null | undefined>(undefined);
+  /**
+   * Why the last update could not be read, when it could not.
+   *
+   * The two values above are the only two answers `null` can stand for, and
+   * the catch used to write it for a third: a read that failed was recorded
+   * as "the server has changed nothing". That hides the whole panel, and with
+   * it every "Change it back" button — which is the only route in the app to
+   * undo a setting a server pushed.
+   */
+  const [syncFailed, setSyncFailed] = useState<string | null>(null);
+  /**
+   * Bumped by the Try again this panel carries. The read belongs to the
+   * instance the tab is open on and the effect owns the guard that keeps a
+   * stale answer out, so asking again is a change to what it depends on.
+   */
+  const [askSync, setAskSync] = useState(0);
   /** The setting being put back, by its file and key, so only its own row waits. */
   const [reverting, setReverting] = useState<string | null>(null);
 
@@ -133,21 +160,34 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
   useEffect(() => {
     if (!instance.joined) {
       setSync(null);
+      setSyncFailed(null);
       return;
     }
     let cancelled = false;
     api
       .lastServerSync(instance.id)
-      .then((found) => !cancelled && setSync(found))
-      .catch(() => !cancelled && setSync(null));
+      .then((found) => {
+        if (cancelled) return;
+        setSync(found);
+        setSyncFailed(null);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        // `null` as well, because the skeleton this screen has for `undefined`
+        // is a claim of its own and the read is over. What the panel renders
+        // is decided by the failure below, which is checked first.
+        setSync(null);
+        setSyncFailed(errorMessage(e));
+      });
     return () => {
       cancelled = true;
     };
-  }, [instance.id, instance.joined]);
+  }, [instance.id, instance.joined, askSync]);
 
   useEffect(() => {
     if (loader === "vanilla") {
       setLoaderVersions([]);
+      setVersionsFailed(null);
       return;
     }
     let cancelled = false;
@@ -156,16 +196,27 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
       .then((list) => {
         if (cancelled) return;
         setLoaderVersions(list);
+        setVersionsFailed(null);
         // Switching loader family invalidates the old version string.
         if (!list.includes(loaderVersion)) setLoaderVersion(list[0] ?? "");
       })
-      .catch(() => !cancelled && setLoaderVersions([]));
+      .catch((e) => {
+        if (cancelled) return;
+        // The list goes empty, which leaves the select holding the one build
+        // this instance already has — and `loaderVersion` is deliberately not
+        // touched here, because the fallback is the honest answer to a read
+        // that did not happen. What is not honest is leaving it looking like
+        // a loader that publishes exactly one build, which is what the line
+        // beside the select is for.
+        setLoaderVersions([]);
+        setVersionsFailed(errorMessage(e));
+      });
     return () => {
       cancelled = true;
     };
     // `loaderVersion` is intentionally not a dependency: it is what we set.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loader, instance.mcVersion]);
+  }, [loader, instance.mcVersion, askVersions]);
 
   // What Save would write, named rather than counted: the loader is on this
   // same form, and it is the one field here that decides what the next launch
@@ -443,6 +494,28 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
                     </option>
                   ))}
                 </select>
+                {/* Said beside the select rather than in place of it: the one
+                    option in there is still this instance's own build, and it
+                    is still what Save would write. What it is not is the list
+                    of builds there are. */}
+                {versionsFailed && (
+                  <>
+                    <p className="hint">
+                      The{" "}
+                      {LOADERS.find((l) => l.id === loader)?.label ?? loader}{" "}
+                      builds for Minecraft {instance.mcVersion} could not be
+                      read, so the only one listed is the build this instance
+                      already uses. Nothing has changed.
+                    </p>
+                    <p className="hint">{versionsFailed}</p>
+                    <button
+                      className="btn btn-sm"
+                      onClick={() => setAskVersions((n) => n + 1)}
+                    >
+                      Try again
+                    </button>
+                  </>
+                )}
               </div>
             )}
           </div>
@@ -716,6 +789,32 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
                 </span>
               </span>
             </label>
+
+            {/* Before the panel below, because a failed read is not "the
+                server has changed nothing": that answer withdraws the only
+                way back from a setting the server pushed, and does it
+                without saying anything. */}
+            {syncFailed && (
+              <div className={styles.lastSync}>
+                <span className="label">Last update from the server</span>
+                <StatusNote
+                  line={{
+                    tone: "warn",
+                    title: "Could not read the last update from the server",
+                    detail:
+                      "So neither what it changed nor the way back from it is listed here. Nothing has been changed by this — your settings files are as they were.",
+                  }}
+                />
+                <p className="hint">{syncFailed}</p>
+                <button
+                  className="btn btn-sm"
+                  style={{ alignSelf: "flex-start" }}
+                  onClick={() => setAskSync((n) => n + 1)}
+                >
+                  Try again
+                </button>
+              </div>
+            )}
 
             {/* What the last update actually changed. A list, because a
                 setting and what it used to be cannot be read off a toast that

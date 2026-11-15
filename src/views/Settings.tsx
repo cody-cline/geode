@@ -389,6 +389,16 @@ function JavaSettings({ update }: { update: Updater }) {
   const reportError = useStore((s) => s.reportError);
 
   const [installs, setInstalls] = useState<JavaInstall[] | null>(null);
+  /**
+   * Why this machine could not be searched for Java, when it could not.
+   *
+   * An empty list is what a machine with no Java looks like, so a failed
+   * search wearing it says two false things at once: that there are no
+   * runtimes here, and — because the three slots below read the same list —
+   * that none of the three Geode manages is installed. The second one is an
+   * offer to download a runtime that is already on disk.
+   */
+  const [failed, setFailed] = useState<string | null>(null);
   const [systemMemory, setSystemMemory] = useState<number | null>(null);
   const [installing, setInstalling] = useState<number | null>(null);
   const [args, setArgs] = useState(config.javaArgs);
@@ -418,8 +428,17 @@ function JavaSettings({ update }: { update: Updater }) {
   const refresh = () =>
     api
       .detectJava()
-      .then(setInstalls)
-      .catch(() => setInstalls([]));
+      .then((found) => {
+        setInstalls(found);
+        setFailed(null);
+      })
+      .catch((e) => {
+        reportError("Could not look for Java on this machine", e);
+        // Still [] rather than null, so the skeleton stops; every branch that
+        // reads the list checks the failure first.
+        setInstalls([]);
+        setFailed(errorMessage(e));
+      });
 
   useEffect(() => {
     void refresh();
@@ -530,7 +549,14 @@ function JavaSettings({ update }: { update: Updater }) {
                       : "1.20.5 and newer"}
                 </span>
               </div>
-              {have.has(major) ? (
+              {failed ? (
+                /* Neither the tick nor the Install button: the search that
+                   would have told them apart did not run, and the button is
+                   an offer to download a runtime that may already be here.
+                   What that means is said once, under the grid, rather than
+                   three times over. */
+                <span className={styles.javaFor}>Could not check</span>
+              ) : have.has(major) ? (
                 <span className={styles.javaOk}>
                   <Check size={14} />
                   Installed
@@ -561,6 +587,28 @@ function JavaSettings({ update }: { update: Updater }) {
 
         {installs === null ? (
           <div className="skeleton" style={{ height: 60 }} />
+        ) : failed ? (
+          /* Before the "none found" line, which is a statement about this
+             machine that nothing here is in a position to make. Nothing has
+             been uninstalled; the search is what did not happen. */
+          <>
+            <p className={styles.checkBad}>
+              <AlertTriangle size={13} />
+              <span>
+                Could not look for Java on this machine, so neither the
+                runtimes you have nor the three above could be checked. Nothing
+                has been changed or removed.
+              </span>
+            </p>
+            <p className="hint">{failed}</p>
+            <button
+              className="btn btn-sm"
+              style={{ alignSelf: "flex-start" }}
+              onClick={() => void refresh()}
+            >
+              Try again
+            </button>
+          </>
         ) : installs.length > 0 ? (
           <details className={styles.details}>
             <summary>Detected runtimes ({installs.length})</summary>
@@ -687,20 +735,40 @@ function HostSettings() {
   const reportError = useStore((s) => s.reportError);
 
   const [hosts, setHosts] = useState<RemoteHost[] | null>(null);
+  /**
+   * Why `hosts.json` could not be read, when it could not.
+   *
+   * An empty list is somebody who has never added a host, and the paragraph
+   * written for them explains what a host is. Shown over a failed read, that
+   * is a tutorial for somebody who already has hosts configured — with the
+   * Add form under it, offering to re-type a name, an address and a token the
+   * file already holds.
+   */
+  const [failed, setFailed] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [address, setAddress] = useState("");
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
 
+  const load = useCallback(
+    () =>
+      api
+        .remoteHosts()
+        .then((listed) => {
+          setHosts(listed);
+          setFailed(null);
+        })
+        .catch((e) => {
+          reportError("Could not read your list of hosts", e);
+          setHosts([]);
+          setFailed(errorMessage(e));
+        }),
+    [reportError],
+  );
+
   useEffect(() => {
-    api
-      .remoteHosts()
-      .then(setHosts)
-      .catch((e) => {
-        setHosts([]);
-        reportError("Could not read your list of hosts", e);
-      });
-  }, [reportError]);
+    void load();
+  }, [load]);
 
   async function add() {
     setBusy(true);
@@ -750,6 +818,28 @@ function HostSettings() {
           <div className={styles.loading}>
             <Loader2 size={16} className="spin" />
           </div>
+        ) : failed ? (
+          /* Before "None yet", because that line and the form under it are
+             written for somebody who has never added a host, and this is the
+             opposite case: a file that may well be full of them. */
+          <>
+            <p className={styles.checkBad}>
+              <AlertTriangle size={13} />
+              <span>
+                Could not read your list of hosts, so none of them are shown.
+                Nothing has been forgotten — the file was not read, so what is
+                in it is unknown.
+              </span>
+            </p>
+            <p className="hint">{failed}</p>
+            <button
+              className="btn btn-sm"
+              style={{ alignSelf: "flex-start" }}
+              onClick={() => void load()}
+            >
+              Try again
+            </button>
+          </>
         ) : hosts.length === 0 ? (
           <p className={styles.calloutNote}>
             None yet. A host is a machine running Geode with no window —{" "}
