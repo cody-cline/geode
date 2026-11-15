@@ -60,7 +60,6 @@
 
 /* An edited field stays marked until it is saved, so what is pending is
    visible without counting. */
-.fieldChanged .label,
 .fieldChanged > label {
   color: var(--accent-text);
 }
@@ -73,8 +72,6 @@
   min-width: 0;
 }
 
-.control .input,
-.control .select,
 .control input,
 .control select {
   min-width: 0;

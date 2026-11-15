@@ -16,7 +16,11 @@
   gap: 8px;
 }
 
-.row .input {
+/* `:global`, because the element carries the plain string "input" from
+   global.css, not `styles.input`. Written as a bare `.input` this compiled to
+   a hashed class that matches nothing, so the rule had never once applied and
+   the field never grew. */
+.row :global(.input) {
   flex: 1;
   min-width: 0;
 }

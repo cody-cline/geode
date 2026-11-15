@@ -187,10 +187,6 @@
   margin-top: 6px;
 }
 
-.checkOff {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
 
 .filterNote {
   margin-top: 6px;
@@ -199,11 +195,6 @@
   line-height: 1.5;
 }
 
-.linkBtn {
-  color: var(--accent-text);
-  font-size: inherit;
-  text-decoration: underline;
-}
 
 .compat {
   font-size: 12px;
