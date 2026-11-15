@@ -540,11 +540,10 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
               <button
                 className="btn btn-sm"
                 disabled={running || busy === folder}
-                title={
-                  running
-                    ? "Stop the game to restore a world"
-                    : `Put ${folder} back from ${list[0].name}`
-                }
+                // What it does, not why it is off: the banner above says that
+                // once for the whole screen, and the six buttons on the row
+                // above keep their ordinary titles while disabled.
+                title={`Put ${folder} back from ${list[0].name}`}
                 onClick={() =>
                   void run(
                     folder,
