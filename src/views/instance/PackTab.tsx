@@ -39,6 +39,7 @@ export default function PackTab({ instance }: { instance: Instance }) {
 
   const [project, setProject] = useState<Project | null>(null);
   const [description, setDescription] = useState<string | null>(null);
+  /** Either read of the project page did not answer — the page, or its body. */
   const [failed, setFailed] = useState(false);
   const [checking, setChecking] = useState(false);
   const [update, setUpdate] = useState<PackUpdate | null>(null);
@@ -96,7 +97,17 @@ export default function PackTab({ instance }: { instance: Instance }) {
     api
       .getProjectDescription(source, projectId)
       .then((body) => !cancelled && setDescription(body))
-      .catch(() => !cancelled && setDescription(""));
+      .catch(() => {
+        if (cancelled) return;
+        // The same flag as the call above, because the sentence it renders is
+        // true of either read failing — and this is a second, independent
+        // call: a different endpoint, able to fail on its own while the
+        // project page itself answers fine. It used to set only the empty
+        // body, which is what a pack with no description looks like, so the
+        // page told somebody this pack has none.
+        setDescription("");
+        setFailed(true);
+      });
 
     return () => {
       cancelled = true;

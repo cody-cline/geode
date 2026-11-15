@@ -43,7 +43,8 @@ import Properties from "./server/Properties";
 import ShareTab from "./server/ShareTab";
 import ShareMenu from "../components/ShareMenu";
 import type { ShareItem } from "../components/ShareMenu";
-import { api } from "../lib/api";
+import StatusNote from "../components/StatusNote";
+import { api, errorMessage } from "../lib/api";
 import {
   parseLine,
   pieces,
@@ -190,11 +191,25 @@ export default function ServerView({ id }: { id: string }) {
           ),
         );
       })
-      .catch(() => !cancelled && setPresent(new Set()));
+      .catch((e) => {
+        if (cancelled) return;
+        // An empty set is the only thing `Browse` can be handed — `installed`
+        // is a `Set`, so there is no value in it for "I could not look" — and
+        // an empty one marks every row in the add panel as not installed. So
+        // the failure is said out loud instead; it used to be swallowed
+        // whole, with nothing anywhere to explain why a plugin the server
+        // already has is offering itself again. Installing it twice is not
+        // the harm: `install_into` removes the records for a project under
+        // either provider id before it writes the new file, so what this
+        // costs is a wasted download and an admin misinformed about what
+        // their own server holds.
+        setPresent(new Set());
+        reportError("Could not read what this folder already holds", e);
+      });
     return () => {
       cancelled = true;
     };
-  }, [adding, id]);
+  }, [adding, id, reportError]);
 
   const server = servers.find((s) => s.id === id);
 
@@ -817,6 +832,17 @@ function BackupsPane({ server }: { server: Server }) {
   const refreshServers = useStore((s) => s.refreshServers);
 
   const [items, setItems] = useState<BackupInfo[] | null>(null);
+  /**
+   * Why the backups could not be listed, when they could not.
+   *
+   * A backup is the only copy of a world, a config and a player list that
+   * exists nowhere else — the whole reason `server/backup.rs` leaves the
+   * server's own software out — so "No backups yet" over a failed directory
+   * read tells an admin the one thing Geode cannot fetch again is not there.
+   * Read before a restore or a version change, that is the opposite of the
+   * truth, and the toast is gone by then.
+   */
+  const [failed, setFailed] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   /**
    * The one backup being asked about, and which question is being asked of it.
@@ -833,9 +859,13 @@ function BackupsPane({ server }: { server: Server }) {
   const load = useCallback(async () => {
     try {
       setItems(await api.listServerBackups(server.id));
+      setFailed(null);
     } catch (e) {
       reportError("Could not list backups", e);
+      // Still [] rather than null, so the skeletons stop; the branch for this
+      // is checked before the one for a folder that really is empty.
       setItems([]);
+      setFailed(errorMessage(e));
     }
   }, [server.id, reportError]);
 
@@ -935,6 +965,29 @@ function BackupsPane({ server }: { server: Server }) {
           {Array.from({ length: 3 }, (_, i) => (
             <div key={i} className="skeleton" style={{ height: 44 }} />
           ))}
+        </div>
+      ) : failed ? (
+        /* Before the empty state, because the two say opposite things about
+           the same folder and only one of them is Geode's to say. A backup is
+           what the rest of this pane exists for, and the paragraph below is a
+           description of what an admin is being told they do not have. */
+        <div className={styles.rows}>
+          <StatusNote
+            line={{
+              tone: "warn",
+              title: "Could not list this server's backups",
+              detail:
+                "Which is not the same as there being none. Nothing has been deleted — the folder was not read, so what is in it is unknown.",
+            }}
+          />
+          <p className={styles.pending}>{failed}</p>
+          <button
+            className="btn btn-sm"
+            style={{ alignSelf: "flex-start" }}
+            onClick={() => void load()}
+          >
+            Try again
+          </button>
         </div>
       ) : items.length === 0 ? (
         <p className={styles.pending}>

@@ -177,6 +177,20 @@ export default function ShareTab({ server }: { server: Server }) {
    * saved until they press Save.
    */
   const [picks, setPicks] = useState<Map<string, ConfigPolicy>>(new Map());
+  /**
+   * Why the picks on screen are not known to be the backend's answer, when
+   * they are not.
+   *
+   * The save goes through and the read-back after it does not, which leaves
+   * the ticks and the behaviours showing the map this screen built as the
+   * admin clicked. The comment on that read says why that map is not
+   * authoritative — a pick changes what another row would do — so presenting
+   * it as the result is the drift `settings_sent` exists to prevent: the
+   * preview's count, the revision, the picker and the zip all read one
+   * function so they cannot disagree, and a picker quietly showing something
+   * else disagrees with all four.
+   */
+  const [pickerStale, setPickerStale] = useState<string | null>(null);
   /** The rule the admin is typing, before it is added to the list. */
   const [rule, setRule] = useState<Forbidden>(NO_RULE);
   const [confirming, setConfirming] = useState<"rotate" | "stop" | null>(null);
@@ -329,6 +343,8 @@ export default function ShareTab({ server }: { server: Server }) {
   async function togglePicker() {
     if (picker) {
       setPicker(null);
+      // Closing throws the picks away, and with them the warning about them.
+      setPickerStale(null);
       return;
     }
     const found = await run("picker", "Could not read this server's settings files", () =>
@@ -339,6 +355,7 @@ export default function ShareTab({ server }: { server: Server }) {
       new Map(found.files.filter((row) => row.sent).map((row) => [row.path, row.policy])),
     );
     setPicker(found);
+    setPickerStale(null);
   }
 
   /** Tick a file to send, or untick it. */
@@ -368,12 +385,33 @@ export default function ShareTab({ server }: { server: Server }) {
     // Read back rather than kept: a pick can change what another row would do
     // — the behaviour chosen for one file, and whether a path is refused — and
     // the backend is the only thing that decides either.
-    const found = await api.getServerSettingsPicker(server.id).catch(() => null);
-    if (found) {
+    await rereadPicks();
+  }
+
+  /**
+   * Read the picker and take its answer as what is ticked.
+   *
+   * Shared by the save above and the Try again its warning carries, because
+   * both ask the same question: what did the backend make of these picks? A
+   * read that fails used to be dropped on the floor, which left the local map
+   * on screen in the place the backend's answer goes — so it says so instead.
+   * The files were saved either way; it is the reading back that did not
+   * happen.
+   */
+  async function rereadPicks() {
+    setBusy("picker");
+    try {
+      const found = await api.getServerSettingsPicker(server.id);
       setPicks(
         new Map(found.files.filter((row) => row.sent).map((row) => [row.path, row.policy])),
       );
       setPicker(found);
+      setPickerStale(null);
+    } catch (e) {
+      reportError("Could not read back which settings files are sent", e);
+      setPickerStale(errorMessage(e));
+    } finally {
+      setBusy(null);
     }
   }
 
@@ -879,6 +917,34 @@ export default function ShareTab({ server }: { server: Server }) {
                   {picker && (
                     <div className={styles.picker}>
                       <p className="hint">{pickingSettingsHint()}</p>
+                      {/* First in the panel, because it is about everything
+                          under it: the ticks and the behaviours below are the
+                          picks as they were clicked, not the backend's answer
+                          to them. */}
+                      {pickerStale && (
+                        <>
+                          <StatusNote
+                            line={{
+                              tone: "warn",
+                              title: "Saved, but not read back",
+                              detail:
+                                "The files were saved. What this list shows is what you picked, which is not always what the backend decides a pick means — so until it is read again, take the rows below as your choices rather than as what will travel.",
+                            }}
+                          />
+                          <p className="hint">{pickerStale}</p>
+                          <button
+                            className="btn btn-sm"
+                            style={{ alignSelf: "flex-start" }}
+                            onClick={() => void rereadPicks()}
+                            disabled={busy !== null}
+                          >
+                            {busy === "picker" && (
+                              <Loader2 size={13} className="spin" />
+                            )}
+                            Read it again
+                          </button>
+                        </>
+                      )}
                       {picker.wholeConfig && (
                         <StatusNote
                           line={{

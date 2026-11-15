@@ -76,6 +76,23 @@ export default function Properties({ server }: { server: Server }) {
   const [saving, setSaving] = useState(false);
   const [portClash, setPortClash] = useState<string[]>([]);
   /**
+   * Why the port could not be checked against the other servers, when it
+   * could not.
+   *
+   * An empty list is the answer "nobody else is on this port", which is the
+   * one thing a check that did not run cannot say — and it says it by showing
+   * a clean screen, the same screen a server with no clash gets. The read
+   * below this one has a comment about exactly this trap; this effect used to
+   * fall into it on the next line.
+   */
+  const [clashFailed, setClashFailed] = useState<string | null>(null);
+  /**
+   * Bumped by the Try again the warning carries. The check lives in an effect
+   * because it belongs to the port currently on screen, and that effect owns
+   * the guard keeping a late answer about an older port out of the warning.
+   */
+  const [askClash, setAskClash] = useState(0);
+  /**
    * Why the file could not be read, when it could not.
    *
    * Not the same as the file not being there. `properties.rs` answers a
@@ -124,18 +141,34 @@ export default function Properties({ server }: { server: Server }) {
       typed !== undefined &&
       (!Number.isInteger(typed) || typed < 0 || typed > 65535)
     ) {
+      // Not a failure: what is in the box is not a port, so there is nothing
+      // to ask about. The warning stands down rather than reporting a check
+      // that was never going to run.
       setPortClash([]);
+      setClashFailed(null);
       return;
     }
     let cancelled = false;
     api
       .gamePortClashes(server.id, typed)
-      .then((names) => !cancelled && setPortClash(names))
-      .catch(() => !cancelled && setPortClash([]));
+      .then((names) => {
+        if (cancelled) return;
+        setPortClash(names);
+        setClashFailed(null);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        // No toast: this runs again on every keystroke in the port box, so a
+        // backend that is refusing would stack one per character. The note
+        // beside the setting is where the answer belongs anyway, and it is
+        // the place somebody is looking when they read a port.
+        setPortClash([]);
+        setClashFailed(errorMessage(e));
+      });
     return () => {
       cancelled = true;
     };
-  }, [server.id, props, port]);
+  }, [server.id, props, port, askClash]);
   const edit = (key: string, value: string) =>
     setEdited((was) => ({ ...was, [key]: value }));
 
@@ -226,6 +259,30 @@ export default function Properties({ server }: { server: Server }) {
     );
   }
 
+  /**
+   * The check did not run, said in both places it could matter: the table of
+   * settings, and the server that has not written its file yet. One element
+   * rather than two copies of the sentence, because it is the same fact
+   * either way — and silence here is a clean screen, which is what a server
+   * with no clash gets.
+   */
+  const clashUnknown = clashFailed ? (
+    <>
+      <p className={styles.danger}>
+        <AlertTriangle size={12} />
+        Whether another server is already set to this port could not be
+        checked, so nothing here says there is no clash. No setting has
+        changed.
+      </p>
+      <div className={styles.readFailed}>
+        <p className="hint">{clashFailed}</p>
+        <button className="btn btn-sm" onClick={() => setAskClash((n) => n + 1)}>
+          Try again
+        </button>
+      </div>
+    </>
+  ) : null;
+
   if (props.length === 0) {
     return (
       <>
@@ -242,6 +299,7 @@ export default function Properties({ server }: { server: Server }) {
             {portClashLine(portClash, UNWRITTEN_PORT)}
           </p>
         )}
+        {clashUnknown}
       </>
     );
   }
@@ -256,6 +314,12 @@ export default function Properties({ server }: { server: Server }) {
           onChange={(e) => setFilter(e.target.value)}
         />
       </div>
+
+      {/* Above the groups rather than on the port's own row: the row is where
+          a clash is said, and this is the absence of an answer about the whole
+          screen — it is also still readable when the filter has hidden the
+          port. */}
+      {clashUnknown}
 
       {groups.length === 0 ? (
         <p className="hint">Nothing matches “{filter}”.</p>

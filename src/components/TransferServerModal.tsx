@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 
 import Modal from "./Modal";
-import { api } from "../lib/api";
+import { api, errorMessage } from "../lib/api";
 import { fileSize } from "../lib/format";
 import { useStore } from "../lib/store";
 import type {
@@ -54,29 +54,62 @@ export default function TransferServerModal({
   const navigate = useStore((s) => s.navigate);
 
   const [hosts, setHosts] = useState<RemoteHost[] | null>(null);
+  /**
+   * Why `hosts.json` could not be read, when it could not.
+   *
+   * The empty-list copy below sends somebody to Settings → Server hosts to
+   * add their first one. Over a failed read that is both false and a dead
+   * end: the screen it offers reads the same file, so it can only repeat the
+   * claim.
+   */
+  const [hostsFailed, setHostsFailed] = useState<string | null>(null);
   const [host, setHost] = useState("");
   const [mode, setMode] = useState<TransferMode>("copy");
 
   // A pull picks from the host's own list, which has to be fetched.
   const [theirs, setTheirs] = useState<RemoteServer[] | null>(null);
+  /**
+   * Why the host could not be asked what it holds, when it could not.
+   *
+   * "That host has no servers on it" is the host's own answer; a host that
+   * never answered has not said that, and for a pull it is the whole content
+   * of this dialog.
+   */
+  const [theirsFailed, setTheirsFailed] = useState<string | null>(null);
   const [picked, setPicked] = useState("");
+  /**
+   * Bumped by Try again below. The read lives in an effect because it belongs
+   * to whichever host is selected, and the effect's own stale guard is what
+   * keeps a slow answer from a previous attempt out of the list — so asking
+   * again is a change to what that effect depends on rather than a second
+   * call beside it.
+   */
+  const [askAgain, setAskAgain] = useState(0);
 
   const [size, setSize] = useState<TransferMeasure | null>(null);
   const [sizing, setSizing] = useState(false);
   const [busy, setBusy] = useState(false);
 
+  const loadHosts = useCallback(
+    () =>
+      api
+        .remoteHosts()
+        .then((listed) => {
+          setHosts(listed);
+          setHostsFailed(null);
+          if (listed.length > 0) setHost(listed[0].id);
+        })
+        .catch((e) => {
+          setHosts([]);
+          setHostsFailed(errorMessage(e));
+          reportError("Could not read your list of hosts", e);
+        }),
+    [reportError],
+  );
+
   useEffect(() => {
-    api
-      .remoteHosts()
-      .then((listed) => {
-        setHosts(listed);
-        if (listed.length > 0) setHost(listed[0].id);
-      })
-      .catch((e) => {
-        setHosts([]);
-        reportError("Could not read your list of hosts", e);
-      });
-  }, [reportError]);
+    void loadHosts();
+  }, [loadHosts]);
 
   // The host's servers, for a pull. Cleared when the host changes, so a list
   // from the last one cannot be picked from by mistake.
@@ -84,6 +117,7 @@ export default function TransferServerModal({
     if (direction !== "pull" || !host) return;
     let stale = false;
     setTheirs(null);
+    setTheirsFailed(null);
     setPicked("");
     api
       .remoteHostServers(host)
@@ -93,12 +127,13 @@ export default function TransferServerModal({
       .catch((e) => {
         if (stale) return;
         setTheirs([]);
+        setTheirsFailed(errorMessage(e));
         reportError("Could not reach that host", e);
       });
     return () => {
       stale = true;
     };
-  }, [direction, host, reportError]);
+  }, [direction, host, reportError, askAgain]);
 
   const id = direction === "push" ? (server?.id ?? "") : picked;
   const chosen = hosts?.find((one) => one.id === host) ?? null;
@@ -220,6 +255,22 @@ export default function TransferServerModal({
         <div className={styles.loading}>
           <Loader2 size={16} className="spin" />
         </div>
+      ) : hostsFailed ? (
+        /* Before the empty state, and without its offer to go and add one:
+           Settings → Server hosts reads the same file this just failed on, so
+           sending somebody there would only confirm the false claim. */
+        <div className={styles.empty}>
+          <AlertTriangle size={22} className={styles.emptyIcon} />
+          <p>
+            Could not read your list of hosts, so there is nothing here to pick
+            from. Which is not the same as having none — nothing has been
+            changed, and what is in the file is unknown until it reads.
+          </p>
+          <span className="hint">{hostsFailed}</span>
+          <button className="btn btn-sm" onClick={() => void loadHosts()}>
+            Try again
+          </button>
+        </div>
       ) : hosts.length === 0 ? (
         <div className={styles.empty}>
           <Unplug size={22} className={styles.emptyIcon} />
@@ -262,6 +313,28 @@ export default function TransferServerModal({
             (theirs === null ? (
               <div className={styles.loading}>
                 <Loader2 size={16} className="spin" />
+              </div>
+            ) : theirsFailed ? (
+              /* Before "no servers on it", which is the host's own answer and
+                 not something to put in its mouth. The toast said the host
+                 could not be reached; this is the same thing said where the
+                 list would have been, so the panel and the toast agree once
+                 the toast has gone. */
+              <div className={styles.field}>
+                <p className={styles.blocked}>
+                  <AlertTriangle size={13} />
+                  That host could not be reached, so what it holds is unknown —
+                  it has not said it has nothing. Nothing on either machine has
+                  been changed.
+                </p>
+                <span className="hint">{theirsFailed}</span>
+                <button
+                  className="btn btn-sm"
+                  style={{ alignSelf: "flex-start" }}
+                  onClick={() => setAskAgain((n) => n + 1)}
+                >
+                  Try again
+                </button>
               </div>
             ) : theirs.length === 0 ? (
               <p className={styles.note}>
