@@ -265,3 +265,30 @@
   font-weight: 500;
   font-family: var(--mono);
 }
+
+/* Backups whose world is gone. Set apart from the list above rather than
+   folded into it, because these are not worlds — the folder is a name on a
+   zip, and there is nothing to launch, rename or copy. */
+.orphans {
+  margin: 26px 22px 0;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.orphansTitle {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.orphansNote {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  line-height: 1.6;
+  margin-bottom: 4px;
+}

@@ -208,11 +208,35 @@ export default function ProjectPanel({
           {blocked ? (
             <div className={styles.blocked}>
               <ShieldAlert size={15} />
-              <div>
-                <strong>Manual download only.</strong> The author disabled
-                third-party downloads for this project. Get the file from the
-                project page and drop it into the instance's mods folder.
-              </div>
+              {/* Two different facts, and the old text told the pack's one about
+                  both. A mod whose author turned third-party downloads off is
+                  still installable here: the core looks for that author's own
+                  release of the identical bytes and installs it when the hashes
+                  match, which is what the comment on the Versions button below
+                  describes and what `blocked.test.mjs` exists to keep. So this
+                  banner used to deny, in the slot read first, the thing the
+                  same panel does one tab across. A pack really is manual —
+                  it is fetched as a file rather than found by its contents.
+                  "the instance's mods folder" went with it: the panel opens
+                  from Browse with no instance chosen, so there was no folder
+                  the sentence could mean. */}
+              {isModpack ? (
+                <div>
+                  <strong>Manual download only.</strong> The author disabled
+                  third-party downloads, and a pack is fetched as a file rather
+                  than matched by its contents, so there is nothing Geode can
+                  put in its place. Download it from the project page and bring
+                  the .zip in from Library.
+                </div>
+              ) : (
+                <div>
+                  <strong>Not downloadable directly.</strong> The author disabled
+                  third-party downloads, so Geode looks for the same file
+                  published by that author elsewhere and installs that when the
+                  contents match. Pick a build under Versions to try it — if
+                  nothing matches, it says so.
+                </div>
+              )}
             </div>
           ) : installedInstance ? (
             <>

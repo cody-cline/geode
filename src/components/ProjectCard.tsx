@@ -387,7 +387,11 @@ export default function ProjectCard({
             disabled={busy || blocked}
             title={
               blocked
-                ? "The author disabled third-party downloads — open the project page"
+                ? // Not the project page: for a mod the core substitutes that
+                  // author's own release of the identical file, and the version
+                  // list is the only place a build is chosen. The pack button
+                  // above says "project page" because a pack has no substitute.
+                  "The author disabled third-party downloads — open this and pick a build under Versions"
                 : actionLabel
                   ? "Add to the plan"
                   : viaConnector

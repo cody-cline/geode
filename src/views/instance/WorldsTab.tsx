@@ -104,6 +104,37 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
 
   const backupsFor = (folder: string) => backups.filter((b) => b.world === folder);
 
+  /**
+   * Backups whose world is no longer on disk, newest first, by folder.
+   *
+   * Every route to a backup used to run through its world's row — the button
+   * at the end of it is the only thing that opens the list — so deleting a
+   * world put its backup out of reach the moment the row went. Which is the
+   * one outcome `world-backups/` living outside `.minecraft` exists to
+   * prevent: a copy is supposed to outlive the world it is a copy of.
+   *
+   * The backend was always willing. `worlds::restore` does `create_dir_all`
+   * on the world folder before extracting, so restoring into a world that is
+   * gone is what it already does; only the way to ask was missing.
+   */
+  const orphaned = useMemo(() => {
+    if (!worlds) return [];
+    const live = new Set(worlds.map((w) => w.folder));
+    const byFolder = new Map<string, WorldBackup[]>();
+    for (const b of backups) {
+      if (live.has(b.world)) continue;
+      const list = byFolder.get(b.world) ?? [];
+      list.push(b);
+      byFolder.set(b.world, list);
+    }
+    return [...byFolder.entries()]
+      .map(([folder, list]) => ({
+        folder,
+        list: [...list].sort((a, b) => b.createdAt - a.createdAt),
+      }))
+      .sort((a, b) => b.list[0].createdAt - a.list[0].createdAt);
+  }, [worlds, backups]);
+
   function close() {
     setAsking(null);
     setTyped("");
@@ -476,6 +507,65 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
         )}
       </div>
 
+      {/* Only ever non-empty after a delete, so it is not a section somebody
+          has to read past: it appears when there is something in it and is
+          gone again the moment the world is back. Restoring the newest is
+          enough to un-strand the rest — the folder exists again afterwards,
+          its row comes back, and the row's own button lists every backup it
+          has, older ones included. */}
+      {orphaned.length > 0 && (
+        <div className={styles.orphans}>
+          <h2 className={styles.orphansTitle}>Backups with no world</h2>
+          <p className={styles.orphansNote}>
+            These outlived the world they were taken from. Restoring one puts
+            the world back where it was.
+          </p>
+          {orphaned.map(({ folder, list }) => (
+            <div key={folder} className={styles.row}>
+              <div className={styles.worldIcon}>
+                <FileArchive size={16} />
+              </div>
+              <div className={styles.itemText}>
+                <div className={styles.itemTitle}>
+                  <span className={styles.itemName}>{folder}</span>
+                </div>
+                <div className={styles.itemMeta}>
+                  <span>
+                    {list.length === 1 ? "1 backup" : `${list.length} backups`}
+                  </span>
+                  <span>{fileSize(list[0].size)}</span>
+                  <span>{relativeTime(list[0].createdAt)}</span>
+                </div>
+              </div>
+              <button
+                className="btn btn-sm"
+                disabled={running || busy === folder}
+                title={
+                  running
+                    ? "Stop the game to restore a world"
+                    : `Put ${folder} back from ${list[0].name}`
+                }
+                onClick={() =>
+                  void run(
+                    folder,
+                    `Could not restore ${folder}`,
+                    () => api.restoreWorld(instance.id, folder, list[0].name),
+                    (world) => ({ title: `Restored ${world.name}` }),
+                  )
+                }
+              >
+                {busy === folder ? (
+                  <Loader2 size={14} className="spin" />
+                ) : (
+                  <ArchiveRestore size={14} />
+                )}
+                Restore
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       {asking?.kind === "rename" && (
         <Modal
           title={`Rename ${asking.world.name}`}
@@ -591,7 +681,7 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
                     () => api.deleteWorld(instance.id, asking.world.folder),
                     (backup) => ({
                       title: `Deleted ${asking.world.name}`,
-                      body: `Its backup, ${backup.name}, is under Backups on this screen.`,
+                      body: `Its backup, ${backup.name}, is under "Backups with no world" below.`,
                     }),
                   )
                 }
