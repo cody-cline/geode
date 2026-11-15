@@ -5,7 +5,7 @@ import clsx from "clsx";
 import { FileArchive, FolderOpen, Loader2, Search, Users } from "lucide-react";
 
 import Modal from "./Modal";
-import { api } from "../lib/api";
+import { api, errorMessage } from "../lib/api";
 import { rovingKey } from "../lib/rovingFocus";
 import { useStore } from "../lib/store";
 import { LOADERS } from "../lib/types";
@@ -49,12 +49,43 @@ export default function NewInstanceModal({ onClose }: { onClose: () => void }) {
 
   const [name, setName] = useState("");
   const [nameTouched, setNameTouched] = useState(false);
-  const [versions, setVersions] = useState<GameVersion[]>([]);
+  /**
+   * Minecraft's versions, or null while that is not known.
+   *
+   * It used to start at `[]` and the catch left it there, so the one branch
+   * the list below had — "No versions match" — was what stood here both before
+   * the manifest arrived and forever after it failed to. With `filter` still
+   * at its initial value that read `No versions match “”`, a sentence with
+   * empty quotation marks that is false twice over: nothing was searched for,
+   * and Minecraft's versions were never in question.
+   */
+  const [versions, setVersions] = useState<GameVersion[] | null>(null);
+  /** Why that list could not be read, when it could not. */
+  const [versionsProblem, setVersionsProblem] = useState<string | null>(null);
+  /** Bumped to ask again; the read is keyed on the snapshot toggle alone. */
+  const [versionsAsked, setVersionsAsked] = useState(0);
   const [showSnapshots, setShowSnapshots] = useState(config?.showSnapshots ?? false);
   const [filter, setFilter] = useState("");
   const [selected, setSelected] = useState<string>("");
   const [loader, setLoader] = useState<Loader>("fabric");
   const [loaderVersions, setLoaderVersions] = useState<string[]>([]);
+  /**
+   * Why the loader's builds could not be read, when they could not.
+   *
+   * An empty `loaderVersions` renders "No Fabric builds for 1.21.1", which is
+   * a claim about what FabricMC publishes — and the first rule this codebase
+   * holds itself to is that support is derived at runtime from the upstream,
+   * so a derivation that failed must not be reported as the upstream's answer.
+   */
+  const [loaderProblem, setLoaderProblem] = useState<string | null>(null);
+  /**
+   * Bumped to ask for the loader's builds again.
+   *
+   * The read is keyed on the loader and the Minecraft version, and pressing
+   * the loader that is already chosen is not a change, so nothing else here
+   * re-runs it for the pair that failed.
+   */
+  const [loaderAsked, setLoaderAsked] = useState(0);
   const [loaderVersion, setLoaderVersion] = useState("");
   const [loadingLoader, setLoadingLoader] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -65,6 +96,11 @@ export default function NewInstanceModal({ onClose }: { onClose: () => void }) {
   const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    // Back to null rather than leaving the last answer on screen: once
+    // snapshots are toggled, the list that is up is the answer to the other
+    // question, and a refetch that fails would leave it standing as this one.
+    setVersions(null);
+    setVersionsProblem(null);
     api
       .listGameVersions(showSnapshots)
       .then((v) => {
@@ -75,8 +111,11 @@ export default function NewInstanceModal({ onClose }: { onClose: () => void }) {
           return v.find((x) => x.kind === "release")?.id ?? v[0]?.id ?? "";
         });
       })
-      .catch((e) => reportError("Could not load Minecraft versions", e));
-  }, [showSnapshots, reportError]);
+      .catch((e) => {
+        reportError("Could not load Minecraft versions", e);
+        setVersionsProblem(errorMessage(e));
+      });
+  }, [showSnapshots, versionsAsked, reportError]);
 
   // Loader builds depend on the chosen game version, so refetch on either.
   useEffect(() => {
@@ -89,6 +128,7 @@ export default function NewInstanceModal({ onClose }: { onClose: () => void }) {
     setLoadingLoader(true);
     setLoaderVersions([]);
     setLoaderVersion("");
+    setLoaderProblem(null);
 
     api
       .listLoaderVersions(loader, selected)
@@ -97,8 +137,8 @@ export default function NewInstanceModal({ onClose }: { onClose: () => void }) {
         setLoaderVersions(list);
         setLoaderVersion(list[0] ?? "");
       })
-      .catch(() => {
-        if (!cancelled) setLoaderVersions([]);
+      .catch((e) => {
+        if (!cancelled) setLoaderProblem(errorMessage(e));
       })
       .finally(() => {
         if (!cancelled) setLoadingLoader(false);
@@ -107,9 +147,10 @@ export default function NewInstanceModal({ onClose }: { onClose: () => void }) {
     return () => {
       cancelled = true;
     };
-  }, [loader, selected]);
+  }, [loader, selected, loaderAsked]);
 
   const filtered = useMemo(() => {
+    if (!versions) return [];
     const q = filter.trim().toLowerCase();
     return q ? versions.filter((v) => v.id.toLowerCase().includes(q)) : versions;
   }, [versions, filter]);
@@ -423,6 +464,27 @@ export default function NewInstanceModal({ onClose }: { onClose: () => void }) {
               <span className={styles.loaderHint}>
                 <Loader2 size={13} className="spin" /> Looking up {loader} builds…
               </span>
+            ) : loaderProblem ? (
+              /* Before the "no builds" branch, which answers for the upstream.
+                 Nothing else here re-runs this read — the loader and the
+                 Minecraft version are what it is keyed on, and both are
+                 already where they need to be — so it carries its own way
+                 back. */
+              <div>
+                <span className={styles.loaderWarn}>
+                  Could not read which{" "}
+                  {LOADERS.find((l) => l.id === loader)?.label} builds exist for{" "}
+                  {selected || "this version"}. Not that there are none.
+                </span>
+                <p className="hint">{loaderProblem}</p>
+                <button
+                  className="btn btn-sm"
+                  style={{ marginTop: 8 }}
+                  onClick={() => setLoaderAsked((n) => n + 1)}
+                >
+                  Try again
+                </button>
+              </div>
             ) : loaderVersions.length === 0 ? (
               <span className={styles.loaderWarn}>
                 No {LOADERS.find((l) => l.id === loader)?.label} builds for{" "}
@@ -473,7 +535,36 @@ export default function NewInstanceModal({ onClose }: { onClose: () => void }) {
         </div>
 
         <div ref={listRef} className={styles.versionList}>
-          {filtered.length === 0 ? (
+          {versions === null ? (
+            versionsProblem ? (
+              /* Both of these come before "No versions match", which was the
+                 only thing this box ever said and so said it while the
+                 manifest was still coming and again when it never did. The
+                 filter is empty at that point, so it read as a search for
+                 nothing that found nothing. */
+              <div className={styles.noResults}>
+                <p>
+                  Could not read Minecraft&apos;s versions. Not that there are
+                  none to pick from — the list was not read, so what Mojang
+                  publishes is unknown here.
+                </p>
+                <p className="hint">{versionsProblem}</p>
+                <button
+                  className="btn btn-sm"
+                  style={{ marginTop: 10 }}
+                  onClick={() => setVersionsAsked((n) => n + 1)}
+                >
+                  Try again
+                </button>
+              </div>
+            ) : (
+              <div style={{ display: "grid", gap: 6, padding: 8 }}>
+                {Array.from({ length: 6 }, (_, i) => (
+                  <div key={i} className="skeleton" style={{ height: 26 }} />
+                ))}
+              </div>
+            )
+          ) : filtered.length === 0 ? (
             <p className={styles.noResults}>No versions match “{filter}”.</p>
           ) : (
             <div

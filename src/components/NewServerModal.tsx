@@ -1,9 +1,15 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
-import { GitBranch, Globe, Loader2, Server as ServerIcon } from "lucide-react";
+import {
+  AlertTriangle,
+  GitBranch,
+  Globe,
+  Loader2,
+  Server as ServerIcon,
+} from "lucide-react";
 
 import Modal from "./Modal";
-import { api } from "../lib/api";
+import { api, errorMessage } from "../lib/api";
 import { rovingKey } from "../lib/rovingFocus";
 import { useStore } from "../lib/store";
 import type { GitStatus, Server, ServerKindInfo } from "../lib/types";
@@ -112,8 +118,25 @@ export default function NewServerModal({
   const refreshServers = useStore((s) => s.refreshServers);
 
   const [kinds, setKinds] = useState<ServerKindInfo[] | null>(null);
+  /**
+   * Why the server types could not be read, when they could not.
+   *
+   * `kinds` being null is how this dialog says "still loading", and the catch
+   * left it there: the whole body went on spinning, with the toast gone in
+   * nine seconds, Cancel the only way out and nothing on screen saying why.
+   */
+  const [kindsProblem, setKindsProblem] = useState<string | null>(null);
   const [kind, setKind] = useState(USUAL);
   const [versions, setVersions] = useState<string[] | null>(null);
+  /** Why the version list could not be read, when it could not. */
+  const [versionsProblem, setVersionsProblem] = useState<string | null>(null);
+  /**
+   * Bumped to ask for the versions again.
+   *
+   * The read is keyed on the kind, and picking the kind that is already picked
+   * is not a change, so there is no other route back to it.
+   */
+  const [versionsAsked, setVersionsAsked] = useState(0);
   const [version, setVersion] = useState("");
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
@@ -122,27 +145,54 @@ export default function NewServerModal({
   // it is picked, rather than discovered ten minutes into a compile.
   const [git, setGit] = useState<GitStatus | null>(null);
   const [gettingGit, setGettingGit] = useState(false);
+  /**
+   * Why the machine could not be asked about Git, when it could not.
+   *
+   * `gitMissing` below needs a real `GitStatus` to be true, so a failed check
+   * left `git` null and read exactly like Git being present: the box with the
+   * plan, the command, the install button and the way out to Paper never
+   * rendered at all, and Create went live. That is the ten-minute compile this
+   * check exists to head off, produced by the check itself.
+   */
+  const [gitProblem, setGitProblem] = useState<string | null>(null);
 
   useEffect(() => {
     if (kind !== "spigot" || git?.present) return;
     let cancelled = false;
     api
       .gitStatus()
-      .then((status) => !cancelled && setGit(status))
-      .catch(() => !cancelled && setGit(null));
+      .then((status) => {
+        if (cancelled) return;
+        setGit(status);
+        setGitProblem(null);
+      })
+      // The last answer the machine gave is kept rather than thrown away. A
+      // failed re-check is something to report, not a reason to forget that
+      // Git was missing a moment ago.
+      .catch((e) => !cancelled && setGitProblem(errorMessage(e)));
     return () => {
       cancelled = true;
     };
   }, [kind, git?.present]);
 
+  async function checkGit() {
+    try {
+      setGit(await api.gitStatus());
+      setGitProblem(null);
+    } catch (e) {
+      setGitProblem(errorMessage(e));
+    }
+  }
+
   async function getGit() {
     setGettingGit(true);
     try {
       setGit(await api.installGit());
+      setGitProblem(null);
     } catch (e) {
       reportError("Could not install Git", e);
       // Whatever happened, the question is still what is on the machine now.
-      await api.gitStatus().then(setGit).catch(() => {});
+      await checkGit();
     } finally {
       setGettingGit(false);
     }
@@ -150,12 +200,20 @@ export default function NewServerModal({
 
   const gitMissing = kind === "spigot" && git !== null && !git.present;
 
-  useEffect(() => {
-    api
+  const loadKinds = useCallback(() => {
+    setKindsProblem(null);
+    return api
       .serverKinds()
       .then(setKinds)
-      .catch((e) => reportError("Could not list server types", e));
+      .catch((e) => {
+        reportError("Could not list server types", e);
+        setKindsProblem(errorMessage(e));
+      });
   }, [reportError]);
+
+  useEffect(() => {
+    void loadKinds();
+  }, [loadKinds]);
 
   const chosen = useMemo(
     () => kinds?.find((k) => k.id === kind),
@@ -199,6 +257,7 @@ export default function NewServerModal({
   useEffect(() => {
     let cancelled = false;
     setVersions(null);
+    setVersionsProblem(null);
     api
       .serverVersions(kind)
       .then((list) => {
@@ -215,11 +274,17 @@ export default function NewServerModal({
         // asked. Create is already disabled while this is empty.
         setVersion("");
       })
-      .catch(() => !cancelled && setVersions([]));
+      .catch((e) => {
+        if (cancelled) return;
+        // Still [] rather than null so the skeleton stops; the branch for this
+        // is checked before the one for a list that really arrived empty.
+        setVersions([]);
+        setVersionsProblem(errorMessage(e));
+      });
     return () => {
       cancelled = true;
     };
-  }, [kind]);
+  }, [kind, versionsAsked]);
 
   const suggested = chosen ? `${chosen.name} ${version}`.trim() : "";
 
@@ -265,9 +330,33 @@ export default function NewServerModal({
       }
     >
       {kinds === null ? (
-        <div className={styles.loading}>
-          <Loader2 size={16} className="spin" />
-        </div>
+        kindsProblem ? (
+          /* In place of the spinner, because `kinds` null is the spinner and a
+             failed read used to sit in it forever. Not an empty list either:
+             what Geode can install was never in question, the list of it was
+             not read. */
+          <div className={styles.needs}>
+            <AlertTriangle size={15} />
+            <div className={styles.needsBody}>
+              <strong>Could not read the list of server types.</strong>
+              <p>
+                So there is nothing here to pick from. Not that there are none
+                — the list itself was not read, so what Geode can install is
+                unknown here.
+              </p>
+              <p className={styles.needsAside}>{kindsProblem}</p>
+              <div className={styles.needsActions}>
+                <button className="btn btn-sm" onClick={() => void loadKinds()}>
+                  Try again
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className={styles.loading}>
+            <Loader2 size={16} className="spin" />
+          </div>
+        )
       ) : (
         <>
           {/* A choice of one from fourteen, in five labelled groups — which is
@@ -346,6 +435,26 @@ export default function NewServerModal({
                 </label>
                 {versions === null ? (
                   <div className="skeleton" style={{ height: 34 }} />
+                ) : versionsProblem ? (
+                  /* Before the empty branch below, which states a fact about
+                     somebody else's software — that it publishes no versions —
+                     that only the upstream could know and that this read
+                     failed to ask it for. */
+                  <>
+                    <p className={styles.note} style={{ marginTop: 0 }}>
+                      Could not read which versions{" "}
+                      {chosen ? chosen.name : "this server"} publishes. Not
+                      that there are none.
+                    </p>
+                    <p className="hint">{versionsProblem}</p>
+                    <button
+                      className="btn btn-sm"
+                      style={{ marginTop: 8 }}
+                      onClick={() => setVersionsAsked((n) => n + 1)}
+                    >
+                      Try again
+                    </button>
+                  </>
                 ) : versions.length === 0 ? (
                   <p className={styles.note}>No versions available.</p>
                 ) : (
@@ -467,16 +576,60 @@ export default function NewServerModal({
                     )}
                     <button
                       className="btn btn-sm"
-                      onClick={() => void api.gitStatus().then(setGit)}
+                      onClick={() => void checkGit()}
                       disabled={gettingGit}
                     >
                       Check again
                     </button>
                   </div>
+                  {/* A press of Check again that did not work, said where the
+                      press was — otherwise the button answers with nothing at
+                      all. The box still stands: what it reports is the last
+                      answer the machine actually gave. */}
+                  {gitProblem && (
+                    <>
+                      <p className={styles.needsAside}>
+                        Checking again did not work.
+                      </p>
+                      <p className={styles.needsAside}>{gitProblem}</p>
+                    </>
+                  )}
                   <p className={styles.needsAside}>
                     {git.manual} Or pick Paper, which runs every Spigot plugin
                     and installs without building anything.
                   </p>
+                </div>
+              </div>
+            )}
+            {/* The check could not run, which is not the same as Git being
+                here. `gitMissing` needs a real `GitStatus`, so this box used
+                to be left out altogether and Create enabled — the exact
+                outcome the check exists to prevent. Create stays enabled all
+                the same: what is on the machine is unknown, and refusing to
+                build a Spigot server on a machine that may well have Git would
+                be a dead end with nothing on screen to get past. */}
+            {kind === "spigot" && !git && gitProblem && (
+              <div className={styles.needs}>
+                <GitBranch size={15} />
+                <div className={styles.needsBody}>
+                  <strong>Could not check whether Git is installed.</strong>
+                  <p>
+                    Compiling Spigot needs it, and this check is what would
+                    have told you beforehand. It did not run, so whether Git is
+                    here is unknown — not that it is missing. Create still
+                    works; if Git turns out to be absent, the build stops and
+                    says so.
+                  </p>
+                  <p className={styles.needsAside}>{gitProblem}</p>
+                  <div className={styles.needsActions}>
+                    <button
+                      className="btn btn-sm"
+                      onClick={() => void checkGit()}
+                      disabled={gettingGit}
+                    >
+                      Check again
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
