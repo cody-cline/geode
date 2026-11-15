@@ -164,6 +164,21 @@ export default function Browse({
   const [categories, setCategories] = useState<string[]>([]);
   const [available, setAvailable] = useState<string[]>([]);
   /**
+   * Why the category list could not be read, when it could not.
+   *
+   * `available` at `[]` takes the whole Categories section out of the rail —
+   * heading, toolbar and twenty-one chips — which reads as this kind of
+   * content having no categories to filter by. The section stays and says
+   * what happened instead.
+   */
+  const [categoriesProblem, setCategoriesProblem] = useState<string | null>(
+    null,
+  );
+  /** The same for the Minecraft versions, which leave the select holding only
+   *  "Any version" — so filtering by version reads as something this screen
+   *  does not offer. */
+  const [versionsProblem, setVersionsProblem] = useState<string | null>(null);
+  /**
    * The chip carrying the rail's one tab stop, held as a category name rather
    * than a position: the list is replaced wholesale when the kind tab changes,
    * and twenty-one names are not twenty-one of anything else.
@@ -203,6 +218,18 @@ export default function Browse({
   const [exhausted, setExhausted] = useState(false);
   const [selected, setSelected] = useState<Project | null>(null);
   const [installed, setInstalled] = useState<Set<string>>(new Set());
+  /**
+   * Why this instance's own content could not be read, when it could not.
+   *
+   * An empty set is not "nothing is installed" — it makes `isInstalled` false
+   * for every hit, so every row in an in-instance browse offers an install
+   * instead of saying "Added". Acting on that offer is not harmless: an
+   * install removes the project's previous file before writing the new one, so
+   * a build somebody chose deliberately goes without anything having said it
+   * would. The badge exists so a card claims "Added" only when it can honestly
+   * say so, and a read that failed is the case it cannot answer either way.
+   */
+  const [installedProblem, setInstalledProblem] = useState<string | null>(null);
   const [page, setPage] = useState(0);
   /**
    * The row carrying the results grid's one tab stop, held as a row's id
@@ -292,12 +319,19 @@ export default function Browse({
   const refreshInstalled = useCallback(async () => {
     if (!lockedInstance) {
       setInstalled(new Set());
+      setInstalledProblem(null);
       return;
     }
     try {
       setInstalled(await contentKeys(lockedInstance.id));
-    } catch {
+      setInstalledProblem(null);
+    } catch (e) {
+      // No toast, unlike the other reads on this screen: this one runs again
+      // after every install, so a folder that cannot be read would raise one
+      // per install on top of the install's own result. The strip above the
+      // rows says it instead, and stays until the read works.
       setInstalled(new Set());
+      setInstalledProblem(errorMessage(e));
     }
   }, [lockedInstance, contentKeys]);
 
@@ -346,24 +380,45 @@ export default function Browse({
    * search returned.
    */
   const [heldBy, setHeldBy] = useState<Map<string, Instance[]>>(new Map());
+  /**
+   * The instances that could not be read, and why — because an unread instance
+   * is missing from `heldBy` exactly as an instance that does not hold the mod
+   * is, and the chip then says the mod is nowhere while it sits in that
+   * instance's mods folder. That is the one claim the chip was added to stop
+   * the screen getting wrong, and a failure in one of several reads is
+   * otherwise invisible: the rest of the map is right.
+   */
+  const [heldProblem, setHeldProblem] = useState<{
+    names: string[];
+    reason: string;
+  } | null>(null);
+  /**
+   * Counted up by "Try again": the read is keyed on the instance list, and
+   * asking again is not a different list.
+   */
+  const [heldAttempt, setHeldAttempt] = useState(0);
 
   useEffect(() => {
     // Only global browse has anything to work out: where the destination is
     // fixed, what it already holds is `installed` above, and nothing else asks.
     if (!globalBrowse) {
       setHeldBy(new Map());
+      setHeldProblem(null);
       return;
     }
     let cancelled = false;
     void Promise.all(
-      instances.map(
-        async (i) =>
-          [i, await contentKeys(i.id).catch(() => new Set<string>())] as const,
-      ),
-    ).then((pairs) => {
+      instances.map(async (instance) => {
+        try {
+          return { instance, keys: await contentKeys(instance.id), why: null };
+        } catch (e) {
+          return { instance, keys: new Set<string>(), why: errorMessage(e) };
+        }
+      }),
+    ).then((read) => {
       if (cancelled) return;
       const map = new Map<string, Instance[]>();
-      for (const [instance, keys] of pairs) {
+      for (const { instance, keys } of read) {
         for (const key of keys) {
           const held = map.get(key);
           if (held) held.push(instance);
@@ -371,11 +426,24 @@ export default function Browse({
         }
       }
       setHeldBy(map);
+      const unread = read.filter((one) => one.why !== null);
+      setHeldProblem(
+        unread.length === 0
+          ? null
+          : {
+              names: unread.map((one) => one.instance.name),
+              // The first of them. Several instances failing is one thing
+              // gone wrong — a missing directory, a disk — and the reasons
+              // repeat; printing one per instance would be the same sentence
+              // several times over.
+              reason: unread[0].why!,
+            },
+      );
     });
     return () => {
       cancelled = true;
     };
-  }, [globalBrowse, instances, contentKeys]);
+  }, [globalBrowse, instances, contentKeys, heldAttempt]);
 
   /**
    * The instances a hit is already in, deduplicated: a project installed from
@@ -630,19 +698,37 @@ export default function Browse({
     return () => clearTimeout(timer);
   }, [query]);
 
-  useEffect(() => {
+  // Neither of these two reads raises a toast, and both say so in the rail
+  // instead: they are tag lists fetched from upstream alongside the search
+  // rather than as part of it, so they fail on their own — and a toast for
+  // each would land twice on a cold start and again on every kind tab.
+  const loadGameVersions = useCallback(() => {
     if (lockedInstance) return;
     api
       .listGameVersions(config?.showSnapshots ?? false)
-      .then((list) => setGameVersions(list.map((v) => v.id)))
-      .catch(() => setGameVersions([]));
+      .then((list) => {
+        setGameVersions(list.map((v) => v.id));
+        setVersionsProblem(null);
+      })
+      .catch((e) => {
+        setGameVersions([]);
+        setVersionsProblem(errorMessage(e));
+      });
   }, [lockedInstance, config?.showSnapshots]);
+
+  useEffect(loadGameVersions, [loadGameVersions]);
 
   useEffect(() => {
     api
       .getCategories(kind)
-      .then(setAvailable)
-      .catch(() => setAvailable([]));
+      .then((found) => {
+        setAvailable(found);
+        setCategoriesProblem(null);
+      })
+      .catch((e) => {
+        setAvailable([]);
+        setCategoriesProblem(errorMessage(e));
+      });
     setCategories([]);
   }, [kind]);
 
@@ -1198,6 +1284,27 @@ export default function Browse({
                   ))}
                 </select>
               )}
+              {versionsProblem && (
+                /* Said rather than left to be inferred from a select with one
+                   option in it. Nothing else re-reads this list — the kind
+                   tabs re-run the categories below, but the versions are
+                   fetched once — so the note carries the way back. */
+                <>
+                  <p className={styles.filterNote}>
+                    The Minecraft versions could not be read, so only “Any
+                    version” is offered. That is not Minecraft having one
+                    version.
+                  </p>
+                  <p className={styles.filterNote}>{versionsProblem}</p>
+                  <button
+                    className="btn btn-sm"
+                    style={{ marginTop: 8 }}
+                    onClick={loadGameVersions}
+                  >
+                    Try again
+                  </button>
+                </>
+              )}
               {plan && (
                 /* These narrow the search, not the plan. A plan has no version
                    of its own and picking one here does not give it one. */
@@ -1324,57 +1431,72 @@ export default function Browse({
             </section>
           )}
 
-          {available.length > 0 && (
+          {(available.length > 0 || categoriesProblem) && (
             <section className={styles.filterSection}>
               <h3 className={styles.filterTitle}>Categories</h3>
-              {/* Several can be on at once, so these are toggles rather than a
-                  radio group — `aria-pressed` each, and a toolbar rather than
-                  a tab set or a radio group, which is the one of the three
-                  roles whose keyboard contract does not choose what it lands
-                  on. See `moveInCategories`.
-                  All of them, no longer the first ten with the rest behind a
-                  "more": a cut made at ten of an alphabetical list makes the
-                  alphabet into a ranking, which is how Cursed came to be the
-                  second thing in this rail and Optimization was not in it at
-                  all. Nothing upstream publishes an order worth cutting by —
-                  Modrinth's `/tag/category` gives a name and a project type —
-                  and the thing that made twenty-one chips expensive was
-                  twenty-one tab stops, which is what the toolbar above
-                  settles. What is left is height, in the last section of a
-                  rail that already scrolls, so what it pushes below the fold
-                  is itself. */}
-              <div
-                className={styles.categories}
-                role="toolbar"
-                aria-label="Filter by category"
-                onKeyDown={moveInCategories}
-                // Where the keyboard is, recorded as it arrives, so the chip
-                // it is on is the chip Tab comes back to.
-                onFocus={(e) => {
-                  const chip = e.target.dataset.chip;
-                  if (chip) setActiveChip(chip);
-                }}
-              >
-                {/* The tick is the second channel: on and off were an accent
-                    tint and nothing else, which is the one difference a screen
-                    reader cannot read out and some eyes cannot see. */}
-                {available.map((category) => {
-                  const on = categories.includes(category);
-                  return (
-                    <button
-                      key={category}
-                      className={clsx(styles.categoryChip, on && styles.categoryActive)}
-                      aria-pressed={on}
-                      onClick={() => toggleCategory(category)}
-                      tabIndex={category === chipStop ? 0 : -1}
-                      data-chip={category}
-                    >
-                      {titleCase(category)}
-                      {on && <Check size={11} aria-hidden="true" />}
-                    </button>
-                  );
-                })}
-              </div>
+              {categoriesProblem ? (
+                /* The section stays put rather than disappearing with its
+                   heading, because a rail with no Categories in it is how this
+                   read failing came to mean "this kind of content has none".
+                   No Try again: the kind tabs above re-run it, so switching to
+                   another kind and back asks again. */
+                <>
+                  <p className={styles.filterNote}>
+                    The categories could not be read, so none are listed. That
+                    is not this kind of content having none.
+                  </p>
+                  <p className={styles.filterNote}>{categoriesProblem}</p>
+                </>
+              ) : (
+                /* Several can be on at once, so these are toggles rather than a
+                   radio group — `aria-pressed` each, and a toolbar rather than
+                   a tab set or a radio group, which is the one of the three
+                   roles whose keyboard contract does not choose what it lands
+                   on. See `moveInCategories`.
+                   All of them, no longer the first ten with the rest behind a
+                   "more": a cut made at ten of an alphabetical list makes the
+                   alphabet into a ranking, which is how Cursed came to be the
+                   second thing in this rail and Optimization was not in it at
+                   all. Nothing upstream publishes an order worth cutting by —
+                   Modrinth's `/tag/category` gives a name and a project type —
+                   and the thing that made twenty-one chips expensive was
+                   twenty-one tab stops, which is what the toolbar above
+                   settles. What is left is height, in the last section of a
+                   rail that already scrolls, so what it pushes below the fold
+                   is itself. */
+                <div
+                  className={styles.categories}
+                  role="toolbar"
+                  aria-label="Filter by category"
+                  onKeyDown={moveInCategories}
+                  // Where the keyboard is, recorded as it arrives, so the chip
+                  // it is on is the chip Tab comes back to.
+                  onFocus={(e) => {
+                    const chip = e.target.dataset.chip;
+                    if (chip) setActiveChip(chip);
+                  }}
+                >
+                  {/* The tick is the second channel: on and off were an accent
+                      tint and nothing else, which is the one difference a screen
+                      reader cannot read out and some eyes cannot see. */}
+                  {available.map((category) => {
+                    const on = categories.includes(category);
+                    return (
+                      <button
+                        key={category}
+                        className={clsx(styles.categoryChip, on && styles.categoryActive)}
+                        aria-pressed={on}
+                        onClick={() => toggleCategory(category)}
+                        tabIndex={category === chipStop ? 0 : -1}
+                        data-chip={category}
+                      >
+                        {titleCase(category)}
+                        {on && <Check size={11} aria-hidden="true" />}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </section>
           )}
         </aside>
@@ -1405,6 +1527,57 @@ export default function Browse({
             <div className={styles.failed}>
               <AlertTriangle size={14} />
               Could not load more results. {failed}
+            </div>
+          )}
+
+          {/* The two strips below are about what is *already installed* rather
+              than about the search, which is why they sit outside its loading
+              and empty branches and stay while the rows change: a row saying
+              nothing about an instance it is in is wrong whatever the search
+              did. They are never both here — the first is only an instance's
+              own browse, the second only the catalogue's. */}
+          {lockedInstance && installedProblem && (
+            <div className={styles.warning}>
+              <AlertTriangle size={14} />
+              <div>
+                <p>
+                  Could not read what {lockedInstance.name} already has, so no
+                  row below can say a mod is in it. Nothing has been removed —
+                  but installing one replaces the file that is there, so check
+                  Content first if a particular build matters.
+                </p>
+                <p>{installedProblem}</p>
+              </div>
+              <button
+                className="btn btn-sm"
+                onClick={() => void refreshInstalled()}
+              >
+                Try again
+              </button>
+            </div>
+          )}
+
+          {heldProblem && (
+            <div
+              className={styles.warning}
+              title={heldProblem.names.join(", ")}
+            >
+              <AlertTriangle size={14} />
+              <div>
+                <p>
+                  {heldProblem.names.length === 1
+                    ? `Could not read what ${heldProblem.names[0]} holds, so no row below can say a mod is already in it.`
+                    : `Could not read what ${heldProblem.names.length} of your instances hold, so no row below can say a mod is already in one of them.`}{" "}
+                  Nothing has been changed.
+                </p>
+                <p>{heldProblem.reason}</p>
+              </div>
+              <button
+                className="btn btn-sm"
+                onClick={() => setHeldAttempt((n) => n + 1)}
+              >
+                Try again
+              </button>
             </div>
           )}
 

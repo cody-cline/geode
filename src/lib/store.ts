@@ -123,6 +123,18 @@ interface State {
   clearServerLog: (serverId: string) => void;
 
   accounts: Account[];
+  /**
+   * Why the account list could not be read, when it could not.
+   *
+   * `accounts` staying `[]` after a failed read is indistinguishable from being
+   * signed out, and every reader treats it as that: Settings says "No accounts
+   * yet", two screens offer "Sign in to play", and `launchInstance` refuses to
+   * start the game until one is added. Every one of those sends somebody
+   * through Microsoft for an account that is already in `accounts.json` —
+   * reading that file is what failed. Loaded-and-empty and loaded-and-unknown
+   * are two states, the way `instances` and `servers` above already have two.
+   */
+  accountsError: string | null;
   refreshAccounts: () => Promise<void>;
   activeAccount: () => Account | undefined;
 
@@ -263,11 +275,13 @@ export const useStore = create<State>((set, get) => ({
     set((s) => ({ serverLogs: { ...s.serverLogs, [serverId]: [] } })),
 
   accounts: [],
+  accountsError: null,
   refreshAccounts: async () => {
     try {
-      set({ accounts: await api.listAccounts() });
+      set({ accounts: await api.listAccounts(), accountsError: null });
     } catch (e) {
       get().reportError("Could not load accounts", e);
+      set({ accountsError: errorMessage(e) });
     }
   },
   activeAccount: () => get().accounts.find((a) => a.active),

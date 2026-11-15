@@ -3,6 +3,7 @@ import clsx from "clsx";
 import { Bot, Check, Copy, FileText, Loader2, Trash2 } from "lucide-react";
 
 import Modal from "./Modal";
+import { errorMessage } from "../lib/api";
 import { useStore } from "../lib/store";
 import { fileSize, relativeTime } from "../lib/format";
 import type { LogFile } from "../lib/types";
@@ -34,6 +35,16 @@ export default function LogFilesPanel({ source }: { source: LogSource }) {
   const reportError = useStore((s) => s.reportError);
 
   const [files, setFiles] = useState<LogFile[] | null>(null);
+  /**
+   * Why the folder could not be listed, when it could not.
+   *
+   * This panel is where somebody goes after a crash, so "No logs yet" is the
+   * one sentence it must not say about a read that failed: it tells a person
+   * whose game just died that the game never wrote anything, and the advice
+   * that follows — run it again and a log will appear — cannot help, because
+   * the log is already on disk and listing the folder is what did not work.
+   */
+  const [failed, setFailed] = useState<string | null>(null);
   const [chosen, setChosen] = useState<string | null>(null);
   const [text, setText] = useState<string | null>(null);
   const [copied, setCopied] = useState<"none" | "text" | "report">("none");
@@ -46,9 +57,18 @@ export default function LogFilesPanel({ source }: { source: LogSource }) {
   const refresh = useCallback(() => {
     source
       .list()
-      .then(setFiles)
-      .catch(() => setFiles([]));
-  }, [source]);
+      .then((found) => {
+        setFiles(found);
+        setFailed(null);
+      })
+      .catch((e) => {
+        reportError("Could not list the logs", e);
+        // Still [] rather than null, so the spinner stops; the branch for this
+        // is checked before the one for an empty folder.
+        setFiles([]);
+        setFailed(errorMessage(e));
+      });
+  }, [source, reportError]);
 
   useEffect(refresh, [refresh]);
 
@@ -175,10 +195,30 @@ export default function LogFilesPanel({ source }: { source: LogSource }) {
           ))
         )}
 
-        {empty && (
-          <p className={styles.none}>
-            No logs yet. Minecraft writes one each time it runs.
-          </p>
+        {/* Before the empty line below, because a folder that was not read is
+            not a folder with nothing in it, and this list is the only route
+            back to the read — nothing else here re-runs it. */}
+        {failed ? (
+          <div className={styles.none}>
+            <p>
+              Could not list the logs. Nothing has been deleted — the folder
+              was not read, so what is in it is unknown.
+            </p>
+            <p className="hint">{failed}</p>
+            <button
+              className="btn btn-sm"
+              style={{ marginTop: 10 }}
+              onClick={refresh}
+            >
+              Try again
+            </button>
+          </div>
+        ) : (
+          empty && (
+            <p className={styles.none}>
+              No logs yet. Minecraft writes one each time it runs.
+            </p>
+          )
         )}
       </aside>
 
@@ -208,7 +248,15 @@ export default function LogFilesPanel({ source }: { source: LogSource }) {
         </div>
 
         <pre ref={scroller} className={styles.text}>
-          {chosen !== null && text === null ? "Reading…" : shown || "Nothing here."}
+          {chosen !== null && text === null
+            ? "Reading…"
+            : // "Nothing here." is about the log that is open, and a failed
+              // listing means none is — said once more on the larger half of
+              // the panel, because that is the half somebody is looking at.
+              shown ||
+              (failed
+                ? "No log is open — the list of them could not be read."
+                : "Nothing here.")}
         </pre>
       </div>
     </div>
