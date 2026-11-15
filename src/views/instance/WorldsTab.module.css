@@ -196,10 +196,15 @@
    sentence about what that means. Quieter than the explanation above it
    because it is evidence rather than the point, and it is the one line here
    this app did not write. */
+/* `!important` for the reason `.emptyHint` in PlanView.module.css carries it:
+   this sits inside `.empty`, whose `.empty p` rule is one class and one element
+   deep and therefore beats a bare class. Without it the line renders at the
+   body's own size and colour and is not quieter than the sentence above it,
+   which is the whole point of it. */
 .why {
   margin: 10px auto 16px;
-  font-size: 12px;
-  color: var(--text-faint);
+  font-size: 12px !important;
+  color: var(--text-faint) !important;
   max-width: 380px;
 }
 

@@ -155,7 +155,7 @@ export default function Plans() {
                 screen's: a refusal that states a fact is a lowercase fragment
                 with no full stop, which runs into the next sentence if it is
                 set inline. */}
-            <p className="hint">{plansError}</p>
+            <p className={styles.why}>{plansError}</p>
             <button className="btn" onClick={() => void load()}>
               Try again
             </button>

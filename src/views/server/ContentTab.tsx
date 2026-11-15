@@ -658,7 +658,7 @@ export default function ServerContentTab({
                 screen's: a refusal that states a fact is a lowercase fragment
                 with no full stop, which runs into the next sentence if it is
                 set inline. */}
-            <p className="hint">{failed}</p>
+            <p className={styles.why}>{failed}</p>
             <button className="btn btn-sm" onClick={() => void load()}>
               Try again
             </button>

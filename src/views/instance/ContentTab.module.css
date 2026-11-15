@@ -605,3 +605,20 @@
     padding: 0 9px;
   }
 }
+
+/* The backend's own sentence about why a read failed, under this screen's
+   sentence about what that means. Quieter because it is evidence rather than
+   the point, and it is the one line here Geode did not write. The same rule
+   as `.why` in Library.module.css and WorldsTab.module.css; it needs to be a
+   module class rather than the global `.hint`, which loses to `.empty p`. */
+/* `!important` for the reason `.emptyHint` in PlanView.module.css carries it:
+   this sits inside `.empty`, whose `.empty p` rule is one class and one element
+   deep and therefore beats a bare class. Without it the line renders at the
+   body's own size and colour and is not quieter than the sentence above it,
+   which is the whole point of it. */
+.why {
+  font-size: 12px !important;
+  line-height: 1.55;
+  color: var(--text-faint) !important;
+  margin: -4px 0 14px;
+}
