@@ -170,3 +170,11 @@
   overflow-wrap: anywhere;
   user-select: text;
 }
+
+/* What is true of several rows below, said above them instead of on each. */
+.alwaysBytes {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-faint);
+  margin-bottom: 10px;
+}

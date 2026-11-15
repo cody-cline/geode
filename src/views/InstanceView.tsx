@@ -99,10 +99,13 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
       hint: `.${EXPORT_FORMATS[format].ext}`,
       onSelect: () => setExportAs(format),
     })),
+    // The rule is the whole separation. This half had a "Make a link" heading
+    // too, sitting about twenty pixels above its only item, "Make a link…" —
+    // the same words twice in a menu four items tall. "Save a file" above
+    // stays, because it names a category the four rows under it do not: they
+    // name formats. `ShareMenu` draws a heading without announcing it, so a
+    // heading that only repeats its item is drawn for nobody.
     { kind: "rule" },
-    // Its own heading, so the menu reads as the two things it is — a file, or
-    // a link — rather than as four options and a stray fifth.
-    { kind: "group", label: "Make a link" },
     {
       kind: "item",
       label: "Make a link\u2026",
@@ -221,9 +224,17 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
           <div className={styles.stats}>
             <span>
               <Clock size={11} />
+              {/* Three states, not two. `played` is whole seconds and the
+                  launcher sets `last_played` whatever happens, so a run that
+                  died in under a second — a bad mod, a missing native —
+                  leaves nought seconds beside a timestamp, and this row
+                  printed "Never played" next to "Last played 2 minutes ago".
+                  The Library card already falls back the same way. */}
               {instance.playSeconds > 0
                 ? formatDuration(instance.playSeconds)
-                : "Never played"}
+                : instance.lastPlayed
+                  ? "Under a minute"
+                  : "Never played"}
             </span>
             {instance.lastPlayed && <span>Last played {relativeTime(instance.lastPlayed)}</span>}
           </div>

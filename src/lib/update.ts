@@ -198,9 +198,16 @@ export function panelLine(args: {
  */
 export function panelHint(status: UpdateStatus | null): string | null {
   if (!status) return null;
+  // Only what the status line above has not already said. Both paragraphs used
+  // to open by listing when Geode looks — "each time it starts, when this
+  // screen opens, and when you ask" — which `updateLine` states in every
+  // reachable state, about a hundred pixels higher. The keyless one then
+  // explained the missing key and pointed at the releases page, and
+  // `CANNOT_INSTALL` had already done both in the same panel. Three statements
+  // of one fact is how a panel teaches somebody to stop reading it.
   return status.configured
-    ? "Geode never updates itself behind your back: it looks once each time it starts, when this screen opens, and when you ask — and replaces nothing until you press Install. Leaving an offer alone is “not now” — it comes back next time Geode starts. Installing replaces this copy and restarts, so it waits until no game and no server is running. On Linux it replaces the AppImage you are running; if you installed the .deb or .rpm, take the new package from the releases page instead."
-    : "This build has no updater: it looks once each time it starts, when this screen opens, and when you ask, and that is all it does. Geode only installs a version it can prove came from the same place this copy did, and this one was compiled without the key to check that with — so nothing here downloads, replaces or restarts anything. A new version is a file you take from the releases page and install the way you installed this one. Leaving an offer alone is “not now” — it comes back next time Geode starts.";
+    ? "Geode never updates itself behind your back, and replaces nothing until you press Install. Leaving an offer alone is “not now” — it comes back next time Geode starts. Installing replaces this copy and restarts, so it waits until no game and no server is running. On Linux it replaces the AppImage you are running; if you installed the .deb or .rpm, take the new package from the releases page instead."
+    : "This build has no updater, so nothing here downloads, replaces or restarts anything. Leaving an offer alone is “not now” — it comes back next time Geode starts.";
 }
 
 /**

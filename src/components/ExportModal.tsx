@@ -6,14 +6,15 @@ import Modal from "./Modal";
 import { api, errorMessage } from "../lib/api";
 import { fileSize } from "../lib/format";
 import {
-  EXPORT_FORMATS,
   authorDefault,
   copiedByReason,
+  EXPORT_FORMATS,
   exportSummary,
   groupHint,
   groupLabel,
   groupNote,
   safeFileStem,
+  UNNAMEABLE_GROUPS,
   whyLabel,
 } from "../lib/share";
 import { useStore } from "../lib/store";
@@ -206,6 +207,17 @@ export default function ExportModal({
 
       <section>
         <h3 className={styles.heading}>What travels</h3>
+        {/* Said once, because it is one answer. These four groups get the same
+            sentence out of `groupNote` in every format — no platform names a
+            config file, a world, a screenshot or a stray jar — so printing it
+            on each row put the identical line four times in a list eight rows
+            long, and the rows that had something of their own to say were
+            harder to pick out for it. */}
+        <p className={styles.alwaysBytes}>
+          {UNNAMEABLE_GROUPS.map(groupLabel).join(", ")} always travel as
+          bytes: no platform names a file like that, so no format can link
+          them.
+        </p>
         <div className={styles.groups}>
           {GROUPS.map((group) => {
             const tally = tallyOf(group);
@@ -231,11 +243,12 @@ export default function ExportModal({
                     </span>
                   </span>
                   {groupHint(group) && <span className={styles.groupWhy}>{groupHint(group)}</span>}
-                  {carry && (
-                    <span className={styles.groupWhy}>
-                      {groupNote(format, group, carry.canReference, carries?.sparesBytes ?? true)}
-                    </span>
-                  )}
+                  {carry &&
+                    groupNote(format, group, carry.canReference, carries?.sparesBytes ?? true) && (
+                      <span className={styles.groupWhy}>
+                        {groupNote(format, group, carry.canReference, carries?.sparesBytes ?? true)}
+                      </span>
+                    )}
                 </span>
               </label>
             );

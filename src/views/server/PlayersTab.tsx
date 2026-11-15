@@ -825,11 +825,19 @@ function ListPane({
       {/* The only note left here is the one that is actually about this
           card: what this server cannot be asked to do, and which file to edit
           instead. How a name is resolved is the same for every list and is
-          said once at the top. */}
-      {!addable && (
+          said once at the top.
+
+          And only when the tree was actually read. With no tree at all every
+          command fails this test at once, so all four cards printed this
+          sentence together, under a warning at the top of the screen that had
+          already said the same thing — five statements of one fact, differing
+          only in which file each named. Where the tree *was* read and this one
+          command is missing from it, the file name is the new information and
+          the sentence is worth its space. */}
+      {!addable && lists.console.known && (
         <p className="hint">
-          Geode has not seen the command this needs on this server, so it is not
-          offered. Stop the server to edit {config.file} directly.
+          This server did not report the command this needs, so it is not
+          offered. Stop it to edit {config.file} directly.
         </p>
       )}
 

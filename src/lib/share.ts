@@ -1267,9 +1267,6 @@ export function publicLinkLine(check: PublicCheck): StatusLine {
   }
 }
 
-/** What a sharer pastes wherever they are sending it. */
-
-
 // ---------------------------------------------------------------------------
 // The export dialog
 // ---------------------------------------------------------------------------
@@ -1358,20 +1355,37 @@ export function groupHint(group: Group): string | null {
  * name: `canReference` comes from the one `Carry` the export itself uses, so
  * this cannot come to promise a link the writer then does not make.
  */
+/**
+ * The groups no platform can name, in any format.
+ *
+ * Their answer is the same in all four and in every format, so the export
+ * dialog says it once above the list rather than printing it on each of them —
+ * see `UNNAMEABLE_NOTE`. Exported so the list and the line are read off one
+ * array: two copies of this membership is how they would come to disagree.
+ */
+export const UNNAMEABLE_GROUPS: Group[] = ["config", "saves", "logs", "other"];
+
+/** What is true of every group in `UNNAMEABLE_GROUPS`. */
+export const UNNAMEABLE_NOTE =
+  "Bundled in as bytes. No platform names a file like this, so no format could link it.";
+
 export function groupNote(
   format: PackFormat,
   group: Group,
   canReference: boolean,
   sparesBytes: boolean,
-): string {
+): string | null {
   if (!canReference) {
     // A group a platform could name, in a format with nowhere to put the
     // name. The sharer can act on this by picking another format, which is
     // why it says which format is refusing.
-    if (group !== "config" && group !== "saves" && group !== "logs" && group !== "other") {
+    if (!UNNAMEABLE_GROUPS.includes(group)) {
       return `Always bundled in as bytes: ${EXPORT_FORMATS[format].name} can only link mods.`;
     }
-    return "Bundled in as bytes. No platform names a file like this, so no format could link it.";
+    // Null rather than `UNNAMEABLE_NOTE`: the answer is the same for these
+    // four in every format, so the dialog states it once above the list and
+    // this row has nothing of its own to add.
+    return null;
   }
   if (!sparesBytes) {
     return "Named, so the recipient's launcher knows what each file is and can check it for updates. The files travel inside the zip either way.";

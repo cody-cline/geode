@@ -22,6 +22,8 @@ import {
   forbiddenRuleHint,
   gameAddressHint,
   groupNote,
+  UNNAMEABLE_GROUPS,
+  UNNAMEABLE_NOTE,
   joinInput,
   joinStep,
   linkKind,
@@ -1412,10 +1414,14 @@ test("groupNote says bytes, and names the format refusing to link, from what the
   // A .geodepack's notes name any platform Geode can ask, so there it is true.
   assert.match(groupNote("geodepack", "mods", true, true), /Linked where a platform has/);
 
-  // Nothing names a world, so no format is blamed for not linking one.
-  const world = groupNote("geodepack", "saves", false, true);
-  assert.match(world, /No platform names a file like this/);
-  assert.doesNotMatch(world, /geodepack/);
+  // Nothing names a world, so no format is blamed for not linking one — and
+  // the row says nothing at all, because that answer is the same for all four
+  // of `UNNAMEABLE_GROUPS` in every format and the dialog states it once above
+  // the list. The claim did not go; it moved to where it is now made.
+  assert.equal(groupNote("geodepack", "saves", false, true), null);
+  assert.ok(UNNAMEABLE_GROUPS.includes("saves"));
+  assert.match(UNNAMEABLE_NOTE, /No platform names a file like this/);
+  assert.doesNotMatch(UNNAMEABLE_NOTE, /geodepack/);
 
   // A Prism instance zip is the one format where a link is not an alternative
   // to the bytes, so it must not promise a smaller download.
