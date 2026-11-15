@@ -486,7 +486,8 @@ export default function PlayersTab({ server }: { server: Server }) {
           <AlertTriangle size={13} />
           Geode has not read this server's list of commands, so it will not offer
           commands it cannot be sure the server has. Start it once with “Read
-          commands” on in Settings, or stop it and edit the lists directly.
+          this server’s commands” on in Settings, or stop it and edit the lists
+          directly.
         </p>
       )}
 

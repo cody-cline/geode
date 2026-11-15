@@ -392,11 +392,27 @@ function JavaSettings({ update }: { update: Updater }) {
   const [systemMemory, setSystemMemory] = useState<number | null>(null);
   const [installing, setInstalling] = useState<number | null>(null);
   const [args, setArgs] = useState(config.javaArgs);
+  const [javaPath, setJavaPath] = useState(config.javaPath ?? "");
 
   /** The box's one way to disk, so clicking away and Reset take the same one. */
   const saveArgs = (next: string) => {
     setArgs(next);
     if (next !== config.javaArgs) void update({ javaArgs: next });
+  };
+
+  /**
+   * The same, for the path box beside it.
+   *
+   * It used to write on every keystroke, which made the rule at the top of
+   * this screen false — "a box you are typing in, when you click away from
+   * it" was written for the arguments box and was the only box it described.
+   * It also put every half-typed prefix of a path through `set_config`: a
+   * dozen IPC calls and a dozen writes to `config.json` to type one, each
+   * one naming an executable that is not there.
+   */
+  const saveJavaPath = (next: string) => {
+    const value = next.trim() || null;
+    if (value !== (config.javaPath ?? null)) void update({ javaPath: value });
   };
 
   const refresh = () =>
@@ -572,9 +588,10 @@ function JavaSettings({ update }: { update: Updater }) {
           <input
             id="global-java"
             className="input"
-            value={config.javaPath ?? ""}
+            value={javaPath}
             placeholder="Leave empty to pick automatically per version"
-            onChange={(e) => update({ javaPath: e.target.value || null })}
+            onChange={(e) => setJavaPath(e.target.value)}
+            onBlur={() => saveJavaPath(javaPath)}
           />
           <p className="hint">
             Overriding this globally is usually a mistake — different Minecraft
