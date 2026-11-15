@@ -14,10 +14,11 @@ import {
   Search,
   Server as ServerIcon,
   Trash2,
+  TriangleAlert,
 } from "lucide-react";
 
 import Tooltip from "../../components/Tooltip";
-import { api } from "../../lib/api";
+import { api, errorMessage } from "../../lib/api";
 import { fileSize, providerLabel, shownName, titleIsFileName } from "../../lib/format";
 import { rovingKey } from "../../lib/rovingFocus";
 import { useStore } from "../../lib/store";
@@ -132,6 +133,16 @@ export default function ServerContentTab({
 
   const [folder, setFolder] = useState<ServerFolder>(folders[0]?.id ?? "mod");
   const [items, setItems] = useState<ContentItem[] | null>(null);
+  /**
+   * Why the folder could not be read, when it could not.
+   *
+   * `items` at `[]` is what makes this panel say the folder is empty *and*
+   * that anything added lands in it safely. On a server a failed listing is
+   * most often a permission or a mount problem, which is exactly the case
+   * where the next write fails too — so the one claim is unknown and the
+   * other is wrong.
+   */
+  const [failed, setFailed] = useState<string | null>(null);
   const [clientOnly, setClientOnly] = useState<ListedClientOnly[]>([]);
   const [filter, setFilter] = useState("");
   const [updates, setUpdates] = useState<UpdateCandidate[]>([]);
@@ -145,9 +156,13 @@ export default function ServerContentTab({
   const load = useCallback(async () => {
     try {
       setItems(await api.listServerContent(server.id, folder));
+      setFailed(null);
     } catch (e) {
       reportError("Could not read the server folder", e);
+      // Still [] rather than null, so the skeletons stop; the branch for this
+      // is checked before the one for an empty folder.
       setItems([]);
+      setFailed(errorMessage(e));
     }
     // The offer about mods only the listing calls client-side. In its own try,
     // and silent if it fails: it is a suggestion, and it must not be able to
@@ -623,6 +638,30 @@ export default function ServerContentTab({
             {Array.from({ length: 5 }, (_, i) => (
               <div key={i} className="skeleton" style={{ height: 54 }} />
             ))}
+          </div>
+        ) : failed ? (
+          /* Before the empty state, because this panel's empty state says two
+             things and a failed read supports neither: that the folder has
+             nothing in it, and that whatever is added next lands in it. On a
+             server that read usually fails on a permission or a mount, which
+             is the case where the write fails too — so "Anything you add lands
+             in the server's mods folder" is left to a folder that really is
+             empty. */
+          <div className={styles.empty}>
+            <TriangleAlert size={32} className={styles.emptyIcon} />
+            <p>
+              Could not read the {noun} folder, which is not the same as there
+              being none. Nothing has been changed or removed — the folder was
+              not read, so what is in it is unknown.
+            </p>
+            {/* On its own line because it is the backend's sentence, not this
+                screen's: a refusal that states a fact is a lowercase fragment
+                with no full stop, which runs into the next sentence if it is
+                set inline. */}
+            <p className="hint">{failed}</p>
+            <button className="btn btn-sm" onClick={() => void load()}>
+              Try again
+            </button>
           </div>
         ) : shown.length === 0 ? (
           <div className={styles.empty}>

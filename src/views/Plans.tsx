@@ -1,9 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
 import clsx from "clsx";
-import { ClipboardList, Loader2, Package, Plus, Trash2 } from "lucide-react";
+import {
+  ClipboardList,
+  Loader2,
+  Package,
+  Plus,
+  Trash2,
+  TriangleAlert,
+} from "lucide-react";
 
 import Modal from "../components/Modal";
-import { api } from "../lib/api";
+import { api, errorMessage } from "../lib/api";
 import { relativeTime } from "../lib/format";
 import { actionHint } from "../lib/shortcuts";
 import { useActionShortcut } from "../lib/useActionShortcut";
@@ -18,6 +25,16 @@ export default function Plans() {
   const reportError = useStore((s) => s.reportError);
 
   const [plans, setPlans] = useState<Plan[] | null>(null);
+  /**
+   * Why the list could not be read, when it could not.
+   *
+   * `plans` at `[]` after a failed read is what makes this screen say "Create
+   * your first plan", which is a different claim from "I could not look" and
+   * the wrong one. A plan is an evening's collecting and there is nothing
+   * anywhere that could put it back, so being wrong here reads as "they are
+   * gone" — and the only thing the empty state offers is starting again.
+   */
+  const [plansError, setPlansError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   /** The dialog state the other two screens have; Plans makes one outright. */
   /** The plan the delete dialog is asking about, if it is open. */
@@ -26,9 +43,13 @@ export default function Plans() {
   const load = useCallback(async () => {
     try {
       setPlans(await api.listPlans());
+      setPlansError(null);
     } catch (e) {
       reportError("Could not load plans", e);
+      // Still [] rather than null, so the skeletons stop; the branch for this
+      // is checked before the one for having no plans.
       setPlans([]);
+      setPlansError(errorMessage(e));
     }
   }, [reportError]);
 
@@ -89,9 +110,15 @@ export default function Plans() {
             Library and Servers are: one primary per screen, and the one in
             the middle of the page is the one with the explanation attached.
             `!== 0` rather than `> 0` so the loading page, which offers
-            nothing, keeps the only button it has as the primary. */}
+            nothing, keeps the only button it has as the primary. A page whose
+            read failed offers nothing either — its one button is Try again —
+            so it counts with the loading page rather than with the empty
+            one. */}
         <button
-          className={clsx("btn", plans?.length !== 0 && "btn-primary")}
+          className={clsx(
+            "btn",
+            (plans?.length !== 0 || plansError !== null) && "btn-primary",
+          )}
           onClick={create}
           disabled={creating}
         >
@@ -107,6 +134,31 @@ export default function Plans() {
             {Array.from({ length: 3 }, (_, i) => (
               <div key={i} className="skeleton" style={{ height: 116 }} />
             ))}
+          </div>
+        ) : plansError ? (
+          /* Before the empty state, because they are different claims and only
+             one of them is ours to make. Library and Servers, the other two
+             list screens in the sidebar, say it this way already; this was the
+             third and was missed. What makes it worth the same words: the
+             empty state's one button starts a plan, and `create()` names it
+             after the length of a list nobody managed to read — so a failed
+             read invites somebody to collect an evening's mods again and
+             calls the result "Plan 1" while "Plan 1" is already on disk. */
+          <div className={styles.empty}>
+            <TriangleAlert size={40} className={styles.emptyIcon} />
+            <h2>Could not read your plans</h2>
+            <p>
+              Which is not the same as having none. Nothing has been changed or
+              removed — the list could not be read, so what is in it is unknown.
+            </p>
+            {/* On its own line because it is the backend's sentence, not this
+                screen's: a refusal that states a fact is a lowercase fragment
+                with no full stop, which runs into the next sentence if it is
+                set inline. */}
+            <p className="hint">{plansError}</p>
+            <button className="btn" onClick={() => void load()}>
+              Try again
+            </button>
           </div>
         ) : plans.length === 0 ? (
           // What the subtitle above does not already say, and nothing more.

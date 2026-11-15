@@ -17,12 +17,13 @@ import {
   RefreshCw,
   Search,
   Trash2,
+  TriangleAlert,
   Unlock,
 } from "lucide-react";
 
 import Modal from "../../components/Modal";
 import Tooltip from "../../components/Tooltip";
-import { api } from "../../lib/api";
+import { api, errorMessage } from "../../lib/api";
 import { fileSize, providerLabel, shownName, titleIsFileName } from "../../lib/format";
 import { rovingKey } from "../../lib/rovingFocus";
 import { actionHint } from "../../lib/shortcuts";
@@ -333,6 +334,16 @@ export default function ContentTab({
 
   const [kind, setKind] = useState<ContentKind>("mod");
   const [items, setItems] = useState<ContentItem[] | null>(null);
+  /**
+   * Why the folder could not be read, when it could not.
+   *
+   * `items` at `[]` is what makes this panel say "No mods yet" and offer to
+   * add some, which is a different claim from "I could not look". Installing
+   * into a folder whose listing just failed is how somebody ends up with
+   * duplicates they cannot see, so the advice is worse than the wrong
+   * sentence it comes with.
+   */
+  const [failed, setFailed] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [updates, setUpdates] = useState<UpdateCandidate[]>([]);
   const [checking, setChecking] = useState(false);
@@ -355,9 +366,13 @@ export default function ContentTab({
   const load = useCallback(async () => {
     try {
       setItems(await api.listContent(instance.id, kind));
+      setFailed(null);
     } catch (e) {
       reportError("Could not read the content folder", e);
+      // Still [] rather than null, so the skeletons stop; the branch for this
+      // is checked before the one for an empty folder.
       setItems([]);
+      setFailed(errorMessage(e));
     }
   }, [instance.id, kind, reportError]);
 
@@ -967,6 +982,30 @@ export default function ContentTab({
             {Array.from({ length: 5 }, (_, i) => (
               <div key={i} className="skeleton" style={{ height: 54 }} />
             ))}
+          </div>
+        ) : failed ? (
+          /* Before either empty state, because neither of them is a claim this
+             panel can make now. The comment below is about getting the other
+             two apart — an empty folder reported as a search result — and a
+             folder nobody could read arrived at the same sentence as a folder
+             with nothing in it, with "Add mods" under it. The install that
+             invites is into the folder whose listing just failed, which is
+             where the duplicates nobody can see come from. */
+          <div className={styles.empty}>
+            <TriangleAlert size={32} className={styles.emptyIcon} />
+            <p>
+              Could not read the {noun} folder, which is not the same as there
+              being none. Nothing has been changed or removed — the folder was
+              not read, so what is in it is unknown.
+            </p>
+            {/* On its own line because it is the backend's sentence, not this
+                screen's: a refusal that states a fact is a lowercase fragment
+                with no full stop, which runs into the next sentence if it is
+                set inline. */}
+            <p className="hint">{failed}</p>
+            <button className="btn btn-sm" onClick={() => void load()}>
+              Try again
+            </button>
           </div>
         ) : /* Which empty this is, read off the folder rather than off the
                filter box. A filter left behind from another folder used to
