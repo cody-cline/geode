@@ -98,6 +98,18 @@ interface State {
   popBackHandler: (id: number) => void;
 
   config: Config | null;
+  /**
+   * Why the settings could not be read, when they could not.
+   *
+   * `config` staying null is not only a Settings problem. Six screens read it
+   * through `?.` and fall back, so a failed read does not look like a failure
+   * anywhere — it looks like answers: CurseForge disappears from Browse, the
+   * accounts dialog says Microsoft sign-in is unavailable *in this build*, an
+   * import is refused for a key this copy may well have, and the instance
+   * Settings tab quotes a global memory figure nobody set. Each of those is a
+   * statement about which Geode you are running, made from a read that failed.
+   */
+  configError: string | null;
   loadConfig: () => Promise<void>;
   patchConfig: (patch: Record<string, unknown>) => Promise<void>;
 
@@ -228,10 +240,18 @@ export const useStore = create<State>((set, get) => ({
   },
 
   config: null,
+  configError: null,
   loadConfig: async () => {
-    const config = await api.getConfig();
-    set({ config });
-    applyTheme(config);
+    try {
+      const config = await api.getConfig();
+      set({ config, configError: null });
+      applyTheme(config);
+    } catch (e) {
+      // Caught here rather than only at the call site, so the one place that
+      // knows the read failed is the one place that holds the settings.
+      set({ configError: errorMessage(e) });
+      throw e;
+    }
   },
   patchConfig: async (patch) => {
     const config = await api.setConfig(patch);

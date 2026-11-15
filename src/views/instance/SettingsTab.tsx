@@ -550,8 +550,13 @@ export default function SettingsTab({ instance }: { instance: Instance }) {
             <label className="label" htmlFor="inst-memory">
               Memory
               <span className={styles.inherit}>
+                {/* Only when the global figure was actually read. `?? 4096`
+                    printed the default as though it were the setting, so a
+                    settings read that failed quoted somebody a number they had
+                    never chosen and may not be using. */}
                 {overrides.memoryMb == null &&
-                  ` — using the global ${config?.memoryMb ?? 4096} MB`}
+                  config &&
+                  ` — using the global ${config.memoryMb} MB`}
               </span>
             </label>
             <div className={styles.memoryRow}>

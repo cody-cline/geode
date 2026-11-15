@@ -234,12 +234,25 @@ export default function NewInstanceModal({ onClose }: { onClose: () => void }) {
       return;
     }
 
-    if (preview.needsCurseforgeKey && !config?.hasCurseforgeKey) {
-      reportError(
-        "CurseForge packs are not available",
-        "This pack's mods come from CurseForge, which this copy of Geode cannot reach.",
-      );
-      return;
+    // `!config?.hasCurseforgeKey` refused on a settings read that failed
+    // exactly as it refused on a build with no key, and said the second thing
+    // either way — which is a claim about which Geode this is, made without
+    // having read the file that would say.
+    if (preview.needsCurseforgeKey) {
+      if (!config) {
+        reportError(
+          "Cannot tell whether this pack can be imported",
+          "This pack's mods come from CurseForge, and Geode could not read its settings to see whether it can reach CurseForge. Settings says what went wrong.",
+        );
+        return;
+      }
+      if (!config.hasCurseforgeKey) {
+        reportError(
+          "CurseForge packs are not available",
+          "This pack's mods come from CurseForge, which this copy of Geode cannot reach.",
+        );
+        return;
+      }
     }
 
     setCreating(true);

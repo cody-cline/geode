@@ -20,7 +20,14 @@ import styles from "./AccountsModal.module.css";
 
 export default function AccountsModal({ onClose }: { onClose: () => void }) {
   const accounts = useStore((s) => s.accounts);
-  const hasClientId = useStore((s) => s.config?.hasClientId ?? false);
+  // `?? false` would read a settings file nobody managed to open as a build
+  // with no client id, and say so — a statement about which Geode this is,
+  // from a read that failed. Null means unknown, and unknown gets its own
+  // sentence below.
+  const hasClientId = useStore((s) =>
+    s.config ? s.config.hasClientId : null,
+  );
+  const configUnread = useStore((s) => !s.config && Boolean(s.configError));
   const refreshAccounts = useStore((s) => s.refreshAccounts);
   const toast = useStore((s) => s.toast);
   const reportError = useStore((s) => s.reportError);
@@ -258,20 +265,27 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
         </div>
       ) : (
         <div className={styles.section}>
-          {ownsTheGame || hasClientId ? (
+          {ownsTheGame || hasClientId !== false ? (
             <button
               className="btn btn-primary"
               onClick={startMicrosoftLogin}
-              disabled={signingIn || !hasClientId}
+              disabled={signingIn || hasClientId !== true}
               style={{ width: "100%" }}
             >
               {signingIn ? <Loader2 size={14} className="spin" /> : <UserPlus size={15} />}
               Sign in with Microsoft
             </button>
           ) : null}
-          {!hasClientId && (
+          {hasClientId === false && (
             <p className={styles.noteLine}>
               Microsoft sign-in is unavailable in this copy of Geode.
+            </p>
+          )}
+          {configUnread && (
+            <p className={styles.noteLine}>
+              Geode could not read its settings, so whether this copy can sign
+              in with Microsoft is not known here. Settings says what went
+              wrong.
             </p>
           )}
         </div>

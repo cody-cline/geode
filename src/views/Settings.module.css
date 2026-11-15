@@ -598,3 +598,33 @@
   font-family: var(--mono);
   user-select: text;
 }
+
+/* The settings could not be read. Same shape as Library's failure state, which
+   this screen's spinner used to stand in for forever. */
+.loadFailed {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 10px;
+  height: 100%;
+  padding: 0 24px;
+  text-align: center;
+  color: var(--text-faint);
+}
+
+.loadFailed h2 {
+  font-size: 17px;
+  color: var(--text);
+}
+
+.loadFailed p {
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.6;
+  max-width: 420px;
+}
+
+.loadFailed .why {
+  font-size: 12px !important;
+  color: var(--text-faint) !important;
+}

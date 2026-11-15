@@ -358,3 +358,12 @@
     padding: 18px 16px 90px;
   }
 }
+
+/* Why a source is missing from the rail, where a checkbox would be a control
+   that cannot do anything. */
+.sourceNote {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-faint);
+  margin-top: 4px;
+}

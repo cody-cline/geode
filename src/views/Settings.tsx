@@ -113,6 +113,8 @@ const DEFAULT_JAVA_ARGS =
 export default function Settings() {
   const route = useStore((s) => s.route);
   const config = useStore((s) => s.config);
+  const configError = useStore((s) => s.configError);
+  const loadConfig = useStore((s) => s.loadConfig);
   const patchConfig = useStore((s) => s.patchConfig);
   const reportError = useStore((s) => s.reportError);
 
@@ -123,7 +125,30 @@ export default function Settings() {
   );
 
   if (!config) {
-    return (
+    // A spinner that never resolves is the whole of this screen when the read
+    // failed, and the toast that said so is gone in nine seconds. Nothing else
+    // re-runs it either: `loadConfig` is called once at startup.
+    return configError ? (
+      <div className={styles.loadFailed}>
+        <AlertTriangle size={30} />
+        <h2>Could not read your settings</h2>
+        <p>
+          Nothing has been changed — the file was not read, so what is in it is
+          unknown. Everything here is still exactly as you left it.
+        </p>
+        <p className={styles.why}>{configError}</p>
+        <button
+          className="btn"
+          onClick={() => {
+            void loadConfig().catch((e) =>
+              reportError("Could not load settings", e),
+            );
+          }}
+        >
+          Try again
+        </button>
+      </div>
+    ) : (
       <div className={styles.loading}>
         <Loader2 size={20} className="spin" />
       </div>

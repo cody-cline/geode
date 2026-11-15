@@ -143,6 +143,7 @@ export default function Browse({
 } = {}) {
   const instances = useStore((s) => s.instances);
   const config = useStore((s) => s.config);
+  const configError = useStore((s) => s.configError);
   const navigate = useStore((s) => s.navigate);
   const reportError = useStore((s) => s.reportError);
   const toast = useStore((s) => s.toast);
@@ -288,7 +289,12 @@ export default function Browse({
   // box for a provider that is switched off.
   // Memoised because it feeds a useCallback dependency list — a fresh array
   // every render would restart the search on every render.
+  // `?? false` drops CurseForge out of the sources and takes its checkbox off
+  // the rail, so a settings read that failed makes Geode look like a build
+  // that only searches Modrinth. Unknown is not the same as absent: the
+  // checkbox stays, and `configUnread` below says why the results may be thin.
   const hasCurseforgeKey = config?.hasCurseforgeKey ?? false;
+  const configUnread = !config && Boolean(configError);
   const providers = useMemo(() => {
     const availableSources: Provider[] = hasCurseforgeKey
       ? ["modrinth", "curseforge"]
@@ -1336,6 +1342,18 @@ export default function Browse({
                 />
                 <span className="badge badge-curseforge">CurseForge</span>
               </label>
+            )}
+            {/* Not a checkbox: a box that cannot be acted on is worse than a
+                sentence. CurseForge is left out of `availableSources` when the
+                settings were not read, so without this the rail simply has one
+                fewer source and Geode reads as a build that only searches
+                Modrinth — a fact about which copy this is, from a file nobody
+                opened. */}
+            {configUnread && (
+              <p className={styles.sourceNote}>
+                CurseForge is missing from these results because Geode could
+                not read its settings. Settings says what went wrong.
+              </p>
             )}
             {kind === "plugin" && (
               <>
