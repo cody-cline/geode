@@ -779,7 +779,7 @@ export default function ServerView({ id }: { id: string }) {
       {askEula && (
         <Modal
           title="Accept the Minecraft EULA"
-          subtitle="Mojang requires this before any server will start."
+          subtitle="Mojang requires this before this server will start."
           onClose={() => setAskEula(false)}
           width={480}
           footer={
@@ -1464,8 +1464,9 @@ function SettingsTab({ server }: { server: Server }) {
               comes back on its own. Nothing is assumed — a host does not
               restore whatever happened to be running, because a server you
               stopped a minute before the power went out should stay stopped.
-              This window ignores the setting: closing Geode stops its servers
-              on purpose.
+              This window ignores the setting: exiting Geode stops its servers
+              on purpose, and closing the window leaves them running when it
+              leaves Geode in the tray.
             </span>
           </span>
         </label>

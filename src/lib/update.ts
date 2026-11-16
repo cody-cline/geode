@@ -205,9 +205,14 @@ export function panelHint(status: UpdateStatus | null): string | null {
   // explained the missing key and pointed at the releases page, and
   // `CANNOT_INSTALL` had already done both in the same panel. Three statements
   // of one fact is how a panel teaches somebody to stop reading it.
+  //
+  // Both then said that leaving an offer alone is "not now" and that it comes
+  // back at the next start. `putOffLine` says exactly that, in the one state
+  // where it has happened, directly above this — and in every other state the
+  // Not now button is the only thing it could be about.
   return status.configured
-    ? "Geode never updates itself behind your back, and replaces nothing until you press Install. Leaving an offer alone is “not now” — it comes back next time Geode starts. Installing replaces this copy and restarts, so it waits until no game and no server is running. On Linux it replaces the AppImage you are running; if you installed the .deb or .rpm, take the new package from the releases page instead."
-    : "This build has no updater, so nothing here downloads, replaces or restarts anything. Leaving an offer alone is “not now” — it comes back next time Geode starts.";
+    ? "Geode never updates itself behind your back, and replaces nothing until you press Install. Installing replaces this copy and restarts, so it waits until no game and no server is running. On Linux it replaces the AppImage you are running; if you installed the .deb or .rpm, take the new package from the releases page instead."
+    : "This build has no updater, so nothing here downloads, replaces or restarts anything.";
 }
 
 /**

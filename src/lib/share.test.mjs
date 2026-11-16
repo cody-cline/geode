@@ -1046,6 +1046,10 @@ test("the admin is told which address is the pack's and which one players play o
   const asked = gameAddressHint(shareView({ packAddress: "https://pack.example.com" }));
   assert.match(asked, /cannot work out the game address/);
   assert.match(asked, /Add Server/);
+  // The only branch with no address to hang it on is also the only one whose
+  // admin has been given no help, so it is the one that has to say what makes
+  // an address answer at all. The other two carry it on their own wording.
+  assert.match(asked, /forward that port or point a tunnel at it/);
   // And with no pack address either, the sentence still stands on its own.
   const nothing = gameAddressHint(shareView());
   assert.match(nothing, /Geode's own port/);

@@ -82,6 +82,13 @@
   }
 }
 
+/* The reason a forbidding rule cannot be added without, spaced off the pair of
+   id fields above it and the button below by the same gap the pair uses
+   between its own two. */
+.reason {
+  margin: 12px 0;
+}
+
 /* The three behaviours for the config folder, indented under the switch that
    decides whether the folder travels at all — so the choice reads as being
    about that folder rather than as a fourth setting beside it. */

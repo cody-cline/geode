@@ -852,8 +852,15 @@ export default function ContentTab({
                 label: "Check for updates",
                 // The reason, where a disabled button could only have carried
                 // it in a `title` — which is to say to a pointer and to
-                // nothing else.
-                note: trackedCount === 0 ? "nothing tracked here" : undefined,
+                // nothing else. A failed read is not a count of nothing: the
+                // folder was never listed, so how much of it is tracked is
+                // unknown here, and `trackedCount` reading zero is the same
+                // laundering the panel below refuses to do.
+                note: failed
+                  ? "the folder was not read"
+                  : trackedCount === 0
+                    ? "nothing tracked here"
+                    : undefined,
                 icon: <RefreshCw size={14} />,
                 disabled: checking || trackedCount === 0,
                 onSelect: () => void checkUpdates(),

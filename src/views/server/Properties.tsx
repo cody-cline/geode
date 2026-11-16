@@ -58,6 +58,20 @@ function humanize(key: string): string {
 }
 
 /**
+ * What a group's tagged rows have in common, said once above them.
+ *
+ * Takes both sentences rather than patching one, because the groups split the
+ * tagged keys unevenly — the World group holds six "world creation" rows and
+ * five "now a game rule" ones, while Security holds exactly one — and
+ * "Settings … are" standing over a single field is the same kind of wrong as
+ * "1 items". Nothing is printed for a group with none.
+ */
+function groupNote(n: number, one: string, many: string) {
+  if (n === 0) return null;
+  return <p className={clsx("hint", styles.groupNote)}>{n === 1 ? one : many}</p>;
+}
+
+/**
  * The server's own `server.properties`, laid out like the settings above it.
  *
  * The file stays the source of truth for which keys exist — every key in it
@@ -345,6 +359,28 @@ export default function Properties({ server }: { server: Server }) {
               {group}
               <span className={styles.groupCount}>{rows.length}</span>
             </h3>
+            {/* Said once for the group, not under every field in it. Six of
+                the World group's keys are creation-only and five of them
+                became game rules, so these two sentences used to print eleven
+                times between them, one under each row, none of them saying
+                anything about the row it sat under. The rows carry the tag;
+                this is what the tag means.
+
+                Written to agree with how many rows carry it, because the
+                groups split them unevenly — the World group has six tagged
+                "world creation" and five tagged "now a game rule", while
+                Security has exactly one, and "Settings … are" above a single
+                field is the same kind of wrong as "1 items". */}
+            {groupNote(
+              rows.filter((p) => CREATION_ONLY.has(p.key)).length,
+              "The setting tagged “world creation” is only read when the world is created — changing it does nothing to chunks that already exist.",
+              "Settings tagged “world creation” are only read when the world is created — changing one does nothing to chunks that already exist.",
+            )}
+            {groupNote(
+              rows.filter((p) => NOW_A_GAMERULE.has(p.key)).length,
+              "The setting tagged “now a game rule” is set with a game rule in newer versions instead, which is why an up-to-date server has no such line in this file.",
+              "Settings tagged “now a game rule” are set with a game rule in newer versions instead, which is why an up-to-date server has no such line in this file.",
+            )}
             <div className={styles.fields}>
               {rows.map((p) => (
                 <Field
@@ -436,6 +472,14 @@ function Field({
           not what most people are looking for. */}
       <label className="label" htmlFor={id} title={property.key}>
         {info?.label ?? humanize(property.key)}
+        {/* Two words rather than the sentence: the sentence is above the
+            group once, and the tag is what points at it. */}
+        {CREATION_ONLY.has(property.key) && (
+          <span className={styles.tag}>world creation</span>
+        )}
+        {NOW_A_GAMERULE.has(property.key) && (
+          <span className={styles.tag}>now a game rule</span>
+        )}
       </label>
 
       <div className={styles.control}>
@@ -520,18 +564,6 @@ function Field({
 
       {info?.description && <p className="hint">{info.description}</p>}
       {retired && <p className="hint">{retired}</p>}
-      {CREATION_ONLY.has(property.key) && (
-        <p className="hint">
-          Only read when the world is created — changing it does nothing to
-          chunks that already exist.
-        </p>
-      )}
-      {NOW_A_GAMERULE.has(property.key) && (
-        <p className="hint">
-          Newer versions set this with a game rule instead, which is why an
-          up-to-date server has no such line in this file.
-        </p>
-      )}
       {/* Not only while the server runs, unlike the note below: this is about
           the value itself, and the point is to say it as the port is set. */}
       {warning && (

@@ -1415,16 +1415,27 @@ export default function Browse({
                       Ignore the Minecraft version
                     </span>
                   </label>
+                  {/* The box's own description, so it says what ticking it
+                      would do rather than what the list is. The line above
+                      already says what the list is: written here in the
+                      present indicative, this repeated that line when the box
+                      was ticked and contradicted it when it was not. */}
                   <p className={styles.filterNote}>
-                    Also shows mods whose authors have not listed Minecraft{" "}
+                    Also show mods whose authors have not listed Minecraft{" "}
                     {lockedInstance.mcVersion}. A jar usually runs on a little
                     newer than it says — one that does not can stop the game
-                    starting, and nothing here has read it. Anything you install
-                    from this list keeps ignoring the version, on its own row in
-                    Content, until you turn that off. The loader is still
+                    starting, and nothing here has read it. The loader is still
                     matched: a Fabric mod cannot be made to run on Forge this
                     way.
                   </p>
+                  {/* Only true of a list that was actually widened. */}
+                  {useAnyVersion && (
+                    <p className={styles.filterNote}>
+                      Anything you install from this list keeps ignoring the
+                      version, on its own row in Content, until you turn that
+                      off.
+                    </p>
+                  )}
                 </>
               )}
             </section>
@@ -1441,8 +1452,12 @@ export default function Browse({
                 />
                 <span className={styles.connectorLabel}>Include Fabric mods</span>
               </label>
+              {/* The box's own description, for the same reason as the one
+                  above it: with the box off, no Fabric-only mod is in the
+                  list, so the present indicative described a list nothing had
+                  built. */}
               <p className={styles.filterNote}>
-                Mixes Fabric-only mods into the list, run through Sinytra
+                Mix Fabric-only mods into the list, run through Sinytra
                 Connector. Installing one also adds Connector, Forgified Fabric
                 API and Connector Extras.
               </p>

@@ -39,10 +39,15 @@
   padding-left: 31px;
 }
 
-/* The game has the world open. A warning rather than the accent tint the
-   update banner uses: nothing here is waiting on the player, something is
-   currently not allowed. */
-.locked {
+/* Two warnings above the list, one rule for both. `.locked`: the game has the
+   world open. A warning rather than the accent tint the update banner uses:
+   nothing here is waiting on the player, something is currently not allowed.
+   `.aheadBanner`: something below was saved by a newer Minecraft than this
+   instance runs — said once here, because what that costs is the same
+   paragraph for every such world and the rows differ only in their two
+   version numbers. */
+.locked,
+.aheadBanner {
   display: flex;
   align-items: flex-start;
   gap: 10px;
@@ -54,7 +59,8 @@
   color: var(--warn-text);
 }
 
-.locked svg {
+.locked svg,
+.aheadBanner svg {
   flex-shrink: 0;
   margin-top: 2px;
 }

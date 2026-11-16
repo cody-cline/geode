@@ -1395,10 +1395,30 @@ function Updates() {
 function About() {
   const reportError = useStore((s) => s.reportError);
   const [info, setInfo] = useState<AppInfo | null>(null);
+  /*
+   * An ellipsis is also what this screen shows while the call is in flight, so
+   * a swallowed failure was indistinguishable from a slow load: the version
+   * line and the path both sat on "…" for the life of the screen and Open
+   * stayed disabled with nothing on it saying why.
+   */
+  const [failed, setFailed] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    void api
+      .appInfo()
+      .then((got) => {
+        setInfo(got);
+        setFailed(null);
+      })
+      .catch((e) => {
+        reportError("Could not read where Geode keeps its data", e);
+        setFailed(errorMessage(e));
+      });
+  }, [reportError]);
 
   useEffect(() => {
-    api.appInfo().then(setInfo).catch(() => {});
-  }, []);
+    load();
+  }, [load]);
 
   return (
     <div className={styles.form}>
@@ -1420,7 +1440,11 @@ function About() {
           <div>
             <h2 className={styles.aboutName}>Geode</h2>
             <p className={styles.aboutVersion}>
-              {info ? `Version ${info.version} · ${info.platform}` : "…"}
+              {info
+                ? `Version ${info.version} · ${info.platform}`
+                : failed
+                  ? "Version unknown"
+                  : "…"}
             </p>
           </div>
         </div>
@@ -1436,22 +1460,48 @@ function About() {
         <h2 className={styles.sectionTitle}>Data</h2>
         <div className={styles.field}>
           <label className="label">Everything lives here</label>
-          <div className={styles.inlineRow}>
-            <code className={styles.path}>{info?.dataDir ?? "…"}</code>
-            <button
-              className="btn"
-              disabled={!info}
-              onClick={() =>
-                info &&
-                revealItemInDir(info.dataDir).catch((e) =>
-                  reportError("Could not open the folder", e),
-                )
-              }
-            >
-              <FolderOpen size={14} />
-              Open
-            </button>
-          </div>
+          {failed ? (
+            /* Before the path and the button, because naming the folder is
+               what this read is for. Nothing is guessed in its place: the
+               documented default is only a default, and a GEODE_HOME this
+               build was started with makes it the wrong folder to send
+               somebody to. */
+            <>
+              <p className={styles.checkBad}>
+                <AlertTriangle size={13} />
+                <span>
+                  Could not read where Geode keeps its data, so the folder
+                  cannot be named or opened from here. Nothing has been moved
+                  or removed.
+                </span>
+              </p>
+              <p className="hint">{failed}</p>
+              <button
+                className="btn btn-sm"
+                style={{ alignSelf: "flex-start", marginTop: 9 }}
+                onClick={load}
+              >
+                Try again
+              </button>
+            </>
+          ) : (
+            <div className={styles.inlineRow}>
+              <code className={styles.path}>{info?.dataDir ?? "…"}</code>
+              <button
+                className="btn"
+                disabled={!info}
+                onClick={() =>
+                  info &&
+                  revealItemInDir(info.dataDir).catch((e) =>
+                    reportError("Could not open the folder", e),
+                  )
+                }
+              >
+                <FolderOpen size={14} />
+                Open
+              </button>
+            </div>
+          )}
           <p className="hint">
             Instances, downloaded Minecraft versions, shared libraries, assets and
             Java runtimes. Deleting this folder resets Geode completely.

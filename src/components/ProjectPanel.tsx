@@ -151,6 +151,31 @@ export default function ProjectPanel({
   const blocked = !project.distributionAllowed;
   const isModpack = project.kind === "modpack";
 
+  /**
+   * The one sentence every build in the list is carrying, when there is one
+   * and no banner is already carrying it.
+   *
+   * A platform that refuses third-party downloads refuses them for the whole
+   * project, so the reason is built from a single constant and lands on every
+   * row identically — dozens of copies of one sentence down one list. Said
+   * once above the list instead.
+   *
+   * Only when `blocked` is false, because when it is true the banner at the
+   * top of the panel is already saying it in more words. That is the
+   * merged-card case: a project on both platforms is canonically its Modrinth
+   * entry, whose downloads are never author-blocked, so no banner renders —
+   * and then the CurseForge chip refetches CurseForge's own builds, every one
+   * of them refused. Two or more rows, because a lone row is not a
+   * repetition, and a reason specific to one build (SpigotMC's premium and
+   * externally hosted resources) belongs on the build it is about.
+   */
+  const sharedBlockedReason =
+    !blocked && versions && versions.length > 1 && versions[0].blockedReason
+      ? versions.every((v) => v.blockedReason === versions[0].blockedReason)
+        ? versions[0].blockedReason
+        : null
+      : null;
+
   // Portalled to the body rather than rendered in place. A custom-styled
   // scrollbar is painted with its own scroller, above overlapping positioned
   // siblings, so the results list's scrollbar drew straight over this panel
@@ -431,7 +456,22 @@ export default function ProjectPanel({
               .
             </p>
           ) : (
-            <ul className={styles.versionList}>
+            <>
+              {/* The reason said once above the list when every build carries
+                  the same one and no banner is already carrying it. That is
+                  the merged-card shape: a project on both platforms is
+                  canonically its Modrinth entry, whose downloads are never
+                  author-blocked, so `blocked` is false and no banner renders
+                  — then clicking the CurseForge chip refetches CurseForge's
+                  own builds and every row has the identical sentence on it.
+                  One sentence for the list is the same repair the banner case
+                  gets, applied where there is no banner to make it. */}
+              {sharedBlockedReason && (
+                <p className={styles.versionBlocked} style={{ marginBottom: 10 }}>
+                  {sharedBlockedReason}
+                </p>
+              )}
+              <ul className={styles.versionList}>
               {versions.map((version) => {
                 const file = version.files.find((f) => f.primary) ?? version.files[0];
                 return (
@@ -463,9 +503,29 @@ export default function ProjectPanel({
                           </>
                         )}
                       </div>
-                      {version.blockedReason && (
-                        <p className={styles.versionBlocked}>{version.blockedReason}</p>
-                      )}
+                      {/* Dropped only where it is CurseForge's constant and
+                          the banner at the top is already saying it. That one
+                          is built per file from a single string, so an author
+                          who turned third-party downloads off puts the same
+                          sentence on every row, dozens of times down one list
+                          — and it tells the reader to drop the jar in "the
+                          mods folder", which the banner dropped for the reason
+                          given up there, and to do by hand what the banner
+                          says the core does by itself.
+
+                          Keyed on the provider, not on the banner, because the
+                          banner is up for a premium or externally hosted
+                          SpigotMC resource too, and that reason is specific to
+                          the resource and prints on the single row it has.
+                          Nothing is repeated there, and it is the only text on
+                          screen saying to buy or fetch the jar — the banner
+                          offers to match the file elsewhere, which for a paid
+                          resource there is no way to do. */}
+                      {version.blockedReason &&
+                        !sharedBlockedReason &&
+                        !(blocked && source.provider === "curseforge") && (
+                          <p className={styles.versionBlocked}>{version.blockedReason}</p>
+                        )}
                     </div>
                     {isModpack && installedInstance ? (
                       <span className={styles.installedTag}>Installed</span>
@@ -491,7 +551,8 @@ export default function ProjectPanel({
                   </li>
                 );
               })}
-            </ul>
+              </ul>
+            </>
           )}
         </div>
       </aside>

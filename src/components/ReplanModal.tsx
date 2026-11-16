@@ -48,6 +48,22 @@ function applyVerb(landOn: LandOn): string {
 }
 
 /**
+ * Whether the line below reads "All N mods run here".
+ *
+ * The card's colour and its border are the same verdict in another register —
+ * `.coverage` is amber and `.coverageFull` dims it to nothing, `.targetIncomplete`
+ * dashes the edge — and both were read off `missing` alone, which is not the sum
+ * the sentence is written from. One unchecked jar and the card went quiet and
+ * solid while the text inside it said "8 of 9 mods run here — 1 not checked".
+ * The colour, the border and the sentence are one decision, so they read it here.
+ */
+function coversWhole(option: PlanTarget, unchecked: number): boolean {
+  const whole = option.fits.length + unchecked;
+  const runs = option.fits.length - option.missing;
+  return runs === whole;
+}
+
+/**
  * How much of this instance a target covers, in one line on its card.
  *
  * `fits` is what the resolver could look up, which is not the folder: a jar
@@ -81,10 +97,9 @@ function coverageLine(option: PlanTarget, unchecked: number): string {
     option.carried > 0 && `${option.carried} carried over`,
     unchecked > 0 && `${unchecked} not checked`,
   ].filter(Boolean) as string[];
-  const head =
-    runs === whole
-      ? `All ${whole} mods run here`
-      : `${runs} of ${whole} mods run here`;
+  const head = coversWhole(option, unchecked)
+    ? `All ${whole} mods run here`
+    : `${runs} of ${whole} mods run here`;
   return rest.length === 0 ? head : `${head} — ${rest.join(", ")}`;
 }
 
@@ -251,6 +266,8 @@ export default function ReplanModal({
    */
   function targetCard(option: PlanTarget, index: number) {
     const date = dates.get(option.gameVersion);
+    const unchecked = resolution?.unresolved.length ?? 0;
+    const full = coversWhole(option, unchecked);
     return (
       <button
         key={`${option.loader}:${option.gameVersion}`}
@@ -258,7 +275,7 @@ export default function ReplanModal({
           planStyles.target,
           index === 0 && planStyles.targetLead,
           index === chosen && planStyles.targetChosen,
-          option.missing > 0 && planStyles.targetIncomplete,
+          !full && planStyles.targetIncomplete,
         )}
         onClick={() => setChosen(index)}
       >
@@ -280,10 +297,10 @@ export default function ReplanModal({
         <span
           className={clsx(
             planStyles.coverage,
-            option.missing === 0 && planStyles.coverageFull,
+            full && planStyles.coverageFull,
           )}
         >
-          {coverageLine(option, resolution?.unresolved.length ?? 0)}
+          {coverageLine(option, unchecked)}
         </span>
 
         {(option.connector > 0 || option.near > 0) && (
@@ -446,6 +463,14 @@ export default function ReplanModal({
           {moved.unchecked.length > 0 && (
             <section className={planStyles.blockers}>
               <h3 className={planStyles.blockTitle}>Could not be checked</h3>
+              {/* The same split the two sections above use: what is true of
+                  every row belongs to the section. Printed per mod, "Left
+                  exactly as it was." was the half of each row that never
+                  varied, so the half that did — why this one could not be
+                  read — was the half that stopped being read. */}
+              <p className={styles.blockNote}>
+                Each of these was left exactly as it was.
+              </p>
               {moved.unchecked.map((one) => (
                 <div key={one.fileName} className={planStyles.blocker}>
                   <span className={planStyles.blockText}>
@@ -453,7 +478,7 @@ export default function ReplanModal({
                     <span
                       className={clsx(planStyles.blockWhere, styles.wraps)}
                     >
-                      {sentence(one.reason)} Left exactly as it was.
+                      {sentence(one.reason)}
                     </span>
                   </span>
                 </div>

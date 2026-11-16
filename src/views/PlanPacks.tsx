@@ -88,6 +88,18 @@ export default function PlanPacks({
    */
   const [modsFailed, setModsFailed] = useState<string | null>(null);
   /**
+   * How many of an instance's mods the filter above `mods` dropped.
+   *
+   * The row you clicked to get here counts the whole `mods/` folder, and
+   * `mods` counts only the jars a provider can name, so a folder with four
+   * hand-dropped jars reads one number on the row and a smaller one here.
+   * Keeping the shortfall means the heading can carry the folder as its
+   * denominator and say where the difference went, instead of quietly
+   * disagreeing with the row. Always 0 for a published pack, which lists its
+   * contents by identity and has nothing to drop.
+   */
+  const [unidentified, setUnidentified] = useState(0);
+  /**
    * Counted up by "Try again" below. The read is keyed on which pack is open,
    * and asking for the same pack a second time is not a different pack, so
    * there is nothing in `open` for a retry to change.
@@ -159,6 +171,7 @@ export default function PlanPacks({
     let cancelled = false;
     setMods(null);
     setModsFailed(null);
+    setUnidentified(0);
     setDescription(null);
     setExpanded(false);
 
@@ -168,17 +181,17 @@ export default function PlanPacks({
         .listContent(instance.id, "mod")
         .then((items) => {
           if (cancelled) return;
+          const named = items.filter((item) => item.projectId && item.provider);
           setMods(
-            items
-              .filter((item) => item.projectId && item.provider)
-              .map((item) => ({
-                provider: item.provider!,
-                projectId: item.projectId!,
-                name: item.name,
-                slug: item.slug ?? null,
-                iconUrl: item.iconUrl ?? null,
-              })),
+            named.map((item) => ({
+              provider: item.provider!,
+              projectId: item.projectId!,
+              name: item.name,
+              slug: item.slug ?? null,
+              iconUrl: item.iconUrl ?? null,
+            })),
           );
+          setUnidentified(items.length - named.length);
         })
         .catch((e) => {
           if (cancelled) return;
@@ -353,12 +366,25 @@ export default function PlanPacks({
               <h3 className={styles.modsTitle}>
                 {/* No count when nothing was counted. "0 mods" is a number
                     somebody can act on, and a failed read did not produce
-                    one. */}
+                    one.
+
+                    When some of a folder could not be identified, the whole
+                    folder is the denominator — the same number the row that
+                    was clicked to get here showed — so the two cannot read as
+                    a disagreement. Where the difference went is said under
+                    the heading and not in it: this is an 11px uppercase
+                    micro-label, which a sentence set in it reads as SHOUTED
+                    rather than as a label. Not when nothing was identified:
+                    the note below already says the folder was read and none
+                    of it could be named, and saying it twice is saying it
+                    once. */}
                 {mods === null
                   ? "Reading the pack…"
                   : modsFailed
                     ? "Could not read the pack"
-                    : `${mods.length} mod${mods.length === 1 ? "" : "s"}`}
+                    : unidentified > 0 && mods.length > 0
+                      ? `${mods.length} of ${mods.length + unidentified} mods`
+                      : `${mods.length} mod${mods.length === 1 ? "" : "s"}`}
               </h3>
               {mods !== null && missing.length === 0 && mods.length > 0 && (
                 <span className={styles.allIn}>
@@ -367,6 +393,17 @@ export default function PlanPacks({
                 </span>
               )}
             </div>
+
+            {/* The shortfall the heading's denominator leaves unexplained.
+                Only ever shown beside a partial count, since the heading
+                carries no denominator in any other case. */}
+            {mods !== null && !modsFailed && unidentified > 0 && mods.length > 0 && (
+              <p className="hint" style={{ marginTop: -4, marginBottom: 10 }}>
+                {unidentified === 1
+                  ? "One jar in this pack is not a project either platform names, so it cannot be copied to a plan — a plan is a list of projects."
+                  : `${unidentified} jars in this pack are not projects either platform names, so they cannot be copied to a plan — a plan is a list of projects.`}
+              </p>
+            )}
 
             {mods === null ? (
               <div className={styles.rows}>

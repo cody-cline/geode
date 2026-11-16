@@ -1113,17 +1113,26 @@ export default function ShareTab({ server }: { server: Server }) {
                   </div>
                 </div>
               </div>
-              <div className={styles.actions}>
+              {/* The third field of the form, labelled and under the two it
+                  joins: in the button row, unlabelled, it read as an adjunct
+                  to the button rather than as the box the button is refused
+                  without. */}
+              <div className={styles.reason}>
+                <label className="label" htmlFor="forbid-reason">
+                  Why
+                </label>
                 <input
-                  className={clsx("input", styles.grow)}
-                  aria-label="Why this mod is not allowed"
+                  id="forbid-reason"
+                  className="input"
                   value={rule.reason}
-                  placeholder="Why — players are shown this"
+                  placeholder="Players are shown this"
                   maxLength={200}
                   disabled={busy !== null}
                   onChange={(e) => setRule({ ...rule, reason: e.target.value })}
                   onKeyDown={(e) => e.key === "Enter" && void addRule()}
                 />
+              </div>
+              <div className={styles.actions}>
                 <button
                   className="btn"
                   onClick={() => void addRule()}
@@ -1138,8 +1147,9 @@ export default function ShareTab({ server }: { server: Server }) {
                 </button>
               </div>
               <p className="hint">
-                A mod id is what the jar calls itself, which matches whoever has
-                it; a project id matches only a copy Geode installed.{" "}
+                A rule needs a reason and at least one of the two ids. A mod id
+                is what the jar calls itself, which matches whoever has it; a
+                project id matches only a copy Geode installed.{" "}
                 {forbiddenRuleHint()}
               </p>
             </div>
@@ -1208,14 +1218,15 @@ export default function ShareTab({ server }: { server: Server }) {
                   {asking ? "Asking the router…" : "Ask the router again"}
                 </button>
               )}
-              {/* The port above is the one packs come down, and the only one
-                  Geode ever opens — an admin who reads it as the game address
-                  hands out a port nothing is listening on. */}
+              {/* Only what the notes above cannot say for themselves: the
+                  mapping is Geode's own, so one answer here stands for every
+                  server shared from this computer. That the port is Geode's
+                  and the same for every server is the Game address hint's own
+                  first sentence, higher up this same screen; repeating either
+                  clause here only said it twice. */}
               <p className={clsx(viewStyles.pending, styles.grow)}>
-                Every server you share uses the same port and router setup. It
-                is the port packs are downloaded on, not the one Minecraft
-                connects to: forward this server&apos;s server-port yourself,
-                or point a tunnel at it.
+                The router setup above is Geode&apos;s own, and the same for
+                every server you share.
               </p>
               {settingsButton}
             </div>

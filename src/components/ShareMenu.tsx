@@ -20,7 +20,6 @@ export type ShareItem =
       /** The right-hand hint: a file extension, usually. */
       hint?: string;
       icon?: ReactNode;
-      disabled?: boolean;
       onSelect: () => void;
     };
 
@@ -254,7 +253,6 @@ export default function ShareMenu({ items }: { items: ShareItem[] }) {
                   key={i}
                   className={styles.item}
                   role="menuitem"
-                  disabled={item.disabled}
                   onClick={() => {
                     close();
                     item.onSelect();

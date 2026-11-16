@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
-import { AlertTriangle, Check, Loader2, Package, Plus } from "lucide-react";
+import { AlertTriangle, Blocks, Check, Loader2, Package, Plus } from "lucide-react";
 
 import InstanceIcon from "./InstanceIcon";
 import Modal from "./Modal";
@@ -33,7 +33,14 @@ function compatibility(
   files: ProjectVersion[] | null,
 ): string | null {
   const needsLoader = project.kind === "mod";
-  const loaderLabel = LOADERS.find((l) => l.id === instance.loader)?.label;
+  // Which build has to exist. A hit the row marked `viaConnector` is a Fabric
+  // mod on purpose: `install_content` asks the provider for the `fabric` file
+  // whatever the instance runs, because that is the whole route. Judging it
+  // against the instance's own loader instead greyed, reddened the button on
+  // and killed double-click for exactly the instances Connector exists to
+  // serve — one screen after the search offered it there.
+  const wanted = project.viaConnector ? "fabric" : instance.loader;
+  const loaderLabel = LOADERS.find((l) => l.id === wanted)?.label;
 
   if (needsLoader && instance.loader === "vanilla") {
     return "no mod loader";
@@ -43,7 +50,7 @@ function compatibility(
     if (
       needsLoader &&
       project.loaders.length > 0 &&
-      !project.loaders.includes(instance.loader)
+      !project.loaders.includes(wanted)
     ) {
       return `no ${loaderLabel} build`;
     }
@@ -57,7 +64,7 @@ function compatibility(
   }
 
   const forLoader = needsLoader
-    ? files.filter((f) => f.loaders.includes(instance.loader))
+    ? files.filter((f) => f.loaders.includes(wanted))
     : files;
 
   if (needsLoader && forLoader.length === 0) {
@@ -149,14 +156,31 @@ export default function InstallTargetModal({
     };
   }, [project.provider, project.id, filesAsked]);
 
+  /**
+   * The files an install could actually take, which is what both halves of
+   * this dialog are really asking about: a blocked file carries no
+   * `VersionFile` at all and an empty one nothing to fetch, so neither
+   * supports a pair — the same rule the core applies in
+   * `providers::pairs_from_versions`. Null while the list is unknown, because
+   * `compatibility` reads null as "no answer yet" and `[]` as "none", and
+   * flattening the two is the bug its own comment below is about.
+   *
+   * It backs `compatibility` as well as the New-instance options. When it did
+   * not, a mod whose only 1.21.1 Fabric build is author-blocked showed a clean
+   * 1.21.1 Fabric instance under Existing instance and no 1.21.1 at all under
+   * New instance — one question answered both ways inside one dialog.
+   */
   const installable = useMemo(
-    () => (files ?? []).filter((f) => !f.blockedReason && f.files.length > 0),
+    () =>
+      files === null
+        ? null
+        : files.filter((f) => !f.blockedReason && f.files.length > 0),
     [files],
   );
 
   const loaderOptions = useMemo(() => {
     if (project.kind !== "mod") return [];
-    const present = new Set(installable.flatMap((f) => f.loaders));
+    const present = new Set((installable ?? []).flatMap((f) => f.loaders));
     return LOADERS.filter((l) => l.id !== "vanilla" && present.has(l.id));
   }, [project.kind, installable]);
 
@@ -165,8 +189,8 @@ export default function InstallTargetModal({
   const [newName, setNewName] = useState("");
 
   const compatible = useMemo(
-    () => instances.filter((i) => !compatibility(project, i, files)),
-    [instances, project, files],
+    () => instances.filter((i) => !compatibility(project, i, installable)),
+    [instances, project, installable],
   );
 
   const [mode, setMode] = useState<"existing" | "new">(
@@ -198,18 +222,18 @@ export default function InstallTargetModal({
     () =>
       [...instances].sort(
         (a, b) =>
-          (compatibility(project, a, files) ? 1 : 0) -
-          (compatibility(project, b, files) ? 1 : 0),
+          (compatibility(project, a, installable) ? 1 : 0) -
+          (compatibility(project, b, installable) ? 1 : 0),
       ),
-    [instances, project, files],
+    [instances, project, installable],
   );
 
   // Versions that have a file for the chosen loader — nothing else.
   const versionOptions = useMemo(() => {
     const relevant =
       newLoader === "vanilla"
-        ? installable
-        : installable.filter((f) => f.loaders.includes(newLoader));
+        ? (installable ?? [])
+        : (installable ?? []).filter((f) => f.loaders.includes(newLoader));
     return sortVersionsDescending([
       ...new Set(relevant.flatMap((f) => f.gameVersions)),
     ]);
@@ -235,7 +259,9 @@ export default function InstallTargetModal({
     project.name;
 
   const target = instances.find((i) => i.id === selected);
-  const targetProblem = target ? compatibility(project, target, files) : null;
+  const targetProblem = target
+    ? compatibility(project, target, installable)
+    : null;
 
   const canCreate = Boolean(newVersion) && !busy;
 
@@ -337,10 +363,26 @@ export default function InstallTargetModal({
         </div>
       )}
 
+      {/* Why a Fabric mod reads as fitting a NeoForge instance. Without it the
+          marks below look like they are answering a different question from
+          the one the row that opened this dialog answered. */}
+      {mode === "existing" && project.viaConnector && (
+        <p className={styles.note}>
+          <Blocks size={12} />
+          {/* One flex item, so the gap between icon and text does not land
+              again in the middle of the sentence. */}
+          <span>
+            {project.name} is going in as a Fabric mod through Sinytra
+            Connector, so what fits below is judged by its Fabric build rather
+            than by each instance&rsquo;s own loader.
+          </span>
+        </p>
+      )}
+
       {mode === "existing" ? (
         <div className={styles.list}>
           {ordered.map((instance) => {
-            const problem = compatibility(project, instance, files);
+            const problem = compatibility(project, instance, installable);
             const already = installedIn?.has(instance.id);
             return (
               <button

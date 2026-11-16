@@ -217,7 +217,7 @@ export default function TransferServerModal({
       return "The copy arrives unshared, with no password of its own. Links players already hold keep pointing here — a second machine serving this server's pack under the same password would be two servers nobody could tell apart.";
     }
     return direction === "push"
-      ? "The server's password travels with it and arrives stopped, so nothing starts serving on its own. Its new home has a different certificate, so share it there and hand out a fresh link: the Share tab will tell you the links you have given out point at an address that has moved."
+      ? "The server's password travels with it and arrives stopped. A host has no window and nothing on it serves a pack, so the server cannot be shared again from there — the links players already hold will point at this machine, where the server no longer is."
       : "The server's password comes with it and arrives stopped. Share it here when you are ready — the Share tab will say that the links already in players' hands point at the host it came from.";
   }, [direction, mode]);
 
@@ -424,9 +424,8 @@ export default function TransferServerModal({
                 {size.backupBytes > 0 && (
                   <span className={styles.sizeWhy}>
                     {fileSize(size.backupBytes)} of that is{" "}
-                    {size.backupFiles === 1 ? "one backup" : `${size.backupFiles} backups`}.
-                    Everything in the server travels, backups included — delete
-                    the ones you do not want first.
+                    {size.backupFiles === 1 ? "one backup" : `${size.backupFiles} backups`}{" "}
+                    — delete any you do not want first.
                   </span>
                 )}
               </>

@@ -102,6 +102,24 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
       : worlds;
   }, [worlds, filter]);
 
+  /**
+   * Whether anything in the list was saved by a newer Minecraft than this
+   * instance runs.
+   *
+   * What that costs and what to do about it is the same paragraph for every
+   * one of them, so it is said once above the list rather than once per row —
+   * an instance whose version was rolled back has every world in this state,
+   * and the paragraph printed all the way down it. The rows keep the half
+   * that differs, which is their own two version numbers.
+   */
+  const anyAhead = useMemo(
+    () =>
+      (shown ?? []).some(
+        (w) => w.version && savedByNewer(w.version, instance.mcVersion),
+      ),
+    [shown, instance.mcVersion],
+  );
+
   const backupsFor = (folder: string) => backups.filter((b) => b.world === folder);
 
   /**
@@ -296,6 +314,20 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
         </div>
       )}
 
+      {anyAhead && (
+        <div className={styles.aheadBanner}>
+          <TriangleAlert size={15} />
+          <span>
+            Something below was saved by a newer Minecraft than this instance
+            runs. Minecraft upgrades a world the first time a newer version
+            opens it and never puts it back, so opening one of those here can
+            drop what the newer version wrote — and a world is the one thing
+            with no upstream to fetch it back from. Back it up first, or run
+            this instance on the version that wrote it.
+          </span>
+        </div>
+      )}
+
       <div className={styles.list}>
         {shown === null ? (
           <div className={styles.skeletons}>
@@ -415,15 +447,14 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
                   {world.trouble && <p className={styles.trouble}>{world.trouble}</p>}
                   {/* Said on the row and not only in the badge's tooltip: a
                       tooltip is read after, and what this costs is a world.
-                      The badge's colour is what makes somebody look here. */}
+                      The badge's colour is what makes somebody look here.
+                      Only the two version numbers, because they are the only
+                      part of this that differs row to row — what the mismatch
+                      costs is said once in the banner above the list. */}
                   {ahead && (
                     <p className={styles.ahead}>
-                      Minecraft upgrades a world the first time a newer version
-                      opens it and never puts it back, so opening this on{" "}
-                      {instance.mcVersion} can drop what {world.version} wrote
-                      — and a world is the one thing with no upstream to fetch
-                      it back from. Back it up first, or run this instance on{" "}
-                      {world.version}.
+                      Saved by Minecraft {world.version}; this instance runs{" "}
+                      {instance.mcVersion}.
                     </p>
                   )}
                 </div>
@@ -705,8 +736,7 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
             <code>world-backups</code> folder before{" "}
             <code>saves/{asking.world.folder}</code> is removed. The backup is
             not optional — a world is hours of play and there is no undo
-            anywhere else. You can restore it from this screen, or delete the
-            backup too once you are sure.
+            anywhere else. You can restore it from this screen.
           </p>
         </Modal>
       )}

@@ -29,6 +29,8 @@ export default function PackLinkModal({
   request: PackRequest;
   onClose: () => void;
 }) {
+  const config = useStore((s) => s.config);
+  const configError = useStore((s) => s.configError);
   const [view, setView] = useState<PackLinkView | null>(null);
   const [arrival, setArrival] = useState<PackArrival | null>(null);
   const [instance, setInstance] = useState<Instance | null>(null);
@@ -94,6 +96,10 @@ export default function PackLinkModal({
 
   const step = packStep(view, arrival, instance);
   const preview = arrival?.preview;
+  // A settings read that failed is not the same as a copy of Geode with no
+  // key: `config` stays null either way, and only one of those states knows
+  // anything about CurseForge.
+  const configUnread = !config && Boolean(configError);
   const loader = preview
     ? (LOADERS.find((l) => l.id === preview.loader)?.label ?? preview.loader)
     : "";
@@ -198,16 +204,24 @@ export default function PackLinkModal({
             </dl>
           </div>
 
-          {preview.needsCurseforgeKey && (
-            <StatusNote
-              line={{
-                tone: "warn",
-                title: "This pack names mods on CurseForge",
-                detail:
-                  "This copy of Geode cannot reach CurseForge, so those mods are left out. They are listed below, and you can add them by hand.",
-              }}
-            />
-          )}
+          {/* `needs_curseforge_key` says only that the pack names files on
+              CurseForge — `instance/modpack.rs` sets it from the manifest and
+              knows nothing about keys — so whether those mods will actually
+              arrive is a second question, asked of the settings. An ordinary
+              build ships a key and fetches them normally; warning there tells
+              somebody their import will be short when it will not be. */}
+          {preview.needsCurseforgeKey &&
+            (config ? !config.hasCurseforgeKey : configUnread) && (
+              <StatusNote
+                line={{
+                  tone: "warn",
+                  title: "This pack names mods on CurseForge",
+                  detail: config
+                    ? "This copy of Geode cannot reach CurseForge, so those mods are left out. You can add them by hand."
+                    : "Geode could not read its settings, so whether it can reach CurseForge is unknown. Settings says what went wrong.",
+                }}
+              />
+            )}
 
           <p className="hint" style={{ marginTop: 0 }}>
             Importing makes a new instance and downloads the mods this pack

@@ -38,6 +38,29 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* What the tagged rows in this group have in common, said once above them
+   rather than under each one. */
+.groupNote {
+  margin-bottom: 12px;
+}
+
+/* The tag that points at the note above. Beside the label, inside it: the
+   grid is `align-items: start`, so a field that grows taller does not drag
+   its neighbour, and a label long enough to wrap takes the tag with it.
+   11px and 0.02em are `.badge`'s, which is the only other inline marker this
+   app has; what is left off is the border and the 20px box, because this sits
+   inside a 12px label rather than beside one. */
+.tag {
+  margin-left: 7px;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-3);
+  color: var(--text-faint);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
 /* The same two-column shape the Java settings above use. Anything that does
    not fit — free text, mostly — takes the whole row instead of being squeezed
    into half of one. */

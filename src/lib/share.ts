@@ -385,11 +385,17 @@ export function pushingHint(): string {
  * The admin who sees this most often is the one who changed a setting and
  * changed it back, because the comparison is per setting and that setting did
  * not move. Saying so is the difference between an empty screen and a bug
- * report — and the list of what this server already sends, with its Send again
- * button, is right underneath.
+ * report — and the remedy, the Send again button, sits on the list of what
+ * this server has already sent.
+ *
+ * That list is not always there, so the line says "if": a Review that found
+ * nothing is at its most likely on the first one, where the baseline is taken
+ * the moment "Keep in sync" goes on, and nothing has been sent yet either.
+ * Pointing an admin at a list below when there is nothing below is how an
+ * empty screen becomes two puzzles instead of one.
  */
 export function nothingToPushHint(): string {
-  return "Nothing has moved since you last sent settings from these files. A setting you changed and then changed back reads as unmoved, because Geode compares the settings rather than the file — send it again from the list below if you want every player to have it.";
+  return "Nothing has moved since you last sent settings from these files. A setting you changed and then changed back reads as unmoved, because Geode compares the settings rather than the file — if this server has sent that setting before, it is in the Already sent list below, with a button to send it again.";
 }
 
 /** How one setting reads on the Review screen: what it was, and what it is now. */
@@ -465,7 +471,12 @@ export function gameAddressHint(share: ServerShareView): string {
   if (share.suggested.address) {
     return `${packSentence} Geode has filled in this server's own server-port for the game address — check it is the one you forwarded, then save it.`;
   }
-  return `${packSentence} Geode cannot work out the game address from that, so type the one players put into Minecraft's Add Server.`;
+  // The forwarding instruction belongs in this branch and only this one. The
+  // two above already carry it — "check it is the one you forwarded", "forward
+  // a different port" — and this is the branch with no address to hang it on,
+  // which left the Share tab saying nothing about forwarding at all to the one
+  // admin who has had no help working the address out.
+  return `${packSentence} Geode cannot work out the game address from that, so type the one players put into Minecraft's Add Server. Whatever you type has to reach this server's own server-port, so forward that port or point a tunnel at it.`;
 }
 
 /**

@@ -85,13 +85,13 @@ export const PROPERTY_INFO: Record<string, PropertyInfo> = {
     group: "World",
     label: "World seed",
     description:
-      "Seed for generating a new world. Ignored once the world exists.",
+      "Seed for generating a new world.",
     control: text("blank for random"),
   },
   "level-type": {
     group: "World",
     label: "World type",
-    description: "Terrain generator used when the world is first created.",
+    description: "Which terrain generator the world is made with.",
     control: enumOf(
       ["minecraft:normal", "Normal"],
       ["minecraft:flat", "Superflat"],
@@ -190,14 +190,14 @@ export const PROPERTY_INFO: Record<string, PropertyInfo> = {
     group: "World",
     label: "Data packs enabled at creation",
     description:
-      "Built-in data packs switched on when the world is first created, comma separated.",
+      "Built-in data packs switched on for the world, comma separated.",
     control: text("vanilla"),
   },
   "initial-disabled-packs": {
     group: "World",
     label: "Data packs disabled at creation",
     description:
-      "Built-in data packs deliberately left off when the world is created.",
+      "Built-in data packs deliberately left off.",
     control: text(),
   },
   "max-world-size": {

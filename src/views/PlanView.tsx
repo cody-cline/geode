@@ -400,6 +400,35 @@ export default function PlanView({ id }: { id: string }) {
    */
   function targetCard(option: PlanTarget, index: number) {
     const date = dates.get(option.gameVersion);
+    // The denominator is the whole plan, not the part of it the resolver got
+    // an answer about. A mod that publishes nothing downloadable, or that
+    // nobody could ask about, never reaches `fits` — so counting against
+    // `fits` alone printed "All 2 mods run here" on a card two inches under
+    // the header's "3 mods", which is the one mod nobody can say anything
+    // about rounded quietly out of the total. It is named under "Could not be
+    // checked" below and gets a clause of its own here instead, so every
+    // number on this line counts out of the same denominator the header uses.
+    // Worded the way the re-target dialog's `coverageLine` words it, for the
+    // same reason the cards themselves are shared.
+    const unchecked = resolution?.unresolved.length ?? 0;
+    const whole = option.fits.length + unchecked;
+    const runs = option.fits.length - option.missing;
+    // The card's colour and its border are this same verdict in another
+    // register — `.coverage` is amber and `.coverageFull` dims it to nothing,
+    // `.targetIncomplete` dashes the edge — so they are read off the sum the
+    // sentence is written from and not off `missing` alone. Gated on `missing`
+    // they disagreed with the words inside them: one unchecked jar and the
+    // card went quiet and solid while the text said "2 of 3 mods run here — 1
+    // not checked". It is the `coversWhole` the re-target dialog keeps for the
+    // same reason.
+    const full = runs === whole;
+    const rest = [
+      option.blocked > 0 && `${option.blocked} left out`,
+      unchecked > 0 && `${unchecked} not checked`,
+    ].filter(Boolean) as string[];
+    const head = full
+      ? `All ${whole} mods run here`
+      : `${runs} of ${whole} mods run here`;
     return (
       <button
         key={`${option.loader}:${option.gameVersion}`}
@@ -407,7 +436,7 @@ export default function PlanView({ id }: { id: string }) {
           styles.target,
           index === 0 && styles.targetLead,
           index === chosen && styles.targetChosen,
-          option.missing > 0 && styles.targetIncomplete,
+          !full && styles.targetIncomplete,
         )}
         onClick={() => setChosen(index)}
       >
@@ -429,12 +458,10 @@ export default function PlanView({ id }: { id: string }) {
         <span
           className={clsx(
             styles.coverage,
-            option.missing === 0 && styles.coverageFull,
+            full && styles.coverageFull,
           )}
         >
-          {option.missing === 0
-            ? `All ${option.fits.length} mods run here`
-            : `${option.fits.length - option.missing} of ${option.fits.length} — ${option.missing} left out`}
+          {rest.length === 0 ? head : `${head} — ${rest.join(", ")}`}
         </span>
 
         {(option.connector > 0 || option.near > 0) && (
@@ -624,7 +651,7 @@ export default function PlanView({ id }: { id: string }) {
           ) : !resolution || resolution.targets.length === 0 ? (
             <p className={styles.railNote}>
               No loader and version combination runs any of these mods. Check
-              the list below for mods with no usable build.
+              the mod list beside this for mods with no usable build.
             </p>
           ) : (
             <>
@@ -685,13 +712,13 @@ export default function PlanView({ id }: { id: string }) {
                   </h3>
                   {blockers.map((blocker) => (
                     <div key={modKey(blocker)} className={styles.blocker}>
+                      {/* The name and the button, and nothing else: every row
+                          here is a row of the list beside it, which already
+                          says where that mod does run. Both panes are on
+                          screen at once, so printing it twice made the second
+                          copy the one nobody reads. */}
                       <span className={styles.blockText}>
                         <span className={styles.blockName}>{blocker.name}</span>
-                        <span className={styles.blockWhere}>
-                          {blocker.elsewhere && blocker.elsewhere.length > 0
-                            ? `Runs on ${blocker.elsewhere.join(", ")}`
-                            : "No build anywhere"}
-                        </span>
                       </span>
                       <button
                         className="btn btn-sm"

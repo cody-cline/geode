@@ -178,8 +178,14 @@ export default function ServerContentTab({
 
   // Read again when the server starts or stops as well: starting moves client
   // mods out of Mods, and a row left behind would name a file no longer there.
+  //
+  // `failed` is cleared here beside `items`, not only on the next success: the
+  // Check-updates title reads it to say which folder could not be read, and a
+  // flag left standing from the last folder would put that sentence over a
+  // folder nothing has tried to read yet.
   useEffect(() => {
     setItems(null);
+    setFailed(null);
     void load();
   }, [load, server.running]);
 
@@ -521,10 +527,15 @@ export default function ServerContentTab({
             className="btn"
             onClick={checkUpdates}
             disabled={checking || trackedCount === 0}
+            // A failed read also leaves `trackedCount` at zero, and saying
+            // nothing here came from Modrinth or CurseForge would be a claim
+            // about files that were never listed.
             title={
-              trackedCount === 0
-                ? "Nothing here was installed from Modrinth or CurseForge"
-                : "Check for newer versions"
+              failed
+                ? `The ${noun} folder could not be read, so there is nothing to check`
+                : trackedCount === 0
+                  ? "Nothing here was installed from Modrinth or CurseForge"
+                  : "Check for newer versions"
             }
           >
             {checking ? (
