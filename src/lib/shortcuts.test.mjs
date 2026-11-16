@@ -66,12 +66,16 @@ async function actionBindings() {
  * entry here fails below rather than slipping through unprinted.
  */
 const PRINTED_IN = {
-  // Four, and all four have to print it. Every list in this app that has a
-  // filter box now answers the same key, which is the only thing that makes
-  // it worth learning — a key that works on the instance's mods and not on
-  // the server's, or not on worlds, or not on the seventy rows of
-  // `server.properties`, is one somebody has to remember the exceptions to.
+  // Six, and all six have to print it. A key that works on the instance's
+  // mods and not on the server's, or not on worlds, or not on the seventy
+  // rows of `server.properties`, is one somebody has to remember the
+  // exceptions to — and the four deep ones were exactly that for as long as
+  // the two screens the app opens on answered nothing. Browse is the one box
+  // left: it asks for focus when it mounts and is unreachable after the first
+  // click into a result, which is a gap rather than a decision.
   focusFilter: [
+    "../views/Library.tsx",
+    "../views/Servers.tsx",
     "../views/instance/ContentTab.tsx",
     "../views/server/ContentTab.tsx",
     "../views/instance/WorldsTab.tsx",
@@ -83,6 +87,12 @@ const PRINTED_IN = {
   // else — and the screen that binds it without printing it is the one where
   // the key is a secret.
   newThing: ["../views/Library.tsx", "../views/Plans.tsx", "../views/Servers.tsx"],
+  // The two front doors, where the hint is printed inside the card's own Play
+  // or Start button rather than in the header — because that is the button
+  // the key presses, and which one it is depends on where the keyboard is.
+  // Both cards hold it back until the keyboard is in them, which is a CSS
+  // rule and not a second string; what is in the file is what is read here.
+  launch: ["../views/Library.tsx", "../views/Servers.tsx"],
 };
 
 test("every binding is printed beside the screen it opens", async () => {

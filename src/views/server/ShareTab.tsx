@@ -560,12 +560,12 @@ export default function ShareTab({ server }: { server: Server }) {
       Players open a link, or type this computer&apos;s address and the
       server&apos;s password, and their Geode sets up this server&apos;s loader
       and mods, ready to join. The pack comes straight from this computer:
-      nothing is uploaded anywhere. Mods on Modrinth or CurseForge travel as
-      references; every other jar in the mods folder, including jars you added
-      by hand, is sent as a copy. Client mods go to players too, but this server
-      never loads them. The one exception is a mod you keep on this server,
-      which you say per mod in the Content tab: players get nothing of it, not
-      the file and not its name.
+      nothing is uploaded anywhere. Mods on Modrinth or CurseForge are
+      downloaded by each player&apos;s own Geode from there; every other jar in
+      the mods folder, including jars you added by hand, is sent as a copy.
+      Client mods go to players too, but this server never loads them. The one
+      exception is a mod you keep on this server, which you say per mod in the
+      Content tab: players get nothing of it, not the file and not its name.
     </p>
   );
 
@@ -928,7 +928,7 @@ export default function ShareTab({ server }: { server: Server }) {
                               tone: "warn",
                               title: "Saved, but not read back",
                               detail:
-                                "The files were saved. What this list shows is what you picked, which is not always what the backend decides a pick means — so until it is read again, take the rows below as your choices rather than as what will travel.",
+                                "The files were saved. These rows are what you picked, which is not always the same as what will travel — until the list is read again, treat them as your choices rather than as the pack's contents.",
                             }}
                           />
                           <p className="hint">{pickerStale}</p>

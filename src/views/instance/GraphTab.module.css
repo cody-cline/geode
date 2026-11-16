@@ -17,6 +17,48 @@
   flex-shrink: 0;
 }
 
+/* Mods / Plugins on a hybrid server. The segment at the shared spec — 30px,
+   `--radius-sm`, 13px, no fill until it is chosen and then a 14% `--accent`
+   wash with an `--accent-text` label — so this strip, the two Content tabs'
+   folders, Browse's kinds and `PlanSourceTabs` are one shape. The spec and the
+   reasoning are at the top of `InstanceView.module.css`.
+
+   Written out here rather than borrowed from a neighbour, which is what every
+   other copy of it does; there is a case for one shared class in `global.css`
+   and this rule should become it when there is. What it must not go back to is
+   a `btn-primary` on the chosen one: that style is the app's mark for the
+   action, and spending it on "this one is selected" is the one thing this
+   strip was. */
+.folders {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.folderTab {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-dim);
+  white-space: nowrap;
+  transition:
+    background 0.12s var(--ease),
+    color 0.12s var(--ease);
+}
+
+.folderTab:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.folderActive,
+.folderActive:hover {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent-text);
+}
+
 .searchWrap {
   position: relative;
   width: 210px;
@@ -36,6 +78,24 @@
   padding-left: 30px;
   height: 32px;
   width: 100%;
+}
+
+/* Room kept on the right so the text never runs under the printed key. Its
+   own class rather than a change to `.search`, for the reason the same pair
+   carries it on the Content tab: the hint is there only while the box can be
+   reached, and the gap would otherwise be 48px of nothing. */
+.searchHinted {
+  padding-right: 48px;
+}
+
+/* The key that reaches this box, printed in it. Wider than the hint needs so
+   the longer of the two spellings (`Ctrl+F`, `⌘F`) has the same room. */
+.searchKey {
+  position: absolute;
+  right: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
 }
 
 /* Most mods are connected to nothing, and that is the single most useful fact
@@ -292,6 +352,19 @@
 
 .alone .label {
   fill: var(--text-faint);
+}
+
+/* Which way the arrows point, written over the field that draws them and at
+   the opposite corner from `.clear`. Out of the pointer's way: the field under
+   it is dragged and panned, and a line of text is not a thing to catch that. */
+.legend {
+  position: absolute;
+  left: 22px;
+  bottom: 22px;
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-faint);
+  pointer-events: none;
 }
 
 .clear {

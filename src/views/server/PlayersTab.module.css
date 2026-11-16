@@ -114,6 +114,17 @@
   color: var(--text-dim);
 }
 
+/* Why one name out of a pasted list did not happen. The rows above and below
+   it may have gone through, so this is the one line in the report that has to
+   read as the exception rather than sink into the rest — and a refusal can be
+   a whole sentence, which `.meta` never has to carry. */
+.failed {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
 .rowActions {
   display: flex;
   align-items: center;

@@ -273,6 +273,12 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
   const running = instance.running;
   /** One import at a time, whichever of the two buttons started it. */
   const importing = busy === "importZip" || busy === "importFolder";
+  // The backups dialog's delete button, said twice down there — once in the
+  // bubble, once in a `title` for the states where the button is off — so the
+  // two cannot drift, the same way `renameSays` is.
+  const deleteBackupSays = running
+    ? "Stop the game to delete a backup"
+    : "Delete this backup";
 
   return (
     <div className={styles.wrap}>
@@ -438,32 +444,45 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
                 <div className={styles.itemText}>
                   <div className={styles.itemTitle}>
                     <span className={styles.itemName}>{world.name}</span>
+                    {/* The badges carry their sentence in this app's own
+                        bubble, the way the Content tab's do: the word on a
+                        badge is the short form and the sentence is the whole
+                        of what it means, which is a `title`'s worst case — a
+                        second of waiting, drawn in neither theme. No
+                        `tabIndex` with it, unlike that tab's: there is no
+                        arrow walk along this row for a badge to join, so the
+                        only stop on offer is a tab stop, and three more of
+                        them before the row's buttons cost more than the
+                        bubble is worth. */}
                     {/* Capitalised like the game mode beside it: both are
                         badges naming how the world plays, and one of them
                         was lowercase. */}
                     {world.hardcore && (
-                      <span className="badge" title="Hardcore: one life">
-                        Hardcore
-                      </span>
+                      <Tooltip text="Hardcore: one life">
+                        <span className="badge">Hardcore</span>
+                      </Tooltip>
                     )}
                     {mode && <span className="badge">{mode}</span>}
                     {world.version && (
-                      <span
-                        className={clsx("badge", ahead && "badge-warn")}
-                        title={
+                      <Tooltip
+                        text={
                           ahead
                             ? `Saved by Minecraft ${world.version}; this instance runs ${instance.mcVersion}`
                             : "The Minecraft version this world was last opened with"
                         }
                       >
-                        {ahead && <TriangleAlert size={10} />}
-                        {world.version}
-                      </span>
+                        <span className={clsx("badge", ahead && "badge-warn")}>
+                          {ahead && <TriangleAlert size={10} />}
+                          {world.version}
+                        </span>
+                      </Tooltip>
                     )}
                     {kept.length > 0 && (
-                      <span className="badge" title="Backups kept for this world">
-                        {kept.length} backup{kept.length === 1 ? "" : "s"}
-                      </span>
+                      <Tooltip text="Backups kept for this world">
+                        <span className="badge">
+                          {kept.length} backup{kept.length === 1 ? "" : "s"}
+                        </span>
+                      </Tooltip>
                     )}
                   </div>
                   <div className={styles.itemMeta}>
@@ -845,21 +864,21 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
                     only state you could get back to and you can neither use
                     it nor take another. It is also what the banner above
                     already promises: stop the game to change anything here. */}
-                <button
-                  className="btn btn-ghost btn-icon btn-sm"
-                  onClick={() =>
-                    setAsking({ kind: "deleteBackup", world: asking.world, backup })
-                  }
-                  disabled={running || busy === backup.name}
-                  title={
-                    running
-                      ? "Stop the game to delete a backup"
-                      : "Delete this backup"
-                  }
-                  aria-label={`Delete backup ${backup.name}`}
-                >
-                  <Trash2 size={14} />
-                </button>
+                <Tooltip text={deleteBackupSays}>
+                  <button
+                    className="btn btn-ghost btn-icon btn-sm"
+                    onClick={() =>
+                      setAsking({ kind: "deleteBackup", world: asking.world, backup })
+                    }
+                    disabled={running || busy === backup.name}
+                    title={
+                      running || busy === backup.name ? deleteBackupSays : undefined
+                    }
+                    aria-label={`Delete backup ${backup.name}`}
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </Tooltip>
               </div>
             ))}
           </div>

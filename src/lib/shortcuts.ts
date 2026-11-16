@@ -40,21 +40,36 @@ const ROUTE_SHORTCUTS: { key: string; route: Route }[] = [
  * `Escape` is written `Esc` on every keyboard that has one.
  */
 const ACTION_SHORTCUTS = [
-  /** Put the keyboard in the Content tab's Filter box. */
+  /** Put the keyboard in the box that narrows the list this screen is of. */
   { action: "focusFilter", key: "f", ctrl: true, label: "F" },
   /** Drop a selection of rows on the Content tab. */
   { action: "clearSelection", key: "Escape", ctrl: false, label: "Esc" },
   /**
    * Make the kind of thing the screen is a list of.
    *
-   * The one action bound on more than one screen, and still an action rather
-   * than a route: what "new" means is the screen's own answer — an instance in
-   * the library, a plan under Plans, a server under Servers — and it means
-   * nothing at all on the others. Each of the three binds it and prints it, so
-   * the key is the same promise everywhere it is made and silent everywhere it
-   * is not.
+   * An action rather than a route, though it is bound on three screens: what
+   * "new" means is the screen's own answer — an instance in the library, a
+   * plan under Plans, a server under Servers — and it means nothing at all on
+   * the others. Each of the three binds it and prints it, so the key is the
+   * same promise everywhere it is made and silent everywhere it is not.
    */
   { action: "newThing", key: "n", ctrl: true, label: "N" },
+  /**
+   * Play the instance, or start the server, the keyboard is on.
+   *
+   * The two things people open this app to do, and until now the two with no
+   * key at all. Bound on the Library and Servers grids, where it presses the
+   * focused card's own Play or Start button — so every reason that card has
+   * for not offering it is already answered before the key is.
+   *
+   * Enter with Ctrl, and both halves of that are the choice. Bare Enter is
+   * the card's: those grids are one tab stop with the cards walked by the
+   * arrows, so Enter on a card opens it, the way Enter on anything focused
+   * presses it. Holding Ctrl is the same key meant harder — the thing the
+   * card is *for* rather than the screen it leads to. A letter would have had
+   * to be P on one screen and S on the other, which is two keys for one act.
+   */
+  { action: "launch", key: "Enter", ctrl: true, label: "Enter" },
 ] as const;
 
 /** One of the actions a screen can bind, named by the table above. */

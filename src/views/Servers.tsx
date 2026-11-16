@@ -1,9 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import clsx from "clsx";
 import {
   AlertTriangle,
-  Clock,
   Cpu,
   Loader2,
   Play,
@@ -24,8 +23,11 @@ import { OLD_ADDRESS_LABEL, linksPointAtOldAddress } from "../lib/share";
 import { useStore } from "../lib/store";
 import type { Server } from "../lib/types";
 
+import { cardKeys, pressLaunch } from "./Library";
 // The Library's stylesheet, deliberately. A server is a profile with a console
-// attached, and the two lists should not be able to drift apart.
+// attached, and the two lists should not be able to drift apart — which is
+// the same reason the grid's keyboard is imported from there on the line
+// above rather than written again here.
 import styles from "./Library.module.css";
 
 type Sort = "recent" | "name" | "kind";
@@ -41,10 +43,34 @@ export default function Servers() {
   const [sort, setSort] = useState<Sort>("recent");
   const [creating, setCreating] = useState(false);
 
+  // Which card the keyboard is on, so Tab comes back to the one it left
+  // rather than to the top of the grid. Checked against the list below rather
+  // than trusted, because it outlives the search it was set under.
+  const [keyed, setKeyed] = useState<string | null>(null);
+  const searchBox = useRef<HTMLInputElement>(null);
+
   useActionShortcut("newThing", (e) => {
     e.preventDefault();
     setCreating(true);
   });
+
+  /**
+   * Ctrl+F reaches this screen's search box, as it does Library's and every
+   * filter box inside an instance or a server.
+   *
+   * Only once there is something to search: the box is not rendered until
+   * there is a server, and a key that focused nothing would cost the webview's
+   * own find bar and give nothing back.
+   */
+  useActionShortcut("focusFilter", (e) => {
+    const box = searchBox.current;
+    if (!box) return;
+    e.preventDefault();
+    box.focus();
+    box.select();
+  });
+
+  useActionShortcut("launch", pressLaunch);
   const [bringing, setBringing] = useState(false);
 
   useEffect(() => {
@@ -75,6 +101,9 @@ export default function Servers() {
     return sorted;
   }, [servers, search, sort]);
 
+  // The one card that answers Tab.
+  const stop = shown.some((s) => s.id === keyed) ? keyed : shown[0]?.id;
+
   return (
     <>
       <header className={styles.header}>
@@ -87,11 +116,16 @@ export default function Servers() {
               <div className={styles.searchWrap}>
                 <Search size={14} className={styles.searchIcon} />
                 <input
+                  ref={searchBox}
                   className={clsx("input", styles.search)}
                   placeholder="Search servers"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                 />
+                {/* The binding, printed in the box it reaches — the same hint
+                    in the same corner as Library's and as the four filter
+                    boxes deeper in. */}
+                <kbd className={styles.searchKey}>{actionHint("focusFilter")}</kbd>
               </div>
               <select
                 className="select"
@@ -190,11 +224,26 @@ export default function Servers() {
         ) : shown.length === 0 ? (
           <p className={styles.noResults}>Nothing matches “{search}”.</p>
         ) : (
-          <div className={styles.grid}>
+          /* The same grid Library declares and the keyboard that goes with
+             it — see `cardKeys` there. The two lists are one shape and now
+             answer one set of keys. */
+          <div
+            className={styles.grid}
+            role="grid"
+            aria-label="Servers"
+            onKeyDown={(e) => cardKeys(e, (id) => navigate({ view: "server", id }))}
+            onFocus={(e) => {
+              const card = (e.target as HTMLElement).closest<HTMLElement>(
+                "[data-row]",
+              );
+              if (card?.dataset.row) setKeyed(card.dataset.row);
+            }}
+          >
             {shown.map((server) => (
               <ServerCard
                 key={server.id}
                 server={server}
+                stop={server.id === stop}
                 onOpen={() => navigate({ view: "server", id: server.id })}
               />
             ))}
@@ -221,9 +270,11 @@ export default function Servers() {
 
 function ServerCard({
   server,
+  stop,
   onOpen,
 }: {
   server: Server;
+  stop: boolean;
   onOpen: () => void;
 }) {
   const refreshServers = useStore((s) => s.refreshServers);
@@ -256,16 +307,17 @@ function ServerCard({
   const contentCount = server.contentCount;
 
   return (
-    <article className={clsx(styles.card, server.running && styles.cardRunning)}>
+    <article
+      className={clsx(styles.card, server.running && styles.cardRunning)}
+      role="row"
+      data-row={server.id}
+      tabIndex={stop ? 0 : -1}
+    >
       {/* An uploaded banner if there is one, otherwise the generated wash —
           the same branch an instance without artwork takes, which keeps one
-          silhouette across the grid. */}
-      <button
-        className={styles.art}
-        onClick={onOpen}
-        tabIndex={-1}
-        aria-hidden="true"
-      >
+          silhouette across the grid. A span rather than a button for the
+          reason the library card's is one. */}
+      <span className={styles.art} onClick={onOpen} aria-hidden="true">
         {server.bannerPath ? (
           <img src={convertFileSrc(server.bannerPath)} alt="" loading="lazy" />
         ) : (
@@ -277,77 +329,96 @@ function ServerCard({
           />
         )}
         <span className={styles.artScrim} />
-      </button>
+      </span>
 
-      <button className={styles.cardBody} onClick={onOpen}>
-        <span className={styles.iconRing}>
-          <InstanceIcon
-            instance={{
-              id: server.id,
-              name: server.name,
-              iconPath: server.iconPath,
-            }}
-            size={46}
-          />
-        </span>
-        {/* Spans for the same reason as the library card: this is inside a
-            button, where block elements are not allowed. */}
-        <span className={styles.cardText}>
-          <span className={styles.cardName}>{server.name}</span>
-          <span className={styles.cardMeta}>
-            {server.mcVersion} · {server.kindName}
+      {/* The card's two cells — what the thing is, and what you can do
+          about it — which is the same two on every card in the grid.
+          `role` goes on a wrapper rather than on the button inside it,
+          because putting it on the button would take the button's own
+          role away; the same place `ProjectCard` puts its two. */}
+      <div className={styles.bodyCell} role="gridcell">
+        <button className={styles.cardBody} onClick={onOpen} tabIndex={-1}>
+          <span className={styles.iconRing}>
+            <InstanceIcon
+              instance={{
+                id: server.id,
+                name: server.name,
+                iconPath: server.iconPath,
+              }}
+              size={46}
+            />
           </span>
-          <span className={styles.cardStats}>
-            {contentCount > 0 && (
-              <span className={styles.stat}>
-                {contentCount} item{contentCount === 1 ? "" : "s"}
-              </span>
-            )}
-            <span className={styles.stat}>
-              <Cpu size={11} />
-              {server.settings.memoryMb} MB
+          {/* Spans for the same reason as the library card: this is inside a
+              button, where block elements are not allowed. */}
+          <span className={styles.cardText}>
+            <span className={styles.cardName}>{server.name}</span>
+            <span className={styles.cardMeta}>
+              {server.mcVersion} · {server.kindName}
             </span>
-            {/* Among the server's other facts rather than over its artwork, so
-                the grid keeps one silhouette. Clicking it opens the server,
-                which is where the link to send instead is. */}
-            {linksPointAtOldAddress(shareStatus, server.lastLinkAddress) && (
-              <span
-                className="badge badge-warn"
-                role="img"
-                title={OLD_ADDRESS_LABEL}
-                aria-label={OLD_ADDRESS_LABEL}
-              >
-                <AlertTriangle size={11} aria-hidden="true" />
-                Old address
+            <span className={styles.cardStats}>
+              {contentCount > 0 && (
+                <span className={styles.stat}>
+                  {contentCount} item{contentCount === 1 ? "" : "s"}
+                </span>
+              )}
+              <span className={styles.stat}>
+                <Cpu size={11} />
+                {server.settings.memoryMb} MB
               </span>
-            )}
+              {/* Among the server's other facts rather than over its artwork, so
+                  the grid keeps one silhouette. Clicking it opens the server,
+                  which is where the link to send instead is. */}
+              {linksPointAtOldAddress(shareStatus, server.lastLinkAddress) && (
+                <span
+                  className="badge badge-warn"
+                  role="img"
+                  title={OLD_ADDRESS_LABEL}
+                  aria-label={OLD_ADDRESS_LABEL}
+                >
+                  <AlertTriangle size={11} aria-hidden="true" />
+                  Old address
+                </span>
+              )}
+            </span>
           </span>
-        </span>
-      </button>
+        </button>
+      </div>
 
-      <div className={styles.cardFoot}>
+      <div className={styles.cardFoot} role="gridcell">
         <span className={styles.lastPlayed}>
-          {server.running ? (
-            "Running"
-          ) : installing ? (
-            (progress?.stage ?? "Installing…")
-          ) : !server.installed ? (
-            "Not installed"
-          ) : server.lastStarted ? (
-            // "Last started", the words the server's own header uses for this
-            // fact — a server is started where an instance is played, but the
-            // shape is one shape. The card said "Ran 3 days ago" to the
-            // header's "Last started 3 days ago".
-            <>
-              <Clock size={11} /> Last started {relativeTime(server.lastStarted)}
-            </>
-          ) : (
-            "Never started"
-          )}
+          {server.running
+            ? "Running"
+            : installing
+              ? (progress?.stage ?? "Installing…")
+              : !server.installed
+                ? "Not installed"
+                : server.lastStarted
+                  ? /* "Last started", the words the server's own header uses
+                       for this fact — a server is started where an instance
+                       is played, but the shape is one shape. The card said
+                       "Ran 3 days ago" to the header's "Last started 3 days
+                       ago".
+
+                       Words alone, as the library card's footer is. A clock
+                       sat here and on none of this slot's other four states,
+                       so the text moved sideways as a server was installed or
+                       started; and it sat on the server card and not on the
+                       instance card beside it in the sidebar, where the same
+                       slot says the same kind of thing at the same height.
+                       Dropping it settles both — and the instance card
+                       already spends a clock on the playtime above, which is
+                       one per card. */
+                    `Last started ${relativeTime(server.lastStarted)}`
+                  : "Never started"}
         </span>
 
         {server.running ? (
-          <button className="btn btn-sm btn-danger" onClick={() => void toggle()} disabled={busy}>
+          <button
+            className="btn btn-sm btn-danger"
+            onClick={() => void toggle()}
+            disabled={busy}
+            tabIndex={-1}
+          >
             {busy ? (
               <Loader2 size={12} className="spin" />
             ) : (
@@ -360,6 +431,8 @@ function ServerCard({
             className="btn btn-sm btn-primary"
             onClick={() => void toggle()}
             disabled={busy || installing || !server.installed}
+            tabIndex={-1}
+            data-launch
             title={
               server.installed
                 ? undefined
@@ -372,6 +445,10 @@ function ServerCard({
               <Play size={12} fill="currentColor" />
             )}
             Start
+            {/* The key, printed in the button it presses — and only while the
+                keyboard is in this card, for the reason the library card's
+                Play button gives. */}
+            <kbd className={styles.launchKey}>{actionHint("launch")}</kbd>
           </button>
         )}
       </div>

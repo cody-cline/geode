@@ -1483,6 +1483,12 @@ function SettingsTab({ server }: { server: Server }) {
             </span>
           </span>
         </label>
+        {/* Shown whether or not this copy knows of a host, because the setting
+            travels with the server when it is moved to one — so it is set here
+            before there is a host to set it for. Which is why this says what a
+            host is instead of naming the program that is one: Settings →
+            Server hosts is where somebody meets that name, and a player with
+            one server on their own PC never goes there. */}
         <label className={styles.settingToggle}>
           <input
             type="checkbox"
@@ -1492,16 +1498,16 @@ function SettingsTab({ server }: { server: Server }) {
             }
           />
           <span>
-            <strong>Start it when a headless host starts</strong>
+            <strong>Start it when a host starts</strong>
             <span className={styles.settingWhy}>
-              For a server running on <code>geoded</code>: after a reboot, a
-              container restart or a crash of the machine itself, this server
-              comes back on its own. Nothing is assumed — a host does not
-              restore whatever happened to be running, because a server you
-              stopped a minute before the power went out should stay stopped.
-              This window ignores the setting: exiting Geode stops its servers
-              on purpose, and closing the window leaves them running when it
-              leaves Geode in the tray.
+              If this server is moved to a host — another machine running Geode
+              with no window — it comes back on its own after a reboot, a
+              container restart or a crash of the machine itself. Nothing is
+              assumed — a host does not restore whatever happened to be
+              running, because a server you stopped a minute before the power
+              went out should stay stopped. This window ignores the setting:
+              exiting Geode stops its servers on purpose, and closing the
+              window leaves them running when it leaves Geode in the tray.
             </span>
           </span>
         </label>
@@ -1521,10 +1527,10 @@ function SettingsTab({ server }: { server: Server }) {
             are both "this server leaves this machine", and one of them is
             recoverable. */}
         <p className={styles.pending}>
-          A server can be moved or copied to a machine running Geode headless.
-          Everything goes: its world, its settings, its content, its artwork and
-          its backups. A move deletes this copy only once the other side has
-          checked every file it received.
+          A server can be moved or copied to a host. Everything goes: its
+          world, its settings, its content, its artwork and its backups. A move
+          deletes this copy only once the other side has checked every file it
+          received.
         </p>
         <button
           className="btn"

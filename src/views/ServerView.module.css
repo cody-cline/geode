@@ -348,19 +348,19 @@
 }
 
 .number {
-  color: #7fd1b9;
+  color: var(--console-number);
 }
 
 .address {
-  color: #7fb4d1;
+  color: var(--console-address);
 }
 
 .player {
-  color: #b39ddb;
+  color: var(--console-player);
 }
 
 .path {
-  color: #d1b87f;
+  color: var(--console-path);
 }
 
 .fault {

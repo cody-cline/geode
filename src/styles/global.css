@@ -62,6 +62,18 @@
   --warn-text: #fbbf24;
   --info: #60a5fa;
 
+  /* The four things the server console picks out of a line: a number, an
+     address, a player's name, a path. They lived as raw hex in
+     `ServerView.module.css` and so did not follow the theme — the console
+     sits on `--bg`, which is near-white in the light theme, and all four
+     landed between 1.67:1 and 2.23:1 there. Tokens because that is what the
+     contrast sweep can see; the dark values below are exactly the hex they
+     replace, so the console nobody complained about looks the same. */
+  --console-number: #7fd1b9;
+  --console-address: #7fb4d1;
+  --console-player: #b39ddb;
+  --console-path: #d1b87f;
+
   /* Sinytra Connector's own colour. A supported route, just not the preferred
      one, so it is neither a provider nor a warning — and the three files that
      said so had each hardcoded #a78bfa at a different mix (15/34, 16/38, 22)
@@ -148,6 +160,13 @@
      came back. 3.90:1 on `--surface-3`, which is what a Browse row becomes
      under the pointer. The wash keeps `--warn`; the word takes this. */
   --warn-text: #6d5210;
+  /* The console's four, at the same hues and dark enough for the sweep's
+     darkest light surface: 4.7:1 or better on all four, against 1.67–2.23:1
+     for the dark theme's values that were being used in both themes. */
+  --console-number: #23745c;
+  --console-address: #2b6d92;
+  --console-player: #794dc9;
+  --console-path: #7e6326;
   --info: #3c689d;
   --connector-text: #645395;
 

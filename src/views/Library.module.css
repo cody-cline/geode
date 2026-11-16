@@ -36,6 +36,21 @@
 .search {
   width: 230px;
   padding-left: 31px;
+  /* Room on the right for the printed binding, so the typed text never runs
+     under it. The box and the hint are rendered together, so unlike the
+     Content tab's there is no state in which this padding is an empty gap. */
+  padding-right: 48px;
+}
+
+/* The key that reaches the box, printed in it — the same corner it sits in on
+   the four filter boxes deeper inside an instance or a server, so the control
+   does not move between the screens that answer the same press. */
+.searchKey {
+  position: absolute;
+  right: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
 }
 
 .scroll {
@@ -86,9 +101,23 @@
   background: var(--surface);
   box-shadow: 0 0 0 1px var(--border);
   overflow: hidden;
+  /* The card is the grid's one tab stop and the arrows walk it, so it is
+     scrolled into view by being focused rather than by being clicked. The
+     focus ring is drawn 2px outside it — `:focus-visible` in `global.css` —
+     and a card brought to the very edge of the scroller has that ring cut in
+     half. The same margin the mod list's rows keep, for the same reason. */
+  scroll-margin: 6px;
   transition:
     box-shadow 0.14s var(--ease),
     transform 0.14s var(--ease);
+}
+
+/* `:focus-visible` in `global.css` sets a radius for the ring it draws, and
+   it sets it on the element — which at equal specificity would square this
+   card's corners off to 6px for as long as the keyboard was on it. Said again
+   here so the ring follows the card's own corners and the card keeps them. */
+.card:focus-visible {
+  border-radius: var(--radius);
 }
 
 .card:hover {
@@ -174,6 +203,15 @@
   flex-shrink: 0;
 }
 
+/* The cell the card's subject sits in. It has no look of its own — it exists
+   because `role="gridcell"` cannot go on the button inside it without taking
+   that button's role away — so all it does is pass the body's growth through,
+   which is what keeps the footers lined up across a row of cards. */
+.bodyCell {
+  display: flex;
+  flex: 1;
+}
+
 .cardBody {
   position: relative;
   z-index: 1;
@@ -183,8 +221,8 @@
   padding: 0 14px 14px;
   text-align: left;
   width: 100%;
-  /* Grow so footers line up across a row even when cards carry
-     different numbers of stat chips. */
+  /* Fill the cell, which is itself what grows — so footers line up across a
+     row even when cards carry different numbers of stat chips. */
   flex: 1;
 }
 
@@ -301,4 +339,20 @@
    held off it, so the button still reads as its words first. */
 .newKey {
   margin-left: 2px;
+}
+
+/* The same, on the card's Play or Start button — but out of sight until the
+   keyboard is in the card, because the key presses *that* card's button and
+   nothing else. Printed in every footer it would be twenty standing claims
+   about twenty cards the key is not pointed at, and 60px of button taken out
+   of the timestamp beside it on every one of them. `display: none` rather
+   than a hidden-but-reserved width for that second reason: the space is the
+   cost being avoided. */
+.launchKey {
+  display: none;
+  margin-left: 2px;
+}
+
+.card:focus-within .launchKey {
+  display: inline;
 }

@@ -88,6 +88,14 @@ const TEXT = [
   "--modrinth-text",
   "--curseforge-text",
   "--spiget-text",
+  // The server console's four. They were raw hex in ServerView.module.css
+  // until they were measured: the console sits on `--bg`, which is near-white
+  // in the light theme, and one dark-theme mint landed at 1.67:1 there. The
+  // sweep could not see them because it reads tokens and they were not one.
+  "--console-number",
+  "--console-address",
+  "--console-player",
+  "--console-path",
 ];
 
 test("every text colour is readable on every surface, in both themes", async () => {

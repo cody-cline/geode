@@ -662,7 +662,7 @@ export default function ContentTab({
         kind: report.identified > 0 ? "success" : "info",
         title:
           report.identified > 0
-            ? `Linked ${report.identified} file${report.identified === 1 ? "" : "s"}`
+            ? `Identified ${report.identified} file${report.identified === 1 ? "" : "s"}`
             : "Nothing new could be identified",
         body:
           report.unknown > 0

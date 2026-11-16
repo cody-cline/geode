@@ -36,6 +36,11 @@ import styles from "./PlayersTab.module.css";
  * The file name is here because the screen says it out loud: when the server is
  * stopped Geode writes that file, and an admin is owed the name of the thing
  * being written.
+ *
+ * Every placeholder ends in "or several", which is where the field says it
+ * takes a pasted list. Here rather than as a note under each card: four cards
+ * would have carried four copies of one sentence, which is the thing the note
+ * at the foot of `ListPane` was written to stop.
  */
 const LISTS = [
   {
@@ -46,7 +51,7 @@ const LISTS = [
     blurb: "Who may join, when the whitelist is on.",
     empty: "Nobody is whitelisted.",
     remove: "Remove",
-    placeholder: "Minecraft name",
+    placeholder: "Minecraft name, or several",
     reason: false,
     level: false,
   },
@@ -58,7 +63,7 @@ const LISTS = [
     blurb: "Who may run the server's commands.",
     empty: "No operators.",
     remove: "Remove",
-    placeholder: "Minecraft name",
+    placeholder: "Minecraft name, or several",
     reason: false,
     level: true,
   },
@@ -70,7 +75,7 @@ const LISTS = [
     blurb: "Kept out until the ban is lifted.",
     empty: "Nobody is banned.",
     remove: "Lift the ban",
-    placeholder: "Minecraft name",
+    placeholder: "Minecraft name, or several",
     reason: true,
     level: false,
   },
@@ -82,7 +87,7 @@ const LISTS = [
     blurb: "Everyone connecting from that address is kept out.",
     empty: "No addresses are banned.",
     remove: "Lift the ban",
-    placeholder: "203.0.113.9",
+    placeholder: "203.0.113.9, or several",
     reason: true,
     level: false,
   },
@@ -119,13 +124,38 @@ type Labels = {
   failed: string;
 };
 
+/**
+ * What one name out of a pasted list got back.
+ *
+ * The same split as `Labels`, for the same reason. Through the console the
+ * server's own words are the whole of the result; a file Geode wrote is the
+ * one direction whose outcome Geode can state itself; and anything else —
+ * including a server that answered nothing at all, which the core refuses to
+ * call a result — arrives here as the reason it did not happen. So a name is
+ * never counted into a total that claims more than its own answer did.
+ */
+type Outcome = {
+  name: string;
+  /** What the server said, when the console was the way in. */
+  said: string[] | null;
+  /** Why it did not happen, when it did not. */
+  failed: string | null;
+};
+
 /** A confirmation that names who it affects and says what it does. */
-type Ask = Labels & {
+type Ask = {
   title: string;
   body: string;
   verb: string;
   danger: boolean;
-  run: () => Promise<PlayerChange>;
+  /**
+   * What pressing the verb does, reporting what came of it as it goes.
+   *
+   * A function rather than the change itself, because one press is not always
+   * one change: a pasted list is one confirmation over several, and the
+   * several cannot be reported as one.
+   */
+  go: () => Promise<void>;
 };
 
 /**
@@ -145,11 +175,30 @@ function labelOf(entry: PlayerListEntry): string {
  *
  * Shared so the ban offered from the online list and the ban typed into a
  * pane's own field cannot come to say different things about the same act.
+ * `many` moves the verb and nothing else: a pasted list of names is that same
+ * act said of several people, and saying it a second way for them is the very
+ * thing this function exists to stop.
  */
-function banBody(list: PlayerListId, who: string): string {
+function banBody(list: PlayerListId, who: string, many = false): string {
   return list === "ip-bans"
     ? `Everyone connecting from ${who} is kept out until the ban is lifted.`
-    : `${who} is put off the server and kept out until the ban is lifted. That is not a kick — a kick lets them come straight back.`;
+    : `${who} ${many ? "are" : "is"} put off the server and kept out until the ban is lifted. That is not a kick — a kick lets them come straight back.`;
+}
+
+/**
+ * The names in what was typed or pasted into an add field.
+ *
+ * Whitespace and commas both. A list of players arrives as a column out of a
+ * spreadsheet or a comma-separated line out of a message, and a single-line
+ * field does not keep the newlines of the first — the browser hands them over
+ * as spaces — so the spaces have to count as separators too. Nothing is lost
+ * by that: a Minecraft name is three to sixteen letters, numbers or
+ * underscores, and an IP address has no spaces either, so a space in this
+ * field was never inside one target. The same name twice is one name, because
+ * a pasted list repeats and two answers for one person is not a report.
+ */
+function namesIn(text: string): string[] {
+  return [...new Set(text.split(/[\s,]+/).filter(Boolean))];
 }
 
 function entriesOf(lists: PlayerLists, list: PlayerListId): PlayerListEntry[] {
@@ -217,6 +266,18 @@ export default function PlayersTab({ server }: { server: Server }) {
   const [asking, setAsking] = useState(false);
   const [busy, setBusy] = useState(false);
   const [ask, setAsk] = useState<Ask | null>(null);
+
+  /**
+   * What each name of a pasted list got back, once they all have.
+   *
+   * A report rather than a toast because a toast is one headline over one
+   * body and takes itself away after a few seconds, and ten names can have
+   * ten different answers — none of which may be summed into an eleventh.
+   */
+  const [report, setReport] = useState<{
+    config: ListConfig;
+    done: Outcome[];
+  } | null>(null);
 
   /**
    * Why the lists could not be read, when they could not.
@@ -313,6 +374,56 @@ export default function PlayersTab({ server }: { server: Server }) {
     }
   }
 
+  /**
+   * Run one add per name and keep what each one answered.
+   *
+   * One after another because the console is: whoever waits on a reply takes
+   * every line it produces while they wait, so two of these overlapping would
+   * collect each other's answers. A name that fails does not stop the ones
+   * after it — a name Mojang cannot place is that name's problem and no
+   * other's.
+   *
+   * Nothing is added up. Ten names can get ten different answers, and a
+   * single "done" over them could only be arrived at by treating some answer
+   * as a success nobody gave — which is the one thing this screen must never
+   * do. So every name keeps its own answer and the report shows them.
+   */
+  async function applyMany(
+    config: ListConfig,
+    names: string[],
+    reason?: string,
+    level?: number,
+  ) {
+    setBusy(true);
+    const done: Outcome[] = [];
+    try {
+      for (const name of names) {
+        try {
+          const change = await api.addToServerList(
+            server.id,
+            config.id,
+            name,
+            reason,
+            level,
+          );
+          setLists(change.lists);
+          done.push({
+            name,
+            said: change.via === "console" ? change.said : null,
+            failed: null,
+          });
+        } catch (e) {
+          done.push({ name, said: null, failed: errorMessage(e) });
+        }
+      }
+    } finally {
+      setBusy(false);
+      setAsk(null);
+      setReport({ config, done });
+      if (liveList && done.some((d) => d.said)) void refreshOnline();
+    }
+  }
+
   if (!lists) {
     return listsProblem ? (
       <div className={styles.loadFailed}>
@@ -370,11 +481,7 @@ export default function PlayersTab({ server }: { server: Server }) {
       },
     };
     const lifting = config.id === "bans" || config.id === "ip-bans";
-    setAsk({
-      ...copy[config.id],
-      body: `${copy[config.id].body} ${direction(config.file)}`,
-      verb: lifting ? "Lift the ban" : "Remove",
-      danger: config.id === "whitelist" || config.id === "ops",
+    const labels = {
       done: lifting
         ? `Lifted the ban on ${who}`
         : `Removed ${who} from ${config.title.toLowerCase()}`,
@@ -384,15 +491,23 @@ export default function PlayersTab({ server }: { server: Server }) {
       failed: lifting
         ? `Could not lift the ban on ${who}`
         : `Could not take ${who} off ${config.title.toLowerCase()}`,
+    };
+    setAsk({
+      ...copy[config.id],
+      body: `${copy[config.id].body} ${direction(config.file)}`,
+      verb: lifting ? "Lift the ban" : "Remove",
+      danger: config.id === "whitelist" || config.id === "ops",
       // Named to the core by the key its file is keyed by, not by the name it
       // shows: two accounts can be recorded under one name, and only the UUID
       // picks out the row the admin clicked.
-      run: () =>
-        api.removeFromServerList(
-          server.id,
-          config.id,
-          entry.ip ?? entry.name,
-          entry.uuid || undefined,
+      go: () =>
+        apply(labels, () =>
+          api.removeFromServerList(
+            server.id,
+            config.id,
+            entry.ip ?? entry.name,
+            entry.uuid || undefined,
+          ),
         ),
     });
   }
@@ -417,19 +532,50 @@ export default function PlayersTab({ server }: { server: Server }) {
       asked: `Asked the server to add ${target} to ${config.title.toLowerCase()}`,
       failed: `Could not add ${target} to ${config.title.toLowerCase()}`,
     };
-    const run = () =>
-      api.addToServerList(server.id, config.id, target, reason, level);
+    const go = () =>
+      apply(labels, () =>
+        api.addToServerList(server.id, config.id, target, reason, level),
+      );
     if (config.id !== "bans" && config.id !== "ip-bans") {
-      void apply(labels, run);
+      void go();
       return;
     }
     setAsk({
-      ...labels,
       title: `Ban ${target}?`,
       body: `${banBody(config.id, target)} ${direction(config.file)}`,
       verb: "Ban",
       danger: true,
-      run,
+      go,
+    });
+  }
+
+  /**
+   * Put a pasted list of names on a list, one at a time.
+   *
+   * Confirmed whichever list it is, where a single name on the whitelist is
+   * not. The dialog is where the split is shown back, and that is worth a
+   * press: a paste that came apart somewhere unexpected is visible there for
+   * the price of reading it, rather than as three refusals afterwards.
+   */
+  function addMany(
+    config: ListConfig,
+    names: string[],
+    reason?: string,
+    level?: number,
+  ) {
+    const banning = config.id === "bans" || config.id === "ip-bans";
+    setAsk({
+      title: banning
+        ? `Ban ${names.length} ${config.id === "ip-bans" ? "addresses" : "players"}?`
+        : `Add ${names.length} names to ${config.title.toLowerCase()}?`,
+      body: `${
+        banning
+          ? banBody(config.id, names.join(", "), names.length > 1)
+          : `${names.join(", ")}.`
+      } ${direction(config.file)} Each name goes on its own, so each one comes back with its own answer.`,
+      verb: banning ? "Ban" : "Add",
+      danger: banning,
+      go: () => applyMany(config, names, reason, level),
     });
   }
 
@@ -439,10 +585,15 @@ export default function PlayersTab({ server }: { server: Server }) {
       body: `${banBody("bans", name)} ${direction("banned-players.json")}`,
       verb: "Ban",
       danger: true,
-      done: `Banned ${name}`,
-      asked: `Asked the server to ban ${name}`,
-      failed: `Could not ban ${name}`,
-      run: () => api.addToServerList(server.id, "bans", name),
+      go: () =>
+        apply(
+          {
+            done: `Banned ${name}`,
+            asked: `Asked the server to ban ${name}`,
+            failed: `Could not ban ${name}`,
+          },
+          () => api.addToServerList(server.id, "bans", name),
+        ),
     });
   }
 
@@ -452,10 +603,15 @@ export default function PlayersTab({ server }: { server: Server }) {
       body: `${name} is put off the server now and can join again straight away. It is not a ban, and nothing is written to any list.`,
       verb: "Kick",
       danger: true,
-      done: `Kicked ${name}`,
-      asked: `Asked the server to kick ${name}`,
-      failed: `Could not kick ${name}`,
-      run: () => api.kickServerPlayer(server.id, name),
+      go: () =>
+        apply(
+          {
+            done: `Kicked ${name}`,
+            asked: `Asked the server to kick ${name}`,
+            failed: `Could not kick ${name}`,
+          },
+          () => api.kickServerPlayer(server.id, name),
+        ),
     });
   }
 
@@ -465,12 +621,25 @@ export default function PlayersTab({ server }: { server: Server }) {
       body: `Operators can run this server's commands, including banning other players. ${direction("ops.json")}`,
       verb: "Make operator",
       danger: false,
-      done: `${name} is an operator`,
-      asked: `Asked the server to make ${name} an operator`,
-      failed: `Could not make ${name} an operator`,
-      run: () => api.addToServerList(server.id, "ops", name),
+      go: () =>
+        apply(
+          {
+            done: `${name} is an operator`,
+            asked: `Asked the server to make ${name} an operator`,
+            failed: `Could not make ${name} an operator`,
+          },
+          () => api.addToServerList(server.id, "ops", name),
+        ),
     });
   }
+
+  // A pasted list counted in the registers its directions allow, and never
+  // summed across them: a file Geode wrote is a result Geode knows, a console
+  // reply is only what the server said, and a name that got neither did not
+  // happen at all.
+  const wrote = report?.done.filter((d) => !d.failed && !d.said).length ?? 0;
+  const answered = report?.done.filter((d) => d.said).length ?? 0;
+  const missed = report?.done.filter((d) => d.failed).length ?? 0;
 
   return (
     // The pane's own geometry comes from `settings`, the class every other tab
@@ -481,9 +650,12 @@ export default function PlayersTab({ server }: { server: Server }) {
           said once, before any of them. The second of those used to be a note
           under each card, which put the same sentence on the screen three
           times with only the file name differing — and the rule is not the
-          file's, it is this screen's. "Where a list is keyed by UUID" rather
-          than "these files are": banned-ips.json is keyed by address, and it
-          is one of the four cards below. */}
+          file's, it is this screen's. The three lists it holds for are named
+          rather than described as "where a list is keyed by UUID": that was
+          written to stay true of banned-ips.json, which is keyed by address
+          and is one of the four cards below, but naming the other three is
+          exactly as true and is a sentence an admin already has the words
+          for. */}
       <p className="hint">
         {lists.running
           ? "This server is running, so it owns these files: changes go through its console, and what it says back is shown as it said it."
@@ -492,7 +664,7 @@ export default function PlayersTab({ server }: { server: Server }) {
         hands, so the UUID beneath each one is the identity.{" "}
         {!lists.running &&
           (lists.onlineMode
-            ? "Where a list is keyed by UUID, a name is checked with Mojang before anything is written, and one Mojang does not know is reported rather than guessed at."
+            ? "The whitelist, operators and banned players go by UUID, so a name is checked with Mojang before anything is written, and one Mojang does not know is reported rather than guessed at."
             : "This server has authentication off, so a UUID is the one Minecraft itself derives from the name — no lookup needed.")}
       </p>
 
@@ -617,6 +789,9 @@ export default function PlayersTab({ server }: { server: Server }) {
           onAdd={(target, reason, level) =>
             addTo(config, target, reason, level)
           }
+          onAddMany={(names, reason, level) =>
+            addMany(config, names, reason, level)
+          }
           onToggleWhitelist={(on) =>
             apply(
               {
@@ -647,12 +822,7 @@ export default function PlayersTab({ server }: { server: Server }) {
               <button
                 className={clsx("btn", ask.danger ? "btn-danger" : "btn-primary")}
                 disabled={inFlight}
-                onClick={() =>
-                  void apply(
-                    { done: ask.done, asked: ask.asked, failed: ask.failed },
-                    ask.run,
-                  )
-                }
+                onClick={() => void ask.go()}
               >
                 {busy && <Loader2 size={14} className="spin" />}
                 {ask.verb}
@@ -661,6 +831,41 @@ export default function PlayersTab({ server }: { server: Server }) {
           }
         >
           <p className={styles.askBody}>{ask.body}</p>
+        </Modal>
+      )}
+
+      {/* A row per name, each carrying the answer that name got, under a lead
+          that counts them without ever adding one register to the other. */}
+      {report && (
+        <Modal
+          title={`${report.done.length} names, one at a time`}
+          onClose={() => setReport(null)}
+          width={460}
+          footer={
+            <button className="btn btn-primary" onClick={() => setReport(null)}>
+              Done
+            </button>
+          }
+        >
+          <p className={styles.askBody}>
+            {answered > 0 &&
+              `${answered} went to the console, and what the server said to each is beside it. `}
+            {wrote > 0 && `Geode wrote ${wrote} to ${report.config.file}. `}
+            {missed > 0 &&
+              `${missed} of the ${report.done.length} did not happen, and why is beside the name.`}
+          </p>
+          <ul className={styles.rows}>
+            {report.done.map((d) => (
+              <li key={d.name} className={styles.row}>
+                <div className={styles.who}>
+                  <span className={styles.name}>{d.name}</span>
+                  <span className={d.failed ? styles.failed : styles.meta}>
+                    {d.failed ?? (d.said ? d.said.join(" ") : "Written")}
+                  </span>
+                </div>
+              </li>
+            ))}
+          </ul>
         </Modal>
       )}
     </div>
@@ -673,6 +878,7 @@ function ListPane({
   lists,
   busy,
   onAdd,
+  onAddMany,
   onRemove,
   onToggleWhitelist,
 }: {
@@ -680,6 +886,7 @@ function ListPane({
   lists: PlayerLists;
   busy: boolean;
   onAdd: (target: string, reason?: string, level?: number) => void;
+  onAddMany: (names: string[], reason?: string, level?: number) => void;
   onRemove: (entry: PlayerListEntry) => void;
   onToggleWhitelist: (on: boolean) => void;
 }) {
@@ -697,14 +904,17 @@ function ListPane({
   // Only while stopped: /op takes no level, so a running server sets it from
   // its own op-permission-level.
   const levelled = config.level && !lists.running;
+  // What is in the field, read as the list it may be. One name is the path it
+  // always was — the same call, the same toast — so nothing about adding one
+  // person changes for somebody who has never pasted anything here.
+  const typed = namesIn(target);
 
   function submit() {
-    if (!target.trim()) return;
-    onAdd(
-      target.trim(),
-      config.reason && reason.trim() ? reason.trim() : undefined,
-      levelled ? level : undefined,
-    );
+    if (typed.length === 0) return;
+    const why = config.reason && reason.trim() ? reason.trim() : undefined;
+    const lvl = levelled ? level : undefined;
+    if (typed.length === 1) onAdd(typed[0], why, lvl);
+    else onAddMany(typed, why, lvl);
     setTarget("");
     setReason("");
   }
@@ -838,13 +1048,16 @@ function ListPane({
             ))}
           </select>
         )}
+        {/* The count is how the field says it read a paste as several names
+            before any of them is sent, which is the only moment a split that
+            went wrong can still be taken back for nothing. */}
         <button
           className="btn"
-          disabled={busy || !addable || !target.trim()}
+          disabled={busy || !addable || typed.length === 0}
           onClick={submit}
         >
           <Plus size={13} />
-          Add
+          {typed.length > 1 ? `Add ${typed.length}` : "Add"}
         </button>
       </div>
 

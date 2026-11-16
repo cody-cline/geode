@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import clsx from "clsx";
 import {
@@ -25,10 +26,76 @@ import { formatDuration, useStore } from "../lib/store";
 import { hashHue, relativeTime } from "../lib/format";
 import { LOADERS } from "../lib/types";
 import type { Instance } from "../lib/types";
+// The mod list's keyboard, imported rather than written again — see `cardKeys`.
+import { rowKeys } from "./instance/ContentTab";
 
 import styles from "./Library.module.css";
 
 type Sort = "recent" | "name" | "played";
+
+/**
+ * The two front-door grids' keyboard, which is the mod list's with one key
+ * added.
+ *
+ * `rowKeys` is the whole of the walk — one tab stop for the grid, Up and Down
+ * between the cards, Left and Right across the card's own controls, Home and
+ * End to the ends — and it is imported rather than copied so the four arrows
+ * mean the same two things in every list in this app. Twenty instances were
+ * forty tab stops here, two per card, with no arrow key doing anything at
+ * all; they are one stop and a walk now, and End is the far end of it.
+ *
+ * Up and Down walk the cards in reading order however many columns the window
+ * happens to fit, for the reason Browse's category rail gives about its own:
+ * the column count here is `auto-fill`'s answer to the width, so it is the
+ * window's fact and not the list's, and "the next card" is the only thing a
+ * press can mean that is the same at every size.
+ *
+ * The one key `rowKeys` leaves to the caller is Enter. On the mod list it
+ * takes a row into the selection; these grids have none, so here it does what
+ * clicking the card does — but only bare. Ctrl+Enter is `launch`, bound at
+ * the window and therefore read first, and a card that answered both would
+ * start the game and walk away from it in the same press.
+ *
+ * Exported for `Servers`, the way `rowKeys` itself is exported for the
+ * server's Content tab. The two grids already share a stylesheet so they
+ * cannot drift apart on screen — this is the same promise about the keyboard.
+ */
+export function cardKeys(
+  e: ReactKeyboardEvent<HTMLElement>,
+  open: (id: string) => void,
+) {
+  const bareEnter =
+    e.key === "Enter" && !e.ctrlKey && !e.metaKey && !e.altKey;
+  const card = (e.target as HTMLElement).closest<HTMLElement>("[data-row]");
+  if (bareEnter && card && e.target === card && card.dataset.row) {
+    e.preventDefault();
+    open(card.dataset.row);
+    return;
+  }
+  rowKeys(e);
+}
+
+/**
+ * Press the Play or Start button of the card the keyboard is on.
+ *
+ * The button rather than the act behind it, which is what makes the key
+ * honest: every reason a card has for not offering it — the game is already
+ * running, nobody is signed in, the server has no software yet, a download is
+ * still going — is written into that button already, so a key that presses it
+ * can never do something the card is not offering. It is also the button the
+ * hint is printed inside, so the two cannot come to disagree.
+ *
+ * Read off what has focus rather than off a remembered card: the key presses
+ * *that* card, and one that acted on a card the reader had since left would
+ * launch something they are not looking at.
+ */
+export function pressLaunch(e: KeyboardEvent) {
+  const card = document.activeElement?.closest<HTMLElement>("[data-row]");
+  const button = card?.querySelector<HTMLButtonElement>("[data-launch]");
+  if (!button || button.disabled) return;
+  e.preventDefault();
+  button.click();
+}
 
 export default function Library() {
   const instances = useStore((s) => s.instances);
@@ -47,11 +114,36 @@ export default function Library() {
   // fixed inside it — a dialog opened from a card would be clipped into the
   // card it was opened from.
   const [stopping, setStopping] = useState<Instance | null>(null);
+  // Which card the keyboard is on, so Tab comes back to the one it left
+  // rather than to the top of the grid. The same bookkeeping the mod list
+  // keeps for its rows, and checked against the list below rather than
+  // trusted, because it outlives the search it was set under.
+  const [keyed, setKeyed] = useState<string | null>(null);
+  const searchBox = useRef<HTMLInputElement>(null);
 
   useActionShortcut("newThing", (e) => {
     e.preventDefault();
     setCreating(true);
   });
+
+  /**
+   * Ctrl+F reaches this screen's search box, as it does every filter box
+   * inside an instance or a server.
+   *
+   * Only once there is something to search: the box is not rendered until
+   * there is an instance, and a key that focused nothing would cost the
+   * webview's own find bar and give nothing back. The hint is inside the box,
+   * so what is printed and what works appear together.
+   */
+  useActionShortcut("focusFilter", (e) => {
+    const box = searchBox.current;
+    if (!box) return;
+    e.preventDefault();
+    box.focus();
+    box.select();
+  });
+
+  useActionShortcut("launch", pressLaunch);
 
   const shown = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -100,11 +192,17 @@ export default function Library() {
               <div className={styles.searchWrap}>
                 <Search size={14} className={styles.searchIcon} />
                 <input
+                  ref={searchBox}
                   className={clsx("input", styles.search)}
                   placeholder="Search instances"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                 />
+                {/* The binding, printed in the box it reaches — an action has
+                    no sidebar row to be found from, so the thing it presses
+                    is the only place it can be come across. The same hint in
+                    the same corner as the four filter boxes deeper in. */}
+                <kbd className={styles.searchKey}>{actionHint("focusFilter")}</kbd>
               </div>
               <select
                 className="select"
@@ -174,28 +272,60 @@ export default function Library() {
         ) : shown.length === 0 ? (
           <p className={styles.noResults}>Nothing matches “{search}”.</p>
         ) : (
-          grouped.map(([group, list]) => (
-            <section key={group || "__ungrouped"} className={styles.group}>
-              {group && (
-                <h2 className={styles.groupTitle}>
-                  <Layers size={13} />
-                  {group}
-                  <span className={styles.groupCount}>{list.length}</span>
-                </h2>
-              )}
-              <div className={styles.grid}>
-                {list.map((instance) => (
-                  <InstanceCard
-                    key={instance.id}
-                    instance={instance}
-                    onOpen={() => navigate({ view: "instance", id: instance.id })}
-                    onSignIn={() => setSigningIn(true)}
-                    onStop={() => setStopping(instance)}
-                  />
-                ))}
-              </div>
-            </section>
-          ))
+          grouped.map(([group, list]) => {
+            // The one card in this group that answers Tab. A group is its own
+            // list and keeps its own stop, so every group stays reachable
+            // whichever one the keyboard was last in.
+            const stop = list.some((i) => i.id === keyed) ? keyed : list[0].id;
+            return (
+              <section key={group || "__ungrouped"} className={styles.group}>
+                {group && (
+                  <h2 className={styles.groupTitle}>
+                    <Layers size={13} />
+                    {group}
+                    <span className={styles.groupCount}>{list.length}</span>
+                  </h2>
+                )}
+                {/* A grid, the same shape the mod lists and Browse's results
+                    declare and for the same two reasons: a list whose items
+                    carry controls of their own is a grid, and a grid is the
+                    role whose documented keyboard is the one `cardKeys`
+                    implements, so the arrows are promised rather than left to
+                    be found. `listitem` was the other candidate and takes no
+                    name from what is inside it, which would have made a
+                    focused card announce the word "card" and nothing else.
+                    Two cells on every card, whatever it holds. */}
+                <div
+                  className={styles.grid}
+                  role="grid"
+                  aria-label={group ? `${group} instances` : "Instances"}
+                  onKeyDown={(e) =>
+                    cardKeys(e, (id) => navigate({ view: "instance", id }))
+                  }
+                  // Where the keyboard is, recorded as it arrives. Bound here
+                  // because focus bubbles in React and the card is not always
+                  // the element focused — it may be a button inside it.
+                  onFocus={(e) => {
+                    const card = (e.target as HTMLElement).closest<HTMLElement>(
+                      "[data-row]",
+                    );
+                    if (card?.dataset.row) setKeyed(card.dataset.row);
+                  }}
+                >
+                  {list.map((instance) => (
+                    <InstanceCard
+                      key={instance.id}
+                      instance={instance}
+                      stop={instance.id === stop}
+                      onOpen={() => navigate({ view: "instance", id: instance.id })}
+                      onSignIn={() => setSigningIn(true)}
+                      onStop={() => setStopping(instance)}
+                    />
+                  ))}
+                </div>
+              </section>
+            );
+          })
         )}
       </div>
 
@@ -211,11 +341,13 @@ export default function Library() {
 
 function InstanceCard({
   instance,
+  stop,
   onOpen,
   onSignIn,
   onStop,
 }: {
   instance: Instance;
+  stop: boolean;
   onOpen: () => void;
   onSignIn: () => void;
   onStop: () => void;
@@ -232,11 +364,23 @@ function InstanceCard({
   const hue = hashHue(instance.id);
 
   return (
-    <article className={clsx(styles.card, instance.running && styles.cardRunning)}>
+    <article
+      className={clsx(styles.card, instance.running && styles.cardRunning)}
+      role="row"
+      data-row={instance.id}
+      tabIndex={stop ? 0 : -1}
+    >
       {/* The art leads. Instances without pack artwork get a generated wash
           from their own hue, so the grid keeps one silhouette instead of
-          alternating between tall and short cards. */}
-      <button className={styles.art} onClick={onOpen} tabIndex={-1} aria-hidden="true">
+          alternating between tall and short cards.
+
+          A span rather than a button, and that is the arrow walk's doing: the
+          walk steps across everything in the card that Tab has been taken off
+          and this is hidden from a reader, so as a button it was a stop that
+          announced nothing. Opening the card by clicking its artwork is a
+          pointer's shortcut to what the card itself already does — Enter on
+          the card, or the title beside it. */}
+      <span className={styles.art} onClick={onOpen} aria-hidden="true">
         {banner && !artFailed ? (
           <img
             src={banner}
@@ -253,44 +397,51 @@ function InstanceCard({
           />
         )}
         <span className={styles.artScrim} />
-      </button>
+      </span>
 
-      <button className={styles.cardBody} onClick={onOpen}>
-        <span className={styles.iconRing}>
-          <InstanceIcon instance={instance} size={46} />
-        </span>
-        {/* Spans, not headings and paragraphs: this all sits inside a button,
-            and block elements are not allowed there. The classes carry the
-            display, so nothing moves. */}
-        <span className={styles.cardText}>
-          <span className={styles.cardName}>{instance.name}</span>
-          <span className={styles.cardMeta}>
-            {instance.mcVersion}
-            {instance.loader !== "vanilla" && ` · ${loaderLabel}`}
+      {/* The card's two cells — what the thing is, and what you can do about
+          it — which is the same two on every card in the grid. `role` goes on
+          a wrapper here rather than on the button inside it, because putting
+          it on the button would take the button's own role away; the same
+          place `ProjectCard` puts its two. */}
+      <div className={styles.bodyCell} role="gridcell">
+        <button className={styles.cardBody} onClick={onOpen} tabIndex={-1}>
+          <span className={styles.iconRing}>
+            <InstanceIcon instance={instance} size={46} />
           </span>
-          {instance.pack && (
-            <span className={styles.cardPack}>
-              <Package size={10} />
-              {instance.pack.name} {instance.pack.version}
+          {/* Spans, not headings and paragraphs: this all sits inside a
+              button, and block elements are not allowed there. The classes
+              carry the display, so nothing moves. */}
+          <span className={styles.cardText}>
+            <span className={styles.cardName}>{instance.name}</span>
+            <span className={styles.cardMeta}>
+              {instance.mcVersion}
+              {instance.loader !== "vanilla" && ` · ${loaderLabel}`}
             </span>
-          )}
-          <span className={styles.cardStats}>
-            {instance.modCount > 0 && (
-              <span className={styles.stat}>
-                {instance.modCount} mod{instance.modCount === 1 ? "" : "s"}
+            {instance.pack && (
+              <span className={styles.cardPack}>
+                <Package size={10} />
+                {instance.pack.name} {instance.pack.version}
               </span>
             )}
-            {instance.playSeconds > 0 && (
-              <span className={styles.stat}>
-                <Clock size={11} />
-                {formatDuration(instance.playSeconds)}
-              </span>
-            )}
+            <span className={styles.cardStats}>
+              {instance.modCount > 0 && (
+                <span className={styles.stat}>
+                  {instance.modCount} mod{instance.modCount === 1 ? "" : "s"}
+                </span>
+              )}
+              {instance.playSeconds > 0 && (
+                <span className={styles.stat}>
+                  <Clock size={11} />
+                  {formatDuration(instance.playSeconds)}
+                </span>
+              )}
+            </span>
           </span>
-        </span>
-      </button>
+        </button>
+      </div>
 
-      <div className={styles.cardFoot}>
+      <div className={styles.cardFoot} role="gridcell">
         <span className={styles.lastPlayed}>
           {instance.running
             ? "Running"
@@ -306,7 +457,7 @@ function InstanceCard({
         </span>
 
         {instance.running ? (
-          <button className="btn btn-sm btn-danger" onClick={onStop}>
+          <button className="btn btn-sm btn-danger" onClick={onStop} tabIndex={-1}>
             <Square size={12} fill="currentColor" />
             Stop
           </button>
@@ -316,7 +467,7 @@ function InstanceCard({
              than being a Play that fails into a corner. This card is the one
              most people press, so fixing only the header left the common path
              dead-ending. */
-          <button className="btn btn-sm btn-primary" onClick={onSignIn}>
+          <button className="btn btn-sm btn-primary" onClick={onSignIn} tabIndex={-1}>
             <UserRound size={12} />
             Sign in to play
           </button>
@@ -325,6 +476,8 @@ function InstanceCard({
             className="btn btn-sm btn-primary"
             onClick={() => void launchInstance(instance)}
             disabled={preparing}
+            tabIndex={-1}
+            data-launch
           >
             {preparing ? (
               <Loader2 size={12} className="spin" />
@@ -332,6 +485,14 @@ function InstanceCard({
               <Play size={12} fill="currentColor" />
             )}
             Play
+            {/* The key, printed in the button it presses — and shown only
+                while the keyboard is in this card, because that is exactly
+                when it works. One copy on screen, on the card it would act
+                on, says something true; twenty standing copies of it would
+                each be a claim about a card the key is not pointed at, and
+                would crowd the timestamp beside them off every footer in the
+                grid. Hidden in CSS, on `.card:focus-within`. */}
+            <kbd className={styles.launchKey}>{actionHint("launch")}</kbd>
           </button>
         )}
       </div>

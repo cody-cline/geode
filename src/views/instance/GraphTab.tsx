@@ -21,6 +21,9 @@ import {
 } from "d3-force";
 
 import { api, errorMessage } from "../../lib/api";
+import { rovingKey } from "../../lib/rovingFocus";
+import { actionHint } from "../../lib/shortcuts";
+import { useActionShortcut } from "../../lib/useActionShortcut";
 import { useStore } from "../../lib/store";
 import type { ContentItem, ContentKind } from "../../lib/types";
 
@@ -451,6 +454,7 @@ export default function GraphTab({
   const [, repaint] = useReducer((n: number) => n + 1, 0);
 
   const svg = useRef<SVGSVGElement>(null);
+  const filterBox = useRef<HTMLInputElement>(null);
   const world = useRef<SVGGElement>(null);
   const nodeList = useRef<SVGGElement>(null);
   const frame = useRef<number>(0);
@@ -601,11 +605,13 @@ export default function GraphTab({
    * chips and tab strips in this app already use, because fifty tab stops in a
    * picture of fifty mods is its own problem.
    *
-   * `rovingKey` in `lib/rovingFocus.ts` is that contract written down, and it
-   * cannot be called from here for a reason that has nothing to do with the
-   * layout: it reads which option the press came from off
-   * `e.target instanceof HTMLElement`, and a node is an `SVGGElement`, so
-   * every press would come back null.
+   * `rovingKey` in `lib/rovingFocus.ts` is that contract written down, and
+   * the folder strip in this file's toolbar does call it. The node set still
+   * does not, and the reason is no longer the `SVGGElement` a node is — that
+   * helper takes one now. It is that `rovingKey` reads where the options sit
+   * to decide whether its group is a line or a grid, which is a question
+   * about this field nothing can answer; see the order below. It also selects
+   * whatever an arrow lands on, and landing on a node here is not tracing it.
    *
    * The order is the DOM's, which is this folder sorted by file name — the
    * order the Content tab lists the same mods in. Deliberately not the 2-D one
@@ -679,6 +685,30 @@ export default function GraphTab({
     });
   };
 
+  /**
+   * The same key that reaches the Filter box on the Content, Worlds and
+   * Properties tabs, bound here because this tab has a box of its own and
+   * Ctrl+F was landing in the webview's find bar over it — one tab's click
+   * away from three where it does not. The text already in the box is
+   * selected, so the next keystroke replaces it.
+   *
+   * Written out the way `WorldsTab` binds it rather than the way `ContentTab`
+   * does, because the box here is off far more often than that one's: there
+   * is nothing to find until the folder has been read *and* the mods in it
+   * declare something about each other, and most of them declare nothing. The
+   * press is only taken once there is a box to take it for — a key that
+   * focuses a disabled input would cost the webview's own find bar and give
+   * nothing back. The hint beside it is gated on the same thing, so what is
+   * printed and what works are the same thing.
+   */
+  useActionShortcut("focusFilter", (e) => {
+    const box = filterBox.current;
+    if (!box || box.disabled) return;
+    e.preventDefault();
+    box.focus();
+    box.select();
+  });
+
   const matches = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return null;
@@ -738,34 +768,50 @@ export default function GraphTab({
     <div className={styles.wrap}>
       <div className={styles.toolbar}>
         {/* Only where there is a choice to make. A hybrid server keeps mods
-            and plugins in different folders, and they are different graphs. */}
+            and plugins in different folders, and they are different graphs.
+
+            A segment, to the spec at the top of `InstanceView.module.css`,
+            because it swaps the panel below it — the same act as the Content
+            tab's kinds and the server's folders, which are that shape
+            already. It used to be a pair of `btn`s with `btn-primary` on the
+            chosen one, which is this app's mark for the thing a screen is
+            *for*: the green on Start, on Create, on Add mods. A filled accent
+            control that turns out to be a radio button teaches the reader
+            that the mark means nothing. */}
         {folders.length > 1 && (
-          <div className={styles.zoom}>
+          <div
+            className={styles.folders}
+            role="tablist"
+            aria-label="Which folder to graph"
+            onKeyDown={(e) => {
+              const next = rovingKey(e, folders);
+              if (next) setFolder(next);
+            }}
+          >
             {folders.map((option) => (
               <button
                 key={option}
                 className={clsx(
-                  "btn",
-                  "btn-sm",
-                  folder === option && "btn-primary",
+                  styles.folderTab,
+                  folder === option && styles.folderActive,
                 )}
                 onClick={() => setFolder(option)}
+                role="tab"
+                aria-selected={folder === option}
+                // One tab stop for the strip, arrows between the folders from
+                // there. No `aria-controls`: what this swaps is one of four
+                // different elements below depending on whether the folder is
+                // still being read, could not be read, is empty or has a
+                // field in it, and none of them has an id — a reference to
+                // one that is not in the document is worse than none.
+                tabIndex={folder === option ? 0 : -1}
+                data-roving={option}
               >
                 {option === "plugin" ? "Plugins" : "Mods"}
               </button>
             ))}
           </div>
         )}
-        <div className={styles.searchWrap}>
-          <Search size={14} className={styles.searchIcon} />
-          <input
-            className={clsx("input", styles.search)}
-            placeholder={`Find a ${one}`}
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            disabled={!drawn}
-          />
-        </div>
         {/* Only where there is a graph to describe. With no edges at all the
             empty state below says the same thing in words, and the two
             together read as one screen counting itself twice. */}
@@ -784,6 +830,29 @@ export default function GraphTab({
         {/* Only where there is something to drag. Over an empty canvas this
             was instructions for an interaction that does not exist. */}
         {drawn && <span className={styles.hint}>drag a {one} to move it</span>}
+        {/* In the slot the Content tab's Filter box sits in — the end of the
+            row, ahead of the controls — rather than at the head of it, so the
+            one control these sibling tabs share does not move between them.
+            The placeholder stays `Find a …`: this box lights a mod up where
+            it stands, where every Filter box in the app takes away the rows
+            that do not match. */}
+        <div className={styles.searchWrap}>
+          <Search size={14} className={styles.searchIcon} />
+          <input
+            ref={filterBox}
+            className={clsx("input", styles.search, drawn && styles.searchHinted)}
+            placeholder={`Find a ${one}`}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            disabled={!drawn}
+          />
+          {/* The binding, printed in the box it reaches, and only while the
+              box can be reached — a key printed on something switched off is
+              a promise nothing keeps. */}
+          {drawn && (
+            <kbd className={styles.searchKey}>{actionHint("focusFilter")}</kbd>
+          )}
+        </div>
         <div className={styles.zoom}>
           <button
             className="btn btn-icon btn-sm"
@@ -1021,6 +1090,23 @@ export default function GraphTab({
           </g>
           </g>
         </svg>
+      )}
+
+      {/* The key to the one thing drawn here that is not a name. The field is
+          almost wordless — discs, short labels, arrowheads — and which end of
+          an arrow is the mod that needs and which is the mod that is needed
+          is a convention from software rather than one everybody has met.
+          The reader here is usually somebody chasing a mod that will not
+          load, and getting it backwards sends them to the wrong one.
+
+          Beside the field rather than appended to the summary line in the
+          toolbar, which is a single `white-space: nowrap` row already
+          ellipsised at most widths once a hidden library is named in it: a
+          key that is cut off is not a key. */}
+      {drawn && (
+        <p className={styles.legend}>
+          an arrow points from a {one} to what it needs
+        </p>
       )}
 
       {focus && (
