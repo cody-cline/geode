@@ -165,9 +165,7 @@
 }
 
 .filterTitle {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
+  composes: section-label from global;
   text-transform: uppercase;
   color: var(--text-faint);
   margin-bottom: 9px;

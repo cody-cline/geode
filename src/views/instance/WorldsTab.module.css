@@ -305,11 +305,7 @@
 }
 
 .orphansTitle {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-faint);
+  composes: section-label from global;
 }
 
 .orphansNote {

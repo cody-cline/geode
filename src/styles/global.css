@@ -248,6 +248,20 @@ input[type="radio"] {
   cursor: pointer;
 }
 
+/* The small uppercase label over a section, a rail block or a group of rows.
+   Fourteen stylesheets had grown their own: 11px and 12px, 600 and 700, and
+   four different letter-spacings, so two of them read as a different size on
+   screen. Modules reach it with `composes: section-label from global`, which
+   keeps whatever padding or rule that one section genuinely needs and takes
+   the rest from here. */
+.section-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
 /* A printed key. Every shortcut in this app is written beside the thing it
    reaches — that rule is what makes a binding worth adding at all, and
    `shortcuts.test.mjs` enforces it — so there are a good few of these, and
