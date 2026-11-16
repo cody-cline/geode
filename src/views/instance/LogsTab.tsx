@@ -7,6 +7,8 @@ import type { LogSource } from "../../components/LogFilesPanel";
 import CrashCard from "./CrashCard";
 import { api } from "../../lib/api";
 import { rovingKey } from "../../lib/rovingFocus";
+import { actionHint } from "../../lib/shortcuts";
+import { useActionShortcut } from "../../lib/useActionShortcut";
 import { useStore } from "../../lib/store";
 import type { LogEntry } from "../../lib/types";
 
@@ -48,6 +50,19 @@ export default function LogsTab({
     if (VIEWS.includes(openOn as View)) setView(openOn as View);
   }, [openOn]);
   const [level, setLevel] = useState<Level>("ALL");
+  const filterBox = useRef<HTMLInputElement>(null);
+  const hasLines = Boolean(logs && logs.length > 0);
+
+  // The key the other eight boxes answer. Gated on there being something to
+  // filter, like the Worlds tab's: taking Ctrl+F to focus a disabled input
+  // would cost the webview's own find bar and give nothing back.
+  useActionShortcut("focusFilter", (e) => {
+    const box = filterBox.current;
+    if (!box || box.disabled) return;
+    e.preventDefault();
+    box.focus();
+    box.select();
+  });
   const [filter, setFilter] = useState("");
   const [follow, setFollow] = useState(true);
   const [copied, setCopied] = useState(false);
@@ -211,12 +226,21 @@ export default function LogsTab({
                 this panel to search. The level pills stay live — they are four
                 fixed values, not a claim that something here can be found. */}
             <input
-              className={clsx("input", styles.search)}
-              placeholder="Search output"
+              ref={filterBox}
+              className={clsx("input", styles.search, hasLines && styles.searchHinted)}
+              /* "Filter", not "Search": this removes lines from the panel in
+                 front of you. "Search" is what the four top-level list
+                 headers do, where the query leaves the machine. */
+              placeholder="Filter output"
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
-              disabled={!logs || logs.length === 0}
+              disabled={!hasLines}
             />
+            {/* Not while the box is off — a key printed beside a disabled
+                control is one that does nothing when pressed. */}
+            {hasLines && (
+              <kbd className={styles.searchKey}>{actionHint("focusFilter")}</kbd>
+            )}
           </div>
           <button
             className={clsx("btn", follow && styles.followOn)}

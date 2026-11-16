@@ -232,6 +232,22 @@ button {
   cursor: pointer;
 }
 
+/* Every tick box in the app, one size and one colour.
+   Eight stylesheets each had their own copy of this and three of them left
+   the size out, so those rendered at the browser's own 13px beside the five
+   that had been set to 15 — two sizes of the same control, sometimes in one
+   screenshot. Equal specificity to a module's `.row input`, and global.css is
+   emitted first (see `main.tsx`), so a module that genuinely needs its own
+   size or margin still wins; what is left here is what none of them differed
+   on. */
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--accent);
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+}
+
 /* A printed key. Every shortcut in this app is written beside the thing it
    reaches — that rule is what makes a binding worth adding at all, and
    `shortcuts.test.mjs` enforces it — so there are a good few of these, and

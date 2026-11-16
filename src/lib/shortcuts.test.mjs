@@ -66,19 +66,22 @@ async function actionBindings() {
  * entry here fails below rather than slipping through unprinted.
  */
 const PRINTED_IN = {
-  // Six, and all six have to print it. A key that works on the instance's
-  // mods and not on the server's, or not on worlds, or not on the seventy
-  // rows of `server.properties`, is one somebody has to remember the
-  // exceptions to — and the four deep ones were exactly that for as long as
-  // the two screens the app opens on answered nothing. Browse is the one box
-  // left: it asks for focus when it mounts and is unreachable after the first
-  // click into a result, which is a gap rather than a decision.
+  // Nine, and all nine have to print it — which is every box in the app that
+  // narrows a list. A key that works on the instance's mods and not on the
+  // server's, or not on worlds, or not on the seventy rows of
+  // `server.properties`, is one somebody has to remember the exceptions to,
+  // and for a while the exceptions were most of them. There are none left:
+  // the two screens the app opens on, the four deep filters, the two search
+  // boxes and the log output all answer it and all say so.
   focusFilter: [
     "../views/Library.tsx",
     "../views/Servers.tsx",
+    "../views/Browse.tsx",
+    "../views/PlanPacks.tsx",
     "../views/instance/ContentTab.tsx",
-    "../views/server/ContentTab.tsx",
     "../views/instance/WorldsTab.tsx",
+    "../views/instance/LogsTab.tsx",
+    "../views/server/ContentTab.tsx",
     "../views/server/Properties.tsx",
   ],
   clearSelection: ["../views/instance/ContentTab.tsx"],

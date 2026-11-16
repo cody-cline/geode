@@ -23,6 +23,8 @@ import ProjectPanel from "../components/ProjectPanel";
 import { api, errorMessage } from "../lib/api";
 import { titleCase } from "../lib/format";
 import { rovingKey } from "../lib/rovingFocus";
+import { actionHint } from "../lib/shortcuts";
+import { useActionShortcut } from "../lib/useActionShortcut";
 import { useStore } from "../lib/store";
 import { LOADERS } from "../lib/types";
 import type {
@@ -762,6 +764,17 @@ export default function Browse({
     searchBox.current?.select();
   }, []);
 
+  // And the key the other eight boxes in the app answer. `autoFocus` puts the
+  // keyboard here on arrival, so this is for coming back to the box after
+  // pressing into the rail or the results.
+  useActionShortcut("focusFilter", (e) => {
+    const box = searchBox.current;
+    if (!box) return;
+    e.preventDefault();
+    box.focus();
+    box.select();
+  });
+
   // Neither of these two reads raises a toast, and both say so in the rail
   // instead: they are tag lists fetched from upstream alongside the search
   // rather than as part of it, so they fail on their own — and a toast for
@@ -1248,6 +1261,7 @@ export default function Browse({
               onChange={(e) => setQuery(e.target.value)}
               autoFocus
             />
+            <kbd className={styles.searchKey}>{actionHint("focusFilter")}</kbd>
           </div>
         </div>
 

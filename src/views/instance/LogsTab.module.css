@@ -70,6 +70,20 @@
   color: var(--accent-text);
 }
 
+/* Room for the printed binding, and the key itself — the shape every filter
+   box in this app has. */
+.searchHinted {
+  padding-right: 48px;
+}
+
+.searchKey {
+  position: absolute;
+  right: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
 .searchWrap {
   position: relative;
 }

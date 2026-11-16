@@ -367,13 +367,6 @@
   flex: none;
 }
 
-.selectCell input {
-  accent-color: var(--accent);
-  cursor: pointer;
-  width: 15px;
-  height: 15px;
-}
-
 .itemIcon {
   width: 32px;
   height: 32px;

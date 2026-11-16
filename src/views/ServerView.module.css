@@ -537,13 +537,6 @@
   background: var(--surface);
 }
 
-.rowToggle input {
-  accent-color: var(--accent);
-  width: 15px;
-  height: 15px;
-  cursor: pointer;
-}
-
 .rowIcon {
   display: grid;
   place-items: center;
@@ -712,14 +705,6 @@
   height: 28px;
   flex-shrink: 0;
   font-size: 12px;
-}
-
-.propCheck {
-  accent-color: var(--accent);
-  width: 15px;
-  height: 15px;
-  flex-shrink: 0;
-  cursor: pointer;
 }
 
 .propsFoot {

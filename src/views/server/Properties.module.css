@@ -144,11 +144,9 @@
   cursor: pointer;
 }
 
+/* Only what this row needs beyond the global tick box: it sits in a flex
+   row that would otherwise squeeze it. */
 .switch input {
-  accent-color: var(--accent);
-  width: 15px;
-  height: 15px;
-  cursor: pointer;
   flex: 0 0 auto;
 }
 

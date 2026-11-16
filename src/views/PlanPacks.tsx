@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import {
   AlertTriangle,
@@ -22,6 +22,8 @@ import { compactNumber, providerLabel } from "../lib/format";
 import { modKey, planModFromProject } from "../lib/plan";
 import { useBackHandler } from "../lib/useBackHandler";
 import { renderProviderBody } from "../lib/richtext";
+import { actionHint } from "../lib/shortcuts";
+import { useActionShortcut } from "../lib/useActionShortcut";
 import { useStore } from "../lib/store";
 import { LOADERS } from "../lib/types";
 import type { Instance, PlanMod, Project } from "../lib/types";
@@ -65,6 +67,16 @@ export default function PlanPacks({
 
   const [tab, setTab] = useState<Tab>("installed");
   const [query, setQuery] = useState("");
+  const searchBox = useRef<HTMLInputElement>(null);
+
+  // The same key the box this borrows its look from answers.
+  useActionShortcut("focusFilter", (e) => {
+    const box = searchBox.current;
+    if (!box) return;
+    e.preventDefault();
+    box.focus();
+    box.select();
+  });
   const [debounced, setDebounced] = useState("");
   const [packs, setPacks] = useState<Project[] | null>(null);
   /**
@@ -263,12 +275,17 @@ export default function PlanPacks({
           <div className={browse.searchWrap}>
             <Search size={15} className={browse.searchIcon} />
             <input
+              ref={searchBox}
               className={clsx("input", browse.search)}
               placeholder="Search modpacks"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               autoFocus
             />
+            {/* Browse's box and Browse's stylesheet, so it carries Browse's
+                printed key too — the padding that makes room for it is in
+                the class this already wears. */}
+            <kbd className={browse.searchKey}>{actionHint("focusFilter")}</kbd>
           </div>
         ) : (
           <span className={styles.lead}>

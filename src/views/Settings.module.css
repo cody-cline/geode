@@ -290,12 +290,10 @@
   cursor: pointer;
 }
 
+/* Only the nudge that is this row's own; the size and the colour are
+   global.css's. */
 .toggleRow input {
-  accent-color: var(--accent);
   margin-top: 2px;
-  cursor: pointer;
-  width: 15px;
-  height: 15px;
 }
 
 .toggleRow strong {

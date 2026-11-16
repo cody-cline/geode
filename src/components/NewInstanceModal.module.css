@@ -103,11 +103,6 @@
   cursor: pointer;
 }
 
-.snapshotToggle input {
-  accent-color: var(--accent);
-  cursor: pointer;
-}
-
 .searchWrap {
   position: relative;
   margin-bottom: 8px;

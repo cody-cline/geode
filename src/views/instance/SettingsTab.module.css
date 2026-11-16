@@ -95,11 +95,6 @@
   white-space: nowrap;
 }
 
-.checkbox input {
-  accent-color: var(--accent);
-  cursor: pointer;
-}
-
 .manageRow {
   display: flex;
   align-items: center;
