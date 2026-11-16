@@ -787,6 +787,40 @@ pub async fn content_dir(
     run.join(level_name(declared.as_deref())).join(kind.folder())
 }
 
+/// How many content files this server holds, across every folder it has.
+///
+/// Counted off the folders, never off [`Server::content`]. Those are
+/// provenance records for what Geode installed, and nothing ever reconciles
+/// them against the directory: a jar dropped into `run/mods/` by hand has no
+/// record and a record whose file was deleted outside Geode is never dropped,
+/// so their length is "things Geode installed and still believes in" — which
+/// is not what a card saying "N items" claims. The instance side learned this
+/// the same way and is pinned against it by
+/// `instance::content::the_mod_count_is_the_folder_and_not_the_records`.
+///
+/// The four folders are the ones the server's own Content tab shows, so the
+/// card and the tab one click away are counting the same files. A folder that
+/// is not there counts nothing, which is the honest answer for a proxy with no
+/// world or a Paper server with no mods folder.
+///
+/// Costs four directory reads, and a fifth of `server.properties` for the
+/// world the datapacks live in. Nothing is opened: this is a count of files,
+/// not a listing of them.
+pub async fn content_count(paths: &Paths, id: &str) -> usize {
+    use crate::instance::content::{count_in, ContentKind};
+
+    let mut total = 0;
+    for kind in [
+        ContentKind::Plugin,
+        ContentKind::Mod,
+        ContentKind::ClientMod,
+        ContentKind::DataPack,
+    ] {
+        total += count_in(&content_dir(paths, id, kind).await, kind).await;
+    }
+    total
+}
+
 /// Where a modpack's or plan's mod goes when a server is built from it.
 ///
 /// Half of a big pack exists to make the game look better, and none of that
@@ -1920,6 +1954,77 @@ mod tests {
             files(&again),
             vec!["lithium.jar", "sodium.jar"],
             "a removal on a second save was undone"
+        );
+    }
+
+    /// What a server card's "N items" is counting: the four folders the
+    /// server's own Content tab shows, not `content`.
+    ///
+    /// The instance side has the same test for the same reason — a card read
+    /// 53 for a folder of 57 jars — and the server card used to be the version
+    /// that still counted records. A jar dropped into `run/mods/` by hand has
+    /// no record and is still a file the server holds; a record whose file was
+    /// deleted outside Geode is not. Datapacks are counted inside the world
+    /// `server.properties` names, which is the one folder whose place is not
+    /// fixed.
+    #[tokio::test]
+    async fn the_server_card_counts_the_folders_and_not_the_records() {
+        let scratch = scratch("content-count");
+        let paths = scratch.paths.clone();
+        let mut server = Server::new("Counter".into(), ServerKind::Paper, "1.21.1".into());
+        let run = paths.server_run(&server.id);
+
+        for (folder, names) in [
+            // Two with records, one dropped in by hand, one turned off.
+            ("plugins", &["essentials.jar", "handdropped.jar"][..]),
+            ("mods", &["sodium.jar", "iris.jar.disabled"][..]),
+            ("client-mods", &["minimap.jar"][..]),
+        ] {
+            tokio::fs::create_dir_all(run.join(folder)).await.unwrap();
+            for name in names {
+                tokio::fs::write(run.join(folder).join(name), b"x")
+                    .await
+                    .unwrap();
+            }
+        }
+        // Not content: neither is counted, in a folder that holds both.
+        tokio::fs::write(run.join("mods/README.txt"), b"x")
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(run.join("mods/.index")).await.unwrap();
+
+        // Inside the world, which is where a server reads them from, and the
+        // world is whatever `server.properties` calls it.
+        tokio::fs::write(run.join("server.properties"), b"level-name=earth\n")
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(run.join("earth/datapacks"))
+            .await
+            .unwrap();
+        tokio::fs::write(run.join("earth/datapacks/vanilla-tweaks.zip"), b"x")
+            .await
+            .unwrap();
+        // A datapack in the folder a server never reads is not installed.
+        tokio::fs::create_dir_all(run.join("datapacks")).await.unwrap();
+        tokio::fs::write(run.join("datapacks/stray.zip"), b"x")
+            .await
+            .unwrap();
+
+        server.content = vec![
+            record("essentials.jar", "modrinth", "A"),
+            record("sodium.jar", "modrinth", "B"),
+            // Its file was deleted outside Geode; the record stayed.
+            record("gone.jar", "modrinth", "C"),
+        ];
+
+        let held = content_count(&paths, &server.id).await;
+        assert_eq!(held, 6, "every file in the four folders, and only those");
+        // The shape the instance side was fixed for, so this is not passing by
+        // the two numbers happening to agree.
+        assert_ne!(
+            server.content.len(),
+            held,
+            "the records and the folders must differ here or this test proves nothing"
         );
     }
 

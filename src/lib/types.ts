@@ -430,6 +430,14 @@ export interface Server {
   /** Added by the backend view layer. */
   running: boolean;
   /**
+   * How many files sit in this server's four content folders — plugins, mods,
+   * client mods and datapacks. Counted off the folders, not off `content`:
+   * those are provenance records for what Geode installed, so they miss a jar
+   * dropped in by hand and keep one deleted behind Geode's back. Use this for
+   * any count shown to a reader; `content` answers a different question.
+   */
+  contentCount: number;
+  /**
    * Capabilities of this server rather than of its kind — a Fabric server with
    * Cardboard installed takes Bukkit plugins, which `ServerKindInfo` cannot say.
    */

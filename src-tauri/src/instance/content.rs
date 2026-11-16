@@ -677,7 +677,17 @@ pub fn content_dir(paths: &Paths, instance_id: &str, kind: ContentKind) -> PathB
 /// cannot be read counts nothing, since the alternative is a whole library
 /// screen failing over one instance.
 pub async fn count(paths: &Paths, instance_id: &str, kind: ContentKind) -> usize {
-    let Ok(mut entries) = tokio::fs::read_dir(content_dir(paths, instance_id, kind)).await else {
+    count_in(&content_dir(paths, instance_id, kind), kind).await
+}
+
+/// The same count, of a folder named directly.
+///
+/// A server's folders are not an instance's: its mods sit under its run
+/// directory and its datapacks inside whichever world `server.properties`
+/// names, so the caller works out the path. Named `_in` like [`list_in`],
+/// [`remove_in`] and [`set_enabled_in`] beside it, for the same reason.
+pub async fn count_in(dir: &Path, kind: ContentKind) -> usize {
+    let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
         return 0;
     };
     let mut found = 0;

@@ -253,7 +253,7 @@ function ServerCard({
     }
   }
 
-  const contentCount = server.content.length;
+  const contentCount = server.contentCount;
 
   return (
     <article className={clsx(styles.card, server.running && styles.cardRunning)}>

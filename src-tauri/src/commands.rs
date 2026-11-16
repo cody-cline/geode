@@ -1921,6 +1921,11 @@ pub struct ServerView {
     /// in one place: this is what a search has to be narrowed to, and getting
     /// it wrong is how a Forge server ends up being offered Fabric mods.
     pub mod_loader: Option<String>,
+    /// How many plugins, mods, client mods and datapacks sit in this server's
+    /// folders. Counted off the folders rather than off `content`, for the
+    /// reason `server::content_count` gives: the records are what Geode
+    /// installed, which is not what the server holds.
+    pub content_count: usize,
     /// Absolute paths to the uploaded images, resolved the same way an
     /// instance's are.
     pub icon_path: Option<String>,
@@ -1932,15 +1937,17 @@ pub struct ServerView {
 }
 
 /// Costs one small read per server — `share.json`, then `share.link.json` for
-/// the shared ones — on top of the `server.json` the list has already read. The
-/// list is a folder of servers, not a feed, so that stays in the noise; a
-/// separate command would have cost the same reads and left the list able to
-/// disagree with itself between refreshes.
+/// the shared ones — on top of the `server.json` the list has already read,
+/// plus the folder reads `server::content_count` names. The list is a folder
+/// of servers, not a feed, so that stays in the noise; a separate command
+/// would have cost the same reads and left the list able to disagree with
+/// itself between refreshes.
 async fn server_view(server: crate::server::Server, state: &AppState) -> ServerView {
     let media = state.paths.server_media(&server.id);
     ServerView {
         icon_path: media_path(&media, &server.icon),
         banner_path: media_path(&media, &server.banner),
+        content_count: crate::server::content_count(&state.paths, &server.id).await,
         running: state.servers.is_running(&server.id),
         takes_plugins: server.takes_plugins(),
         takes_mods: server.takes_mods(),
