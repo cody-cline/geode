@@ -288,7 +288,15 @@ export default function ExportModal({
         )}
         {plan && (
           <>
-            <p className={styles.summary}>{exportSummary(format, plan.report)}</p>
+            {/* Without the per-reason sentences: each one names a reason and
+                a count that the heading directly beneath it names again, so
+                "2 bundled in because a CurseForge pack cannot link to where
+                they came from" sat two lines above "Could not be linked — 2"
+                and the files it was about. The toast keeps them, having no
+                list to point at. */}
+            <p className={styles.summary}>
+              {exportSummary(format, plan.report, false)}
+            </p>
             {copiedByReason(plan.content).map(({ why, files }) => (
               <div key={why} className={styles.reason}>
                 <span className={styles.reasonWhy}>

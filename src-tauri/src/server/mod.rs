@@ -132,8 +132,13 @@ impl ServerKind {
     /// read from what the upstream publishes, never written down.
     pub fn blurb(self) -> &'static str {
         match self {
+            // No "the usual choice" here, though it is: the create dialog
+            // carries that as a badge on Paper's tile, where somebody
+            // scanning fourteen of them will actually see it, and a blurb
+            // saying it again under the badge said it twice. This answers
+            // only "why this one and not its neighbour", like the rest.
             ServerKind::Paper => {
-                "The usual choice. Faster than Spigot, fixes more, and nearly every plugin targets it."
+                "Faster than Spigot, fixes more, and nearly every plugin targets it."
             }
             ServerKind::Purpur => {
                 "Paper with a long list of extra settings to tune. Runs Paper's plugins unchanged."

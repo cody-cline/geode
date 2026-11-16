@@ -14,6 +14,10 @@ import {
 } from "lucide-react";
 
 import PlanPacks from "./PlanPacks";
+// The two sentences a target card says about its coverage, and the verdict
+// that colours it. Kept in the re-target dialog because that is the screen
+// that learned what each number means; both screens draw the same card.
+import { coverageLine, coversWhole } from "../components/ReplanModal";
 import type { PlanSource } from "../components/PlanSourceTabs";
 import Browse from "./Browse";
 import { api, errorMessage } from "../lib/api";
@@ -411,24 +415,15 @@ export default function PlanView({ id }: { id: string }) {
     // Worded the way the re-target dialog's `coverageLine` words it, for the
     // same reason the cards themselves are shared.
     const unchecked = resolution?.unresolved.length ?? 0;
-    const whole = option.fits.length + unchecked;
-    const runs = option.fits.length - option.missing;
-    // The card's colour and its border are this same verdict in another
-    // register — `.coverage` is amber and `.coverageFull` dims it to nothing,
-    // `.targetIncomplete` dashes the edge — so they are read off the sum the
-    // sentence is written from and not off `missing` alone. Gated on `missing`
-    // they disagreed with the words inside them: one unchecked jar and the
-    // card went quiet and solid while the text said "2 of 3 mods run here — 1
-    // not checked". It is the `coversWhole` the re-target dialog keeps for the
-    // same reason.
-    const full = runs === whole;
-    const rest = [
-      option.blocked > 0 && `${option.blocked} left out`,
-      unchecked > 0 && `${unchecked} not checked`,
-    ].filter(Boolean) as string[];
-    const head = full
-      ? `All ${whole} mods run here`
-      : `${runs} of ${whole} mods run here`;
+    // Both read off the re-target dialog's own two functions rather than a
+    // second copy of them here. The card's colour and its border are the
+    // sentence in another register — `.coverage` is amber, `.coverageFull`
+    // dims it to nothing, `.targetIncomplete` dashes the edge — and a copy
+    // is what let them disagree: gated on `missing` alone, one unchecked jar
+    // left the card quiet and solid over text reading "2 of 3 mods run here
+    // — 1 not checked". The two screens draw the same card out of the same
+    // stylesheet, so they say the same sentence from the same arithmetic.
+    const full = coversWhole(option, unchecked);
     return (
       <button
         key={`${option.loader}:${option.gameVersion}`}
@@ -461,7 +456,7 @@ export default function PlanView({ id }: { id: string }) {
             full && styles.coverageFull,
           )}
         >
-          {rest.length === 0 ? head : `${head} — ${rest.join(", ")}`}
+          {coverageLine(option, unchecked)}
         </span>
 
         {(option.connector > 0 || option.near > 0) && (

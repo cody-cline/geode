@@ -945,7 +945,11 @@ test("the public-link check reads as a confirmation or as a warning", () => {
   assert.equal(publicLinkLine("served").tone, "ok");
   assert.match(publicLinkLine("served").title, /serves the pack/);
   assert.equal(publicLinkLine("webPage").tone, "warn");
-  assert.match(publicLinkLine("webPage").detail, /Import a pack/);
+  // Named exactly as the two controls are labelled — "New instance" in the
+  // sidebar and on Library, "Import modpack" inside it. This line used to
+  // send somebody to an "Add instance → Import a pack" that has never
+  // existed under either name, and the test pinned the wrong one.
+  assert.match(publicLinkLine("webPage").detail, /New instance → Import modpack/);
   assert.equal(publicLinkLine("unknown").tone, "info");
 });
 
@@ -1480,6 +1484,29 @@ test("exportSummary never tells a Prism recipient to download anything", () => {
     exportSummary("mrpack", report({ referenced: 12 })),
     /All 12 linked for the recipient to download/,
   );
+});
+
+test("the export dialog's summary does not restate the headings under it", () => {
+  // The dialog prints a heading per reason — "Could not be linked — 2" — with
+  // the file names beneath it, so the summary saying the same reason and the
+  // same number two lines above was saying it twice. The toast has no such
+  // list, which is why it keeps them and why the default is on.
+  const report_ = report({ referenced: 3, embeddedElsewhere: 2, embeddedUnknown: 1 });
+  const toast = exportSummary("curseforge", report_);
+  const dialog = exportSummary("curseforge", report_, false);
+
+  assert.match(toast, /bundled in because a CurseForge pack cannot link/);
+  assert.match(toast, /bundled in because nothing Geode asked has them/);
+  assert.doesNotMatch(dialog, /bundled in because/);
+
+  // Both still say how many went each way: a summary that made the reader add
+  // the headings up would be a worse summary, not a shorter one.
+  assert.match(dialog, /3 linked for the recipient to download, 3 bundled in/);
+
+  // And neither drops what is about this export rather than about a reason.
+  for (const said of [toast, dialog]) {
+    assert.match(said, /Only mods can be linked in this format/);
+  }
 });
 
 test("exportSummary blames the format that could not link, by name", () => {

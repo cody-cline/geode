@@ -98,12 +98,14 @@ const GROUP_NOTE: Record<Group, string | null> = {
  * The kind the dialog opens on, and the one tile marked as the usual answer.
  *
  * One constant for both, because the marker and the preselection disagreeing
- * would be worse than having neither. Paper was already preselected and its
- * blurb already opens "The usual choice" — but a recommendation that is three
- * words inside one of fourteen bodies of copy is not one anybody scanning
- * fourteen tiles will find, so the tile carries a marker as well. What Paper
- * *is* still comes from the kind; this only says which tile to look at first,
- * and "usually" is the whole claim — it is not the only good answer here.
+ * would be worse than having neither. A recommendation that is three words
+ * inside one of fourteen bodies of copy is not one anybody scanning fourteen
+ * tiles will find, so the tile carries a marker. Paper's blurb used to open
+ * "The usual choice" as well, which put the same recommendation twice on one
+ * tile; the badge is now the only place it is made (`ServerKind::blurb` says
+ * why it is not in the blurb). What Paper *is* still comes from the kind;
+ * this only says which tile to look at first, and "usually" is the whole
+ * claim — it is not the only good answer here.
  */
 const USUAL = "paper";
 

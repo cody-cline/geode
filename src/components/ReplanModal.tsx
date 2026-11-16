@@ -57,7 +57,7 @@ function applyVerb(landOn: LandOn): string {
  * solid while the text inside it said "8 of 9 mods run here — 1 not checked".
  * The colour, the border and the sentence are one decision, so they read it here.
  */
-function coversWhole(option: PlanTarget, unchecked: number): boolean {
+export function coversWhole(option: PlanTarget, unchecked: number): boolean {
   const whole = option.fits.length + unchecked;
   const runs = option.fits.length - option.missing;
   return runs === whole;
@@ -65,6 +65,13 @@ function coversWhole(option: PlanTarget, unchecked: number): boolean {
 
 /**
  * How much of this instance a target covers, in one line on its card.
+ *
+ * Exported, and the plan screen's own target cards call it: they draw the
+ * same card out of the same stylesheet and used to carry a second copy of
+ * this arithmetic, which is how the two came to say "left out" off different
+ * fields. One copy, so they cannot drift again — and so that if plan mode
+ * ever learns about the version override, the `carried` clause appears there
+ * without anybody remembering to add it.
  *
  * `fits` is what the resolver could look up, which is not the folder: a jar
  * with no project id was never checked. Counting only against `fits` printed
@@ -89,7 +96,7 @@ function coversWhole(option: PlanTarget, unchecked: number): boolean {
  * nothing for, which is why "all run here" is only printed when there is
  * neither that nor anything unchecked.
  */
-function coverageLine(option: PlanTarget, unchecked: number): string {
+export function coverageLine(option: PlanTarget, unchecked: number): string {
   const whole = option.fits.length + unchecked;
   const runs = option.fits.length - option.missing;
   const rest = [

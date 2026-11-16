@@ -1266,7 +1266,7 @@ export function publicLinkLine(check: PublicCheck): StatusLine {
         tone: "warn",
         title: "That address served a web page, not the pack",
         detail:
-          "Anyone you send it to will have to open the link in a browser, download the file, and use Add instance → Import a pack. Most hosts need a direct download link rather than the page the file sits on.",
+          "Anyone you send it to will have to open the link in a browser, download the file, and use New instance → Import modpack. Most hosts need a direct download link rather than the page the file sits on.",
       };
     case "unknown":
       return {
@@ -1485,8 +1485,20 @@ export function safeFileStem(name: string): string {
  * third-party downloads off" is somebody else's decision that no format gets
  * around — which is why it is counted only where no other platform names the
  * same bytes.
+ *
+ * `reasons` turns those sentences off for a caller that is about to list the
+ * same reasons itself. The export dialog prints a heading per reason with its
+ * count and the file names under it, so the sentences above were the same
+ * reason and the same number a second time, two lines apart; the toast has no
+ * list, so it keeps them and is why the default is on. The totals stay either
+ * way — a summary that stopped saying how many were bundled in would be
+ * leaving the reader to add the headings up.
  */
-export function exportSummary(format: PackFormat, report: ExportReport): string {
+export function exportSummary(
+  format: PackFormat,
+  report: ExportReport,
+  reasons = true,
+): string {
   const {
     referenced,
     embeddedUnknown,
@@ -1528,6 +1540,10 @@ export function exportSummary(format: PackFormat, report: ExportReport): string 
     lines.push("There were no mods, packs or datapacks to carry.");
   } else if (bundled === 0) {
     lines.push(`All ${referenced} linked for the recipient to download, nothing bundled in.`);
+  } else if (!reasons) {
+    lines.push(
+      `${referenced} linked for the recipient to download, ${bundled} bundled in.`,
+    );
   } else {
     lines.push(`${referenced} linked for the recipient to download.`);
     if (embeddedUnknown > 0) {
