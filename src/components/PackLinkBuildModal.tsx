@@ -136,7 +136,14 @@ export default function PackLinkBuildModal({ onClose }: { onClose: () => void })
               setUrl(e.target.value);
               setBuilt(null);
             }}
-            onKeyDown={(e) => e.key === "Enter" && ready && !working && void build()}
+            data-enter="field"
+            onKeyDown={(e) => {
+              // Claimed, so `Modal`'s Enter does not press the
+              // footer's primary straight after this has run it.
+              if (e.key !== "Enter") return;
+              e.preventDefault();
+              if (ready && !working) void build();
+            }}
           />
           <p className="hint">
             A direct download address, not the page the file sits on. Geode

@@ -110,7 +110,7 @@ export default function ServerTargetModal({
                 <span className={styles.meta}>
                   <span className={styles.name}>{server.name}</span>
                   <span className={styles.detail}>
-                    {server.kind} {server.mcVersion}
+                    {server.kindName} {server.mcVersion}
                   </span>
                 </span>
 

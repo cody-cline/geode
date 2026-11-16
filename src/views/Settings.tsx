@@ -201,6 +201,32 @@ function Appearance({ update }: { update: Updater }) {
   /** The accent is one nobody offered, so the picker is the control holding it. */
   const custom = !ACCENTS.some((a) => a.hex === current);
 
+  /**
+   * What the parallel-downloads box holds while it is being typed in.
+   *
+   * It used to be `config.concurrentDownloads` straight, written on every
+   * keystroke, and the box is cleared before a new number is typed: that sent
+   * `Number("")`, which is 0, `set_config` turned it into 1 on the way in, and
+   * the store writes the stored value back — so the empty box filled itself
+   * with a 1 under the cursor and the next digit landed beside it. Held here
+   * and written when you click away, the way the boxes on the Java tab are.
+   */
+  const [downloads, setDownloads] = useState(String(config.concurrentDownloads));
+
+  /** The box's one way to disk, so clicking away and Enter take the same one. */
+  const saveDownloads = (text: string) => {
+    const typed = Number(text);
+    // Nothing typed, or nothing a number: the box goes back to what is stored
+    // rather than committing a 0 for the backend to turn into something else.
+    const next =
+      Number.isFinite(typed) && typed > 0
+        ? Math.min(Math.max(Math.round(typed), 1), 64)
+        : config.concurrentDownloads;
+    setDownloads(String(next));
+    if (next !== config.concurrentDownloads)
+      void update({ concurrentDownloads: next });
+  };
+
   // A radio group has exactly one tab stop, and it is the chosen option — or
   // the first one when nothing in the group is chosen, which is the accent
   // swatches whenever the colour in use came from the picker beside them, and
@@ -212,8 +238,9 @@ function Appearance({ update }: { update: Updater }) {
   return (
     <div className={styles.form}>
       <p className={styles.saveModel}>
-        Everything on this screen is saved the moment you change it. There is
-        no Save button and nothing to lose by leaving.
+        Everything on this screen is saved the moment you change it — a box you
+        are typing in, when you click away from it. There is no Save button and
+        nothing to lose by leaving.
       </p>
 
       <section className={styles.section}>
@@ -393,10 +420,12 @@ function Appearance({ update }: { update: Updater }) {
             type="number"
             min={1}
             max={64}
-            value={config.concurrentDownloads}
-            onChange={(e) =>
-              update({ concurrentDownloads: Number(e.target.value) })
-            }
+            value={downloads}
+            onChange={(e) => setDownloads(e.target.value)}
+            onBlur={() => saveDownloads(downloads)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") saveDownloads(downloads);
+            }}
           />
           <p className="hint">
             Higher is faster on good connections. Drop it if downloads keep
@@ -448,6 +477,41 @@ function JavaSettings({ update }: { update: Updater }) {
   const saveJavaPath = (next: string) => {
     const value = next.trim() || null;
     if (value !== (config.javaPath ?? null)) void update({ javaPath: value });
+  };
+
+  /**
+   * The ceiling both memory controls hold to, named once so they cannot
+   * disagree.
+   *
+   * The slider has always stopped at what this machine has. The box beside it
+   * stopped nowhere, so it would take a heap larger than the machine's RAM —
+   * the one mistake the slider is shaped to prevent — and `set_config`'s own
+   * ceiling is a flat 65536 that knows nothing about the machine.
+   */
+  const memoryMax = systemMemory ?? 16384;
+
+  /**
+   * What the memory box holds while it is being typed in.
+   *
+   * It used to be `config.memoryMb` straight, written on every keystroke, and
+   * `set_config` clamps to 512 and hands the stored value back for the store
+   * to write in: the 8 of 8192 went over on its own, came back a 512, and the
+   * field was rewritten under the cursor mid-number. The slider still writes
+   * as it moves, because every value it can reach is one the machine has.
+   */
+  const [memoryText, setMemoryText] = useState(String(config.memoryMb));
+
+  /** The box's one way to disk, so clicking away and Enter take the same one. */
+  const saveMemory = (text: string) => {
+    const typed = Number(text);
+    // Nothing typed, or nothing a number: the box goes back to what is stored
+    // rather than committing a 0 for the backend to turn into something else.
+    const next =
+      Number.isFinite(typed) && typed > 0
+        ? Math.min(Math.max(Math.round(typed), 1024), memoryMax)
+        : config.memoryMb;
+    setMemoryText(String(next));
+    if (next !== config.memoryMb) void update({ memoryMb: next });
   };
 
   const refresh = () =>
@@ -504,23 +568,33 @@ function JavaSettings({ update }: { update: Updater }) {
           <input
             type="range"
             min={1024}
-            max={systemMemory ?? 16384}
+            max={memoryMax}
             step={512}
             value={config.memoryMb}
-            onChange={(e) => update({ memoryMb: Number(e.target.value) })}
+            onChange={(e) => {
+              setMemoryText(e.target.value);
+              void update({ memoryMb: Number(e.target.value) });
+            }}
             className={styles.slider}
           />
           <input
             className={clsx("input", styles.memoryNumber)}
             type="number"
-            value={config.memoryMb}
-            onChange={(e) => update({ memoryMb: Number(e.target.value) })}
+            min={1024}
+            max={memoryMax}
+            value={memoryText}
+            onChange={(e) => setMemoryText(e.target.value)}
+            onBlur={() => saveMemory(memoryText)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") saveMemory(memoryText);
+            }}
           />
           <span className={styles.unit}>MB</span>
         </div>
         <p className="hint">
           Applies to every instance that has not set its own value.
-          {systemMemory && ` This machine has ${(systemMemory / 1024).toFixed(1)} GB.`}
+          {systemMemory &&
+            ` This machine has ${(systemMemory / 1024).toFixed(1)} GB, and neither the slider nor the box will go above it.`}
         </p>
       </section>
 
@@ -1121,18 +1195,39 @@ function SharingSettings() {
               and a TCP tunnel only has to pass the connection through, so it is
               the simpler of the tunnels to set up.
             </p>
-            {/* Said up front, because a tunnel set up the usual way fails for
-                every player while nothing on this computer looks wrong: Geode
-                only speaks TLS, with a certificate no authority signed. */}
-            <p className="hint">
-              An https:// address is checked by its certificate authority
-              instead, and whatever serves it — a tunnel or a reverse proxy —
-              has to pass requests on to https://localhost:
-              {parsedPort ?? saved.port}, not http://, with its check of this
-              computer&apos;s certificate turned off, since that certificate is
-              self-signed. With cloudflared, that is --no-tls-verify. Set up any
-              other way, players cannot connect, and nothing here shows it.
-            </p>
+            {/* The question is said up front and the answer is folded behind
+                it, because a tunnel set up the usual way fails for every
+                player while nothing on this computer looks wrong — and that
+                is a reason to put the question where the person setting one
+                up will meet it, not a reason to put a certificate authority
+                in front of somebody who opened this tab to read their port.
+                The question names the https:// address rather than tunnels in
+                general, because the paragraph above has already answered the
+                TCP kind and there is nothing in here for them.
+
+                Open already once the box holds an https:// address, which is
+                the person it was written for, mid-sentence rather than after
+                they have saved. Left alone from then on: React only writes
+                `open` when the expression changes, so collapsing it by hand
+                while the address stays an https:// one stays collapsed. */}
+            <details
+              className={styles.details}
+              open={address.trim().toLowerCase().startsWith("https://")}
+            >
+              <summary>
+                Using an https:// address, from a tunnel or a reverse proxy?
+              </summary>
+              <p className="hint">
+                An https:// address is checked by its certificate authority
+                instead, and whatever serves it — a tunnel or a reverse proxy —
+                has to pass requests on to https://localhost:
+                {parsedPort ?? saved.port}, not http://, with its check of this
+                computer&apos;s certificate turned off, since that certificate
+                is self-signed. With cloudflared, that is --no-tls-verify. Set
+                up any other way, players cannot connect, and nothing here
+                shows it.
+              </p>
+            </details>
           </div>
         </section>
       </div>

@@ -99,6 +99,7 @@ function sortVersionsDescending(versions: string[]): string[] {
 
 export default function InstallTargetModal({
   project,
+  versionId,
   preselect,
   installedIn,
   busy,
@@ -107,6 +108,17 @@ export default function InstallTargetModal({
   onClose,
 }: {
   project: Project;
+  /**
+   * The build the panel was open on when Install was pressed, when one was.
+   *
+   * Absent when the press came from a card in the results, which installs
+   * whatever the resolver picks. When it is here it is the build that will be
+   * installed — `installContent` is given this same id — so the dialog both
+   * names it and judges against it. Judging against every build while
+   * installing one of them is how a dialog comes to say a target fits on the
+   * strength of a file it is not going to use.
+   */
+  versionId?: string | null;
   preselect?: string;
   installedIn?: Set<string>;
   busy: boolean;
@@ -178,19 +190,42 @@ export default function InstallTargetModal({
     [files],
   );
 
+  /**
+   * The build that was picked a screen earlier, once the list has been read.
+   *
+   * `null` both before the read and when nothing was picked, which are the
+   * same thing to everything below: judge against whatever this project
+   * publishes.
+   */
+  const chosen = useMemo(
+    () => (versionId && files ? (files.find((f) => f.id === versionId) ?? null) : null),
+    [versionId, files],
+  );
+
+  /**
+   * What the dialog answers about. One build when one was picked, everything
+   * installable otherwise — so the verdict on a row, the loaders offered to a
+   * new instance and the versions under them are all about the file that is
+   * actually going to be fetched.
+   */
+  const candidates = useMemo(
+    () => (chosen ? [chosen] : installable),
+    [chosen, installable],
+  );
+
   const loaderOptions = useMemo(() => {
     if (project.kind !== "mod") return [];
-    const present = new Set((installable ?? []).flatMap((f) => f.loaders));
+    const present = new Set((candidates ?? []).flatMap((f) => f.loaders));
     return LOADERS.filter((l) => l.id !== "vanilla" && present.has(l.id));
-  }, [project.kind, installable]);
+  }, [project.kind, candidates]);
 
   const [newLoader, setNewLoader] = useState<Loader>("vanilla");
   const [newVersion, setNewVersion] = useState("");
   const [newName, setNewName] = useState("");
 
   const compatible = useMemo(
-    () => instances.filter((i) => !compatibility(project, i, installable)),
-    [instances, project, installable],
+    () => instances.filter((i) => !compatibility(project, i, candidates)),
+    [instances, project, candidates],
   );
 
   const [mode, setMode] = useState<"existing" | "new">(
@@ -222,22 +257,22 @@ export default function InstallTargetModal({
     () =>
       [...instances].sort(
         (a, b) =>
-          (compatibility(project, a, installable) ? 1 : 0) -
-          (compatibility(project, b, installable) ? 1 : 0),
+          (compatibility(project, a, candidates) ? 1 : 0) -
+          (compatibility(project, b, candidates) ? 1 : 0),
       ),
-    [instances, project, installable],
+    [instances, project, candidates],
   );
 
   // Versions that have a file for the chosen loader — nothing else.
   const versionOptions = useMemo(() => {
     const relevant =
       newLoader === "vanilla"
-        ? (installable ?? [])
-        : (installable ?? []).filter((f) => f.loaders.includes(newLoader));
+        ? (candidates ?? [])
+        : (candidates ?? []).filter((f) => f.loaders.includes(newLoader));
     return sortVersionsDescending([
       ...new Set(relevant.flatMap((f) => f.gameVersions)),
     ]);
-  }, [installable, newLoader]);
+  }, [candidates, newLoader]);
 
   // Settle on a loader once the files arrive, then keep the version valid for
   // whichever loader is chosen.
@@ -260,7 +295,7 @@ export default function InstallTargetModal({
 
   const target = instances.find((i) => i.id === selected);
   const targetProblem = target
-    ? compatibility(project, target, installable)
+    ? compatibility(project, target, candidates)
     : null;
 
   const canCreate = Boolean(newVersion) && !busy;
@@ -268,7 +303,11 @@ export default function InstallTargetModal({
   return (
     <Modal
       title={`Install ${project.name}`}
-      subtitle="Choose where it goes."
+      subtitle={
+        chosen
+          ? `Choose where ${chosen.versionNumber} goes.`
+          : "Choose where it goes."
+      }
       onClose={onClose}
       width={480}
       footer={
@@ -382,7 +421,7 @@ export default function InstallTargetModal({
       {mode === "existing" ? (
         <div className={styles.list}>
           {ordered.map((instance) => {
-            const problem = compatibility(project, instance, installable);
+            const problem = compatibility(project, instance, candidates);
             const already = installedIn?.has(instance.id);
             return (
               <button

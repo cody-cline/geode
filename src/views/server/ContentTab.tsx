@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import clsx from "clsx";
 import {
@@ -21,6 +21,8 @@ import Tooltip from "../../components/Tooltip";
 import { api, errorMessage } from "../../lib/api";
 import { fileSize, providerLabel, shownName, titleIsFileName } from "../../lib/format";
 import { rovingKey } from "../../lib/rovingFocus";
+import { actionHint } from "../../lib/shortcuts";
+import { useActionShortcut } from "../../lib/useActionShortcut";
 import { useStore } from "../../lib/store";
 import type {
   ContentItem,
@@ -145,6 +147,7 @@ export default function ServerContentTab({
   const [failed, setFailed] = useState<string | null>(null);
   const [clientOnly, setClientOnly] = useState<ListedClientOnly[]>([]);
   const [filter, setFilter] = useState("");
+  const filterBox = useRef<HTMLInputElement>(null);
   const [updates, setUpdates] = useState<UpdateCandidate[]>([]);
   const [checking, setChecking] = useState(false);
   const [updating, setUpdating] = useState<UpdateCandidate | null>(null);
@@ -200,6 +203,28 @@ export default function ServerContentTab({
         )
       : items;
   }, [items, filter]);
+
+  /**
+   * The same key into the Filter box as the instance tab's, bound here for the
+   * same reason the list keyboard is shared: these two panes are one screen
+   * with different folders behind them, and a key that worked on one half and
+   * not the other would leave somebody having to remember which half they are
+   * on. Bound with the tab rather than at the window, since the press means
+   * nothing on a screen with no filter to reach.
+   */
+  useActionShortcut("focusFilter", (e) => {
+    const box = filterBox.current;
+    // Only once there is a box. A proxy's Content tab is the panel below
+    // instead, with no filter in it, and taking the key there would cost the
+    // webview's find bar and give nothing back.
+    if (!box) return;
+    // Where there is one, the webview's find bar is not what this is for, and
+    // the text that is there is selected so the next keystroke replaces the
+    // old filter.
+    e.preventDefault();
+    box.focus();
+    box.select();
+  });
 
   // The same project can sit in Mods and in Client mods, and each row is
   // offered only its own folder's update.
@@ -498,11 +523,20 @@ export default function ServerContentTab({
           <div className={styles.searchWrap}>
             <Search size={14} className={styles.searchIcon} />
             <input
-              className={clsx("input", styles.search)}
+              ref={filterBox}
+              // `.searchHinted` is the shared stylesheet's box-with-a-key-in-it:
+              // it keeps the room on the right that stops the typed text
+              // running under the hint. This box is never switched off, so
+              // unlike the instance tab's it wears the class unconditionally.
+              className={clsx("input", styles.search, styles.searchHinted)}
               placeholder="Filter"
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
             />
+            {/* The binding, printed in the box it reaches. An action has no
+                sidebar row to be found from, so the thing it presses is the
+                only place it can be come across at all. */}
+            <kbd className={styles.searchKey}>{actionHint("focusFilter")}</kbd>
           </div>
           <button className="btn" onClick={addFiles}>
             <FilePlus2 size={14} />

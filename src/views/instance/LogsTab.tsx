@@ -19,13 +19,34 @@ type Level = (typeof LEVELS)[number];
 const VIEWS = ["console", "files"] as const;
 type View = (typeof VIEWS)[number];
 
-export default function LogsTab({ instanceId }: { instanceId: string }) {
+export default function LogsTab({
+  instanceId,
+  openOn,
+}: {
+  instanceId: string;
+  /**
+   * Which half to open on, when something sent somebody here to see one.
+   *
+   * The crash toast is the only caller: the card naming the mod that brought
+   * the game down sits above the log files, so "Check the Logs tab" landing
+   * on the console was the right tab and the wrong half of it. Ignored unless
+   * it names a half this tab has.
+   */
+  openOn?: string;
+}) {
   const logs = useStore((s) => s.logs[instanceId]);
   const clearLogs = useStore((s) => s.clearLogs);
 
   // The console is this run; the files are every run, including the one that
   // crashed while nobody was looking.
-  const [view, setView] = useState<View>("console");
+  const [view, setView] = useState<View>(() =>
+    VIEWS.includes(openOn as View) ? (openOn as View) : "console",
+  );
+  // And again when the route names one while this is already mounted, which
+  // is what a crash toast pressed from inside the instance does.
+  useEffect(() => {
+    if (VIEWS.includes(openOn as View)) setView(openOn as View);
+  }, [openOn]);
   const [level, setLevel] = useState<Level>("ALL");
   const [filter, setFilter] = useState("");
   const [follow, setFollow] = useState(true);

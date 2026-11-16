@@ -455,7 +455,7 @@
 }
 
 /* And a section that follows anything else, which is the case the rule above
-   cannot see. The Automation tab is one pane holding two halves: `BackupsPane`
+   cannot see. The Backups tab is one pane holding two halves: `BackupsPane`
    renders this `.settings` div, and `SchedulesSection` renders its `.section`
    *inside* it, after the backups. So there is only ever one `.section` there,
    it has no `.section` before it to be adjacent to, and "On a timer" sat 18px

@@ -66,7 +66,17 @@ async function actionBindings() {
  * entry here fails below rather than slipping through unprinted.
  */
 const PRINTED_IN = {
-  focusFilter: ["../views/instance/ContentTab.tsx"],
+  // Four, and all four have to print it. Every list in this app that has a
+  // filter box now answers the same key, which is the only thing that makes
+  // it worth learning — a key that works on the instance's mods and not on
+  // the server's, or not on worlds, or not on the seventy rows of
+  // `server.properties`, is one somebody has to remember the exceptions to.
+  focusFilter: [
+    "../views/instance/ContentTab.tsx",
+    "../views/server/ContentTab.tsx",
+    "../views/instance/WorldsTab.tsx",
+    "../views/server/Properties.tsx",
+  ],
   clearSelection: ["../views/instance/ContentTab.tsx"],
   // Three, and all three have to print it. An action can belong to more than
   // one screen — "new" means something on each of these and nothing anywhere

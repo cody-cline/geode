@@ -76,9 +76,13 @@ const TABS = [
   // The same dependency field an instance draws. A server's mods folder is a
   // mods folder, and it keeps the same provenance records.
   { id: "graph", label: "Dependencies" },
-  // Backups on a timer and commands on a timer are the same idea — things the
-  // server does without being asked — so they share a tab.
-  { id: "backups", label: "Automation" },
+  // Named for what the pane is mostly made of: retention, "Back up now", the
+  // list, Restore, Delete. None of that happens without being asked, so
+  // "Automation" sent an admin who needed a restore to the one word up here
+  // that does not describe it. The schedules keep their place on this tab
+  // under their own heading — a backup on a timer is still a backup, and a
+  // command on a timer is the same idea one step over.
+  { id: "backups", label: "Backups" },
   // Its own tab, not a Settings section: whether players can reach the server
   // is live state an admin comes back to check, and at the foot of a long
   // settings page nobody would find it.
@@ -87,6 +91,22 @@ const TABS = [
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
+
+/**
+ * The tab each server was last left on.
+ *
+ * `App` builds a fresh `ServerView` per server id, so every bit of tab state
+ * goes when you open another one — which is what keeps one server's open
+ * dialogs and drafts out of the next server's screen. The tab itself is the
+ * one piece worth carrying across: somebody part-way down a Players list who
+ * checks a second server and comes back did not ask to be put on the console,
+ * and `Route`'s `tab` cannot answer for them, because the sidebar row and the
+ * servers list both navigate without one.
+ *
+ * Keyed by id, for the session only. Where you had a screen open is not worth
+ * a line in anybody's config file.
+ */
+const lastTab = new Map<string, TabId>();
 
 /** The longest start every candidate shares — what Tab completes to. */
 function commonPrefix(items: string[]): string {
@@ -148,7 +168,12 @@ export default function ServerView({ id }: { id: string }) {
   const lines = useStore((s) => s.serverLogs[id]);
   const clearServerLog = useStore((s) => s.clearServerLog);
 
-  const [active, setActive] = useState<TabId>("console");
+  const [active, setActive] = useState<TabId>(() => lastTab.get(id) ?? "console");
+  // Written here rather than at the four places that set the tab, so a fifth
+  // one cannot forget to.
+  useEffect(() => {
+    lastTab.set(id, active);
+  }, [id, active]);
   const [busy, setBusy] = useState(false);
   const [askEula, setAskEula] = useState(false);
   const [command, setCommand] = useState("");
@@ -931,6 +956,10 @@ function BackupsPane({ server }: { server: Server }) {
 
   return (
     <div className={styles.settings}>
+      {/* The tab is named Backups and so is this half of it, because the other
+          half has a heading of its own and a pane whose first heading is "On a
+          timer" reads as though everything above it were on one too. */}
+      <h2 className={styles.sectionTitle}>Backups</h2>
       <div className={styles.contentHead}>
         <label className={styles.retention}>
           Keep

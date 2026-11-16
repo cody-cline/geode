@@ -30,7 +30,11 @@ export type Route =
   | { view: "servers" }
   | { view: "server"; id: string; tab?: string }
   | { view: "settings"; tab?: string }
-  | { view: "instance"; id: string; tab?: string };
+  // `sub` names a half of the tab, for the one tab that has halves: Logs is
+  // a console and a list of files, and the crash report lives above the
+  // files. A toast that says "a mod crashed it" has to be able to land on
+  // the card that says which mod.
+  | { view: "instance"; id: string; tab?: string; sub?: string };
 
 export interface Toast {
   id: number;
@@ -44,6 +48,17 @@ export interface Toast {
    */
   action?: { label: string; run: () => void };
 }
+
+/**
+ * How many toasts the corner holds at once, oldest out first.
+ *
+ * A ceiling only failures need. They stay until they are dismissed, so a
+ * session's worth that nobody closed would wall off the corner of the window
+ * for the rest of it. Five is what still fits above the bottom of a short
+ * window, and the four a broken start raises at once — settings, instances,
+ * servers and accounts, none of them readable — all fit.
+ */
+const MAX_TOASTS = 5;
 
 /** What the offline-play dialog needs to ask its question. */
 export interface OfflinePlayRequest {
@@ -314,13 +329,23 @@ export const useStore = create<State>((set, get) => ({
   toasts: [],
   toast: (t) => {
     const id = ++toastSeq;
-    set((s) => ({ toasts: [...s.toasts, { ...t, id }] }));
+    set((s) => ({ toasts: [...s.toasts, { ...t, id }].slice(-MAX_TOASTS) }));
+    // A failure waits to be dismissed instead of leaving on a timer. Several
+    // of these report something that happened while nobody was watching — a
+    // server that did not start, sharing that could not take its port, a pack
+    // that would not build for a player who was waiting for it — and this
+    // corner is the only place any of them is ever said. Nine seconds was long
+    // enough to miss, and missing it meant nothing anywhere recorded that it
+    // happened. Everything else has whatever it is about standing in for it —
+    // the screen that changed, the thing that finished — so it still goes on
+    // its own.
+    if (t.kind === "error") return;
     // A toast carrying an action is the only route back from the thing it is
     // reporting, so it is given longer than any other kind: 12 seconds, which
     // is long enough to read a line, decide, and move a pointer to it. The
     // ordinary 4.5 is barely enough for the reading. An undo that has already
     // left is worse than no undo at all, because it was offered.
-    const ttl = t.action ? 12000 : t.kind === "error" ? 9000 : 4500;
+    const ttl = t.action ? 12000 : 4500;
     setTimeout(() => get().dismissToast(id), ttl);
   },
   dismissToast: (id) =>
@@ -588,10 +613,28 @@ export const useStore = create<State>((set, get) => ({
         get().toast({
           kind: "error",
           title: `${name} crashed`,
+          // Carries the way there rather than naming it. "Check the Logs tab"
+          // was a correct instruction and left the reader to find the tab,
+          // then the half of it with the crash report in — which is the files
+          // half, not the console the tab opens on. The press lands on the
+          // card that names the mod.
           body:
             payload.code === null
               ? "The game was stopped."
-              : `Exit code ${payload.code}. Check the Logs tab for the cause.`,
+              : `Exit code ${payload.code}.`,
+          action:
+            payload.code === null
+              ? undefined
+              : {
+                  label: "Show me why",
+                  run: () =>
+                    get().navigate({
+                      view: "instance",
+                      id: payload.instanceId,
+                      tab: "logs",
+                      sub: "files",
+                    }),
+                },
         });
       }
     });

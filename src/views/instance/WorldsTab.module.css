@@ -21,6 +21,21 @@
   gap: 7px;
 }
 
+/* Room for the printed binding on the right, and the key itself. Both copied
+   from the Content tabs' box, which is the shape this one is a dialect of:
+   one key, one place it sits, whichever filter you are looking at. */
+.searchHinted {
+  padding-right: 48px;
+}
+
+.searchKey {
+  position: absolute;
+  right: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
 .searchWrap {
   position: relative;
 }

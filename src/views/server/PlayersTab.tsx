@@ -15,6 +15,7 @@ import {
 
 import Modal from "../../components/Modal";
 import { api, errorMessage } from "../../lib/api";
+import { PROPERTY_INFO } from "../../lib/serverProperties";
 import { useStore } from "../../lib/store";
 import type {
   OnlinePlayers,
@@ -88,6 +89,20 @@ const LISTS = [
 ];
 
 type ListConfig = (typeof LISTS)[number];
+
+/**
+ * What each operator level grants, in the Properties tab's own words.
+ *
+ * Only level 4 was glossed here, so choosing 2 or 3 meant already knowing
+ * Minecraft's permission ladder — the one value on this tab that had to come
+ * from memory. The words are read off `op-permission-level` rather than
+ * written again, because that setting is the very thing the hint at the foot
+ * of this card sends the reader to, one tab away: a server describing one
+ * ladder two ways is worse than a ladder left unglossed. Each label carries
+ * its own number already — "1 — bypass spawn protection".
+ */
+const opLevelControl = PROPERTY_INFO["op-permission-level"].control;
+const OP_LEVELS = opLevelControl.kind === "enum" ? opLevelControl.options : [];
 
 /**
  * How one change is reported, whichever way it went.
@@ -739,8 +754,20 @@ function ListPane({
               <div className={styles.who}>
                 <span className={styles.name}>
                   {labelOf(entry)}
+                  {/* The same gloss as the picker's, because while the server
+                      is running there is no picker and this badge is the only
+                      place a level is named. */}
                   {entry.level !== null && (
-                    <span className={styles.level}>level {entry.level}</span>
+                    <span
+                      className={styles.level}
+                      title={
+                        OP_LEVELS.find(
+                          (o) => Number(o.value) === entry.level,
+                        )?.label
+                      }
+                    >
+                      level {entry.level}
+                    </span>
                   )}
                 </span>
                 {/* The identity, as against the name, which may be stale —
@@ -804,10 +831,9 @@ function ListPane({
             onChange={(e) => setLevel(Number(e.target.value))}
             aria-label="Operator level"
           >
-            {[1, 2, 3, 4].map((l) => (
-              <option key={l} value={l}>
-                Level {l}
-                {l === 4 ? " — everything" : ""}
+            {OP_LEVELS.map((o) => (
+              <option key={o.value} value={o.value}>
+                Level {o.label}
               </option>
             ))}
           </select>

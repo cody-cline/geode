@@ -323,6 +323,12 @@
   color: var(--text-faint) !important;
 }
 
+/* The Try again under a failed search. `.empty` centres by `text-align`, which
+   an inline-flex button answers, so only the gap is wanted here. */
+.emptyAction {
+  margin-top: 16px;
+}
+
 /* `tauri.conf.json` declares `minWidth: 940`, and this screen is three fixed
    columns wide — sidebar, rail, and a row whose icon and button are fixed too.
    At 940 that left a mod's summary 188px and it truncated mid-word. Nothing

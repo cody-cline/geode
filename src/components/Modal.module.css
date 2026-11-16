@@ -135,3 +135,11 @@
   background: var(--surface-2);
   border-radius: 0 0 var(--radius-lg) var(--radius-lg);
 }
+
+/* The key that finishes the dialog. An auto margin at the far end rather than
+   a place in the row: it comes and goes with the keyboard, and the buttons
+   must not step sideways each time it does. `kbd` is `--text-faint`, which
+   `contrast.test.mjs` already measures against `--surface-2`. */
+.enter {
+  margin-right: auto;
+}

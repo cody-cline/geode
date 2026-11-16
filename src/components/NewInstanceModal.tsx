@@ -39,6 +39,25 @@ const LOADER_BLURB: Record<Loader, string> = {
   forge: "The older line, and what many long-running packs are built on.",
 };
 
+/**
+ * What each kind of version is called, in the words a player would use.
+ *
+ * `version.kind` is Mojang's own `type` field, passed through
+ * `list_game_versions` untouched, and two of the four values it takes are
+ * machine tokens: a badge beside a version from 2010 read `old_beta`,
+ * underscore and all.
+ *
+ * Keyed by `string` rather than by a union, because the set of types is
+ * Mojang's to extend and the row below falls back to the raw value — a fifth
+ * kind then looks wrong rather than disappearing, which is the right way
+ * round for a badge whose whole job is to say this is not a release.
+ */
+const VERSION_KIND_LABEL: Record<string, string> = {
+  snapshot: "snapshot",
+  old_beta: "beta",
+  old_alpha: "alpha",
+};
+
 export default function NewInstanceModal({ onClose }: { onClose: () => void }) {
   const navigate = useStore((s) => s.navigate);
   const refresh = useStore((s) => s.refreshInstances);
@@ -527,13 +546,18 @@ export default function NewInstanceModal({ onClose }: { onClose: () => void }) {
           <span className="label" style={{ margin: 0 }}>
             Minecraft version
           </span>
+          {/* Named after the three badges it turns on, rather than after the
+              one of them most people are here for: this switch asks for every
+              version Mojang publishes, so ticking it also brings back the
+              alphas and betas from 2010, which "Show snapshots" alone gave no
+              warning of. */}
           <label className={styles.snapshotToggle}>
             <input
               type="checkbox"
               checked={showSnapshots}
               onChange={(e) => setShowSnapshots(e.target.checked)}
             />
-            Show snapshots
+            Show snapshots, betas and alphas
           </label>
         </div>
 
@@ -541,9 +565,18 @@ export default function NewInstanceModal({ onClose }: { onClose: () => void }) {
           <Search size={14} className={styles.searchIcon} />
           <input
             className={clsx("input", styles.searchInput)}
+            data-enter="field"
             placeholder="Filter versions"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
+            // Claimed and spent. `Modal` finishes a dialog on Enter unless the
+            // field it was pressed in takes the key, and a filter is the one
+            // field here where finishing is the wrong answer — somebody
+            // narrowing a list of versions has not decided yet, and Create
+            // would make the instance out from under them.
+            onKeyDown={(e) => {
+              if (e.key === "Enter") e.preventDefault();
+            }}
           />
         </div>
 
@@ -604,7 +637,9 @@ export default function NewInstanceModal({ onClose }: { onClose: () => void }) {
                   >
                     <span className={styles.versionId}>{version.id}</span>
                     {version.kind !== "release" && (
-                      <span className="badge">{version.kind}</span>
+                      <span className="badge">
+                        {VERSION_KIND_LABEL[version.kind] ?? version.kind}
+                      </span>
                     )}
                     <span className={styles.versionDate}>
                       {version.releaseTime.slice(0, 10)}

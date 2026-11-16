@@ -2,6 +2,7 @@ import { useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import clsx from "clsx";
 import {
+  AlertTriangle,
   Check,
   Copy,
   ExternalLink,
@@ -12,7 +13,7 @@ import {
 
 import AccountAvatar from "./AccountAvatar";
 import Modal from "./Modal";
-import { api } from "../lib/api";
+import { api, errorMessage } from "../lib/api";
 import { useStore } from "../lib/store";
 import type { Account, DeviceCodeStart } from "../lib/types";
 
@@ -34,6 +35,14 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
 
   const [pending, setPending] = useState<DeviceCodeStart | null>(null);
   const [signingIn, setSigningIn] = useState(false);
+  // Why a sign-in failure is kept here and not left to its toast: the call
+  // below only settles once the person has finished in their browser, so the
+  // failure lands in a window they are not looking at. Nine seconds later the
+  // toast is gone, and what they come back to is a dialog that looks like it
+  // was never used. The backend writes these sentences carefully — Microsoft's
+  // own `error_description` among them — so the one place they are worth
+  // keeping is the dialog that will be asked to try again.
+  const [signInError, setSignInError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [autoCopied, setAutoCopied] = useState(false);
   const [offlineName, setOfflineName] = useState("");
@@ -65,6 +74,7 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
   async function startMicrosoftLogin() {
     setSigningIn(true);
     setAutoCopied(false);
+    setSignInError(null);
     try {
       const start = await api.beginMicrosoftLogin();
       setPending(start);
@@ -83,6 +93,7 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
       setPending(null);
     } catch (e) {
       reportError("Microsoft sign-in failed", e);
+      setSignInError(errorMessage(e));
       setPending(null);
     } finally {
       setSigningIn(false);
@@ -265,6 +276,18 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
         </div>
       ) : (
         <div className={styles.section}>
+          {/* The backend's own sentence, unwrapped. These arrive in both of
+              this app's registers — "sign-in was declined" states a fact,
+              "the sign-in code expired — start over" says what to do — and
+              either one reads as itself above the button it is about. A lead
+              glued in front would double up with the half that already
+              carries one. */}
+          {signInError && (
+            <div className={styles.error} role="alert">
+              <AlertTriangle size={15} />
+              <span>{signInError}</span>
+            </div>
+          )}
           {ownsTheGame || hasClientId !== false ? (
             <button
               className="btn btn-primary"
@@ -316,7 +339,14 @@ export default function AccountsModal({ onClose }: { onClose: () => void }) {
             maxLength={16}
             disabled={!ownsTheGame}
             onChange={(e) => setOfflineName(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && addOffline()}
+            data-enter="field"
+            onKeyDown={(e) => {
+              // Claimed: without this `Modal` presses the footer's
+              // primary after this adds the account, adding it twice.
+              if (e.key !== "Enter") return;
+              e.preventDefault();
+              addOffline();
+            }}
           />
           <button
             className="btn"

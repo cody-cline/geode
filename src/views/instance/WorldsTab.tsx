@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import clsx from "clsx";
 import {
@@ -16,9 +16,12 @@ import {
 } from "lucide-react";
 
 import Modal from "../../components/Modal";
+import Tooltip from "../../components/Tooltip";
 import { api, errorMessage } from "../../lib/api";
 import { GAME_MODES, fileSize, relativeTime } from "../../lib/format";
 import { savedByNewer } from "../../lib/mcversion";
+import { actionHint } from "../../lib/shortcuts";
+import { useActionShortcut } from "../../lib/useActionShortcut";
 import { useStore } from "../../lib/store";
 import type { Instance, World, WorldBackup } from "../../lib/types";
 
@@ -52,6 +55,7 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
   const reportError = useStore((s) => s.reportError);
 
   const [worlds, setWorlds] = useState<World[] | null>(null);
+  const hasWorlds = Boolean(worlds && worlds.length > 0);
   /**
    * Why the folder could not be read, when it could not.
    *
@@ -63,6 +67,23 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
   const [failed, setFailed] = useState<string | null>(null);
   const [backups, setBackups] = useState<WorldBackup[]>([]);
   const [filter, setFilter] = useState("");
+  const filterBox = useRef<HTMLInputElement>(null);
+
+  /**
+   * Ctrl+F reaches this tab's filter, as it does the two Content tabs'.
+   *
+   * Only once there is something to filter: the box is off until a world
+   * exists, and a key that focuses a disabled input would cost the webview's
+   * own find bar and give nothing back. The hint beside it is gated the same
+   * way, so what is printed and what works are the same thing.
+   */
+  useActionShortcut("focusFilter", (e) => {
+    const box = filterBox.current;
+    if (!box || box.disabled) return;
+    e.preventDefault();
+    box.focus();
+    box.select();
+  });
   const [asking, setAsking] = useState<Asking>(null);
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
@@ -264,12 +285,21 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
               one" with "No world matches “zzz”" — a correct sentence and the
               wrong diagnosis of why the screen is empty. */}
           <input
-            className={clsx("input", styles.search)}
+            ref={filterBox}
+            className={clsx("input", styles.search, hasWorlds && styles.searchHinted)}
             placeholder="Filter worlds"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
-            disabled={!worlds || worlds.length === 0}
+            disabled={!hasWorlds}
           />
+          {/* The binding, printed in the box it reaches — an action has no
+              sidebar row to be found from, so the thing it presses is the
+              only place it can be come across. Not while the box is off:
+              a key printed beside a disabled control is one that does
+              nothing when pressed. */}
+          {hasWorlds && (
+            <kbd className={styles.searchKey}>{actionHint("focusFilter")}</kbd>
+          )}
         </div>
 
         <div className={styles.tools}>
@@ -391,6 +421,11 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
             const ahead = Boolean(
               world.version && savedByNewer(world.version, instance.mcVersion),
             );
+            // Said twice below — once in the bubble, once in a `title` for
+            // the states where the button is off — so the two cannot drift.
+            const renameSays = world.trouble
+              ? "There is no level.dat here to hold a name"
+              : "Rename";
             return (
               <div
                 key={world.folder}
@@ -459,34 +494,46 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
                   )}
                 </div>
 
-                <button
-                  className="btn btn-ghost btn-icon btn-sm"
-                  onClick={() => {
-                    setAsking({ kind: "rename", world });
-                    setTyped(world.name);
-                  }}
-                  disabled={running || Boolean(world.trouble)}
-                  title={
-                    world.trouble
-                      ? "There is no level.dat here to hold a name"
-                      : "Rename"
-                  }
-                  aria-label={`Rename ${world.name}`}
-                >
-                  <Pencil size={14} />
-                </button>
-                <button
-                  className="btn btn-ghost btn-icon btn-sm"
-                  onClick={() => {
-                    setAsking({ kind: "copy", world });
-                    setTyped(`${world.name} copy`);
-                  }}
-                  disabled={running}
-                  title="Make a copy"
-                  aria-label={`Copy ${world.name}`}
-                >
-                  <Copy size={14} />
-                </button>
+                {/* The four icon-only buttons say what they do in this app's
+                    own bubble rather than the platform's: a `title` waits out
+                    the platform's delay, is drawn in neither theme, and never
+                    appears on keyboard focus — and the pair around "Back up"
+                    is the same archive shape twice, one writing and one
+                    reading back, which is not a difference anybody should
+                    have to hover to find. The `title` stays for the states
+                    where a button is off, because a disabled control receives
+                    neither pointer nor focus; it says what the press would
+                    do, and why it is off is the banner's job. "Back up" keeps
+                    its `title` alone — it has a visible word, and its
+                    sentence only elaborates. */}
+                <Tooltip text={renameSays}>
+                  <button
+                    className="btn btn-ghost btn-icon btn-sm"
+                    onClick={() => {
+                      setAsking({ kind: "rename", world });
+                      setTyped(world.name);
+                    }}
+                    disabled={running || Boolean(world.trouble)}
+                    title={running || world.trouble ? renameSays : undefined}
+                    aria-label={`Rename ${world.name}`}
+                  >
+                    <Pencil size={14} />
+                  </button>
+                </Tooltip>
+                <Tooltip text="Make a copy">
+                  <button
+                    className="btn btn-ghost btn-icon btn-sm"
+                    onClick={() => {
+                      setAsking({ kind: "copy", world });
+                      setTyped(`${world.name} copy`);
+                    }}
+                    disabled={running}
+                    title={running ? "Make a copy" : undefined}
+                    aria-label={`Copy ${world.name}`}
+                  >
+                    <Copy size={14} />
+                  </button>
+                </Tooltip>
                 <button
                   className="btn btn-sm"
                   onClick={() =>
@@ -510,28 +557,36 @@ export default function WorldsTab({ instance }: { instance: Instance }) {
                   )}
                   Back up
                 </button>
-                <button
-                  className="btn btn-ghost btn-icon btn-sm"
-                  onClick={() => setAsking({ kind: "backups", world })}
-                  disabled={kept.length === 0}
-                  title={
+                <Tooltip
+                  text={
                     kept.length === 0
                       ? "No backups of this world yet"
                       : "Restore from a backup"
                   }
-                  aria-label={`Backups of ${world.name}`}
                 >
-                  <ArchiveRestore size={14} />
-                </button>
-                <button
-                  className="btn btn-ghost btn-icon btn-sm"
-                  onClick={() => setAsking({ kind: "delete", world })}
-                  disabled={running}
-                  title="Delete"
-                  aria-label={`Delete ${world.name}`}
-                >
-                  <Trash2 size={14} />
-                </button>
+                  <button
+                    className="btn btn-ghost btn-icon btn-sm"
+                    onClick={() => setAsking({ kind: "backups", world })}
+                    disabled={kept.length === 0}
+                    title={
+                      kept.length === 0 ? "No backups of this world yet" : undefined
+                    }
+                    aria-label={`Backups of ${world.name}`}
+                  >
+                    <ArchiveRestore size={14} />
+                  </button>
+                </Tooltip>
+                <Tooltip text="Delete">
+                  <button
+                    className="btn btn-ghost btn-icon btn-sm"
+                    onClick={() => setAsking({ kind: "delete", world })}
+                    disabled={running}
+                    title={running ? "Delete" : undefined}
+                    aria-label={`Delete ${world.name}`}
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </Tooltip>
               </div>
             );
           })

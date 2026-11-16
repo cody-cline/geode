@@ -4,9 +4,36 @@
   margin-bottom: 16px;
 }
 
+/* The same three parts the Content and Worlds filter boxes have: the wrapper
+   that positions them, the magnifier on the left, and the printed binding on
+   the right. Copied rather than shared because there is no `.find` composite
+   in global.css yet; if one is ever hoisted, these four go with it. */
+.searchWrap {
+  position: relative;
+}
+
+.searchIcon {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-faint);
+  pointer-events: none;
+}
+
+.searchKey {
+  position: absolute;
+  right: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
 .search {
   width: 220px;
   height: 30px;
+  padding-left: 31px;
+  padding-right: 48px;
 }
 
 .group + .group {
@@ -125,7 +152,9 @@
   flex: 0 0 auto;
 }
 
-/* Only shown while the server is running, where the consequence is real. */
+/* Three things wear this: what changing a setting while the server runs
+   costs, a port another server is already set to, and a number the server
+   cannot take. Only the first waits for the server to be running. */
 .danger {
   display: flex;
   align-items: flex-start;

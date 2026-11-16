@@ -111,3 +111,14 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* The line under a failure stays until somebody dismisses it, so it is the
+   one worth reading all of. A path, a host and a reason do not fit in 320px
+   of one line, and an ellipsis here opens onto nothing. */
+.detailError {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  white-space: normal;
+}

@@ -311,7 +311,14 @@ export default function JoinModal({
             autoComplete="off"
             disabled={busy}
             onChange={(e) => edit({ link: e.target.value })}
-            onKeyDown={(e) => e.key === "Enter" && void lookUp()}
+            data-enter="field"
+            onKeyDown={(e) => {
+              // Claimed, so `Modal` does not press the footer's primary
+              // on the same press this looks the link up with.
+              if (e.key !== "Enter") return;
+              e.preventDefault();
+              void lookUp();
+            }}
           />
           <p className="hint">The link a server&apos;s admin copied from Geode.</p>
         </div>
@@ -331,7 +338,14 @@ export default function JoinModal({
                 autoComplete="off"
                 disabled={busy}
                 onChange={(e) => edit({ address: e.target.value })}
-                onKeyDown={(e) => e.key === "Enter" && void lookUp()}
+                data-enter="field"
+                onKeyDown={(e) => {
+                  // Claimed, so `Modal` does not press the footer's primary
+                  // on the same press this looks the link up with.
+                  if (e.key !== "Enter") return;
+                  e.preventDefault();
+                  void lookUp();
+                }}
               />
             </div>
             <div>
@@ -347,7 +361,14 @@ export default function JoinModal({
                 autoComplete="off"
                 disabled={busy}
                 onChange={(e) => edit({ code: e.target.value })}
-                onKeyDown={(e) => e.key === "Enter" && void lookUp()}
+                data-enter="field"
+                onKeyDown={(e) => {
+                  // Claimed, so `Modal` does not press the footer's primary
+                  // on the same press this looks the link up with.
+                  if (e.key !== "Enter") return;
+                  e.preventDefault();
+                  void lookUp();
+                }}
               />
             </div>
           </div>

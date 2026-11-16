@@ -56,6 +56,33 @@ const SORTS: { id: SortBy; label: string }[] = [
 
 const PAGE_SIZE = 30;
 
+/**
+ * What the catalogue's own browse was last left set to.
+ *
+ * `App.tsx` unmounts a route the moment you leave it, and browsing is
+ * iterative — find a mod, install it, step into the instance to see it, come
+ * back for the next one — so every return started from an empty box with the
+ * sources, categories and narrowing reset, and the search had to be typed out
+ * again. `installPack` below already refuses to jump away from the results for
+ * the same reason; this carries that across the one navigation it stopped at.
+ *
+ * A module-level value rather than state anywhere, because it belongs to the
+ * window rather than to what Geode keeps: a reload is a fresh start, and none
+ * of it is worth writing to disk. Only the catalogue's browse is kept — an
+ * instance, a plan and a server each fix the kind and the narrowing from what
+ * they are, so there is nothing of theirs to come back to.
+ */
+let lastBrowse: {
+  query: string;
+  kind: ProjectKind;
+  sort: SortBy;
+  sources: Provider[];
+  categories: string[];
+  filterVersion: string;
+  filterLoader: string;
+  lastTargetId: string;
+} | null = null;
+
 /** The arrows inside the category chips, by the step each one moves. */
 const CHIP_STEP: Record<string, number> = {
   ArrowLeft: -1,
@@ -150,19 +177,28 @@ export default function Browse({
   const refreshInstances = useStore((s) => s.refreshInstances);
   const refreshServers = useStore((s) => s.refreshServers);
 
-  const [query, setQuery] = useState("");
-  const [debounced, setDebounced] = useState("");
-  const [kind, setKind] = useState<ProjectKind>("mod");
-  const [sort, setSort] = useState<SortBy>("relevance");
+  /** Browsing on nobody's behalf: the whole catalogue, with a page of its own. */
+  const globalBrowse = !lockedInstance && !plan && !server;
+
+  /** Where this screen was left last time, when it is the screen that keeps it. */
+  const resume = globalBrowse ? lastBrowse : null;
+
+  const [query, setQuery] = useState(resume?.query ?? "");
+  // Restored alongside the query rather than left empty and caught up to by
+  // the debounce below, which would run the resumed search once for the words
+  // and once for nothing before them.
+  const [debounced, setDebounced] = useState(resume?.query ?? "");
+  const [kind, setKind] = useState<ProjectKind>(resume?.kind ?? "mod");
+  const [sort, setSort] = useState<SortBy>(resume?.sort ?? "relevance");
   // SpigotMC is selected from the start so it comes back on its own when the
   // Plugins tab is opened, the way CurseForge does once a key is added. It is
   // filtered out of every other tab below.
-  const [sources, setSources] = useState<Provider[]>([
-    "modrinth",
-    "curseforge",
-    "spiget",
-  ]);
-  const [categories, setCategories] = useState<string[]>([]);
+  const [sources, setSources] = useState<Provider[]>(
+    resume?.sources ?? ["modrinth", "curseforge", "spiget"],
+  );
+  const [categories, setCategories] = useState<string[]>(
+    resume?.categories ?? [],
+  );
   const [available, setAvailable] = useState<string[]>([]);
   /**
    * Why the category list could not be read, when it could not.
@@ -186,9 +222,11 @@ export default function Browse({
    */
   const [activeChip, setActiveChip] = useState("");
   /** Last instance installed into, used to preselect the picker. */
-  const [lastTargetId, setLastTargetId] = useState<string>("");
-  const [filterVersion, setFilterVersion] = useState("");
-  const [filterLoader, setFilterLoader] = useState("");
+  const [lastTargetId, setLastTargetId] = useState<string>(
+    resume?.lastTargetId ?? "",
+  );
+  const [filterVersion, setFilterVersion] = useState(resume?.filterVersion ?? "");
+  const [filterLoader, setFilterLoader] = useState(resume?.filterLoader ?? "");
   const [gameVersions, setGameVersions] = useState<string[]>([]);
   const [includeFabric, setIncludeFabric] = useState(false);
   const [connector, setConnector] = useState<ConnectorSupport | null>(null);
@@ -214,6 +252,13 @@ export default function Browse({
    * screen has to stop presenting the absence of results as a result.
    */
   const [failed, setFailed] = useState<string | null>(null);
+  /**
+   * Counted up by the Try again the failed search carries: the search is keyed
+   * on what was asked for, and asking the same thing again is not a different
+   * question — so without this, retyping the very words that failed runs
+   * nothing.
+   */
+  const [attempt, setAttempt] = useState(0);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [exhausted, setExhausted] = useState(false);
@@ -279,9 +324,6 @@ export default function Browse({
   const requestSeq = useRef(0);
 
   const target = lockedInstance;
-
-  /** Browsing on nobody's behalf: the whole catalogue, with a page of its own. */
-  const globalBrowse = !lockedInstance && !plan && !server;
 
   // `sources` records what the user wants; `usableSources` is what we can
   // actually query. Keeping them apart means CurseForge stays selected — and
@@ -536,8 +578,12 @@ export default function Browse({
       toast({
         kind: "success",
         title: `Installed ${instance.name}`,
+        // Through `loaderLabel`, so the pack's instance is named here the way
+        // its own card will name it a second later: "NeoForge", not the id.
         body: `Minecraft ${instance.mcVersion}${
-          instance.loader !== "vanilla" ? ` · ${instance.loader}` : ""
+          instance.loader !== "vanilla"
+            ? ` · ${loaderLabel(instance.loader)}`
+            : ""
         }`,
       });
       // Deliberately stays put: installing a pack is often one of several
@@ -704,6 +750,18 @@ export default function Browse({
     return () => clearTimeout(timer);
   }, [query]);
 
+  /**
+   * A resumed search arrives selected, so the first thing typed replaces it
+   * instead of landing on the end of words nobody just typed. Still on screen
+   * and still the search that ran, so keeping it costs nothing but not typing.
+   * Mount only — `autoFocus` puts the keyboard here, and re-selecting later
+   * would be taking the caret off somebody mid-word.
+   */
+  const searchBox = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    searchBox.current?.select();
+  }, []);
+
   // Neither of these two reads raises a toast, and both say so in the rail
   // instead: they are tag lists fetched from upstream alongside the search
   // rather than as part of it, so they fail on their own — and a toast for
@@ -724,6 +782,14 @@ export default function Browse({
 
   useEffect(loadGameVersions, [loadGameVersions]);
 
+  /**
+   * The kind the categories in force were picked under. A new kind replaces
+   * every chip, so the picks go with it — but the first run of the effect
+   * below is not a change of kind, and clearing there would throw away the
+   * chips `lastBrowse` just restored.
+   */
+  const categoriesKind = useRef(kind);
+
   useEffect(() => {
     api
       .getCategories(kind)
@@ -735,8 +801,37 @@ export default function Browse({
         setAvailable([]);
         setCategoriesProblem(errorMessage(e));
       });
-    setCategories([]);
+    if (categoriesKind.current !== kind) {
+      setCategories([]);
+      categoriesKind.current = kind;
+    }
   }, [kind]);
+
+  // Recorded as it changes rather than on the way out: an unmounted view gets
+  // no chance to write anything, and every one of these is already a render.
+  useEffect(() => {
+    if (!globalBrowse) return;
+    lastBrowse = {
+      query,
+      kind,
+      sort,
+      sources,
+      categories,
+      filterVersion,
+      filterLoader,
+      lastTargetId,
+    };
+  }, [
+    globalBrowse,
+    query,
+    kind,
+    sort,
+    sources,
+    categories,
+    filterVersion,
+    filterLoader,
+    lastTargetId,
+  ]);
 
   // Only the in-instance view scopes automatically — there the destination is
   // fixed, so narrowing is helpful. Global browse shows everything unless the
@@ -913,6 +1008,9 @@ export default function Browse({
       sort,
       providers,
       useFabric,
+      // Not read inside: it is here so that Try again asks the same question
+      // again, which nothing else in this list can express.
+      attempt,
       reportError,
     ],
   );
@@ -1139,6 +1237,7 @@ export default function Browse({
           <div className={styles.searchWrap}>
             <Search size={15} className={styles.searchIcon} />
             <input
+              ref={searchBox}
               className={clsx("input", styles.search)}
               placeholder={`Search ${kindLabel}`}
               value={query}
@@ -1625,11 +1724,21 @@ export default function Browse({
                suggestions that state offers — search differently, widen the
                sources, clear the filters — are all about a search that ran,
                and following any of them would have been wasted on a search
-               that did not. */
+               that did not. What belongs here instead is the same question a
+               second time: three upstreams are the most likely thing in Geode
+               to fail for a minute and come back, and the search is keyed on
+               what was asked for, so retyping the words it already has would
+               run nothing. */
             <div className={styles.empty}>
               <AlertTriangle size={30} className={styles.emptyIcon} />
               <p>The search failed, so there is nothing here to read.</p>
               <p className={styles.emptyHint}>{failed}</p>
+              <button
+                className={clsx("btn", styles.emptyAction)}
+                onClick={() => setAttempt((n) => n + 1)}
+              >
+                Try again
+              </button>
             </div>
           ) : hits.length === 0 ? (
             <div className={styles.empty}>
@@ -1777,6 +1886,11 @@ export default function Browse({
       {askTarget && (
         <InstallTargetModal
           project={askTarget.project}
+          // The build the panel was open on, when the press came from a
+          // build's own row. `installDirect` already installs this exact id,
+          // so the dialog names it and judges against it rather than against
+          // every build the project publishes.
+          versionId={askTarget.versionId}
           preselect={lastTargetId}
           installedIn={installedIn}
           busy={installing !== null}

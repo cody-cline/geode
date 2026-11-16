@@ -358,6 +358,14 @@ export default function ContentTab({
   const [keyed, setKeyed] = useState<string | null>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
   const [askingDelete, setAskingDelete] = useState(false);
+  /**
+   * The hand-added file a row's own Delete is asking about, if one is.
+   *
+   * Its own state rather than a single row pushed through the bulk ask above,
+   * because the two dialogs are not the same question — see the pair of them
+   * at the bottom of this file.
+   */
+  const [askingRow, setAskingRow] = useState<ContentItem | null>(null);
   // Whether the toolbar's drawer is open, held here because Escape means
   // something else on this screen and the drawer has first call on it.
   const [moreOpen, setMoreOpen] = useState(false);
@@ -658,7 +666,7 @@ export default function ContentTab({
             : "Nothing new could be identified",
         body:
           report.unknown > 0
-            ? `${report.unknown} file${report.unknown === 1 ? " could" : "s could"} not be named, so ${report.unknown === 1 ? "it stays" : "they stay"} untracked.`
+            ? `${report.unknown} file${report.unknown === 1 ? " could" : "s could"} not be named, so ${report.unknown === 1 ? "it is" : "they are"} still not checked for updates.`
             : undefined,
       });
     } catch (e) {
@@ -808,12 +816,12 @@ export default function ContentTab({
               the width the pane narrows at it keeps the icon and the number
               and drops the word. */}
           {untrackedCount > 0 && (
-            <Tooltip text="Match untracked files against Modrinth and CurseForge by file hash">
+            <Tooltip text="Match the files added by hand against Modrinth and CurseForge by file hash">
               <button
                 className={clsx("btn", styles.toolCollapse, styles.toolCounted)}
                 onClick={linkUntracked}
                 disabled={linking}
-                aria-label={`Identify ${untrackedCount} untracked file${untrackedCount === 1 ? "" : "s"}`}
+                aria-label={`Identify ${untrackedCount} file${untrackedCount === 1 ? "" : "s"} added by hand`}
               >
                 {linking ? (
                   <Loader2 size={14} className="spin" />
@@ -1147,10 +1155,14 @@ export default function ContentTab({
                     {/* Each of these is one word whose meaning is the sentence
                         attached to it, and until now that sentence was a
                         `title` — which is to say it was there for a mouse and
-                        for nothing else. "untracked" is the plainest case: the
-                        word is jargon, and what it means existed only in a
-                        native tooltip that never opens on focus and never on
-                        touch.
+                        for nothing else. "untracked" was the plainest case,
+                        and the only one a tooltip could not rescue: the word
+                        is borrowed from version control, so its plain reading
+                        is wrong rather than merely thin, and what it did mean
+                        lived in a native tooltip that never opens on focus and
+                        never on touch. The badge says what happened instead —
+                        somebody put the file there — and the tooltip is left
+                        to say what follows from that.
 
                         So each carries a real tooltip and a `tabIndex` of -1,
                         which puts it in its row's arrow walk and in no tab
@@ -1180,9 +1192,9 @@ export default function ContentTab({
                       </Tooltip>
                     )}
                     {item.fromDisk && (
-                      <Tooltip text="Added manually — not tracked for updates">
+                      <Tooltip text="Not checked for updates — Geode does not know which project it is.">
                         <span className="badge" tabIndex={-1}>
-                          untracked
+                          added by hand
                         </span>
                       </Tooltip>
                     )}
@@ -1327,7 +1339,13 @@ export default function ContentTab({
                       Both tooltips, and a `title` as well for the one state
                       the bubble cannot reach: a disabled control receives
                       neither a pointer nor focus, so the platform's own is all
-                      that is left to say why this press is not on offer. */}
+                      that is left to say why this press is not on offer.
+
+                      Which of the two presses this is depends on the file, and
+                      the dialog at the bottom says why: a mod with a project
+                      behind it goes in one press because Browse can fetch it
+                      back, and one somebody dropped in here cannot be fetched
+                      by anything. */}
                   <Tooltip
                     text={
                       item.origin === "server"
@@ -1337,7 +1355,10 @@ export default function ContentTab({
                   >
                     <button
                       className="btn btn-ghost btn-icon btn-sm"
-                      onClick={() => remove(item)}
+                      onClick={() => {
+                        if (item.fromDisk) setAskingRow(item);
+                        else void remove(item);
+                      }}
                       disabled={item.origin === "server"}
                       title={
                         item.origin === "server"
@@ -1358,12 +1379,12 @@ export default function ContentTab({
         )}
       </div>
 
-      {/* A row's own Delete button asks nothing — one press, one file, and the
-          name is right under the cursor. A press that takes a dozen at once is
-          not that, so this names every one of them: a count is what was
-          clicked, the names are what is about to go, and a selection made
-          three filters ago is the easy way to delete something you had
-          forgotten was in it. */}
+      {/* A row's own Delete usually asks nothing — one press, one file, the
+          name right under the cursor, and a mod Browse can fetch again at the
+          end of it. A press that takes a dozen at once is not that, so this
+          names every one of them: a count is what was clicked, the names are
+          what is about to go, and a selection made three filters ago is the
+          easy way to delete something you had forgotten was in it. */}
       {askingDelete && (
         <Modal
           title={`Delete ${deletable.length} file${deletable.length === 1 ? "" : "s"}?`}
@@ -1405,6 +1426,44 @@ export default function ContentTab({
                 : `${picked.length - deletable.length} more files in the selection came from the server's pack and stay — turn those off instead if you do not want them.`}
             </p>
           )}
+        </Modal>
+      )}
+
+      {/* The one row that does ask, and the whole of why: a file added by hand
+          came off this computer and exists nowhere else Geode can reach, so
+          the press is the last thing that happens to it. Every other row has
+          a project behind it and stays a single press, which is the trade —
+          the question is spent where it buys something back. */}
+      {askingRow && (
+        <Modal
+          title={`Delete ${askingRow.name}?`}
+          subtitle={`Removed from this instance's ${noun} folder. It cannot be undone.`}
+          onClose={() => setAskingRow(null)}
+          width={440}
+          footer={
+            <>
+              <button className="btn" onClick={() => setAskingRow(null)}>
+                Cancel
+              </button>
+              <button
+                className="btn btn-danger"
+                onClick={() => {
+                  const item = askingRow;
+                  setAskingRow(null);
+                  void remove(item);
+                }}
+              >
+                Delete permanently
+              </button>
+            </>
+          }
+        >
+          <p className={styles.askNote}>
+            Geode did not install this one, so there is no project to ask for
+            it again — a mod from Modrinth or CurseForge goes in one press
+            because Browse can find it again. This file is here and wherever
+            you copied it from, and that is all.
+          </p>
         </Modal>
       )}
     </div>

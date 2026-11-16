@@ -112,6 +112,32 @@
   gap: 12px;
 }
 
+/* A sign-in that failed, held above the button that will be asked to try
+   again. Same block as `JoinModal` and `PackLinkModal`, because it is the
+   same thing: a refusal the reader has to be able to read at their own pace
+   rather than catch. Selectable for the same reason those are — an AADSTS
+   code is what somebody goes and searches for. */
+.error {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--danger) 38%, var(--border));
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.error svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--danger);
+}
+
 .scanning {
   display: flex;
   align-items: center;

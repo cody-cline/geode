@@ -56,7 +56,15 @@ type TabId = (typeof TABS)[number]["id"];
 /** An instance has one folder worth graphing, so there is no choice to offer. */
 const MODS_ONLY: ContentKind[] = ["mod"];
 
-export default function InstanceView({ id, tab }: { id: string; tab?: string }) {
+export default function InstanceView({
+  id,
+  tab,
+  sub,
+}: {
+  id: string;
+  tab?: string;
+  sub?: string;
+}) {
   const instances = useStore((s) => s.instances);
   const navigate = useStore((s) => s.navigate);
   const reportError = useStore((s) => s.reportError);
@@ -67,6 +75,15 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
   const [active, setActive] = useState<TabId>(
     TABS.some((t) => t.id === tab) ? (tab as TabId) : "content",
   );
+  // The initialiser above runs once, and `App` keys this view by id alone, so
+  // navigating to a tab of the instance already open used to change nothing
+  // at all — the route said `logs`, the screen stayed on Content, and whoever
+  // sent you there looked like it had done nothing. Only when the route names
+  // a tab: a navigation that names none is the sidebar or a card, and those
+  // mean "open this instance", not "put me back on Content".
+  useEffect(() => {
+    if (tab && TABS.some((t) => t.id === tab)) setActive(tab as TabId);
+  }, [tab]);
   // Browsing happens inside the instance rather than navigating to the global
   // Browse view, so the sidebar stays put and the destination stays obvious.
   const [browsing, setBrowsing] = useState(false);
@@ -340,7 +357,7 @@ export default function InstanceView({ id, tab }: { id: string; tab?: string }) 
           <GraphTab id={instance.id} source="instance" folders={MODS_ONLY} />
         )}
         {active === "pack" && <PackTab instance={instance} />}
-        {active === "logs" && <LogsTab instanceId={id} />}
+        {active === "logs" && <LogsTab instanceId={id} openOn={sub} />}
         {active === "settings" && <SettingsTab instance={instance} />}
       </div>
 

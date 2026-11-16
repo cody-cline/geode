@@ -10,6 +10,7 @@ import {
   ShieldAlert,
 } from "lucide-react";
 
+import Tooltip from "./Tooltip";
 import { launchInstance } from "../lib/actions";
 import {
   compactNumber,
@@ -242,15 +243,38 @@ export default function ProjectCard({
                 </span>
               )
             )}
-            {blocked && (
-              <span
-                className="badge badge-warn"
-                title="The author disabled third-party downloads"
-              >
-                <ShieldAlert size={10} />
-                Manual
-              </span>
-            )}
+            {/* Two facts, and one badge used to tell the pack's one about
+                both — the same mistake the panel's banner already corrected,
+                and never carried back here (see the comment above
+                `styles.blocked` in ProjectPanel.tsx). A pack really is a
+                manual download: it is fetched as a file, so there is nothing
+                Geode can put in its place. A mod is not — the core installs
+                that author's own release of the identical bytes, and the
+                version list is the one place a build is chosen — so "Manual"
+                over a greyed-out Install sent somebody to the website that
+                the Versions tab exists to spare them. The badge names that
+                step instead.
+                A real tooltip rather than a `title`, the way the Content tab
+                carries the explanation on its own badges: the word is the
+                short form and the sentence is the information, which is a
+                `title`'s worst case — a second of waiting, drawn in neither
+                of this app's themes. */}
+            {blocked &&
+              (isModpack ? (
+                <Tooltip text="The author disabled third-party downloads, and a pack is fetched as a file rather than matched by its contents. Download it from the project page and bring the .zip in from Library.">
+                  <span className="badge badge-warn" tabIndex={-1}>
+                    <ShieldAlert size={10} />
+                    Manual
+                  </span>
+                </Tooltip>
+              ) : (
+                <Tooltip text="The author disabled third-party downloads, so Geode looks for the same file published by that author elsewhere and installs that when the contents match. Open this and pick a build under Versions.">
+                  <span className="badge badge-warn" tabIndex={-1}>
+                    <ShieldAlert size={10} />
+                    Pick a build
+                  </span>
+                </Tooltip>
+              ))}
           </div>
 
           {installing ? (

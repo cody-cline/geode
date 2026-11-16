@@ -477,6 +477,14 @@
   line-height: 1.55;
 }
 
+/* The same text, set as the whole of a dialog's body rather than under a
+   list — so it starts where the body starts and carries no gap of its own. */
+.askNote {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  line-height: 1.55;
+}
+
 .empty {
   padding: 60px 20px;
   text-align: center;

@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
-import { AlertTriangle, Eye, EyeOff, Loader2, Zap } from "lucide-react";
+import { AlertTriangle, Eye, EyeOff, Loader2, Search, Zap } from "lucide-react";
 
 import { api, errorMessage } from "../../lib/api";
+import { actionHint } from "../../lib/shortcuts";
+import { useActionShortcut } from "../../lib/useActionShortcut";
 import { useStore } from "../../lib/store";
 import {
   CREATION_ONLY,
@@ -35,15 +37,118 @@ const PORT_KEY = "server-port";
  * that has never started, where there is no file and so no number yet.
  */
 function portClashLine(names: string[], port: string): string {
-  const others =
-    names.length === 1
-      ? names[0]
-      : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
-  return `${others} ${names.length === 1 ? "is" : "are"} also set to ${port}. Only one of them can run at a time — whichever starts second will fail to bind it.`;
+  return `${listOf(names)} ${names.length === 1 ? "is" : "are"} also set to ${port}. Only one of them can run at a time — whichever starts second will fail to bind it.`;
+}
+
+/** "a", "a and b", "a, b and c" — how this screen names a handful of things. */
+function listOf(names: string[]): string {
+  if (names.length === 1) return names[0];
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 }
 
 /** How to name the port of a server that has not written its file yet. */
 const UNWRITTEN_PORT = "the port this server will take the first time it starts";
+
+/** What a number in this file can be: digits, and nothing else. */
+const WHOLE_NUMBER = /^-?\d+$/;
+
+/**
+ * Where a port stops, and the one upper bound in the catalogue that is a fact
+ * rather than a guess.
+ *
+ * It is also how the four port keys are told apart from everything else here:
+ * `server-port`, `query.port`, `rcon.port` and `management-server-port` are
+ * the only settings whose maximum is this, because they are the only ones
+ * measuring a TCP port. A fork may well raise `max-players` past 200; none
+ * will ever bind 99999. Geode already says so where it asks for a port of its
+ * own — the share port in Settings wants "a whole number from 1024 to 65535"
+ * and will not save anything else.
+ */
+const MAX_PORT = 65535;
+
+/**
+ * What is wrong with a number somebody has typed, and whether it is wrong
+ * enough to hold the save back.
+ *
+ * Two different things, which is why both come back together. A box holding
+ * no whole number — emptied, half-typed, or `1e5`, all of which a
+ * `type="number"` input hands over quite happily — would go into the file
+ * exactly as it stands, and a line the server reads as a number is not the
+ * place to find that out, so the save waits for one.
+ *
+ * A whole number outside the catalogue's range is a different claim. Those
+ * bounds are where a setting usually sits, not what a server refuses:
+ * `max-players` is listed as 0 to 200 and `view-distance` as 2 to 32, and a
+ * fork, a plugin or a version nobody here has heard of may take more. So that
+ * one is said and then saved, for the same reason the port two servers share
+ * is warned about rather than refused — Geode cannot know, and a refusal
+ * would be it pretending otherwise.
+ *
+ * Over `MAX_PORT` is the exception, and the only one: Geode does know, so it
+ * refuses. The bound below a port stays a warning even so, because
+ * `server-port=0` is a real setting meaning "any free port" that the
+ * catalogue's `min: 1` would otherwise turn away.
+ */
+function numberProblem(
+  value: string,
+  { min, max }: { min?: number; max?: number },
+): { line: string; blocks: boolean } | null {
+  const range =
+    min !== undefined && max !== undefined
+      ? `${min} to ${max}`
+      : min !== undefined
+        ? `${min} or more`
+        : max !== undefined
+          ? `${max} or less`
+          : null;
+
+  const typed = value.trim();
+  if (!WHOLE_NUMBER.test(typed)) {
+    return {
+      line:
+        "Type a whole number — the box would go into the file exactly as it stands." +
+        (range ? ` ${range} is the usual range.` : ""),
+      blocks: true,
+    };
+  }
+
+  const n = Number(typed);
+  if (max === MAX_PORT && n > max) {
+    return {
+      line: `Type a port of ${MAX_PORT} or less. Nothing can listen on a higher number, so the server would not start.`,
+      blocks: true,
+    };
+  }
+  if (
+    range !== null &&
+    ((min !== undefined && n < min) || (max !== undefined && n > max))
+  ) {
+    return {
+      line: `This is outside the usual ${range}. Geode saves what you typed rather than refusing it — a fork, a plugin or a newer version may take a value this screen has not heard of.`,
+      blocks: false,
+    };
+  }
+  return null;
+}
+
+/**
+ * Which kind of box a key gets.
+ *
+ * A key nobody has described still gets the right kind, guessed from the
+ * value the server wrote. A mod's own setting is usable without anyone here
+ * having heard of it.
+ *
+ * `written` is the file's own value and not the one in the box, so the guess
+ * cannot change as somebody types. It used to: clearing a guessed number box
+ * made it a text box mid-edit, and an emptied box that is no longer a number
+ * box is one nothing can mark as empty.
+ */
+function controlFor(key: string, written: string): Control {
+  const known = PROPERTY_INFO[key]?.control;
+  if (known) return known;
+  if (written === "true" || written === "false") return { kind: "bool" };
+  return WHOLE_NUMBER.test(written.trim()) ? { kind: "int" } : { kind: "text" };
+}
 
 /**
  * A readable title for a key nobody has written a description for.
@@ -87,6 +192,20 @@ export default function Properties({ server }: { server: Server }) {
   const [props, setProps] = useState<ServerProperty[] | null>(null);
   const [edited, setEdited] = useState<Record<string, string>>({});
   const [filter, setFilter] = useState("");
+  const filterBox = useRef<HTMLInputElement>(null);
+
+  /**
+   * Ctrl+F reaches this filter too. `server.properties` is the longest list
+   * in the app — seventy-odd rows — so it is the one most worth not scrolling,
+   * and it was the one the key did nothing on.
+   */
+  useActionShortcut("focusFilter", (e) => {
+    const box = filterBox.current;
+    if (!box) return;
+    e.preventDefault();
+    box.focus();
+    box.select();
+  });
   const [saving, setSaving] = useState(false);
   const [portClash, setPortClash] = useState<string[]>([]);
   /**
@@ -217,6 +336,36 @@ export default function Properties({ server }: { server: Server }) {
     });
   }, [props, filter]);
 
+  /**
+   * What is wrong with the numbers in the edited boxes, keyed by setting.
+   *
+   * Only the edited keys, because only those are written. A number already in
+   * the file is the server's own — it wrote the file — and this app's idea of
+   * the usual range is no reason to put a mark on it.
+   *
+   * Through `controlFor`, so a mod's own numeric key — one that got a number
+   * box by guess rather than out of the catalogue — is held to the same rule
+   * as the keys this screen has heard of. Two boxes that look identical and
+   * behave differently is the worse half of the bug this is here to stop.
+   */
+  const problems = useMemo(() => {
+    const found = new Map<string, { line: string; blocks: boolean }>();
+    for (const p of props ?? []) {
+      const value = edited[p.key];
+      if (value === undefined) continue;
+      const control = controlFor(p.key, p.value);
+      if (control.kind !== "int") continue;
+      const problem = numberProblem(value, control);
+      if (problem) found.set(p.key, problem);
+    }
+    return found;
+  }, [edited, props]);
+
+  /** The settings that cannot be written as they stand, named for the save bar. */
+  const unwritable = [...problems]
+    .filter(([, p]) => p.blocks)
+    .map(([key]) => PROPERTY_INFO[key]?.label ?? humanize(key));
+
   const groups = useMemo(() => {
     const buckets = new Map<string, ServerProperty[]>();
     for (const p of shown) {
@@ -336,12 +485,21 @@ export default function Properties({ server }: { server: Server }) {
   return (
     <>
       <div className={styles.head}>
-        <input
-          className={clsx("input", styles.search)}
-          placeholder="Filter settings"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-        />
+        {/* The magnifier and the printed key the other filter boxes carry.
+            This one had neither, which made the same control look like a
+            different one depending on which tab you were on — and left the
+            only list in the app you cannot reach from the keyboard. */}
+        <div className={styles.searchWrap}>
+          <Search size={14} className={styles.searchIcon} />
+          <input
+            ref={filterBox}
+            className={clsx("input", styles.search)}
+            placeholder="Filter settings"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+          />
+          <kbd className={styles.searchKey}>{actionHint("focusFilter")}</kbd>
+        </div>
       </div>
 
       {/* Above the groups rather than on the port's own row: the row is where
@@ -394,6 +552,7 @@ export default function Properties({ server }: { server: Server }) {
                       ? portClashLine(portClash, "this port")
                       : undefined
                   }
+                  problem={problems.get(p.key)?.line}
                   onEdit={edit}
                   onApplyNow={applyNow}
                 />
@@ -405,14 +564,36 @@ export default function Properties({ server }: { server: Server }) {
 
       {changedCount > 0 && (
         <div className={"save-bar"}>
+          {/* The count gives way to the reason the button is off, the way the
+              sharing settings' bar does: a bar that still says how much is
+              pending beside a Save that will not go is the one sentence
+              somebody does not need. The count comes back as soon as every box
+              holds a number the server can use.
+
+              Named rather than counted, because the filter box above can be
+              hiding the row that carries the mark, which would leave this the
+              only thing on screen saying anything is wrong and nothing in it
+              to search for. */}
           <span className="save-hint">
-            {changedCount} setting{changedCount === 1 ? "" : "s"} changed.
-            {server.running ? " Restart the server to apply." : ""}
+            {unwritable.length === 1 ? (
+              `${unwritable[0]} has to be a number the server can use before this can be saved.`
+            ) : unwritable.length > 1 ? (
+              `${listOf(unwritable)} have to be numbers the server can use before this can be saved.`
+            ) : (
+              <>
+                {changedCount} setting{changedCount === 1 ? "" : "s"} changed.
+                {server.running ? " Restart the server to apply." : ""}
+              </>
+            )}
           </span>
           <button className="btn" onClick={() => setEdited({})}>
             Discard
           </button>
-          <button className="btn btn-primary" onClick={save} disabled={saving}>
+          <button
+            className="btn btn-primary"
+            onClick={save}
+            disabled={saving || unwritable.length > 0}
+          >
             {saving && <Loader2 size={14} className="spin" />}
             Save properties
           </button>
@@ -428,6 +609,7 @@ function Field({
   changed,
   running,
   warning,
+  problem,
   onEdit,
   onApplyNow,
 }: {
@@ -437,6 +619,8 @@ function Field({
   running: boolean;
   /** Something true about the value as it stands, said where it is set. */
   warning?: string;
+  /** What is wrong with the number in the box, when something is. */
+  problem?: string;
   onEdit: (key: string, value: string) => void;
   onApplyNow: (key: string, command: string) => void;
 }) {
@@ -445,16 +629,7 @@ function Field({
   const retired = RETIRED_KEYS[property.key];
   const id = `prop-${property.key}`;
 
-  // A key nobody has described still gets the right kind of box, guessed from
-  // the value the server wrote. A mod's own setting is usable without anyone
-  // here having heard of it.
-  const control: Control =
-    info?.control ??
-    (value === "true" || value === "false"
-      ? { kind: "bool" }
-      : /^-?\d+$/.test(value.trim())
-        ? { kind: "int" }
-        : { kind: "text" });
+  const control: Control = controlFor(property.key, property.value);
 
   // Free text needs the room; a checkbox or a dropdown does not.
   const wide = control.kind === "text";
@@ -564,6 +739,14 @@ function Field({
 
       {info?.description && <p className="hint">{info.description}</p>}
       {retired && <p className="hint">{retired}</p>}
+      {/* First of the three, because it is about the characters that were
+          typed a moment ago rather than about the setting. */}
+      {problem && (
+        <p className={styles.danger}>
+          <AlertTriangle size={12} />
+          {problem}
+        </p>
+      )}
       {/* Not only while the server runs, unlike the note below: this is about
           the value itself, and the point is to say it as the port is set. */}
       {warning && (
