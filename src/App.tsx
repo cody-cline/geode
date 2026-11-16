@@ -6,6 +6,7 @@ import PackLinkModal from "./components/PackLinkModal";
 import Sidebar from "./components/Sidebar";
 import ProgressDock from "./components/ProgressDock";
 import Toasts from "./components/Toasts";
+import ErrorBoundary from "./components/ErrorBoundary";
 import Browse from "./views/Browse";
 import InstanceView from "./views/InstanceView";
 import Library from "./views/Library";
@@ -16,6 +17,7 @@ import Servers from "./views/Servers";
 import Settings from "./views/Settings";
 import { shortcutRoute } from "./lib/shortcuts";
 import { useStore } from "./lib/store";
+import type { Route } from "./lib/store";
 
 import styles from "./App.module.css";
 
@@ -61,6 +63,17 @@ function focusScreen() {
   // `-1` lets it take focus from script alone.
   main.tabIndex = -1;
   main.focus();
+}
+
+/**
+ * One string per screen, for the boundary inside `<main>`.
+ *
+ * Not `route.view` alone: two instances are two screens, and a throw drawing
+ * one of them must not leave the other showing the error panel when it is
+ * picked. Same reason `InstanceView` is keyed by id a few lines below.
+ */
+function routeKey(route: Route): string {
+  return "id" in route ? `${route.view}:${route.id}` : route.view;
 }
 
 export default function App() {
@@ -156,6 +169,12 @@ export default function App() {
       </button>
       <Sidebar />
       <main className={styles.main}>
+        {/* Keyed by route, which is the whole recovery: a screen that throws
+            leaves the sidebar alive, and going anywhere else gives this a new
+            key, so React remounts it and the next screen draws. Without it an
+            uncaught throw unmounts the tree and a Tauri window has no address
+            bar to reload from — the app is simply gone until it is killed. */}
+        <ErrorBoundary key={routeKey(route)}>
         {route.view === "library" && <Library />}
         {route.view === "browse" && <Browse />}
         {route.view === "plans" && <Plans />}
@@ -165,8 +184,9 @@ export default function App() {
         {route.view === "settings" && <Settings />}
         {route.view === "instance" && (
           // Remounting per instance keeps tab state from leaking between them.
-          <InstanceView key={route.id} id={route.id} tab={route.tab} />
+          <InstanceView key={route.id} id={route.id} tab={route.tab} sub={route.sub} />
         )}
+        </ErrorBoundary>
       </main>
       <ProgressDock />
       {/* Here rather than in a view, because a link can arrive on any screen.

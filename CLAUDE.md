@@ -38,13 +38,14 @@ cargo test --lib           # unit tests — offline, fast, the ones that gate a 
 cargo clippy --all-targets # expected to be clean; treat a warning as a failure
 ```
 
-`npm test` runs `node --test src/lib/*.test.mjs` — today that is eleven
+`npm test` runs `node --test src/lib/*.test.mjs` — today that is twelve
 files, `src/lib/share.test.mjs`, `src/lib/blocked.test.mjs`,
 `src/lib/pack-update.test.mjs`, `src/lib/update.test.mjs`,
 `src/lib/types.test.mjs`, `src/lib/retarget.test.mjs`,
 `src/lib/ignore-version.test.mjs`, `src/lib/shortcuts.test.mjs`,
-`src/lib/contrast.test.mjs`, `src/lib/mcversion.test.mjs` and
-`src/lib/serverConsole.test.mjs`. Seven of those are worth knowing apart. `types.test.mjs` is the only check anywhere that
+`src/lib/contrast.test.mjs`, `src/lib/mcversion.test.mjs`,
+`src/lib/serverConsole.test.mjs` and `src/lib/boundary.test.mjs`. Eight of
+those are worth knowing apart. `types.test.mjs` is the only check anywhere that
 `types.ts` really mirrors the Rust struct it claims to — it reads the text of
 `types.ts` and `Settings.tsx` and asserts that the `close_to_tray` field
 arrived in both, because a field left out of the hand-written mirror reads as
@@ -97,7 +98,18 @@ stream a line arrived on does not get to overrule the label inside it. It did
 once — every line reaching stderr was relabelled, which turned
 `[Server thread/INFO]` into `[Server thread/ERROR]` on screen, a word the
 server never wrote in the server's own voice. The stream decides only when
-there is no label to read, which is the JVM-crash case. The other nine check
+there is no label to read, which is the JVM-crash case. `boundary.test.mjs`
+holds the two error boundaries, and holds them because nothing else can see
+them: React unmounts the whole tree when a render throws uncaught, and a Tauri
+window has no address bar to reload from, so for months any thrown render left
+a rectangle of `--bg` whose only exit was killing the process. The test pins
+both placements and the difference between them — the one inside `<main>` is
+keyed by route, which *is* the recovery, since going anywhere else remounts it
+and the sidebar is still there to go with; the outer one catches a throw in the
+frame, where there is nothing left to navigate with. It also pins that the
+panel has no "Try again": every other failure panel in this app has one because
+a read can be re-run, and a render that threw would throw the same way. The
+other ten check
 their invariants by reading the `.tsx` or `.css` that holds them, because
 there is no DOM or React renderer under `npm test`. Everything else on the frontend is
 gated by `tsc` alone, which is strict (`noUnusedLocals`,

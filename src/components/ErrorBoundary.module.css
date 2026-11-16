@@ -1,0 +1,52 @@
+/* Centred in whatever it was given, so the same panel works filling `<main>`
+   beside the sidebar and filling the window without it. */
+.wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  min-height: 100%;
+  padding: 32px;
+  background: var(--bg);
+  overflow: auto;
+}
+
+.panel {
+  max-width: 520px;
+  text-align: center;
+}
+
+.panel h2 {
+  margin: 14px 0 10px;
+  font-size: 17px;
+}
+
+.panel p {
+  margin: 0 0 10px;
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.icon {
+  color: var(--warn);
+}
+
+/* The error's own words, in the mono face everything machine-written uses
+   here. Selectable and wrapped rather than truncated: the whole point of
+   showing it is that somebody can copy it into a bug report. */
+.detail {
+  margin: 16px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: left;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
