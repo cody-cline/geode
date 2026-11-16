@@ -124,7 +124,10 @@ export default function Modal({
   function pressable(): HTMLButtonElement | null {
     if (!focusCanFinish()) return null;
     const primary = foot.current?.querySelectorAll<HTMLButtonElement>(
-      "button.btn-primary:not(:disabled)",
+      // A primary can refuse the key, as a field can claim it. One does:
+      // accepting Mojang's EULA is the user's act, and an act that is one
+      // stray Enter after a dialog opens is not one they have made.
+      'button.btn-primary:not(:disabled):not([data-enter="never"])',
     );
     return primary?.length === 1 ? primary[0] : null;
   }

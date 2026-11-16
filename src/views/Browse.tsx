@@ -980,7 +980,11 @@ export default function Browse({
         });
       } catch (e) {
         if (seq === requestSeq.current) {
-          reportError("Search failed", e);
+          // No toast. The panel below says this failed, names the reason and
+          // carries the retry — and a search runs on every keystroke, so a
+          // toast here meant one per character typed while offline, each of
+          // them now waiting to be dismissed rather than leaving on a timer.
+          // Five of those and the corner is a wall.
           setFailed(errorMessage(e));
           // A first page that failed leaves nothing known about this query, and
           // what was on screen belongs to the last one. Keeping it would hand

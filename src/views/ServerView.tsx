@@ -814,6 +814,12 @@ export default function ServerView({ id }: { id: string }) {
               </button>
               <button
                 className="btn btn-primary"
+                // Refuses Enter. Every other dialog here finishes on it, and
+                // this is the one whose primary is a licence being agreed to
+                // — "accepting Mojang's EULA is the user's act, not ours",
+                // and a key pressed on a dialog that has just opened is not
+                // an act anybody has made.
+                data-enter="never"
                 onClick={() => void acceptAndStart(server)}
                 disabled={busy}
               >

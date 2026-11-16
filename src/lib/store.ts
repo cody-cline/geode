@@ -58,7 +58,46 @@ export interface Toast {
  * window, and the four a broken start raises at once — settings, instances,
  * servers and accounts, none of them readable — all fit.
  */
+/**
+ * Whether a job's one line is the core saying it stopped because somebody
+ * asked it to.
+ *
+ * Read off the line rather than off who pressed the button, because the X in
+ * this dock is not the only Cancel in the app — `PackLinkModal` cancels the
+ * `pack-link` download, and a stop asked for there is just as much a stop. A
+ * dock that only knew its own button left that one sitting as a failure for
+ * the rest of the session.
+ *
+ * Nothing in the event says so, so this reads the two shapes the core writes:
+ * `Error::Cancelled` prints exactly `cancelled`, and `.ctx("…")` puts what it
+ * was doing in front of it as `{what}: {e}` — the one format in `error.rs`.
+ * A cancellation the core wrote a sentence about instead is deliberately not
+ * one of them: that sentence was written to be read.
+ */
+export function wasCancelled(error: string): boolean {
+  return error === "cancelled" || error.endsWith(": cancelled");
+}
+
 const MAX_TOASTS = 5;
+
+/**
+ * The corner, with the newest kept and the oldest *dismissible* one dropped.
+ *
+ * Not simply the oldest. A failure now waits to be dismissed rather than
+ * leaving on a timer, and taking the oldest regardless of kind meant five
+ * routine "copied", "saved", "stopped" notices pushed the failure underneath
+ * them off the screen — which is the one thing the waiting was for. A handful
+ * of successes after a server would not start, and the reason it would not
+ * start was gone.
+ *
+ * When every one of them is a failure the oldest still goes, because
+ * something has to: a corner that could only grow would wall off the window.
+ */
+function makeRoom(list: Toast[]): Toast[] {
+  if (list.length <= MAX_TOASTS) return list;
+  const goes = list.findIndex((t) => t.kind !== "error");
+  return list.filter((_, i) => i !== (goes === -1 ? 0 : goes));
+}
 
 /** What the offline-play dialog needs to ask its question. */
 export interface OfflinePlayRequest {
@@ -166,6 +205,22 @@ interface State {
   activeAccount: () => Account | undefined;
 
   progress: Record<string, ProgressEvent>;
+  /**
+   * Jobs that finished badly, kept until somebody takes them away.
+   *
+   * Beside `progress` rather than inside it, because `progress` means "this
+   * is happening now" to five screens — a library card, a server card, the
+   * sidebar, the instance header and a project row all read it to draw a live
+   * bar — and leaving a dead job in there would leave them drawing one.
+   * `progress` keeps its short timer; this is the dock's own memory.
+   *
+   * Why keep it at all: these are multi-minute downloads people start and
+   * walk away from. Six seconds was the wrong length for the one line saying
+   * why one stopped — you come back to an empty dock and nothing anywhere
+   * ever said what happened.
+   */
+  failedJobs: Record<string, ProgressEvent>;
+  dismissJob: (id: string) => void;
   logs: Record<string, LogEntry[]>;
   clearLogs: (instanceId: string) => void;
 
@@ -322,6 +377,13 @@ export const useStore = create<State>((set, get) => ({
   activeAccount: () => get().accounts.find((a) => a.active),
 
   progress: {},
+  failedJobs: {},
+  dismissJob: (id) =>
+    set((s) => {
+      const next = { ...s.failedJobs };
+      delete next[id];
+      return { failedJobs: next };
+    }),
   logs: {},
   clearLogs: (instanceId) =>
     set((s) => ({ logs: { ...s.logs, [instanceId]: [] } })),
@@ -329,7 +391,7 @@ export const useStore = create<State>((set, get) => ({
   toasts: [],
   toast: (t) => {
     const id = ++toastSeq;
-    set((s) => ({ toasts: [...s.toasts, { ...t, id }].slice(-MAX_TOASTS) }));
+    set((s) => ({ toasts: makeRoom([...s.toasts, { ...t, id }]) }));
     // A failure waits to be dismissed instead of leaving on a timer. Several
     // of these report something that happened while nobody was watching — a
     // server that did not start, sharing that could not take its port, a pack
@@ -431,7 +493,27 @@ export const useStore = create<State>((set, get) => ({
       .catch(() => {});
 
     await listen<ProgressEvent>("geode://progress", ({ payload }) => {
-      set((s) => ({ progress: { ...s.progress, [payload.id]: payload } }));
+      set((s) => {
+        const next: Partial<State> = {
+          progress: { ...s.progress, [payload.id]: payload },
+        };
+        // A job's id is built from what it is about, so a second attempt at
+        // the same thing arrives under the id of the one that just failed.
+        // Starting clears what was held about the last try, or the dock shows
+        // the old failure beside the new attempt at fixing it.
+        if (!payload.done && s.failedJobs[payload.id]) {
+          const held = { ...s.failedJobs };
+          delete held[payload.id];
+          next.failedJobs = held;
+        }
+        // Held the moment it fails, not when the timer below lets go, so
+        // nothing has to race it. A cancellation is not held: somebody asked
+        // for that one and does not need to dismiss it as well.
+        if (payload.done && payload.error && !wasCancelled(payload.error)) {
+          next.failedJobs = { ...(next.failedJobs ?? s.failedJobs), [payload.id]: payload };
+        }
+        return next;
+      });
       if (payload.done) {
         // Leave a finished bar on screen briefly so the completion registers.
         setTimeout(() => {
