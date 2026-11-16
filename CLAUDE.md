@@ -38,14 +38,14 @@ cargo test --lib           # unit tests — offline, fast, the ones that gate a 
 cargo clippy --all-targets # expected to be clean; treat a warning as a failure
 ```
 
-`npm test` runs `node --test src/lib/*.test.mjs` — today that is twelve
+`npm test` runs `node --test src/lib/*.test.mjs` — today that is thirteen
 files, `src/lib/share.test.mjs`, `src/lib/blocked.test.mjs`,
 `src/lib/pack-update.test.mjs`, `src/lib/update.test.mjs`,
 `src/lib/types.test.mjs`, `src/lib/retarget.test.mjs`,
 `src/lib/ignore-version.test.mjs`, `src/lib/shortcuts.test.mjs`,
 `src/lib/contrast.test.mjs`, `src/lib/mcversion.test.mjs`,
-`src/lib/serverConsole.test.mjs` and `src/lib/boundary.test.mjs`. Eight of
-those are worth knowing apart. `types.test.mjs` is the only check anywhere that
+`src/lib/serverConsole.test.mjs`, `src/lib/boundary.test.mjs` and
+`src/lib/glossary.test.mjs`. Nine of those are worth knowing apart. `types.test.mjs` is the only check anywhere that
 `types.ts` really mirrors the Rust struct it claims to — it reads the text of
 `types.ts` and `Settings.tsx` and asserts that the `close_to_tray` field
 arrived in both, because a field left out of the hand-written mirror reads as
@@ -108,8 +108,16 @@ keyed by route, which *is* the recovery, since going anywhere else remounts it
 and the sidebar is still there to go with; the outer one catches a throw in the
 frame, where there is nothing left to navigate with. It also pins that the
 panel has no "Try again": every other failure panel in this app has one because
-a read can be re-run, and a render that threw would throw the same way. The
-other ten check
+a read can be re-run, and a render that threw would throw the same way.
+`glossary.test.mjs` holds the arrangement that `src/lib/glossary.ts` exists
+for. The sentence saying what an instance is used to live only in the
+Library's empty state, so it vanished the moment somebody made one; the same
+was true of a server. Those definitions are now one string each, rendered
+both as the screen's own lede and as a row in Settings → Words Geode uses —
+and the test fails if any `.tsx` types one of them out instead of reading it,
+or if one of those three screens stops reading its own word. Two copies of a
+definition is the thing the glossary was made to remove, so a glossary that
+became the second copy would be worse than none. The other ten check
 their invariants by reading the `.tsx` or `.css` that holds them, because
 there is no DOM or React renderer under `npm test`. Everything else on the frontend is
 gated by `tsc` alone, which is strict (`noUnusedLocals`,

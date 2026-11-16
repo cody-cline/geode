@@ -15,6 +15,7 @@ import {
   UserRound,
 } from "lucide-react";
 
+import { term } from "../lib/glossary";
 import AccountsModal from "../components/AccountsModal";
 import InstanceIcon from "../components/InstanceIcon";
 import NewInstanceModal from "../components/NewInstanceModal";
@@ -183,7 +184,15 @@ export default function Library() {
   return (
     <>
       <header className={styles.header}>
-        <h1 className={styles.heading}>Library</h1>
+        <div>
+          <h1 className={styles.heading}>Library</h1>
+          {/* The sentence saying what an instance is lived only in the empty
+              state, so it disappeared the moment somebody made one and was
+              never readable again — the same thing Plans fixed by putting it
+              here. Out of the glossary, which is the one copy of it: the
+              empty state below renders these same words. */}
+          <p className={styles.lede}>{term("Instance").short}</p>
+        </div>
         <div className={styles.headerTools}>
           {/* Searching and sorting nothing are controls that cannot do
               anything, and on first run they sat live over an empty page. */}
@@ -261,9 +270,7 @@ export default function Library() {
             <Boxes size={40} className={styles.emptyIcon} />
             <h2>No instances yet</h2>
             <p>
-              An instance is one Minecraft install: its own version, mods, and
-              worlds. Make as many as you like — they share downloads, so extras
-              are nearly free on disk.
+              {term("Instance").short} {term("Instance").more}
             </p>
             <button className="btn btn-primary" onClick={() => setCreating(true)}>
               Create your first instance

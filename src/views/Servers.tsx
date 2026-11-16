@@ -20,6 +20,7 @@ import TransferServerModal from "../components/TransferServerModal";
 import { api } from "../lib/api";
 import { hashHue, relativeTime } from "../lib/format";
 import { OLD_ADDRESS_LABEL, linksPointAtOldAddress } from "../lib/share";
+import { term } from "../lib/glossary";
 import { useStore } from "../lib/store";
 import type { Server } from "../lib/types";
 
@@ -107,7 +108,15 @@ export default function Servers() {
   return (
     <>
       <header className={styles.header}>
-        <h1 className={styles.heading}>Servers</h1>
+        <div>
+          <h1 className={styles.heading}>Servers</h1>
+          {/* What a server is, kept on screen instead of only in the empty
+              state — the same thing Plans and Library do, and out of the
+              same one copy the empty state below reads. Only the first
+              sentence: the rest of what that state says is about making one,
+              which is not what somebody looking at a list of them needs. */}
+          <p className={styles.lede}>{term("Server").short}</p>
+        </div>
         <div className={styles.headerTools}>
           {/* Nothing to search or sort until there is a server, and a live
               control over an empty page is a control that cannot work. */}
@@ -210,11 +219,8 @@ export default function Servers() {
                 empty screen is where a promise is made, and the dialog this
                 button opens is where the two ways of keeping it belong. */}
             <p>
-              A server running on this machine: anyone on your own network can
-              join it, and friends further away once its port is open to the
-              internet. Geode downloads the software, sets it up, and gives you
-              a console to start and stop it from. Creating one asks which
-              software to run and says what each kind is for, so there is
+              {term("Server").short} {term("Server").more} Creating one asks
+              which software to run and says what each kind is for, so there is
               nothing to look up first.
             </p>
             <button className="btn btn-primary" onClick={() => setCreating(true)}>

@@ -1,6 +1,9 @@
 .header {
   display: flex;
-  align-items: center;
+  /* Was `center`. The heading now has a sentence under it, so centring put
+     the controls opposite the gap between the two lines instead of level
+     with the heading — the same arrangement Plans already uses. */
+  align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
   flex-wrap: wrap;
@@ -355,4 +358,14 @@
 
 .card:focus-within .launchKey {
   display: inline;
+}
+
+/* The one sentence saying what this screen is a list of, kept on screen
+   rather than only in the empty state. Plans' own `.lede`, to the value. */
+.lede {
+  margin: 3px 0 0;
+  font-size: 12.5px;
+  color: var(--text-faint);
+  line-height: 1.5;
+  max-width: 62ch;
 }

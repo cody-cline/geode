@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import clsx from "clsx";
 import {
@@ -8,6 +8,8 @@ import {
   Download,
   ExternalLink,
   FolderOpen,
+  BookOpen,
+  Search,
   Info,
   Loader2,
   Palette,
@@ -37,6 +39,9 @@ import type {
   UpdateStatus,
 } from "../lib/types";
 
+import { GLOSSARY } from "../lib/glossary";
+import { actionHint } from "../lib/shortcuts";
+import { useActionShortcut } from "../lib/useActionShortcut";
 import styles from "./Settings.module.css";
 
 const TABS = [
@@ -45,6 +50,11 @@ const TABS = [
   { id: "accounts", label: "Accounts", icon: UserRound },
   { id: "sharing", label: "Server sharing", icon: Share2 },
   { id: "hosts", label: "Server hosts", icon: ServerIcon },
+  // Last but one, above About, because it is the only pane here that is not a
+  // setting: every explanation this app gives lives on the screen that needed
+  // it, which is good help while you are there and none at all afterwards.
+  // This is the one place a word can be looked up from anywhere.
+  { id: "help", label: "Words Geode uses", icon: BookOpen },
   { id: "about", label: "About", icon: Info },
 ] as const;
 
@@ -184,6 +194,7 @@ export default function Settings() {
           {tab === "accounts" && <AccountsSettings />}
           {tab === "sharing" && <SharingSettings />}
           {tab === "hosts" && <HostSettings />}
+          {tab === "help" && <Glossary />}
           {tab === "about" && <About />}
         </div>
       </div>
@@ -1604,5 +1615,86 @@ function About() {
         </div>
       </section>
     </div>
+  );
+}
+
+/**
+ * The words Geode invents, in one place you can reach from anywhere.
+ *
+ * Every one of these is explained somewhere already — what an instance is in
+ * the Library's empty state, what a plan is in the Plans lede, what sharing a
+ * server does on its Share tab. That is help while you are on the screen, and
+ * none at all a week later; worse, the empty-state ones are gone for good the
+ * moment the list stops being empty. This is the same sentences, read out of
+ * `glossary.ts`, which is also where those screens read them from — so there
+ * is one copy of each and nothing here can drift from what the app says.
+ *
+ * Filtered rather than paginated, with the same box and the same Ctrl+F as
+ * every other list in the app. It is a short list on purpose: only words this
+ * product invents or gives its own meaning to. "Mod", "loader" and "world"
+ * are Minecraft's and belong to the player already.
+ */
+function Glossary() {
+  const [filter, setFilter] = useState("");
+  const filterBox = useRef<HTMLInputElement>(null);
+
+  useActionShortcut("focusFilter", (e) => {
+    const box = filterBox.current;
+    if (!box) return;
+    e.preventDefault();
+    box.focus();
+    box.select();
+  });
+
+  const q = filter.trim().toLowerCase();
+  const shown = q
+    ? GLOSSARY.filter(
+        (t) =>
+          t.term.toLowerCase().includes(q) ||
+          t.short.toLowerCase().includes(q) ||
+          (t.more ?? "").toLowerCase().includes(q),
+      )
+    : GLOSSARY;
+
+  return (
+    <>
+      <section className={styles.section}>
+        <div className={styles.sectionHead}>
+          <h2 className={styles.sectionTitle}>Words Geode uses</h2>
+          <div className={styles.searchWrap}>
+            <Search size={14} className={styles.searchIcon} />
+            <input
+              ref={filterBox}
+              className={clsx("input", styles.search)}
+              placeholder="Filter words"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+            />
+            <kbd className={styles.searchKey}>{actionHint("focusFilter")}</kbd>
+          </div>
+        </div>
+
+        {shown.length === 0 ? (
+          <p className="hint">Nothing here matches “{filter}”.</p>
+        ) : (
+          <dl className={styles.glossary}>
+            {shown.map((t) => (
+              <div key={t.term} className={styles.entry}>
+                <dt className={styles.term}>
+                  {t.term}
+                  {t.seeAlso && (
+                    <span className={styles.seeAlso}>in {t.seeAlso}</span>
+                  )}
+                </dt>
+                <dd className={styles.meaning}>
+                  <p>{t.short}</p>
+                  {t.more && <p className="hint">{t.more}</p>}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        )}
+      </section>
+    </>
   );
 }

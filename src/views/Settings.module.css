@@ -584,3 +584,97 @@
   font-size: 12px !important;
   color: var(--text-faint) !important;
 }
+
+/* The glossary pane. Its heading and its filter box share one row, which the
+   other panes have no need of — theirs is a heading over a column of fields.
+   The rule below keeps `.sectionTitle`'s underline running the full width
+   under both. */
+.sectionHead {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 9px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sectionHead .sectionTitle {
+  padding-bottom: 0;
+  border-bottom: none;
+}
+
+/* The same three parts every filter box in this app has: the wrapper that
+   positions them, the magnifier, and the printed binding. */
+.searchWrap {
+  position: relative;
+  flex: none;
+}
+
+.searchIcon {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-faint);
+  pointer-events: none;
+}
+
+.searchKey {
+  position: absolute;
+  right: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.search {
+  width: 220px;
+  padding-left: 31px;
+  padding-right: 48px;
+}
+
+.glossary {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  margin: 0;
+}
+
+/* The word on its own line above its meaning rather than beside it: these
+   definitions run to two sentences, and a term column wide enough for
+   "Sharing a server" would leave the text in a channel too narrow to read. */
+.entry {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.term {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* Where to go to be looking at the thing, which is a different job from
+   defining it — so it is quiet, and it sits on the term rather than in the
+   sentence, where it would read as part of the definition. */
+.seeAlso {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-faint);
+}
+
+.meaning {
+  margin: 0;
+  max-width: 62ch;
+}
+
+.meaning p {
+  margin: 0 0 4px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-dim);
+}

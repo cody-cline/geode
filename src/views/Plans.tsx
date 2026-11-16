@@ -15,6 +15,7 @@ import { relativeTime } from "../lib/format";
 import { actionHint } from "../lib/shortcuts";
 import { useActionShortcut } from "../lib/useActionShortcut";
 import { useStore } from "../lib/store";
+import { term } from "../lib/glossary";
 import type { Plan } from "../lib/types";
 
 import styles from "./Plans.module.css";
@@ -99,11 +100,14 @@ export default function Plans() {
               state, so it disappeared the moment somebody made one and was
               never readable again. It is here now, which makes this the
               screen's one explanation: the empty state said the same thing a
-              second time, in longer words, just below it. */}
+              second time, in longer words, just below it.
+
+              Read out of the glossary rather than typed here, because the
+              same two sentences are now also a row in Settings → Words Geode
+              uses. Two copies of a definition is the thing this comment is
+              about, one level up. */}
           <p className={styles.lede}>
-            A list of mods with no Minecraft version and no loader attached.
-            Geode works out afterwards which loader and version can run all of
-            them.
+            {term("Plan").short} {term("Plan").more}
           </p>
         </div>
         {/* Quiet while the page below is offering the same thing, the way
