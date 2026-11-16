@@ -1317,6 +1317,25 @@ function SchedulesSection({ server }: { server: Server }) {
 }
 
 function SettingsTab({ server }: { server: Server }) {
+  /**
+   * What this machine has, for the memory box on the Settings tab.
+   *
+   * Asked once per visit and quietly: a server whose heap is bigger than the
+   * machine starts and dies, which is a failure with no message attached to
+   * it. Null while unknown, and null is what a refusal leaves — the box then
+   * behaves exactly as it did before, with its floor and no ceiling.
+   */
+  const [systemMemory, setSystemMemory] = useState<number | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .systemMemoryMb()
+      .then((mb) => !cancelled && setSystemMemory(mb))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const refreshServers = useStore((s) => s.refreshServers);
   const reportError = useStore((s) => s.reportError);
   const navigate = useStore((s) => s.navigate);
@@ -1393,17 +1412,30 @@ function SettingsTab({ server }: { server: Server }) {
             <label className="label" htmlFor="mem">
               Memory (MB)
             </label>
+            {/* The ceiling its two siblings in Settings have. Without it this
+                box took a heap larger than the machine's RAM, which is a
+                server that starts and dies — and it was the one memory field
+                in the app with no limit and no sense of the machine, which
+                reads as the others knowing something this one does not. */}
             <input
               id="mem"
               className="input"
               type="number"
               min={512}
+              max={systemMemory ?? undefined}
               step={512}
               value={draft.memoryMb}
               onChange={(e) =>
                 setDraft({ ...draft, memoryMb: Number(e.target.value) || 512 })
               }
             />
+            {systemMemory !== null && (
+              <p className="hint">
+                This machine has {Math.round(systemMemory / 1024)} GB. Leave
+                some for Minecraft&apos;s own needs and for everything else
+                running.
+              </p>
+            )}
           </div>
           <div>
             <label className="label" htmlFor="javapath">

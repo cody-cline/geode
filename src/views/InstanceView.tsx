@@ -56,6 +56,22 @@ type TabId = (typeof TABS)[number]["id"];
 /** An instance has one folder worth graphing, so there is no choice to offer. */
 const MODS_ONLY: ContentKind[] = ["mod"];
 
+/**
+ * The tab each instance was last left on.
+ *
+ * `App` builds a fresh `InstanceView` per id, which is what keeps one
+ * instance's dialogs and drafts out of the next one's screen — and took the
+ * tab with it. Somebody comparing two instances' mods went back to the second
+ * one and landed on Content again every time. The route's own `tab` cannot
+ * answer for them: the sidebar row and the library card both navigate without
+ * one, which is exactly the case this is for. A route that *does* name a tab
+ * still wins, because that is somebody being sent somewhere specific.
+ *
+ * Keyed by id, for the session only, as `ServerView` keeps its own. Where you
+ * had a screen open is not worth a line in anybody's config file.
+ */
+const lastTab = new Map<string, TabId>();
+
 export default function InstanceView({
   id,
   tab,
@@ -72,9 +88,15 @@ export default function InstanceView({
   const logs = useStore((s) => s.logs[id]);
   const accounts = useStore((s) => s.accounts);
 
-  const [active, setActive] = useState<TabId>(
-    TABS.some((t) => t.id === tab) ? (tab as TabId) : "content",
-  );
+  const [active, setActive] = useState<TabId>(() => {
+    if (TABS.some((t) => t.id === tab)) return tab as TabId;
+    return lastTab.get(id) ?? "content";
+  });
+  // Written here rather than at the places that set the tab, so a new one
+  // cannot forget to — the same arrangement `ServerView` keeps.
+  useEffect(() => {
+    lastTab.set(id, active);
+  }, [id, active]);
   // The initialiser above runs once, and `App` keys this view by id alone, so
   // navigating to a tab of the instance already open used to change nothing
   // at all — the route said `logs`, the screen stayed on Content, and whoever
