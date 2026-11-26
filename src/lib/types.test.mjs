@@ -28,6 +28,40 @@ test("the close-to-tray setting reaches the frontend", async () => {
   );
 });
 
+// A progress job's id is the other hand-written agreement across the IPC
+// boundary, and it fails the same silent way: the core names a job, a screen
+// reads `progress[someOtherName]`, and `undefined` is a bar that never
+// appears. There is no type to get wrong and nothing for `tsc` to look at —
+// the key is a string built in two places.
+//
+// So the ids are taken from the Rust that emits them rather than listed here.
+// Every job `server/run.rs` creates is work a start is waiting on, and the
+// server grid is the one screen that prints a server's progress; a third job
+// added there is a third bar owed, and this is what says so.
+test("the screen that shows a server's progress reads every id a start emits", async () => {
+  const run = await readFile(
+    new URL("../../src-tauri/src/server/run.rs", import.meta.url),
+    "utf8",
+  );
+  // `[^;]*` and not `[^)]*`: `sink.clone()` sits between the two calls.
+  const ids = [...run.matchAll(/Progress::new\([^;]*format!\("([a-z-]+):\{/g)].map(
+    ([, prefix]) => prefix,
+  );
+  assert.ok(
+    ids.includes("server") && ids.includes("server-install"),
+    `run.rs no longer names the job ids this test reads: found ${ids.join(", ") || "none"}`,
+  );
+
+  const servers = await readFile(new URL("../views/Servers.tsx", import.meta.url), "utf8");
+  for (const id of new Set(ids)) {
+    assert.ok(
+      servers.includes(`${id}:\${server.id}`),
+      `run.rs reports a server's work under ${id}:{id} and nothing in Servers.tsx ` +
+        "reads that key, so the card shows no progress while it runs",
+    );
+  }
+});
+
 // The JVM flags a fresh Geode starts with are written twice: once in
 // `default_java_args()` in `src-tauri/src/config.rs`, and once in
 // `Settings.tsx`, which needs them for its "Reset to default" button.

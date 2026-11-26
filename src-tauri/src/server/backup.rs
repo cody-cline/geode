@@ -7,7 +7,9 @@
 //! Everything else is left out. Logs and crash reports are written afresh
 //! every run and nobody has ever restored one; the server's own software is
 //! something Geode can ask for again, and a start that finds it gone does
-//! exactly that. See [`fetchable_again`].
+//! exactly that. See [`fetchable_again`]. A few caches the server rebuilds for
+//! itself sit *inside* `plugins/`, which is otherwise entirely the admin's, and
+//! are named one at a time in [`NESTED_CACHES`].
 //!
 //! A running server is asked to write its world out first. Minecraft holds a
 //! world open and only puts `level.dat` on disk at an autosave or a clean
@@ -39,6 +41,45 @@ const SKIP: &[&str] = &["logs", "crash-reports", "cache"];
 /// place they came from the first time — which [`crate::server::run`] does by
 /// itself when a start finds the software gone.
 const FETCHABLE: &[&str] = &["libraries", "versions"];
+
+/// Caches a server rebuilds for itself, nested inside a directory that is
+/// otherwise entirely the admin's.
+///
+/// `plugins/` cannot be judged by its top-level name in either direction: it
+/// holds every plugin's own config and data, which has no upstream and is half
+/// the reason a backup exists, and it also holds the single largest pile of
+/// regenerable bytes on a modern Paper server. So this is a list of exact
+/// paths, not a rule — each one is a tree some server software owns outright
+/// and writes again when it is missing, and the only test applied is
+/// CLAUDE.md's: does it exist nowhere else? A path nobody can answer that for
+/// stays in the backup, because one that is too big is a nuisance and one
+/// missing a plugin's data is a disaster.
+///
+/// A list rather than a pattern because every candidate name here is also a
+/// plausible name for something irreplaceable. `tmp` is scratch in spark and
+/// a work queue somewhere else; a dot-directory is Paper's cache here and
+/// could be a plugin's own store next door. Only knowing the software tells
+/// the two apart, so each entry carries the reasoning that got it added:
+///
+/// * `plugins/.paper-remapped` — Paper (1.20.5 and up) remaps every
+///   Mojang-mapped plugin against the server jar on boot and caches the work
+///   here: the remap classpath it builds and the reversed mappings it builds
+///   it from. Both are derived from the server jar and the plugin jars, and
+///   Paper writes them again on the next start — including after a restore,
+///   where the jar itself came back via [`crate::server::run`]. Measured on a
+///   real Paper 1.21.1 server this was 30.2 MB of a 31.8 MB backup whose
+///   irreplaceable part was 1.1 MB. It is the whole reason this list exists.
+/// * `plugins/spark/tmp-client` — spark's scratch directory: the
+///   async-profiler native library it unpacks out of its own jar, and the
+///   part-written `.jfr` of a profile that was running when the backup was
+///   taken. Its sibling `plugins/spark/config.json` is the admin's and is
+///   deliberately *not* excluded, which is why this entry names the
+///   subdirectory and not the plugin.
+///
+/// Unconditional, unlike [`FETCHABLE`]: these come back from the server's own
+/// software rather than from anything Geode fetches, so there is no record
+/// Geode has to be holding for them to be safe to drop.
+const NESTED_CACHES: &[&str] = &["plugins/.paper-remapped", "plugins/spark/tmp-client"];
 
 /// How long to let a running server write its world out before archiving it.
 const FLUSH_GRACE: Duration = Duration::from_secs(3);
@@ -110,6 +151,30 @@ fn fetchable_again(server: Option<&crate::server::Server>) -> Vec<String> {
     out
 }
 
+/// Whether this path, relative to the run directory, stays out of the backup.
+///
+/// Two kinds of match, and the difference between them is load-bearing.
+/// `skip` — everything [`fetchable_again`] gathered — is matched against the
+/// **top-level component only**, because every name in it is something the
+/// server owns at the root of its run directory and the same name deeper down
+/// belongs to whoever made it: a plugin's own `cache/` may be the only copy of
+/// something. [`NESTED_CACHES`] is matched as a **whole path prefix**, by
+/// component, so an entry excludes exactly the tree it names and nothing
+/// beside it — `plugins/spark/tmp-client` takes the scratch and leaves
+/// `plugins/spark/config.json` alone.
+///
+/// Matching directories too, not just files: excluding a directory here prunes
+/// the walk, so a cache is never descended into.
+fn excluded(rel: &Path, skip: &[String]) -> bool {
+    let top = rel.components().next().and_then(|c| c.as_os_str().to_str());
+    if top.is_some_and(|t| skip.iter().any(|s| s == t)) {
+        return true;
+    }
+    NESTED_CACHES
+        .iter()
+        .any(|cache| rel.starts_with(Path::new(cache)))
+}
+
 /// Ask a running server to put its world on disk, and give it a moment to.
 ///
 /// `save-off` would give a cleaner snapshot, but a backup that died halfway
@@ -164,8 +229,7 @@ pub async fn create(
                 let Ok(rel) = path.strip_prefix(&run) else {
                     continue;
                 };
-                let top = rel.components().next().and_then(|c| c.as_os_str().to_str());
-                if top.is_some_and(|t| skip.iter().any(|s| s == t)) {
+                if excluded(rel, &skip) {
                     continue;
                 }
                 if path.is_dir() {
@@ -472,6 +536,118 @@ mod tests {
         assert!(held.contains(&"libraries/x.jar".to_string()), "{held:?}");
     }
 
+    /// A cache nested under `plugins/` is left out — and its neighbours are
+    /// not, which is the half that is hard.
+    ///
+    /// Measured on a real Paper 1.21.1 server: a 22.9 MB zip holding about
+    /// 1.1 MB of irreplaceable data. 30.7 MB of the 31.8 MB uncompressed was
+    /// Paper's remap cache and spark's scratch — both under `plugins/`, where
+    /// a filter that only ever looked at `rel.components().next()` could not
+    /// see them. `plugins/` is also the thing a backup exists for, so the
+    /// assertions that matter are the ones below the dropped list.
+    #[tokio::test(start_paused = true)]
+    async fn a_cache_nested_under_plugins_goes_and_its_neighbours_stay() {
+        use crate::server::ServerKind;
+
+        let scratch = crate::paths::Scratch::new("backup-nested-cache");
+        let paths = scratch.paths.clone();
+        let mut server =
+            crate::server::Server::new("Survival".into(), ServerKind::Paper, "1.21.1".into());
+        server.jar = "paper-1.21.1.jar".into();
+        server.save(&paths).await.unwrap();
+
+        let run = paths.server_run(&server.id);
+        let files = [
+            // Regenerable, and 96% of the bytes.
+            "plugins/.paper-remapped/remap-classpath/a1b2.jar",
+            "plugins/.paper-remapped/mappings/reversed/a1b2.tiny",
+            "plugins/spark/tmp-client/libasyncProfiler.so.tmp",
+            "plugins/spark/tmp-client/profile-data.jfr.tmp",
+            // Exists nowhere else, and sits in the same tree.
+            "plugins/spark/config.json",
+            "plugins/MyPlugin/config.yml",
+            "plugins/MyPlugin/data/players.db",
+            // `cache` is in SKIP, but only as a top-level name: this one is
+            // some plugin's, and nothing promises to put it back.
+            "plugins/MyPlugin/cache/tiles.dat",
+            "world/level.dat",
+            "server.properties",
+        ];
+        for rel in files {
+            let path = run.join(rel);
+            tokio::fs::create_dir_all(path.parent().unwrap()).await.unwrap();
+            tokio::fs::write(&path, b"bytes").await.unwrap();
+        }
+
+        let info = create(
+            &paths,
+            &crate::server::run::ServerRegistry::default(),
+            &server.id,
+            &Progress::silent("t"),
+        )
+        .await
+        .expect("a backup");
+
+        let held = entries(&paths.server_backups(&server.id).join(&info.name));
+        for dropped in [
+            "plugins/.paper-remapped/remap-classpath/a1b2.jar",
+            "plugins/.paper-remapped/mappings/reversed/a1b2.tiny",
+            "plugins/spark/tmp-client/libasyncProfiler.so.tmp",
+            "plugins/spark/tmp-client/profile-data.jfr.tmp",
+        ] {
+            assert!(
+                !held.contains(&dropped.to_string()),
+                "{dropped} was carried: {held:?}"
+            );
+        }
+        for kept in [
+            "plugins/spark/config.json",
+            "plugins/MyPlugin/config.yml",
+            "plugins/MyPlugin/data/players.db",
+            "plugins/MyPlugin/cache/tiles.dat",
+            "world/level.dat",
+            "server.properties",
+        ] {
+            assert!(held.contains(&kept.to_string()), "{kept} was dropped: {held:?}");
+        }
+    }
+
+    /// What each of the two filters may and may not match.
+    ///
+    /// The top-level names and the nested paths are matched differently on
+    /// purpose, and both directions have teeth: matching the top-level names
+    /// at any depth would throw away a plugin's own `cache/`, and matching the
+    /// nested paths by string rather than by component would catch a sibling
+    /// whose name merely begins the same way.
+    #[test]
+    fn a_nested_cache_is_matched_by_whole_path_and_a_top_level_name_is_not() {
+        let skip = names(&["logs", "cache", "libraries", "paper-1.21.1.jar"]);
+        let out = |p: &str| excluded(Path::new(p), &skip);
+
+        assert!(out("logs/latest.log"));
+        assert!(out("cache/mojang_1.21.1.jar"));
+        assert!(out("libraries/net/x/x.jar"));
+        assert!(out("paper-1.21.1.jar"));
+
+        // The same names deeper down belong to whoever made them.
+        assert!(!out("plugins/MyPlugin/cache/tiles.dat"));
+        assert!(!out("plugins/MyPlugin/logs/audit.log"));
+        assert!(!out("world/datapacks/libraries/pack.mcmeta"));
+
+        // A nested cache, and the tree above it that must survive.
+        assert!(out("plugins/.paper-remapped"));
+        assert!(out("plugins/.paper-remapped/mappings/reversed/a.tiny"));
+        assert!(out("plugins/spark/tmp-client/libasyncProfiler.so.tmp"));
+        assert!(!out("plugins"));
+        assert!(!out("plugins/spark"));
+        assert!(!out("plugins/spark/config.json"));
+
+        // By component, not by string, and anchored at the top rather than
+        // found anywhere.
+        assert!(!out("plugins/.paper-remapped-notes.txt"));
+        assert!(!out("world/plugins/.paper-remapped/a1b2.jar"));
+    }
+
     /// Everything inside a backup, by entry name.
     fn entries(archive: &std::path::Path) -> Vec<String> {
         let file = std::fs::File::open(archive).unwrap();
@@ -534,5 +710,16 @@ mod tests {
         assert!(SKIP.contains(&"crash-reports"));
         assert!(!SKIP.contains(&"world"));
         assert!(!SKIP.contains(&"plugins"));
+
+        // And no nested entry may swallow a whole directory the admin's own
+        // data lives in. Every one names a tree *inside* one, which is the
+        // difference between dropping Paper's remap cache and dropping every
+        // plugin's config with it.
+        for cache in NESTED_CACHES {
+            assert!(
+                cache.contains('/'),
+                "{cache} excludes a whole top-level directory"
+            );
+        }
     }
 }

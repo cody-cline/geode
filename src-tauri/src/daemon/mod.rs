@@ -292,6 +292,45 @@ mod tests {
         );
     }
 
+    /// Both listeners this codebase binds clear `IPV6_V6ONLY`.
+    ///
+    /// Read out of the source because a run on Linux cannot measure it: the
+    /// flag is off there to begin with, so
+    /// `serve::tests::an_ipv6_listener_answers_an_ipv4_client_too` passes
+    /// whether or not anybody set it, and `cargo test --lib` said nothing
+    /// while `GEODE_LISTEN=[::]:25570` on Windows was refusing every IPv4
+    /// client it had just been recommended to. `grep -rn only_v6` coming back
+    /// with one site is how that was found; this is that grep, kept.
+    ///
+    /// Here rather than in `serve.rs` for the obvious reason: a test that
+    /// looks for this call in the file it is written in would find its own
+    /// spelling of it and pass on nothing at all.
+    #[test]
+    fn both_listeners_clear_the_windows_ipv6_only_flag() {
+        for (file, source) in [
+            ("daemon/serve.rs", include_str!("serve.rs")),
+            ("share/host.rs", include_str!("../share/host.rs")),
+        ] {
+            // Comments stripped before looking, or this is satisfied by the
+            // prose explaining the call instead of by the call. It was, the
+            // first time it was written: `serve.rs` names the call in the doc
+            // comment on its own test, so inverting the real one left this
+            // green. Which is the whole failure mode this test is about.
+            let code = source
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                code.contains("set_only_v6(false)"),
+                "{file} binds a listener without clearing IPV6_V6ONLY, so an \
+                 IPv6 address there refuses every IPv4 client on Windows — \
+                 including the machine's own 127.0.0.1. If the two listeners \
+                 now share one bind, point this test at the file that holds it"
+            );
+        }
+    }
+
     /// Nothing that compiles the desktop app compiles this module.
     ///
     /// Tauri is behind the `desktop` feature and hands the default build

@@ -121,8 +121,16 @@ impl Events for Console {
 ///
 /// Two ways it can. Most say which server they are about — a log line, an
 /// exit. Progress does not: it is keyed by the job, and the jobs a server's
-/// own start and backup create are named after it, which is how "Downloading
-/// Java 21" reaches the console of the server that is waiting for it.
+/// own start, re-fetch and backup create are named after it, which is how
+/// "Downloading Java 21" reaches the console of the server that is waiting
+/// for it.
+///
+/// Those three names are the whole list, so a job missing from it is a job
+/// nobody can see. `server-install:` was: it is the download
+/// `run::install_if_the_software_is_gone` starts when a restored server's jar
+/// is not on disk, which is the whole server's software — tens of megabytes,
+/// minutes of it — and an admin who pressed Start watched every byte of it in
+/// silence.
 ///
 /// Pure, and the part of the socket worth proving: a rule that let another
 /// server's lines through would put one server's console in another's, and a
@@ -133,7 +141,11 @@ pub fn concerns(id: &str, event: &Event) -> bool {
         return true;
     }
     match field("id") {
-        Some(job) => job == format!("server:{id}") || job == format!("server-backup:{id}"),
+        Some(job) => {
+            job == format!("server:{id}")
+                || job == format!("server-install:{id}")
+                || job == format!("server-backup:{id}")
+        }
         None => false,
     }
 }
@@ -296,6 +308,11 @@ mod tests {
 
     /// One server's console must show that server, and a starting server's
     /// downloads, which are named after the job rather than the server.
+    ///
+    /// Every job id a start can create is in this list, and the list is the
+    /// only thing standing between a download and silence: `server-install:`
+    /// was emitting its stages to nobody, so a 49 MB re-fetch of a restored
+    /// server's software reached the host's log and no console at all.
     #[test]
     fn a_console_shows_its_own_servers_lines_and_the_jobs_named_after_it() {
         for shown in [
@@ -310,6 +327,10 @@ mod tests {
             event(
                 "geode://progress",
                 serde_json::json!({ "id": "server:survival", "stage": "Downloading Java" }),
+            ),
+            event(
+                "geode://progress",
+                serde_json::json!({ "id": "server-install:survival", "stage": "Downloading Paper" }),
             ),
             event(
                 "geode://progress",
@@ -341,6 +362,10 @@ mod tests {
             event(
                 "geode://progress",
                 serde_json::json!({ "id": "server:survival-2" }),
+            ),
+            event(
+                "geode://progress",
+                serde_json::json!({ "id": "server-install:survival-2" }),
             ),
             // An instance being installed on this host is nobody's console.
             event(

@@ -7,6 +7,7 @@
 //! POST   /v1/servers                               {name, kind, mcVersion} → 202
 //! GET    /v1/servers/{id}
 //! PATCH  /v1/servers/{id}                          {name?, notes?, settings?}
+//!                                                  settings merge field by field
 //! DELETE /v1/servers/{id}
 //! POST   /v1/servers/{id}/install                  → 202; a retry after a failure
 //! POST   /v1/servers/{id}/eula                     accept Mojang's EULA
@@ -45,8 +46,9 @@
 //! between them:
 //!
 //! * **The token first.** Before the path is matched, before a body is read,
-//!   before anything is read from disk. A request without it cannot even learn
-//!   whether a route exists.
+//!   before anything is read from disk. No route except `/health` answers
+//!   without it, and a request without it cannot even learn whether any other
+//!   route exists.
 //! * **One refusal.** A missing token, a wrong token and a token for a route
 //!   that does not exist are the same 401, the same body, after the same fixed
 //!   delay. A route that does not exist and a route asked with the wrong
@@ -175,12 +177,16 @@ struct NewServer {
 
 /// The same shape the app's `update_server` takes, minus the schedules, which
 /// have a route of their own so there is only one way to set them.
+///
+/// `settings` is the raw fields rather than a [`server::ServerSettings`],
+/// because which fields were *named* is the whole of what [`merged_settings`]
+/// needs and a parsed struct has already thrown that away.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ServerPatch {
     name: Option<String>,
     notes: Option<String>,
-    settings: Option<server::ServerSettings>,
+    settings: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Deserialize)]
@@ -311,12 +317,24 @@ pub async fn respond(host: &Arc<Host>, mut request: Request<Incoming>) -> Respon
 /// Compared in constant time by [`super::token::Token`], over digests, so
 /// neither how much of the token was right nor how long the real one is can be
 /// read off how long this takes.
+///
+/// The *scheme* is matched without regard to case, because RFC 7235 makes it
+/// case-insensitive: `bearer` and `BEARER` name the same scheme as `Bearer`,
+/// and a client sending either is conforming. One did — a Windows HTTP stack
+/// sent `bearer` and was refused while holding the right token. What follows
+/// the scheme is not a scheme: it is compared byte for byte, so a token
+/// differing in case, or pasted with a space around it, is not this host's
+/// token. Case here is not a secret and needs no constant time; the token is,
+/// and still gets it.
 fn authorised(host: &Host, request: &Request<Incoming>) -> bool {
     let presented = request
         .headers()
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
+        .and_then(|value| {
+            let (scheme, token) = value.split_once(' ')?;
+            scheme.eq_ignore_ascii_case("Bearer").then_some(token)
+        })
         .unwrap_or_default();
     host.token.matches(presented)
 }
@@ -486,6 +504,11 @@ fn installing(host: &Arc<Host>, id: String) {
     });
 }
 
+/// Change the fields a caller named and no others.
+///
+/// Nothing is written until every part of the body has been read, so a body
+/// with one bad field leaves the server exactly as it was rather than
+/// half-applied.
 async fn patch(host: &Arc<Host>, id: &str, body: &Bytes) -> Response<Body> {
     let patch: ServerPatch = match parsed(body) {
         Ok(patch) => patch,
@@ -505,13 +528,64 @@ async fn patch(host: &Arc<Host>, id: &str, body: &Bytes) -> Response<Body> {
     if let Some(notes) = patch.notes {
         server.notes = notes;
     }
-    if let Some(settings) = patch.settings {
-        server.settings = settings;
+    if let Some(named) = patch.settings {
+        match merged_settings(&server.settings, named) {
+            Ok(settings) => server.settings = settings,
+            Err(why) => return message(StatusCode::BAD_REQUEST, &why),
+        }
     }
     match server.save(&host.state.paths).await {
         Ok(()) => json(StatusCode::OK, &ServerState::of(server, host)),
         Err(e) => refused(e),
     }
+}
+
+/// The stored settings with the named ones laid over them.
+///
+/// `PATCH` is partial, and `settings` has to be partial the same way the two
+/// fields beside it are. Deserialising the body straight into
+/// [`server::ServerSettings`] is not: that struct carries
+/// `#[serde(default)]`, which is right for reading a `server.json` written by
+/// an older Geode and wrong for reading a request, because a field the caller
+/// left out arrives as the *default* rather than as what is on disk. So
+/// `{"memoryMb":2048}` answered 200 having also put `keepBackups` back to 10
+/// and `readCommands` back on. The app never met this — it sends the whole
+/// object every time — and an admin changing one setting with curl lost the
+/// other seven without a word.
+///
+/// Done over JSON, against the record that is on disk, for two reasons. It is
+/// the only place both halves exist as the same kind of thing, so what the
+/// caller named can win key by key; and nothing is listed here field by
+/// field, so a setting added to `ServerSettings` tomorrow merges without a
+/// line of this changing. A whole object still lands as one, which is what
+/// keeps a client that read `GET` and sent it all back working.
+///
+/// `null` is a value, not an absence: `{"keepBackups":null}` is how an admin
+/// says to keep every backup ever made, and it has to reach the field rather
+/// than read as a key nobody named.
+///
+/// A key that names no setting is refused rather than ignored. Ignoring it
+/// would be the same silence this function exists to remove — somebody who
+/// typed `keepBackup` would read a 200 as "saved".
+fn merged_settings(
+    stored: &server::ServerSettings,
+    named: serde_json::Map<String, serde_json::Value>,
+) -> std::result::Result<server::ServerSettings, String> {
+    let mut merged = match serde_json::to_value(stored) {
+        Ok(serde_json::Value::Object(fields)) => fields,
+        // A struct of plain fields, so it is an object or it is nothing.
+        _ => unreachable!("ServerSettings serialises to a JSON object"),
+    };
+    for (key, value) in named {
+        // Against the stored record's own keys, so this knows the settings
+        // without being told them.
+        if !merged.contains_key(&key) {
+            return Err(format!("'{key}' is not a server setting"));
+        }
+        merged.insert(key, value);
+    }
+    serde_json::from_value(serde_json::Value::Object(merged))
+        .map_err(|e| format!("that is not a value one of those settings takes: {e}"))
 }
 
 async fn delete(host: &Arc<Host>, id: &str) -> Response<Body> {
@@ -1000,11 +1074,31 @@ mod tests {
         )
     }
 
+    /// One request whose `Authorization` header is written out whole, so what
+    /// is asserted is the header a client really sends rather than what
+    /// [`signed`] chooses to send.
+    fn authorised_with(addr: std::net::SocketAddr, header: &str) -> String {
+        super::super::serve::tests::ask(
+            addr,
+            &format!(
+                "GET /v1/servers HTTP/1.1\r\nHost: localhost\r\nAuthorization: {header}\r\n\
+                 Content-Length: 0\r\nConnection: close\r\n\r\n"
+            ),
+        )
+    }
+
     /// The whole point of the token. Every route, with none and with a wrong
     /// one, and an unknown route besides — all the same refusal, so a stranger
     /// cannot even learn which routes exist. And the server is still there
     /// afterwards, because the `DELETE` in that list was refused before
     /// anything was read from disk, let alone removed.
+    ///
+    /// "Every route" is every route but `/health`, which answers
+    /// unauthenticated on purpose — the container healthcheck carries no
+    /// credentials — and is held open by
+    /// [`health_is_the_only_route_that_needs_no_token`]. The exception is
+    /// written out here too, because this test's name is read elsewhere as
+    /// the rule itself.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn no_route_does_anything_without_the_token() {
         let scratch = Scratch::new("daemon-auth");
@@ -1084,6 +1178,47 @@ mod tests {
         listening.stop().await;
     }
 
+    /// The scheme is case-insensitive and the token is not, and nothing else
+    /// in this file would notice if that were the other way round: every
+    /// signed request here goes through [`signed`], which writes one spelling.
+    ///
+    /// A Windows HTTP stack sent `bearer` with the right token and was
+    /// refused. RFC 7235 makes the auth scheme case-insensitive, so that
+    /// client was conforming and this host was wrong. The other half matters
+    /// just as much: what follows the scheme is the secret, so a token in the
+    /// wrong case, under a scheme this host does not speak, or with no scheme
+    /// at all, is refused exactly as a wrong token is.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_scheme_is_case_insensitive_and_the_token_is_not() {
+        let scratch = Scratch::new("daemon-scheme");
+        let listening = started(host(&scratch)).await;
+        let addr = listening.local_addr;
+
+        for scheme in ["Bearer", "bearer", "BEARER", "BeArEr"] {
+            let answer = authorised_with(addr, &format!("{scheme} {TOKEN}"));
+            assert!(
+                answer.starts_with("HTTP/1.1 200 "),
+                "`{scheme}` is the same scheme as `Bearer`, got {answer}"
+            );
+        }
+
+        for refused in [
+            // The token itself, which is not a scheme.
+            format!("Bearer {}", TOKEN.to_uppercase()),
+            // A scheme this host does not speak, carrying the real token.
+            format!("Basic {TOKEN}"),
+            // No scheme at all, which is not a bearer credential.
+            TOKEN.to_string(),
+        ] {
+            let answer = authorised_with(addr, &refused);
+            assert!(
+                answer.starts_with("HTTP/1.1 401 "),
+                "{refused:?} answered {answer}"
+            );
+        }
+        listening.stop().await;
+    }
+
     /// A body is the one thing a caller chooses the size of, so it has a
     /// ceiling. Refused rather than collected, and the server is unchanged.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1138,6 +1273,153 @@ mod tests {
         let reloaded = crate::server::load(&scratch.paths, &server.id).await.unwrap();
         assert_eq!(reloaded.name, "Survival Two");
         assert_eq!(reloaded.notes, "moved here");
+
+        listening.stop().await;
+    }
+
+    /// One setting's own key taken out, so what is left is every setting the
+    /// caller did not name.
+    fn without(key: &str, settings: &serde_json::Value) -> serde_json::Value {
+        let mut settings = settings.clone();
+        settings
+            .as_object_mut()
+            .expect("settings are an object")
+            .remove(key);
+        settings
+    }
+
+    /// A `PATCH` naming one setting changes one setting.
+    ///
+    /// What was measured: `keepBackups` stored as 3, then
+    /// `{"settings":{"memoryMb":2048}}`, and the answer came back saying
+    /// `keepBackups` was 10 — the serde default, not the stored 3. Seven
+    /// settings nobody had mentioned went back to their defaults, on disk and
+    /// in the reply. The app never met it because it sends the whole object
+    /// every time, which is also why nothing here noticed: the only test of
+    /// this route sent `name` and `notes`.
+    ///
+    /// The comparison is deliberately not a list of fields. It serialises the
+    /// record before and after, drops the one key that was named, and asserts
+    /// the rest is identical — so a setting added to `ServerSettings` next
+    /// year is covered by this without anybody remembering to come back here.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_partial_settings_patch_changes_only_what_it_names() {
+        let scratch = Scratch::new("daemon-settings-merge");
+        let server = with_a_server(&scratch).await;
+        let listening = started(host(&scratch)).await;
+        let addr = listening.local_addr;
+        let path = format!("/v1/servers/{}", server.id);
+
+        // The whole object first, as a client that read `GET` and sent it all
+        // back does. That has to keep landing as one.
+        let whole = server::ServerSettings {
+            memory_mb: 1024,
+            keep_backups: Some(3),
+            auto_restart: true,
+            ..Default::default()
+        };
+        let answer = signed(
+            addr,
+            "PATCH",
+            &path,
+            Some(&serde_json::json!({ "settings": whole }).to_string()),
+        );
+        assert!(answer.starts_with("HTTP/1.1 200 "), "{answer}");
+        let stored = crate::server::load(&scratch.paths, &server.id).await.unwrap();
+        assert_eq!(stored.settings.memory_mb, 1024);
+        assert_eq!(stored.settings.keep_backups, Some(3));
+        assert!(stored.settings.auto_restart);
+        let before = serde_json::to_value(&stored.settings).unwrap();
+
+        // And now one setting, named on its own.
+        let answer = signed(
+            addr,
+            "PATCH",
+            &path,
+            Some(r#"{"settings":{"memoryMb":2048}}"#),
+        );
+        assert!(answer.starts_with("HTTP/1.1 200 "), "{answer}");
+        let stored = crate::server::load(&scratch.paths, &server.id).await.unwrap();
+        assert_eq!(stored.settings.memory_mb, 2048);
+        let after = serde_json::to_value(&stored.settings).unwrap();
+        assert_eq!(
+            without("memoryMb", &after),
+            without("memoryMb", &before),
+            "a setting the caller never named was changed"
+        );
+
+        // The reply says what is on disk, since that is what an admin reads to
+        // check the change took — and it was the reply that said 10.
+        let replied: serde_json::Value = serde_json::from_str(body_of(&answer)).unwrap();
+        assert_eq!(replied["settings"], after);
+
+        // `null` is a value, not an absence: it is how an admin says to keep
+        // every backup ever made, so it has to reach the field rather than
+        // read as a key nobody named.
+        let answer = signed(
+            addr,
+            "PATCH",
+            &path,
+            Some(r#"{"settings":{"keepBackups":null}}"#),
+        );
+        assert!(answer.starts_with("HTTP/1.1 200 "), "{answer}");
+        let stored = crate::server::load(&scratch.paths, &server.id).await.unwrap();
+        assert_eq!(stored.settings.keep_backups, None);
+        assert_eq!(stored.settings.memory_mb, 2048, "and nothing else moved");
+
+        listening.stop().await;
+    }
+
+    /// A key that names no setting, and a value a setting cannot take, are
+    /// both refused — and refused before anything is written, including the
+    /// `name` sent in the same body.
+    ///
+    /// Ignoring the key would be the same silence the merge exists to remove:
+    /// `keepBackup` is not `keepBackups`, and a 200 would read as "saved".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_settings_key_that_names_nothing_is_refused() {
+        let scratch = Scratch::new("daemon-settings-typo");
+        let server = with_a_server(&scratch).await;
+        let listening = started(host(&scratch)).await;
+        let addr = listening.local_addr;
+        let path = format!("/v1/servers/{}", server.id);
+
+        let answer = signed(
+            addr,
+            "PATCH",
+            &path,
+            Some(r#"{"name":"Renamed","settings":{"keepBackup":3}}"#),
+        );
+        assert!(answer.starts_with("HTTP/1.1 400 "), "{answer}");
+        assert!(
+            body_of(&answer).contains("'keepBackup' is not a server setting"),
+            "it should name the key: {}",
+            body_of(&answer)
+        );
+
+        let answer = signed(
+            addr,
+            "PATCH",
+            &path,
+            Some(r#"{"name":"Renamed","settings":{"memoryMb":"lots"}}"#),
+        );
+        assert!(answer.starts_with("HTTP/1.1 400 "), "{answer}");
+        assert!(
+            body_of(&answer).contains("not a value"),
+            "it should say the value is wrong: {}",
+            body_of(&answer)
+        );
+
+        let stored = crate::server::load(&scratch.paths, &server.id).await.unwrap();
+        assert_eq!(
+            stored.settings.keep_backups,
+            server::ServerSettings::default().keep_backups,
+            "a refused patch must leave the settings alone"
+        );
+        assert_eq!(
+            stored.name, "Survival",
+            "a body with one bad field writes none of it"
+        );
 
         listening.stop().await;
     }

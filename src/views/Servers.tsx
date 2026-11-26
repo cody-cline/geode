@@ -285,7 +285,21 @@ function ServerCard({
 }) {
   const refreshServers = useStore((s) => s.refreshServers);
   const reportError = useStore((s) => s.reportError);
-  const progress = useStore((s) => s.progress[`server:${server.id}`]);
+  // Two job ids, because a start can be two jobs. `server:` is the start's
+  // own, and the one the installs done from this server's screens report
+  // under. Before it, a start that finds the software gone fetches it again
+  // under `server-install:` (`install_if_the_software_is_gone` in
+  // `server/run.rs`), which is the bigger of the two by far and had nothing
+  // reading its id: the card went on printing when the server was last
+  // started, with Start still inviting another press, through a 49 MB
+  // download. They are sequential rather than concurrent, so the only moment
+  // both are in the map is the second a finished one lingers there, and the
+  // start's own is the live one by then.
+  const progress = useStore(
+    (s) =>
+      s.progress[`server:${server.id}`] ??
+      s.progress[`server-install:${server.id}`],
+  );
   const shareStatus = useStore((s) => s.shareStatus);
 
   const [busy, setBusy] = useState(false);

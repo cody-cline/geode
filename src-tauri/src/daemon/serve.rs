@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hyper_util::rt::{TokioIo, TokioTimer};
+use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::TcpListener;
 use tokio::sync::{watch, Semaphore};
 
@@ -53,7 +54,7 @@ pub struct Listener {
 
 impl Listener {
     pub async fn start(addr: SocketAddr, host: Arc<Host>) -> Result<Self> {
-        let listener = TcpListener::bind(addr).await.map_err(|e| {
+        let listener = bind(addr).and_then(TcpListener::from_std).map_err(|e| {
             Error::msg(format!(
                 "could not listen on {addr}: {e} — another program may be using that port"
             ))
@@ -144,6 +145,49 @@ impl Listener {
     }
 }
 
+/// The listening socket, reachable over IPv4 when the address is an IPv6 one.
+///
+/// `IPV6_V6ONLY` is cleared by hand, and that is the only reason this is not
+/// `TcpListener::bind`: Linux leaves that flag off, Windows turns it on. So
+/// `GEODE_LISTEN=[::]:25570` on Windows came up answering `[::1]` and refusing
+/// `127.0.0.1` and the machine's own LAN address — measured on a laptop, both
+/// refused outright, which is a host nothing on IPv4 can reach. Worse than a
+/// surprise, because [`settings`](super::settings) *recommends* that address
+/// "to listen over IPv6 as well"; this is what makes that advice true. The
+/// shipped defaults are both IPv4 (`127.0.0.1:8765`, and `0.0.0.0:8765` in the
+/// container), so it is only the documented escape hatch this was breaking.
+///
+/// The same clearing, for the same reason, as `share::host::listen`. Those two
+/// are the only listeners this codebase binds, and they are a pair: change one
+/// and read the other.
+///
+/// Cleared for every IPv6 address rather than only the wildcard. The wildcard
+/// is the one it decides anything for, and on an address with no IPv4 traffic
+/// to refuse it costs a no-op. A failure to clear it is reported rather than
+/// shrugged off, which is where this parts company with `share::host`: that
+/// one may fall back to IPv4 alone because any reachable port will do for
+/// sharing, while this listener was told exactly where to be, and coming up
+/// where half of its clients cannot reach it is the defect itself.
+fn bind(addr: SocketAddr) -> std::io::Result<std::net::TcpListener> {
+    let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
+    if addr.is_ipv6() {
+        socket.set_only_v6(false)?;
+    }
+    // The rest is what `TcpListener::bind` was doing, and what
+    // `share::host::bound` does: a port given up a moment ago, its last
+    // connections still waiting out TIME_WAIT, can be listened on again. Not
+    // on Windows, where the same option lets a second program take a port that
+    // is in use.
+    #[cfg(not(windows))]
+    socket.set_reuse_address(true)?;
+    socket.bind(&addr.into())?;
+    socket.listen(1024)?;
+    // Required before tokio will take it: `TcpListener::from_std` expects a
+    // socket that is already non-blocking.
+    socket.set_nonblocking(true)?;
+    Ok(socket.into())
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     //! Against a listener on a port the OS chose, spoken to over a real
@@ -151,7 +195,7 @@ pub(super) mod tests {
     //! network or starts a Minecraft server.
 
     use std::io::{Read, Write};
-    use std::net::TcpStream;
+    use std::net::{Ipv4Addr, Ipv6Addr, TcpStream};
 
     use crate::paths::Scratch;
 
@@ -224,6 +268,55 @@ pub(super) mod tests {
         let answer = get(listening.local_addr, "/health");
         assert!(answer.starts_with("HTTP/1.1 200 "), "{answer}");
         assert!(answer.contains(r#"{"ok":true}"#), "{answer}");
+        listening.stop().await;
+    }
+
+    /// An IPv6 listener answers an IPv4 client, because `GEODE_LISTEN=[::]`
+    /// is what [`super::super::settings`] tells an admin to write "to listen
+    /// over IPv6 as well" — and a listener that refused half of them would
+    /// make that sentence a lie.
+    ///
+    /// It did refuse them on Windows, where `IPV6_V6ONLY` is on unless
+    /// cleared: `[::1]:25570` answered while `127.0.0.1:25570` and the LAN
+    /// address were both refused on the same machine. This is that
+    /// measurement, and it is why the whole check suite running on three
+    /// runners matters — it fails on the Windows one without
+    /// [`bind`]'s `set_only_v6(false)`, and passes here either way, because
+    /// Linux leaves the flag off to begin with. Which is exactly how this
+    /// shipped. `daemon::tests::both_listeners_clear_the_windows_ipv6_only_flag`
+    /// is the half a run on this machine can still refuse.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_ipv6_listener_answers_an_ipv4_client_too() {
+        let scratch = Scratch::new("daemon-dual");
+        let listening = Listener::start(
+            SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
+            host(&scratch),
+        )
+        .await
+        .expect("the IPv6 wildcard, port chosen by the OS");
+        let port = listening.local_addr.port();
+
+        for client in [
+            SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+            SocketAddr::from((Ipv6Addr::LOCALHOST, port)),
+        ] {
+            // The connection on its own, before the request: a refusal here is
+            // the measured symptom, and asserting it in the shared `ask`
+            // helper below would report it as that helper's `expect` instead.
+            let reached = TcpStream::connect(client);
+            assert!(
+                reached.is_ok(),
+                "a listener on [::]:{port} refused a client at {client} \
+                 ({:?}), so nothing on IPv4 can reach this host",
+                reached.err()
+            );
+            let answer = get(client, "/health");
+            assert!(
+                answer.starts_with("HTTP/1.1 200 "),
+                "a client at {client} connected and was not answered: {answer:?}"
+            );
+        }
+
         listening.stop().await;
     }
 

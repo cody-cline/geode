@@ -61,6 +61,10 @@ impl Settings {
 
         let listen = get("GEODE_LISTEN").unwrap_or_else(|| DEFAULT_LISTEN.to_string());
         let listen = listen.trim().parse().map_err(|_| {
+            // "over IPv6 as well" is a promise, and `serve::bind` is what keeps
+            // it: it clears `IPV6_V6ONLY`, which Windows turns on, so `[::]`
+            // there really does answer an IPv4 client. Without that this line
+            // is advice to come up unreachable — change one and read the other.
             Error::msg(format!(
                 "GEODE_LISTEN is {listen:?}, which is not an address and a port. Write it as {DEFAULT_LISTEN}, or [::]:8765 to listen over IPv6 as well."
             ))
