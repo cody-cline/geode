@@ -170,11 +170,17 @@ pub async fn project(client: &reqwest::Client, id: &str) -> Result<Project> {
 /// CDN; older versions are listed but not reliably served, so offering them
 /// would be offering links that fail.
 pub async fn versions(client: &reqwest::Client, id: &str) -> Result<Vec<Version>> {
-    let resource: Resource = get_json(client, &format!("{API}/resources/{id}")).await?;
+    versions_at(client, API, id).await
+}
+
+/// The same, against a given base URL. Injectable so a test can serve the two
+/// answers itself and look at the file name they compose into.
+pub async fn versions_at(client: &reqwest::Client, base: &str, id: &str) -> Result<Vec<Version>> {
+    let resource: Resource = get_json(client, &format!("{base}/resources/{id}")).await?;
 
     let latest: Vec<ResourceVersion> = get_json(
         client,
-        &format!("{API}/resources/{id}/versions?size=1&sort=-releaseDate"),
+        &format!("{base}/resources/{id}/versions?size=1&sort=-releaseDate"),
     )
     .await
     .unwrap_or_default();
@@ -206,11 +212,14 @@ pub async fn versions(client: &reqwest::Client, id: &str) -> Result<Vec<Version>
         Vec::new()
     } else {
         vec![VersionFile {
-            url: format!("{API}/resources/{id}/download"),
+            url: format!("{base}/resources/{id}/download"),
             // Spiget serves the jar behind a redirect and names it by id, so
             // the name is built rather than read from a header we cannot see
-            // before downloading.
-            filename: format!("{}-{version_name}.jar", sanitise(&resource.name)),
+            // before downloading. Both halves go through `sanitise` together:
+            // the version name is as much Spiget's JSON as the resource name
+            // is, and sanitising only one of them left the other free to put a
+            // `/` or a `..` in the name an install then joins onto a folder.
+            filename: format!("{}.jar", sanitise(&format!("{}-{version_name}", resource.name))),
             sha1: None,
             sha512: None,
             size: None,
@@ -242,12 +251,16 @@ pub async fn versions(client: &reqwest::Client, id: &str) -> Result<Vec<Version>
 }
 
 /// A file name that will not fight the filesystem.
+///
+/// A dot survives so a version number still reads as one, which is the whole
+/// point of putting it in the name — but never a leading or trailing one, so
+/// what comes back can be joined onto a folder and cannot be `..`.
 fn sanitise(name: &str) -> String {
     let cleaned: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' { c } else { '-' })
         .collect();
-    let trimmed = cleaned.trim_matches('-').to_string();
+    let trimmed = cleaned.trim_matches(|c| c == '-' || c == '.').to_string();
     if trimmed.is_empty() {
         "plugin".into()
     } else {
@@ -339,5 +352,83 @@ mod tests {
         assert_eq!(sanitise("LuckPerms"), "LuckPerms");
         assert_eq!(sanitise("Chat / Format++"), "Chat---Format");
         assert_eq!(sanitise("???"), "plugin");
+    }
+
+    /// Spiget, serving the two answers `versions` reads.
+    ///
+    /// Both are `#[serde(default)]` strings straight out of somebody else's
+    /// JSON; what they compose into is a name an install joins onto a folder.
+    async fn spiget_answering(resource_name: &str, version_name: &str) -> String {
+        use http_body_util::Full;
+        use hyper::body::{Bytes, Incoming};
+        use hyper::service::service_fn;
+        use hyper::{Request, Response};
+        use hyper_util::rt::TokioIo;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v2", listener.local_addr().unwrap());
+        let resource = format!(r#"{{"id":28140,"name":{}}}"#, json_string(resource_name));
+        let versions = format!(
+            r#"[{{"id":7,"name":{},"downloads":1}}]"#,
+            json_string(version_name)
+        );
+
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                let (resource, versions) = (resource.clone(), versions.clone());
+                tokio::spawn(async move {
+                    let service = service_fn(move |r: Request<Incoming>| {
+                        let (resource, versions) = (resource.clone(), versions.clone());
+                        async move {
+                            let body = if r.uri().path().ends_with("/versions") {
+                                Bytes::from(versions)
+                            } else {
+                                Bytes::from(resource)
+                            };
+                            Ok::<_, std::convert::Infallible>(Response::new(Full::new(body)))
+                        }
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(TokioIo::new(tcp), service)
+                        .await;
+                });
+            }
+        });
+        base
+    }
+
+    fn json_string(s: &str) -> String {
+        serde_json::to_string(s).unwrap()
+    }
+
+    /// The name a version actually arrives with, which is the only thing that
+    /// becomes a path.
+    ///
+    /// Asserting on `sanitise` alone — which is all this file used to do —
+    /// could not see that it was being applied to one half of a composed name:
+    /// the version string went in verbatim, so a resource whose latest version
+    /// is called `../../../../tools/geode-probe.jar` named the file that every
+    /// server JVM is started with under `-javaagent:`.
+    #[tokio::test]
+    async fn the_name_a_version_arrives_with_is_one_ordinary_file_name() {
+        let client = crate::net::client();
+
+        // The ordinary case, unchanged: the version number still reads as one.
+        let base = spiget_answering("LuckPerms", "5.5.71").await;
+        let versions = versions_at(&client, &base, "28140").await.unwrap();
+        assert_eq!(
+            versions[0].files[0].filename, "LuckPerms-5.5.71.jar",
+            "the everyday name changed shape"
+        );
+
+        // And the version name as a path, which is where it came from.
+        let base = spiget_answering("LuckPerms", "../../../../tools/geode-probe.jar").await;
+        let versions = versions_at(&client, &base, "28140").await.unwrap();
+        let name = &versions[0].files[0].filename;
+        let rel = std::path::Path::new(name);
+        assert!(
+            crate::paths::is_safe_relative(rel) && rel.components().count() == 1,
+            "a version name composed into a path: {name}"
+        );
     }
 }

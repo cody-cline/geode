@@ -1,8 +1,24 @@
 //! CurseForge (api.curseforge.com/v1).
 //!
-//! Requires an API key that CurseForge issues per developer and explicitly
-//! forbids sharing, so Geode ships without one and asks the user for theirs.
-//! Everything here is inert until that key is set.
+//! Needs an API key, and Geode ships one: `DEFAULT_CURSEFORGE_KEY` in
+//! `config.rs` is committed, the way Prism Launcher and PolyMC commit theirs,
+//! and there is no box anywhere in the app to paste a different one into — so
+//! nothing here is waiting on the user for anything.
+//!
+//! **The fork notice above that constant is what makes shipping it
+//! legitimate, and it is the thing to read before this file travels
+//! anywhere.** In short: a key is non-transferable, CurseForge requires a
+//! derivative work to use its own, and this one was issued for Geode, so a
+//! fork or a rebrand must request its own — free, at
+//! <https://console.curseforge.com/>. Revocation lands on everybody using the
+//! real Geode rather than on whoever misused the key, which is why the notice
+//! is worded as a requirement.
+//!
+//! Building with the key set to `""` compiles and turns CurseForge off, which
+//! is a supported way to build: Modrinth needs no key and keeps working. That
+//! is the one state in which anything here is inert, and the refusals below
+//! say so plainly rather than sending somebody to a setting that does not
+//! exist.
 
 use serde::Deserialize;
 
@@ -178,8 +194,9 @@ fn key_shape_hint(key: &str) -> String {
         );
     }
     "The length and prefix are both correct, so the value itself is being \
-     refused — regenerate it at console.curseforge.com. Also make sure no \
-     older key is saved in Settings shadowing the one you meant to use."
+     refused — regenerate it at console.curseforge.com. If `config.json` \
+     holds a `curseforgeApiKey`, that saved value is the one being used, \
+     whatever this build was compiled with."
         .into()
 }
 
@@ -492,7 +509,12 @@ pub async fn search(
 }
 
 pub async fn project(client: &reqwest::Client, id: &str, api_key: &str) -> Result<Project> {
-    let resp: Envelope<CfMod> = get(client, &format!("{API}/mods/{id}"), api_key).await?;
+    let resp: Envelope<CfMod> = get(
+        client,
+        &format!("{API}/mods/{}", urlencoding::encode(id)),
+        api_key,
+    )
+    .await?;
     Ok(to_project(resp.data))
 }
 
@@ -511,7 +533,12 @@ pub async fn support_pairs(
     id: &str,
     api_key: &str,
 ) -> Result<Vec<(String, String)>> {
-    let resp: Envelope<CfMod> = get(client, &format!("{API}/mods/{id}"), api_key).await?;
+    let resp: Envelope<CfMod> = get(
+        client,
+        &format!("{API}/mods/{}", urlencoding::encode(id)),
+        api_key,
+    )
+    .await?;
     Ok(resp
         .data
         .latest_files_indexes
@@ -563,7 +590,12 @@ struct CfDescription {
 }
 
 pub async fn description(client: &reqwest::Client, id: &str, api_key: &str) -> Result<String> {
-    let resp: CfDescription = get(client, &format!("{API}/mods/{id}/description"), api_key).await?;
+    let resp: CfDescription = get(
+        client,
+        &format!("{API}/mods/{}/description", urlencoding::encode(id)),
+        api_key,
+    )
+    .await?;
     Ok(resp.data)
 }
 
@@ -712,7 +744,10 @@ pub async fn versions(
     loader: Option<&str>,
     api_key: &str,
 ) -> Result<Vec<Version>> {
-    let mut url = format!("{API}/mods/{project_id}/files?pageSize=50");
+    let mut url = format!(
+        "{API}/mods/{}/files?pageSize=50",
+        urlencoding::encode(project_id)
+    );
     if let Some(v) = game_version {
         url.push_str(&format!("&gameVersion={}", urlencoding::encode(v)));
     }
@@ -950,6 +985,126 @@ pub async fn match_fingerprints_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The sentences at the top of this file, which is where a forker reads
+    /// about the key while they are in the file that uses it.
+    fn module_doc() -> String {
+        include_str!("curseforge.rs")
+            .lines()
+            .take_while(|l| l.starts_with("//!") || l.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// This file agrees with the fork notice in `config.rs` rather than
+    /// contradicting it.
+    ///
+    /// It used to say the key "CurseForge issues per developer and explicitly
+    /// forbids sharing, so Geode ships without one and asks the user for
+    /// theirs. Everything here is inert until that key is set." All three
+    /// claims are false — `DEFAULT_CURSEFORGE_KEY` is committed,
+    /// `default_curseforge_key` returns it, and there is no box in the app to
+    /// paste one into — and the notice above that constant says so in terms.
+    /// A forker reading the file that *uses* the key was being told the
+    /// opposite of the one thing that makes shipping it legitimate, which is
+    /// exactly the belief that ends in Geode's key going out under another
+    /// name.
+    #[test]
+    fn the_module_doc_points_at_the_fork_notice_rather_than_denying_the_key() {
+        let doc = module_doc();
+        assert!(
+            doc.contains("DEFAULT_CURSEFORGE_KEY") && doc.contains("config.rs"),
+            "the doc does not say where the shipped key is: {doc}"
+        );
+        assert!(
+            doc.contains("fork notice"),
+            "the doc does not send a forker to the notice that licenses the key: {doc}"
+        );
+        assert!(
+            doc.contains("fork") && doc.contains("console.curseforge.com"),
+            "the doc does not say a fork must request its own: {doc}"
+        );
+        assert!(
+            doc.contains(r#"`""`"#),
+            "the doc does not say an empty key is a build that works: {doc}"
+        );
+        assert!(
+            !doc.contains("ships without"),
+            "the doc still says Geode ships without a key: {doc}"
+        );
+    }
+
+    /// Nothing in either provider file sends anybody to a CurseForge key field
+    /// in Settings, because there is none.
+    ///
+    /// `src/views/Settings.tsx` has no such control and the removal was
+    /// deliberate — a person who wants to play Minecraft should never read the
+    /// word "key". In a fork built with an empty key these refusals are the
+    /// strings that are actually reached, and every one of them used to
+    /// instruct an impossible action.
+    #[test]
+    fn no_refusal_sends_anybody_to_a_control_that_does_not_exist() {
+        for (name, text) in [
+            ("providers/curseforge.rs", include_str!("curseforge.rs")),
+            ("providers/mod.rs", include_str!("mod.rs")),
+        ] {
+            // Only the half of the file that can be read on screen. A test
+            // naming the words it is looking for is still a test.
+            let shipped = text.split("\n#[cfg(test)]").next().unwrap_or(text);
+            assert!(
+                !shipped.contains("in Settings"),
+                "{name} still points at a CurseForge key field in Settings"
+            );
+        }
+    }
+
+    /// Every id this file splices into a URL *path* is either wrapped in
+    /// `urlencoding::encode` or is an integer by type.
+    ///
+    /// `modrinth.rs` encodes all of its; this file encoded none of them, and
+    /// the next endpoint added here copies whichever neighbour it sits beside.
+    /// The host is fixed by [`API`], so the authority cannot be moved, but an
+    /// id holding `?`, `#` or `..` addresses a different path or query on that
+    /// same host while still carrying the `x-api-key` header.
+    ///
+    /// Asserted as the whole set of names rather than per call site, so an
+    /// endpoint added later is either in the set or breaks the test. The two
+    /// names allowed in it are [`file_at`]'s, which settles the question the
+    /// other way: both are `u32`, so there is nothing a caller could put in
+    /// them.
+    #[test]
+    fn an_id_in_a_url_path_is_encoded_unless_its_type_makes_that_pointless() {
+        let text = include_str!("curseforge.rs");
+        let mut spliced: Vec<&str> = Vec::new();
+        for prefix in ["{API}/", "{base}/"] {
+            for (at, _) in text.match_indices(prefix) {
+                let rest = &text[at + prefix.len()..];
+                // As far as the URL path goes: a quote, a `?` or anything else
+                // that cannot be in one ends it. A query string is a place for
+                // an encoded value, not a place an id can address something
+                // else from.
+                let end = rest
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || "{}/_-.".contains(c)))
+                    .unwrap_or(rest.len());
+                // `{}` is a positional argument — the `encode` call beside it.
+                spliced.extend(
+                    rest[..end]
+                        .split('{')
+                        .skip(1)
+                        .filter_map(|after| after.split('}').next())
+                        .filter(|name| !name.is_empty()),
+                );
+            }
+        }
+        spliced.sort_unstable();
+        spliced.dedup();
+        assert_eq!(
+            spliced,
+            ["MINECRAFT_GAME_ID", "file_id", "project_id"],
+            "an id reaches a URL path unencoded: wrap it in urlencoding::encode the \
+             way modrinth.rs does, or take it as a u32 the way file_at does"
+        );
+    }
 
     #[test]
     fn flags_a_shell_mangled_key() {

@@ -32,6 +32,19 @@ impl Provider {
         }
     }
 
+    /// The platform's name as the platform spells it, for copy a person reads.
+    ///
+    /// [`Provider::as_str`] is the wire name — it is what `serde` writes and
+    /// what a `ContentRecord` stores — so putting it in a sentence tells
+    /// somebody their mod came from "curseforge".
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Provider::Modrinth => "Modrinth",
+            Provider::CurseForge => "CurseForge",
+            Provider::Spiget => "SpigotMC",
+        }
+    }
+
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "modrinth" => Some(Provider::Modrinth),
@@ -371,7 +384,8 @@ pub async fn search(
         None => {
             if wanted.contains(&Provider::CurseForge) && curseforge_key.is_none() {
                 warnings.push(
-                    "CurseForge is off — add your own API key in Settings to include it.".into(),
+                    "CurseForge is off in this build, so these results are Modrinth's alone."
+                        .into(),
                 );
             }
         }
@@ -487,7 +501,7 @@ pub async fn versions(
         Provider::Modrinth => modrinth::versions(client, project_id, game_version, loader).await,
         Provider::CurseForge => {
             let key = curseforge_key.ok_or_else(|| {
-                crate::error::Error::msg("a CurseForge API key is required — add one in Settings")
+                crate::error::Error::msg("CurseForge is off in this build, so it cannot be asked")
             })?;
             curseforge::versions(client, project_id, game_version, loader, key).await
         }
@@ -535,7 +549,7 @@ pub async fn support_pairs(
         }
         Provider::CurseForge => {
             let key = curseforge_key.ok_or_else(|| {
-                crate::error::Error::msg("a CurseForge API key is required — add one in Settings")
+                crate::error::Error::msg("CurseForge is off in this build, so it cannot be asked")
             })?;
             let mut pairs = curseforge::support_pairs(client, project_id, key).await?;
             if let Ok(versions) = curseforge::versions(client, project_id, None, None, key).await {
@@ -564,7 +578,7 @@ pub async fn project(
         Provider::Modrinth => modrinth::project(client, id).await,
         Provider::CurseForge => {
             let key = curseforge_key.ok_or_else(|| {
-                crate::error::Error::msg("a CurseForge API key is required — add one in Settings")
+                crate::error::Error::msg("CurseForge is off in this build, so it cannot be asked")
             })?;
             curseforge::project(client, id, key).await
         }
@@ -583,7 +597,7 @@ pub async fn description(
         Provider::Modrinth => modrinth::description(client, id).await,
         Provider::CurseForge => {
             let key = curseforge_key.ok_or_else(|| {
-                crate::error::Error::msg("a CurseForge API key is required — add one in Settings")
+                crate::error::Error::msg("CurseForge is off in this build, so it cannot be asked")
             })?;
             curseforge::description(client, id, key).await
         }

@@ -127,6 +127,18 @@ pub async fn install_into(
         Some(&file.filename),
     )?;
 
+    // And once more about the name, which is about to become a path. Refused
+    // rather than repaired: a platform answering with a name like this is
+    // something to see, not something to quietly rewrite into a name nobody
+    // published.
+    let dest = in_folder(dir, &file.filename).ok_or_else(|| {
+        Error::msg(format!(
+            "{} named this file {:?}, which is not a name Geode will write into a folder",
+            version.provider.display_name(),
+            file.filename
+        ))
+    })?;
+
     tokio::fs::create_dir_all(dir).await?;
 
     // Remove the previous file for this project before writing the new one —
@@ -165,7 +177,7 @@ pub async fn install_into(
 
     crate::net::fetch_one(
         client,
-        &Download::new(file.url.clone(), dir.join(&file.filename))
+        &Download::new(file.url.clone(), dest)
             .sha1(file.sha1.clone())
             .size(file.size)
             .label(display_name.to_string()),
@@ -176,8 +188,15 @@ pub async fn install_into(
         if old == file.filename {
             continue;
         }
-        let _ = tokio::fs::remove_file(dir.join(&old)).await;
-        let _ = tokio::fs::remove_file(dir.join(disabled_name(&old))).await;
+        // Through the same check as the write: this name was recorded by an
+        // earlier install, an imported pack or a shared one, and a record is a
+        // file somebody else wrote. A name that would not be written is one
+        // that cannot be deleted either — its record goes, nothing on disk
+        // outside this folder is touched.
+        if let Some(path) = in_folder(dir, &old) {
+            let _ = tokio::fs::remove_file(&path).await;
+            let _ = tokio::fs::remove_file(dir.join(disabled_name(&old))).await;
+        }
         records.retain(|r| !(r.file_name == old && r.kind == kind));
     }
 
@@ -206,6 +225,27 @@ pub async fn install_into(
     });
 
     Ok(file.filename.clone())
+}
+
+/// Where a file name handed over from outside is allowed to land.
+///
+/// `None` for anything that is not one ordinary name: [`Path::join`] takes an
+/// absolute path as the whole answer and walks `..` out of its base, so a name
+/// with either in it is a path rather than a name, and the folder it was meant
+/// to land in stops mattering. A server's plugins folder is four segments from
+/// `tools/`, whose `geode-probe.jar` every server JVM is started with under
+/// `-javaagent:`, and `net::fetch_one` creates the parent directory of
+/// whatever it is given.
+///
+/// Held here because [`install_into`] is the one place all four sources of
+/// these names pass through — the two commands, a server's install and
+/// [`resolve_dependency`] — and none of them holds the name to a shape. The
+/// same two-part rule as `instance::content`'s `resolve_in`,
+/// [`crate::logs`]'s `resolve` and `server`'s move and rename: safe, and
+/// exactly one component.
+fn in_folder(dir: &Path, name: &str) -> Option<std::path::PathBuf> {
+    let rel = Path::new(name);
+    (crate::paths::is_safe_relative(rel) && rel.components().count() == 1).then(|| dir.join(rel))
 }
 
 /// Refuse an install that would replace a mod the server's pack owns.
@@ -1102,6 +1142,112 @@ mod tests {
             !dir.join("mr-cool-1.2.3.jar").exists(),
             "the server's file was overwritten by the substitute"
         );
+    }
+
+    /// A name is a name, not a path — on the way in and on the way out.
+    ///
+    /// The file name arrives verbatim out of a provider's JSON and is joined
+    /// onto a folder, and `net::fetch_one` creates the parent of whatever it
+    /// is handed. A plugin named `../../../../tools/geode-probe.jar` installs
+    /// into `tools/` from a server's plugins folder, and that jar is handed to
+    /// every server JVM under `-javaagent:` — the next start runs it. The
+    /// recorded name then drives the delete on the *next* update, which is the
+    /// same hole in the other direction and the one `instance::prism` already
+    /// carries a test for.
+    ///
+    /// Both halves are asked about a file that already exists outside the
+    /// content folder, which is what makes the failure legible: unguarded, the
+    /// install finds that file where it joined its way to, finds nothing to
+    /// check about it, and reports success — so the agent jar is now recorded
+    /// as this plugin and the next update of it writes whatever the provider
+    /// serves straight over it.
+    #[tokio::test]
+    async fn a_file_name_from_a_provider_or_a_record_cannot_become_a_path() {
+        let scratch = Scratch::new("install-escape");
+        let root = scratch.paths.root.clone();
+        let dir = root.join("servers/s/run/plugins");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::create_dir_all(root.join("tools")).await.unwrap();
+        tokio::fs::write(root.join("tools/geode-probe.jar"), b"the real agent")
+            .await
+            .unwrap();
+        // Four segments up from `run/plugins` is the Geode root.
+        let escape = "../../../../tools/geode-probe.jar";
+        // Nothing should be fetched, and the client points at a port nothing
+        // listens on so a refusal that failed to refuse cannot quietly succeed.
+        let offline = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:9").unwrap())
+            .build()
+            .unwrap();
+
+        // The provider's half: the name on the version being installed.
+        let mut hostile = version("1.0", "release", true);
+        hostile.provider = Provider::CurseForge;
+        hostile.files[0].filename = escape.into();
+        let mut records = Vec::new();
+        let err = install_into(
+            &offline,
+            &dir,
+            &mut records,
+            &hostile,
+            ContentKind::Plugin,
+            "Something Useful",
+            None,
+            None,
+            false,
+            None,
+            blocked::Fallback::live(&Progress::silent("t")),
+        )
+        .await
+        .expect_err("a file name that is a path must be refused, not written");
+        assert!(
+            err.to_string().contains("CurseForge") && err.to_string().contains(escape),
+            "the refusal names neither the platform that said it nor the name: {err}"
+        );
+        assert!(
+            records.is_empty(),
+            "the agent jar outside the folder was recorded as this plugin: {records:?}"
+        );
+        assert_eq!(
+            tokio::fs::read(root.join("tools/geode-probe.jar")).await.unwrap(),
+            b"the real agent",
+            "the agent jar every server JVM loads was written over"
+        );
+
+        // The record's half: an update deletes the previous file for this
+        // project under the name a record carries, and a record is a file
+        // somebody else wrote.
+        tokio::fs::write(dir.join("a.jar"), b"the new build")
+            .await
+            .unwrap();
+        let mut newer = version("2.0", "release", true);
+        newer.files[0].sha1 = Some(crate::net::sha1_file(&dir.join("a.jar")).await.unwrap());
+        let mut records = vec![ContentRecord {
+            origin: Default::default(),
+            kind: ContentKind::Plugin,
+            ..server_record(escape, "p")
+        }];
+        install_into(
+            &offline,
+            &dir,
+            &mut records,
+            &newer,
+            ContentKind::Plugin,
+            "Something Useful",
+            None,
+            None,
+            false,
+            None,
+            blocked::Fallback::live(&Progress::silent("t")),
+        )
+        .await
+        .expect("the install itself is ordinary; only the recorded name is not");
+        assert!(
+            root.join("tools/geode-probe.jar").is_file(),
+            "the update deleted a file outside the content folder"
+        );
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].file_name, "a.jar");
     }
 
     /// The listing's side is kept on the record at install time, because it is
