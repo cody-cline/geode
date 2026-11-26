@@ -1,9 +1,11 @@
 # A Geode server host.
 #
+#   openssl rand -hex 32 > geode_token.local && chmod 600 geode_token.local
 #   docker compose up -d
 #
 # Then, in Geode: Servers › Add a host, and give it this machine's address and
-# the token below. The container keeps running whether or not Geode is open.
+# the token in that file. The container keeps running whether or not Geode is
+# open.
 
 services:
   geode-host:
@@ -23,11 +25,29 @@ services:
     # limit, so the host is what decides, not Docker.
     stop_grace_period: 125s
 
+    # The token, as a file rather than a value. Compose mounts it at
+    # /run/secrets/geode_token inside the container; `secrets:` at the bottom of
+    # this file is where it comes from.
+    secrets:
+      - geode_token
+
     environment:
-      # REQUIRED. Generate one and keep it secret — it is the only thing
-      # standing between the internet and your worlds:
-      #   openssl rand -hex 32
-      GEODE_TOKEN: "${GEODE_TOKEN:?set GEODE_TOKEN in a .env file next to this}"
+      # REQUIRED, and this is the way to say it: the path to the file above,
+      # never the token itself.
+      #
+      # A Minecraft server here runs as the same user as the host, so a mod
+      # inside one can read `geoded`'s environment block out of
+      # /proc/<pid>/environ — which is why the secret goes in a file and only
+      # the path to it goes in the environment. A path is not a credential.
+      GEODE_TOKEN_FILE: /run/secrets/geode_token
+
+      # The older way, still read exactly as it always was, and what every host
+      # set up before this is running. To go back to it, swap the two lines and
+      # comment out `secrets:` above as well — compose would otherwise still
+      # want the file. Setting both variables is refused rather than resolved,
+      # because two of them would be two claims about one secret and the loser
+      # is a token somebody still believes is in use.
+      #   GEODE_TOKEN: "${GEODE_TOKEN:?set GEODE_TOKEN in a .env file next to this}"
 
       # How much of the host a server may use. Left unset, a runaway modpack
       # will take the machine down with it.
@@ -64,6 +84,25 @@ services:
       timeout: 5s
       start_period: 20s
       retries: 3
+
+secrets:
+  geode_token:
+    # Make it next to this file:
+    #
+    #   openssl rand -hex 32 > geode_token.local && chmod 600 geode_token.local
+    #
+    # The `.local` is not decoration — `*.local` is in .gitignore, so a token
+    # made this way cannot be committed by the next `git add .`. The trailing
+    # newline is fine: the file is read as the token with the whitespace around
+    # it trimmed off.
+    #
+    # The host runs as uid 1000 and has to be able to read it: if it cannot,
+    # `geoded` says so by name and stops rather than starting without a token.
+    # If other users on the machine can read it, the host starts and says that
+    # too — a token file nobody else can open is the whole point of this, so
+    # being told is better than being refused over a mode that, inside a
+    # container, is not the host's to change.
+    file: ./geode_token.local
 
 volumes:
   geode-data:

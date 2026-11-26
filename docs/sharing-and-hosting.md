@@ -944,9 +944,24 @@ binary, and the image has been built.
 is behind the crate's `desktop` feature, so the image is built with
 `--no-default-features` and needs no webview toolchain in either stage — which
 is the only reason a headless image is possible at all. Everything it is told
-comes from the environment the compose file already passed: `GEODE_TOKEN`
-(required; it refuses to start without one, and refuses one short enough to
-guess), `GEODE_LISTEN`, `GEODE_MAX_HEAP_MB` and `GEODE_HOME`.
+comes from the environment the compose file already passed:
+`GEODE_TOKEN_FILE` or `GEODE_TOKEN` (one of them required; it refuses to start
+without a token, and refuses one short enough to guess), `GEODE_LISTEN`,
+`GEODE_MAX_HEAP_MB` and `GEODE_HOME`.
+
+The token is the one of those that is a secret, and the file is the way to pass
+it. `childenv.rs` strips Geode's own variables from every child, so a mod can
+no longer read `GEODE_TOKEN` out of a server's own environment — but the server
+runs as the same user as the host, and `/proc/<geoded-pid>/environ` still holds
+the block `geoded` was exec'd with. `GEODE_TOKEN_FILE` closes that by putting a
+path there instead of the secret, which is also how a compose secret is meant
+to be consumed. Setting both variables is refused rather than resolved, since
+the one that lost would be a token somebody still believes is in use; an empty
+or whitespace-only file, a path to nothing and a token under sixteen characters
+are each refused by name, and a file other users on the machine can read is
+said out loud on startup rather than refused — the mode on a mounted secret is
+often not the admin's to choose, and a host that would not start over it is a
+host that has to go back to `GEODE_TOKEN`.
 
 What it serves is in `daemon/api.rs`: REST for the list, create, install, start,
 stop, kill, command, properties, content, tasks and backups the app already

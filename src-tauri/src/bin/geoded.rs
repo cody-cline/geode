@@ -10,7 +10,7 @@ fn main() -> std::process::ExitCode {
     if !unexpected.is_empty() {
         eprintln!(
             "geoded: takes no arguments, and was given {}.\n\
-             Set GEODE_TOKEN, GEODE_LISTEN, GEODE_MAX_HEAP_MB and GEODE_HOME in the environment instead.",
+             Set GEODE_TOKEN_FILE (or GEODE_TOKEN), GEODE_LISTEN, GEODE_MAX_HEAP_MB and GEODE_HOME in the environment instead.",
             unexpected.join(" ")
         );
         return std::process::ExitCode::FAILURE;

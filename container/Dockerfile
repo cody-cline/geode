@@ -8,8 +8,18 @@
 #   docker build -f container/Dockerfile -t geode/host .
 
 # --- build -------------------------------------------------------------------
-# Pinned by digest rather than tag in a release build; a floating tag makes a
-# reproducible image impossible.
+# Both stages float on a tag, and that is the choice rather than an oversight.
+# A `FROM rust@sha256:…` would make this image reproducible, and would also
+# freeze the runtime base on the day somebody pasted the digest: nothing here
+# bumps one, and this image runs other people's mods behind a management port,
+# so picking up a patched `debian:bookworm-slim` on every rebuild is worth more
+# than building the same bytes twice. Pinning by digest is the right trade only
+# alongside something that raises the pin, and there is nothing here to do that.
+#
+# What is pinned is the part that decides how the host behaves: `--locked` below
+# builds from the committed `Cargo.lock` and fails rather than resolving a newer
+# dependency. The toolchain floats inside `1`, for which `rust-version` in
+# `Cargo.toml` is the floor.
 FROM rust:1-bookworm AS build
 
 WORKDIR /src
@@ -52,7 +62,8 @@ FROM debian:bookworm-slim
 # version that needs a different major.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
-        # The healthcheck below calls /health with it.
+        # The HEALTHCHECK below calls /health with it, as does the one in
+        # docker-compose.yml.
         curl \
         # BuildTools compiles Spigot from source and drives a real git binary.
         git \
@@ -81,6 +92,20 @@ COPY --from=build --chown=geode:geode /src/target/release/geoded /usr/local/bin/
 VOLUME ["/data"]
 ENV GEODE_HOME=/data
 
+# The token every request to the management API must present. Deliberately not
+# an ENV here — there is no default worth having, and a secret baked into an
+# image is a secret in every copy of it. Mount a file holding it and name the
+# path:
+#
+#   -e GEODE_TOKEN_FILE=/run/secrets/geode_token
+#
+# in preference to GEODE_TOKEN, which still works and is what every host set up
+# before this was. The difference is `/proc/<pid>/environ`: a Minecraft server
+# here runs as this same user, so a mod inside one can read `geoded`'s own
+# environment block out of it even though `childenv.rs` keeps Geode's variables
+# out of the environment the server itself was given. A path is not a
+# credential; whoever can read the file could have read the token anyway.
+
 # The management API. Minecraft's own ports are published per server by the
 # person running this, since only they know which ones they want exposed.
 #
@@ -89,6 +114,19 @@ ENV GEODE_HOME=/data
 # right, because the only way in is still a port somebody chose to publish.
 ENV GEODE_LISTEN=0.0.0.0:8765
 EXPOSE 8765
+
+# Healthy is the API answering, which is the only useful definition: a server
+# can legitimately be stopped, so counting processes proves nothing.
+#
+# Here as well as in docker-compose.yml because a healthcheck in a compose file
+# *replaces* the image's rather than adding to it, so there is no drift to
+# avoid by leaving it out — and a `docker run` host without it has no check at
+# all, which is the state this image was in for as long as the comment beside
+# `curl` promised one. The address is read back out of GEODE_LISTEN rather than
+# written again, so a host told to listen somewhere else is still asked there —
+# shell form rather than exec form, because exec form expands nothing.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD curl -fsS "http://${GEODE_LISTEN}/health" || exit 1
 
 # A server is asked to shut down and given up to two minutes to save, so the
 # stop timeout has to be longer than that or Docker's SIGKILL arrives mid-save

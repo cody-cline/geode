@@ -403,9 +403,13 @@ Five frontend traps, each a comment in place:
   `geoded` with `--no-default-features`, which is what keeps a webview
   toolchain out of the image: Tauri is behind the `desktop` feature, so the
   headless crate is the library plus `src/bin/geoded.rs` and `src/daemon/`.
-  `GEODE_TOKEN` is read by `daemon::Settings`, every route is behind it, and a
-  container stop stops the servers rather than killing them. A whole server
-  moves or copies between the app and a host over two routes of their own
+  The token is read by `daemon::Settings` and every route is behind it;
+  `GEODE_TOKEN_FILE` names a file holding it and is what the compose file now
+  uses, because a server runs as the same user as the host and
+  `/proc/<geoded-pid>/environ` outlives `childenv.rs` — `GEODE_TOKEN` itself is
+  still read, and setting both is refused. A container stop stops the servers
+  rather than killing them. A whole server moves or copies between the app and
+  a host over two routes of their own
   (`daemon/api.rs`, with `server/transfer.rs` and the app-side `remote.rs`):
   the app drives both directions, because a host cannot reach a desktop
   machine behind NAT; an upload is bounded by one staging directory at a time

@@ -139,6 +139,15 @@ pub async fn run() -> Result<()> {
         settings.max_heap_mb,
     ));
 
+    // What [`Settings`] noticed about how this host was configured and would
+    // not refuse to start over — the token file's permissions, today. Through
+    // the sink rather than printed, so it lands in a container's log beside
+    // everything else; and here rather than in `settings.rs`, which has no sink
+    // and should not grow one to say a sentence.
+    for warning in settings.warnings {
+        notice(&host.sink, warning);
+    }
+
     // The scheduled backups and commands each server carries. The app runs
     // this same loop; a host that did not would be a host where a server's
     // nightly backup silently stopped happening the moment it was moved here.
