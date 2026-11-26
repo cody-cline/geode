@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{Error, Result};
+use crate::error::{Context, Error, Result};
 use crate::net::{Download, Progress};
 use crate::paths::Paths;
 
@@ -214,6 +214,11 @@ struct AdoptiumBinary {
 #[derive(Debug, Deserialize)]
 struct AdoptiumPackage {
     link: String,
+    /// The archive's SHA-256, which Adoptium publishes beside every binary.
+    /// Read because the same response hands us the URL: without it, nothing
+    /// about these bytes is checked beyond their length.
+    #[serde(default)]
+    checksum: Option<String>,
     #[serde(default)]
     size: Option<u64>,
 }
@@ -278,6 +283,30 @@ pub async fn provision_image(
         ))
     })?;
 
+    // Read before anything is removed or downloaded: a refusal must not first
+    // delete an install that was working.
+    //
+    // A missing checksum refuses rather than falling back to the size check.
+    // What this guards against is a tampered answer from Adoptium — a proxy, a
+    // CDN, a CA — and that same answer can leave the `checksum` field out as
+    // easily as it can swap the bytes, so a fallback would hand the whole check
+    // back to whoever wanted it gone. An empty string counts as absent: it is a
+    // hash that can never match, and "expected ''" is not something to show
+    // anybody.
+    let Some(checksum) = asset
+        .binary
+        .package
+        .checksum
+        .clone()
+        .filter(|c| !c.trim().is_empty())
+    else {
+        return Err(Error::msg(format!(
+            "Pick a Java {major} already on this machine under Settings → Java & Memory, or try \
+             again later. Adoptium published no checksum for its Java {major} download, and Geode \
+             will not install a runtime it cannot check against one."
+        )));
+    };
+
     // A JDK is kept apart from the JRE of the same version: they are different
     // downloads, and letting one overwrite the other would mean whichever was
     // fetched last decides whether compiling works.
@@ -301,8 +330,13 @@ pub async fn provision_image(
         .stage(&format!("Downloading Java {major}"), 1)
         .await;
     let download = Download::new(asset.binary.package.link.clone(), archive.clone())
-        // Adoptium's `checksum` is SHA-256; our downloader verifies SHA-1, so
-        // we check size only and rely on TLS for integrity.
+        // Adoptium's `checksum` is SHA-256, and `Download::sha256` verifies it
+        // as the bytes stream past. The size stays beside it because it is
+        // free, not because it proves anything: a hash is what decides whether
+        // this archive gets unpacked. It also keeps the shared cache file name
+        // honest — every major downloads to the same `jre.tar.gz`, and a
+        // length is no way to tell one runtime's archive from another's.
+        .sha256(Some(checksum))
         .size(asset.binary.package.size)
         .label(format!("Temurin {major}"));
     crate::net::fetch_one(client, &download).await?;
@@ -372,14 +406,27 @@ fn unpack_targz(archive: &Path, dest: &Path) -> Result<()> {
     let file = std::fs::File::open(archive)?;
     let decoder = flate2::read::GzDecoder::new(file);
     let mut tar = tar::Archive::new(decoder);
-    tar.set_preserve_permissions(true);
+    // No `set_preserve_permissions(true)`: the rwx bits in an entry's mode are
+    // applied either way, so `bin/java` still comes out executable without it.
+    // All the flag adds is honouring setuid, setgid and the sticky bit from the
+    // archive, and an archive is not something that gets to hand this machine a
+    // setuid binary.
     for entry in tar.entries()? {
         let mut entry = entry?;
         let path = entry.path()?.into_owned();
         if !crate::paths::is_safe_relative(&path) {
             continue;
         }
-        entry.unpack(dest.join(&path))?;
+        // `unpack_in` rather than `unpack`, and the check above is not a
+        // substitute for it: `is_safe_relative` reads the entry's own name, and
+        // a name can be innocent while the place it lands is not. Temurin
+        // tarballs really do carry symlinks, so `jdk/lib` can arrive as a link
+        // pointing anywhere on disk and `jdk/lib/authorized_keys` then writes
+        // through it — both names pass the guard above and the file lands
+        // outside `dest`. `unpack_in` canonicalises each entry's parent and
+        // refuses when it leaves `dest`, which is the only check here that can
+        // see a symlink at all. The name check stays as the cheaper first pass.
+        entry.unpack_in(dest).ctx("unpacking the Java runtime")?;
     }
     Ok(())
 }
@@ -464,6 +511,189 @@ pub async fn ensure_jdk(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One entry of a tarball built for a test. Modes are spelled out because
+    /// every claim below is about what mode reaches the disk.
+    #[cfg(unix)]
+    enum Item<'a> {
+        Dir(&'a str),
+        /// Path, mode, contents.
+        File(&'a str, u32, &'a [u8]),
+        /// Path, and what the symlink points at.
+        Link(&'a str, &'a str),
+    }
+
+    #[cfg(unix)]
+    fn tarball(archive: &Path, items: &[Item<'_>]) {
+        let out = std::fs::File::create(archive).unwrap();
+        let gz = flate2::write::GzEncoder::new(out, flate2::Compression::default());
+        let mut tar = tar::Builder::new(gz);
+        for item in items {
+            let mut header = tar::Header::new_gnu();
+            header.set_mtime(0);
+            match *item {
+                Item::Dir(path) => {
+                    header.set_entry_type(tar::EntryType::Directory);
+                    header.set_mode(0o755);
+                    header.set_size(0);
+                    tar.append_data(&mut header, path, &[][..]).unwrap();
+                }
+                Item::File(path, mode, body) => {
+                    header.set_entry_type(tar::EntryType::Regular);
+                    header.set_mode(mode);
+                    header.set_size(body.len() as u64);
+                    tar.append_data(&mut header, path, body).unwrap();
+                }
+                Item::Link(path, target) => {
+                    header.set_entry_type(tar::EntryType::Symlink);
+                    header.set_mode(0o777);
+                    header.set_size(0);
+                    tar.append_link(&mut header, path, target).unwrap();
+                }
+            }
+        }
+        tar.into_inner().unwrap().finish().unwrap();
+    }
+
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o7777
+    }
+
+    /// The whole reason `unpack_in` is used rather than `unpack`.
+    ///
+    /// Neither entry name here is suspect — `is_safe_relative` sees no `..` and
+    /// no root in either — so the name check passes both and cannot be what
+    /// stops this. What stops it is the destination check inside `unpack_in`,
+    /// and with plain `unpack` the file really did land two directories above
+    /// `dest`: this test was written against that code and watched it happen.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_cannot_carry_a_file_out_of_the_destination() {
+        let scratch = crate::paths::Scratch::new("java-escape");
+        let root = scratch.paths.root.clone();
+        let dest = root.join("dest");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let archive = root.join("temurin.tar.gz");
+        tarball(
+            &archive,
+            &[
+                Item::Dir("jdk/"),
+                Item::Link("jdk/lib", "../../outside"),
+                Item::File("jdk/lib/authorized_keys", 0o644, b"pwned"),
+            ],
+        );
+
+        let refused = unpack_targz(&archive, &dest).expect_err("the archive escaped");
+        assert!(
+            refused.to_string().contains("unpacking the Java runtime"),
+            "{refused}"
+        );
+        let landed = outside.join("authorized_keys");
+        assert!(
+            !landed.exists(),
+            "{} was written outside the destination",
+            landed.display()
+        );
+    }
+
+    /// The same escape aimed with an absolute path instead of `..`, since that
+    /// is the other way to write a link target and the name check sees neither.
+    #[cfg(unix)]
+    #[test]
+    fn an_absolute_symlink_target_cannot_either() {
+        let scratch = crate::paths::Scratch::new("java-escape-abs");
+        let root = scratch.paths.root.clone();
+        let dest = root.join("dest");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let archive = root.join("temurin.tar.gz");
+        tarball(
+            &archive,
+            &[
+                Item::Dir("jdk/"),
+                Item::Link("jdk/lib", outside.to_str().unwrap()),
+                Item::File("jdk/lib/authorized_keys", 0o644, b"pwned"),
+            ],
+        );
+
+        assert!(unpack_targz(&archive, &dest).is_err());
+        assert!(!outside.join("authorized_keys").exists());
+    }
+
+    /// The containment check refuses an escape, not symlinks — real Temurin
+    /// tarballs are full of them, and a fix that turned every one of them into
+    /// a failed install would break every install there is. `bin/java` also has
+    /// to come out executable, which is what the archive's own mode is for.
+    #[cfg(unix)]
+    #[test]
+    fn a_tarball_shaped_like_a_real_jdk_still_unpacks() {
+        let scratch = crate::paths::Scratch::new("java-normal");
+        let root = scratch.paths.root.clone();
+        let dest = root.join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+
+        let archive = root.join("temurin.tar.gz");
+        tarball(
+            &archive,
+            &[
+                Item::Dir("jdk-21.0.5+11-jre/"),
+                Item::Dir("jdk-21.0.5+11-jre/bin/"),
+                Item::File("jdk-21.0.5+11-jre/bin/java", 0o755, b"#!/bin/false\n"),
+                Item::Dir("jdk-21.0.5+11-jre/lib/"),
+                Item::File("jdk-21.0.5+11-jre/lib/libjvm.so", 0o644, b"elf"),
+                // A link pointing back inside the archive, and a file written
+                // through it. Both are ordinary and both must still work.
+                Item::Link("jdk-21.0.5+11-jre/lib/server", "../lib"),
+                Item::File("jdk-21.0.5+11-jre/lib/server/classlist", 0o644, b"java/lang/Object"),
+            ],
+        );
+
+        unpack_targz(&archive, &dest).unwrap();
+
+        let java = find_java_binary(&dest).expect("no java binary came out");
+        assert_eq!(java, dest.join("jdk-21.0.5+11-jre/bin/java"));
+        assert_eq!(mode_of(&java), 0o755, "bin/java came out non-executable");
+        assert_eq!(
+            std::fs::read_to_string(dest.join("jdk-21.0.5+11-jre/lib/classlist")).unwrap(),
+            "java/lang/Object",
+            "a file written through an inward symlink did not arrive"
+        );
+    }
+
+    /// Why `set_preserve_permissions(true)` is gone. It was never what made
+    /// `bin/java` executable — the test above pins that the rwx bits arrive
+    /// without it — and the one thing it did add was letting an archive set
+    /// setuid on a binary this machine is about to run.
+    #[cfg(unix)]
+    #[test]
+    fn a_setuid_bit_in_the_archive_does_not_reach_the_disk() {
+        let scratch = crate::paths::Scratch::new("java-setuid");
+        let root = scratch.paths.root.clone();
+        let dest = root.join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+
+        let archive = root.join("temurin.tar.gz");
+        tarball(
+            &archive,
+            &[
+                Item::Dir("jdk/"),
+                Item::Dir("jdk/bin/"),
+                Item::File("jdk/bin/java", 0o4755, b"#!/bin/false\n"),
+            ],
+        );
+
+        unpack_targz(&archive, &dest).unwrap();
+
+        let java = dest.join("jdk/bin/java");
+        assert_eq!(mode_of(&java), 0o755, "the setuid bit survived extraction");
+    }
 
     #[test]
     fn parses_legacy_and_modern_versions() {

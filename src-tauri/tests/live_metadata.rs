@@ -385,3 +385,39 @@ async fn modrinth_names_a_file_by_the_hash_somebody_else_published() {
     assert!(answered.found.is_empty(), "a hash nobody published matched");
     assert!(answered.unanswered.is_empty(), "a miss is not a refusal");
 }
+
+/// Adoptium publishes a SHA-256 beside every binary, and `java::provision`
+/// now refuses a download that arrives without one — so if Adoptium ever
+/// stops publishing the field, installing Java stops working and this is the
+/// test that says so rather than a user's launch failing.
+///
+/// Run for real rather than against the JSON: that way the checksum is the one
+/// the code asks for, it is checked against the bytes that actually arrive, and
+/// the tarball goes through `unpack_targz` — which is the other half of the
+/// same path and the half that has to cope with Temurin's symlinks. A JRE is
+/// around 45MB, which is why this one is `#[ignore]`d even among the live
+/// tests.
+#[tokio::test]
+#[ignore = "downloads a Java runtime"]
+async fn adoptium_publishes_a_checksum_and_the_runtime_verifies_against_it() {
+    let client = net::client();
+    let paths = scratch_paths();
+    paths.ensure_all().await.unwrap();
+
+    let installed = geode_lib::java::provision(&client, &paths, 21, &net::Progress::silent("test"))
+        .await
+        .expect("a verified Temurin 21 JRE");
+
+    // The major comes from asking the binary, so this is the unpacked runtime
+    // answering for itself rather than Adoptium's release name being echoed.
+    assert_eq!(installed.major, 21, "{:?}", installed);
+    assert!(installed.managed, "a runtime Geode downloaded is its to delete");
+    assert!(
+        installed.path.starts_with(paths.java()),
+        "the runtime landed outside the Java directory: {}",
+        installed.path.display()
+    );
+
+    println!("{} {}", installed.vendor, installed.version);
+    let _ = tokio::fs::remove_dir_all(&paths.root).await;
+}
