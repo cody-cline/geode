@@ -38,14 +38,15 @@ cargo test --lib           # unit tests — offline, fast, the ones that gate a 
 cargo clippy --all-targets # expected to be clean; treat a warning as a failure
 ```
 
-`npm test` runs `node --test src/lib/*.test.mjs` — today that is thirteen
+`npm test` runs `node --test src/lib/*.test.mjs` — today that is fourteen
 files, `src/lib/share.test.mjs`, `src/lib/blocked.test.mjs`,
 `src/lib/pack-update.test.mjs`, `src/lib/update.test.mjs`,
 `src/lib/types.test.mjs`, `src/lib/retarget.test.mjs`,
 `src/lib/ignore-version.test.mjs`, `src/lib/shortcuts.test.mjs`,
 `src/lib/contrast.test.mjs`, `src/lib/mcversion.test.mjs`,
-`src/lib/serverConsole.test.mjs`, `src/lib/boundary.test.mjs` and
-`src/lib/glossary.test.mjs`. Nine of those are worth knowing apart. `types.test.mjs` is the only check anywhere that
+`src/lib/serverConsole.test.mjs`, `src/lib/boundary.test.mjs`,
+`src/lib/glossary.test.mjs` and `src/lib/richtext.test.mjs`. Ten of those are
+worth knowing apart. `types.test.mjs` is the only check anywhere that
 `types.ts` really mirrors the Rust struct it claims to — it reads the text of
 `types.ts` and `Settings.tsx` and asserts that the `close_to_tray` field
 arrived in both, because a field left out of the hand-written mirror reads as
@@ -117,7 +118,22 @@ both as the screen's own lede and as a row in Settings → Words Geode uses —
 and the test fails if any `.tsx` types one of them out instead of reading it,
 or if one of those three screens stops reading its own word. Two copies of a
 definition is the thing the glossary was made to remove, so a glossary that
-became the second copy would be worse than none. The other ten check
+became the second copy would be worse than none. `richtext.test.mjs` is the
+newest and the only hybrid, which is what makes it worth describing: `sanitize`
+is the one thing between a mod description — markup from anyone who can publish
+on a provider — and three `dangerouslySetInnerHTML` sites in a webview that has
+`invoke` behind it, and it cannot be called under `npm test` at all, because
+there is no DOM and no HTML parser in `node_modules`. So the policy it applies
+lives in three exported pieces that the test *runs* against the real payloads,
+under all three base URLs this app really has, while the loop that applies them
+is *read* the way `boundary.test.mjs` reads `App.tsx` — and that half is the
+load-bearing one, because inlining the policy back into the loop leaves every
+payload test green. One link cannot be proved from Node either way: that a
+`&#9;` in source markup reaches the loop as a real tab, which is the whole
+bypass. It is confirmed in a browser and recorded with its codepoints in the
+test's header, so the test starts from the decoded value. The file also holds
+the CSP that is the actual backstop, because `tauri.conf.json` is parsed with
+`deny_unknown_fields` and cannot carry a comment saying so. The other ten check
 their invariants by reading the `.tsx` or `.css` that holds them, because
 there is no DOM or React renderer under `npm test`. Everything else on the frontend is
 gated by `tsc` alone, which is strict (`noUnusedLocals`,
