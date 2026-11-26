@@ -200,6 +200,9 @@ pub async fn install_into(
         keep_on_server,
         server_off: false,
         ignore_game_version,
+        // Nothing to say: this file was just written under the platform's own
+        // name, so the name on disk already is it.
+        provider_file_name: None,
     });
 
     Ok(file.filename.clone())
@@ -786,6 +789,7 @@ mod tests {
             keep_on_server: false,
             server_off: false,
             ignore_game_version: false,
+            provider_file_name: None,
         }
     }
 
@@ -1685,7 +1689,7 @@ pub async fn link_untracked_in(
     let mut nameless: Vec<(ContentKind, String, std::path::PathBuf)> = Vec::new();
     for (kind, file_name, path, sha1) in pending {
         progress.advance(1, &file_name).await;
-        let Some((version, _)) = found.get(&sha1) else {
+        let Some((version, matched)) = found.get(&sha1) else {
             nameless.push((kind, file_name, path));
             continue;
         };
@@ -1713,6 +1717,13 @@ pub async fn link_untracked_in(
                 keep_on_server: false,
                 server_off: false,
                 ignore_game_version: false,
+                // The author's own name for these bytes, which is the one
+                // thing a hash match knows and the name on disk cannot say.
+                // A pack that has to build an address for this file builds it
+                // from here: `write_mrpack` asks nobody anything when a
+                // server exports, so without this the address is the admin's
+                // filename and 404s for every player at once.
+                provider_file_name: Some(matched.filename.clone()),
             },
         );
         identified += 1;
@@ -1840,6 +1851,7 @@ async fn ask_curseforge_about(
                 keep_on_server: false,
                 server_off: false,
                 ignore_game_version: false,
+                provider_file_name: None,
             },
         );
         named += 1;
@@ -2002,6 +2014,7 @@ async fn name_from_catalogue(
                 keep_on_server: false,
                 server_off: false,
                 ignore_game_version: false,
+                provider_file_name: None,
             }),
         }
     }
@@ -2326,6 +2339,7 @@ mod naming_tests {
             keep_on_server: false,
             server_off: true,
             ignore_game_version: false,
+            provider_file_name: None,
         });
 
         let catalogue = catalogue_claiming(paths, &inst, &["theirs.jar"]).await;
@@ -2374,6 +2388,7 @@ mod naming_tests {
             keep_on_server: false,
             server_off: false,
             ignore_game_version: false,
+            provider_file_name: None,
         });
 
         let catalogue = catalogue_claiming(paths, &inst, &["known.jar"]).await;
@@ -2427,6 +2442,7 @@ mod naming_tests {
             version_id: "Hu34AbCd".into(),
             version_number: "mr-1.0".into(),
             url: None,
+            provider_file_name: None,
             distributable: true,
         };
         // Listed as a client mod, which is what a listing has to say for the
@@ -2491,6 +2507,7 @@ mod naming_tests {
             keep_on_server: false,
             server_off: false,
             ignore_game_version: false,
+            provider_file_name: None,
         }
     }
 

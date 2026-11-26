@@ -1100,6 +1100,7 @@ mod tests {
             keep_on_server: false,
             server_off: false,
             ignore_game_version: false,
+            provider_file_name: None,
         }
     }
 

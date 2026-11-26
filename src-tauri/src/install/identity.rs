@@ -63,6 +63,16 @@ pub struct PlatformRef {
     /// and for a platform whose packs name ids and resolve the URL at install
     /// time.
     pub url: Option<String>,
+    /// What the platform calls this file, for a writer that has to build the
+    /// address itself.
+    ///
+    /// The one thing a record can say that an index entry needs and the name
+    /// on disk cannot: a jar added by hand keeps the admin's own filename, and
+    /// an address built from that name is refused — see
+    /// [`crate::instance::content::ContentRecord::provider_file_name`], which
+    /// is where this comes from when nobody was asked. `None` for a record
+    /// written before it was kept, and for CurseForge, whose packs name ids.
+    pub provider_file_name: Option<String>,
     /// Whether the author lets anyone but the platform's own app fetch this
     /// file. False only where a platform said so: CurseForge lets an author
     /// turn third-party downloads off, and Modrinth has no such switch.
@@ -259,13 +269,17 @@ impl Catalogue {
                         version_id: "mr-version".into(),
                         version_number: "mr-1.0".into(),
                         // Deliberately not the name on disk: that is the whole
-                        // case for taking the matched file's own URL, since
-                        // `link_untracked_in` records the on-disk base name
-                        // and a renamed jar's constructed URL 404s.
+                        // case for taking the matched file's own URL rather
+                        // than building one, since a jar the sharer renamed
+                        // sits under a name the platform has never heard of.
                         url: Some(format!(
                             "https://cdn.modrinth.com/data/mr-project/versions/mr-version/uploaded-{}",
                             urlencoding::encode(&i.file_name)
                         )),
+                        // The same name the URL above is built from, because a
+                        // real answer says both and a fixture that said one
+                        // would be a shape nothing produces.
+                        provider_file_name: Some(format!("uploaded-{}", i.file_name)),
                         distributable: true,
                     },
                 )
@@ -303,8 +317,10 @@ impl Catalogue {
                         project_id: held.1.to_string(),
                         version_id: held.2.to_string(),
                         version_number: format!("cf-{}", held.2),
-                        // Never a URL, for the reason `curseforge_ref` gives.
+                        // Never a URL, and so never a name for one, for the
+                        // reason `curseforge_ref` gives.
                         url: None,
+                        provider_file_name: None,
                         distributable: held.3,
                     },
                 ))
@@ -718,6 +734,7 @@ pub async fn identify(
                         version_id: r.version_id.clone(),
                         version_number: r.version_number.clone(),
                         url: None,
+                        provider_file_name: r.provider_file_name.clone(),
                         // Geode installed this file from there once, so it was
                         // downloadable then and nothing here has heard
                         // otherwise. A lookup is what can say it changed.
@@ -851,6 +868,7 @@ async fn ask_modrinth(client: &reqwest::Client, catalogue: &mut Catalogue) {
                     // the name on disk: a file renamed since it was installed
                     // has a constructed URL that 404s, and nothing checks it.
                     url: Some(file.url),
+                    provider_file_name: Some(file.filename),
                     // Modrinth has no third-party-download switch for an
                     // author to turn off, so a match there is always one a
                     // recipient can fetch.
@@ -1000,6 +1018,9 @@ fn curseforge_ref(version: crate::providers::Version) -> PlatformRef {
         // is what makes an author's decision today the one that counts rather
         // than the one that held when somebody else exported.
         url: None,
+        // And nothing builds an address for a file named that way, so there is
+        // nothing here for a name to be for.
+        provider_file_name: None,
         // `blocked_reason` is set for exactly one thing: a file whose author
         // turned third-party downloads off, which CurseForge reports as a null
         // download URL.
@@ -1079,6 +1100,7 @@ mod tests {
             keep_on_server: false,
             server_off: false,
             ignore_game_version: false,
+            provider_file_name: None,
         }
     }
 
@@ -1134,6 +1156,7 @@ mod tests {
                 version_id: "answered-version".into(),
                 version_number: "answered-1.0".into(),
                 url: Some("https://cdn.modrinth.com/data/answered-project/versions/answered-version/real-name.jar".into()),
+                provider_file_name: Some("real-name.jar".into()),
                 distributable: true,
             },
         )]
@@ -1674,6 +1697,7 @@ mod tests {
             version_id: "487564".into(),
             version_number: "1.0".into(),
             url: None,
+            provider_file_name: None,
             distributable: true,
         });
 

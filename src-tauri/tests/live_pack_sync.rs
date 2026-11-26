@@ -12,9 +12,11 @@
 //!   bytes, and the URL that reference becomes is *constructed* —
 //!   `export_server` identifies with `Ask::Nobody` on purpose, so
 //!   `PlatformRef::url` is always `None` and `write_mrpack` builds
-//!   `https://cdn.modrinth.com/data/{project}/versions/{version}/{name on the
-//!   admin's disk}` instead (`instance/modpack.rs`). No test anywhere has ever
-//!   fetched one of those URLs. The offline suite pins the *string* and stops.
+//!   `https://cdn.modrinth.com/data/{project}/versions/{version}/{the name the
+//!   platform published}` instead (`instance/modpack.rs`), falling back to the
+//!   name on the admin's disk for a record written before that name was kept.
+//!   No offline test can fetch one of those URLs; the offline suite pins the
+//!   *string* and stops.
 //! - No offline test exercises a **successful** index download at all: every
 //!   one of them seeds the server's jars into the player's `mods/` first so
 //!   `net::already_valid` short-circuits the fetch.
@@ -1129,23 +1131,34 @@ async fn the_url_a_server_pack_constructs_is_the_one_modrinth_serves() {
 }
 
 /// A jar renamed on the admin's disk and then re-identified ships an address
-/// that does not resolve, and nothing anywhere says so.
+/// that resolves, because the record carries the name the author published.
 ///
 /// This is the other side of the test above, and the reason that one is worth
-/// having. The URL in a server's pack is built from the name on the admin's
-/// disk, and `install::content::link_untracked_in` writes a record under that
-/// on-disk name while throwing the uploaded filename away — the trap the code
-/// already states in prose at `install/identity.rs`, where the mitigation
-/// exists only on the path that runs a lookup, which a server's export never
-/// does.
+/// having. The URL in a server's pack is built rather than looked up, and it
+/// used to be built from the name on the admin's disk:
+/// `install::content::link_untracked_in` resolved the bytes by hash, got the
+/// author's own `filename` back with them, and wrote a record keyed to the
+/// on-disk name while throwing that filename away. Every player was then sent
+/// to an address Modrinth has never heard of, and one dead reference fails the
+/// whole update (`fetch_all` is fail-fast) rather than landing in a report —
+/// so the admin heard nothing, because the export itself had succeeded.
 ///
-/// What is asserted is the whole of the gap: the export **succeeds**,
-/// `check_server_downloads` **passes** it, and the address every player would
-/// be sent to does not answer. If somebody later makes the export verify its
-/// own URLs, or carry the uploaded name, this test fails — which is the point.
+/// What this test pinned until the fix was exactly that gap: the export
+/// succeeded, `check_server_downloads` passed it, and the address answered 404
+/// or 400. `ContentRecord::provider_file_name` closes it — recorded where the
+/// matched file is already in hand, and preferred over the name on disk
+/// wherever `write_mrpack` has to build an address. What is asserted now is
+/// the whole of the fix, end to end against the real CDN: the record carries
+/// the published name, the pack's address is built from it, the file still
+/// travels as a reference rather than as bytes, and what the CDN serves is the
+/// bytes the index vouches for.
+///
+/// The one thing deliberately *not* asserted is the path: the entry stays
+/// `mods/<the admin's name>`, because where the file sits on their disk is
+/// theirs to decide and the pack says where it goes.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "downloads a real mod from Modrinth and fetches a URL that should 404"]
-async fn a_renamed_and_relinked_jar_ships_an_address_that_does_not_resolve() {
+#[ignore = "downloads a real mod from Modrinth and fetches the address a renamed jar ships"]
+async fn a_renamed_and_relinked_jar_ships_the_published_name() {
     let scratch = Scratch::new("renamed");
     let paths = &scratch.paths;
     paths.ensure_all().await.unwrap();
@@ -1192,12 +1205,18 @@ async fn a_renamed_and_relinked_jar_ships_an_address_that_does_not_resolve() {
         .expect("the identify pass wrote a record");
     assert_eq!(
         record.file_name, renamed,
-        "the record is keyed to the name on disk, and the uploaded name is dropped"
+        "the record is keyed to the name on disk, which is where the file is"
+    );
+    assert_eq!(
+        record.provider_file_name.as_deref(),
+        Some(installed.as_str()),
+        "the hash match had the author's own filename in hand and the record \
+         has to keep it — this is the field the whole fix rests on"
     );
     say(
         "relinked",
         format!(
-            "{renamed} -> project {}, version {}",
+            "{renamed} -> project {}, version {}, published as {installed}",
             record.project_id, record.version_id
         ),
     );
@@ -1210,52 +1229,65 @@ async fn a_renamed_and_relinked_jar_ships_an_address_that_does_not_resolve() {
         &Progress::silent("live-sync-export"),
     )
     .await
-    .expect("the export succeeds, which is half the finding");
+    .expect("the export succeeds");
     pack::check_server_downloads(&dest)
         .await
-        .expect("Geode's own gate passes it, which is the other half");
+        .expect("Geode's own gate passes it");
 
     let files = indexed(&dest);
     assert_eq!(files.len(), 1, "the jar travels as a reference: {files:#?}");
+    assert_eq!(
+        files[0].path,
+        format!("mods/{renamed}"),
+        "the pack puts the file where the admin keeps it"
+    );
     let url = files[0].downloads.first().expect("an address").clone();
     assert!(
-        url.ends_with(renamed),
-        "the constructed URL should end in the on-disk name: {url}"
+        !url.ends_with(renamed),
+        "the address was built from the name on the admin's disk, which is the \
+         bug this test used to pin: {url}"
+    );
+    assert!(
+        url.ends_with(&urlencoding::encode(&installed).to_string()),
+        "the address should end in the name Modrinth published, {installed}: {url}"
     );
     // And the bytes are not in the pack either, so this address is the only
-    // copy a player can get.
+    // copy a player can get — which is what makes it worth fetching.
     assert!(
         !entries(&dest).iter().any(|n| n.ends_with(renamed)),
-        "the bytes travelled after all, which would make the bad URL harmless"
+        "the bytes travelled after all, which would make the address moot"
     );
 
-    let status = client
+    let response = client
         .get(&url)
         .timeout(Duration::from_secs(60))
         .send()
         .await
-        .unwrap_or_else(|e| panic!("fetching {url} failed outright: {e}"))
-        .status();
-    say("fetched", format!("{status}  {url}"));
-    // Refused for *being that address*, and not merely refused. `!is_success()`
-    // would have taken a 429 or a 503 as the finding, so a rate limit or a bad
-    // five minutes at the CDN would have been reported as a fact about
-    // filenames — a test that passes for a reason it is not about is worse
-    // here than one that fails, because what it writes down is a claim about
-    // somebody else's software.
+        .unwrap_or_else(|e| panic!("fetching {url} failed outright: {e}"));
+    let status = response.status();
+    let bytes = response.bytes().await.expect("the whole answer").to_vec();
+    say("fetched", format!("{status} {} bytes  {url}", bytes.len()));
     assert!(
-        status == reqwest::StatusCode::BAD_REQUEST || status == reqwest::StatusCode::NOT_FOUND,
-        "the address a renamed jar ships should be refused as an address, and \
-         Modrinth answered {status} for {url} — a 2xx means a renamed jar is no \
-         longer a problem and this test and the row that goes with it should go; \
-         anything else means the run says nothing either way and should be \
-         repeated"
+        status.is_success(),
+        "the pack points every player at {url}, and Modrinth answered {status} \
+         — a 429 or a 503 means the run says nothing and should be repeated, \
+         and a 404 means the published name is not reaching the address"
+    );
+    // Served *and* the right file: the index vouches for the bytes on the
+    // admin's disk, and an address that resolves to some other artifact of the
+    // same version would fail every player's checksum instead of their fetch.
+    use sha1::{Digest, Sha1};
+    let vouched = files[0].sha1.clone().expect("the index vouches for a sha1");
+    assert_eq!(
+        hex::encode(Sha1::digest(&bytes)).to_lowercase(),
+        vouched.to_lowercase(),
+        "{url} serves bytes the pack does not vouch for"
     );
     say(
         "finding",
         format!(
-            "the export succeeded, check_server_downloads passed, and every \
-             player would be sent to an address that answers {status}"
+            "a jar renamed on the admin's disk ships {installed}, which answers \
+             {status} with the bytes the pack vouches for"
         ),
     );
 }

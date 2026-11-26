@@ -379,6 +379,7 @@ fn record_from_index(kind: ContentKind, slug: &str, text: &str) -> Option<Conten
         keep_on_server: false,
         server_off: false,
         ignore_game_version: false,
+        provider_file_name: None,
     })
 }
 
@@ -982,15 +983,26 @@ pub(super) fn plan_instance<'a>(
                 IndexDownload {
                     mode: "url",
                     // The matched file's own URL when a lookup gave one.
-                    // Without a lookup there is only the record's ids and the
-                    // name on disk, so the URL is built from them — the same
-                    // fallback the mrpack writer has, and for the same reason.
+                    // Without a lookup the URL is built from the record's ids
+                    // and the published file name it kept, falling back to the
+                    // name on disk only when it kept none — the same three
+                    // steps the mrpack writer takes, and for the same reason.
+                    // The published name matters because the two can differ: a
+                    // jar the admin added under their own name is matched by
+                    // hash, so the name on disk is theirs rather than the
+                    // author's, and an address built from it is one the CDN
+                    // has never heard of.
                     url: reference.url.clone().unwrap_or_else(|| {
                         format!(
                             "https://cdn.modrinth.com/data/{}/versions/{}/{}",
                             reference.project_id,
                             reference.version_id,
-                            urlencoding::encode(&ident.file_name)
+                            urlencoding::encode(
+                                reference
+                                    .provider_file_name
+                                    .as_deref()
+                                    .unwrap_or(&ident.file_name)
+                            )
                         )
                     }),
                     // The hash algorithm is the provider's, not a preference:
@@ -2338,6 +2350,7 @@ project-id = 1649197
             keep_on_server: false,
             server_off: false,
             ignore_game_version: false,
+            provider_file_name: None,
         }
     }
 

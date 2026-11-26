@@ -192,6 +192,26 @@ pub struct ContentRecord {
     /// [`set_ignore_game_version`] is the only thing that clears it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ignore_game_version: bool,
+    /// What the platform calls this file, when that is not what it is called
+    /// here.
+    ///
+    /// A pack's index entry for a file nobody looked up is an address built
+    /// from this record — `…/data/<project>/versions/<version>/<name>` — and
+    /// the name in it has to be the author's, not the one on this disk. A jar
+    /// added by hand keeps whatever the admin's copy was called (a browser's
+    /// `… (1).jar`, a GitHub release asset, a copy renamed to force load
+    /// order), so an address built from that name 404s, and one dead reference
+    /// fails every player's update rather than landing in a report.
+    /// [`crate::install::content::link_untracked_in`] has the matched file in
+    /// hand and is the one place that writes this down.
+    ///
+    /// `None` for a file Geode installed itself, which lands under the
+    /// platform's own name, and for every record written before this was kept.
+    /// Both fall back to the name on disk, which is what every pack built so
+    /// far has used — right in the first case, and all there is in the second,
+    /// since a server's export asks nobody anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_file_name: Option<String>,
 }
 
 /// Who said which side a mod belongs on.
@@ -1108,6 +1128,7 @@ mod tests {
             keep_on_server: false,
             server_off: false,
             ignore_game_version: false,
+            provider_file_name: None,
         };
         let json = serde_json::to_string(&record).unwrap();
         assert!(!json.contains("origin"), "{json}");
@@ -1165,6 +1186,7 @@ mod tests {
             keep_on_server: false,
             server_off: false,
             ignore_game_version: false,
+            provider_file_name: None,
         }
     }
 
@@ -1322,6 +1344,7 @@ mod tests {
             keep_on_server: false,
             server_off: false,
             ignore_game_version: false,
+            provider_file_name: None,
         }];
         link(&mut items, &[None, None], &records);
 
@@ -1770,6 +1793,7 @@ mod tests {
             keep_on_server: false,
             server_off: false,
             ignore_game_version: false,
+            provider_file_name: None,
         }];
         link(&mut items, &[None, None], &records);
         assert_eq!(items[1].required_by, vec!["mod.jar.disabled"]);

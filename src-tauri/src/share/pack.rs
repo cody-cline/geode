@@ -1853,6 +1853,7 @@ pub(crate) async fn settle_server_files(
                 keep_on_server: false,
                 server_off: arrival.off,
                 ignore_game_version: false,
+                provider_file_name: None,
             }),
         }
     }
@@ -2324,6 +2325,7 @@ async fn resolve_references(
             keep_on_server: false,
             server_off: false,
             ignore_game_version: false,
+            provider_file_name: None,
         }));
     }
 
@@ -3740,6 +3742,7 @@ mod tests {
             keep_on_server: false,
             server_off: false,
             ignore_game_version: false,
+            provider_file_name: None,
         }
     }
 

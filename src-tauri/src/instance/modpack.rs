@@ -1118,6 +1118,7 @@ pub async fn import_into_at(
                         keep_on_server: false,
                         server_off: false,
                         ignore_game_version: false,
+                        provider_file_name: None,
                     });
                 }
             }
@@ -1712,6 +1713,7 @@ async fn record_mrpack_provenance(
             keep_on_server: false,
             server_off: false,
             ignore_game_version: false,
+            provider_file_name: None,
         });
     }
 }
@@ -2258,16 +2260,29 @@ pub async fn write_mrpack(
             // is a file Prism silently declines to install.
             env: Some(env_for(Some(side))),
             // The matched file's own URL when a lookup gave one. Without a
-            // lookup there is only the record's ids and the name on disk, so
-            // the URL is built from them — which is what every Geode pack
-            // carried before the matcher existed, and what an offline export
-            // still has to fall back on.
+            // lookup — which is every server's export, on purpose — there is
+            // only the record, and the address is built from it.
+            //
+            // The name in it is the author's, taken from the record, and the
+            // name on disk only when the record does not say. The two differ
+            // for a jar the admin added by hand: a file picker copies it in
+            // under whatever their copy was called, and an address built from
+            // that name is refused, which fails every player's update at once
+            // rather than landing in a report. A record written before that
+            // name was kept still has only the one on disk — a server's export
+            // asks nobody, so there is nothing else to fall back on, and that
+            // is what every Geode pack carried before this.
             downloads: vec![reference.url.clone().unwrap_or_else(|| {
                 format!(
                     "https://cdn.modrinth.com/data/{}/versions/{}/{}",
                     reference.project_id,
                     reference.version_id,
-                    urlencoding::encode(&ident.file_name)
+                    urlencoding::encode(
+                        reference
+                            .provider_file_name
+                            .as_deref()
+                            .unwrap_or(&ident.file_name)
+                    )
                 )
             })],
             file_size: Some(ident.size),
@@ -2970,6 +2985,117 @@ mod tests {
                 Some(mc)
             );
         }
+    }
+
+    /// An address this writer builds itself names the file by the author's
+    /// name for it, not by the name on the sharer's disk.
+    ///
+    /// The two are different for every jar added by hand: the file picker
+    /// copies it in as whatever the sharer's copy was called, and
+    /// `link_untracked_in` then identifies the bytes by hash and writes a
+    /// record keyed to that name. Build the address from it and it is refused
+    /// — and a refused reference is not a mod missing from a pack, it is
+    /// `fetch_all` failing, which costs the recipient the whole update.
+    ///
+    /// Both halves are pinned here because only the pair is the rule. A record
+    /// that does not say — one written before the name was kept — still names
+    /// the file on disk, since a server's export asks nobody anything and
+    /// there is nothing else to fall back on.
+    #[tokio::test]
+    async fn a_constructed_address_names_the_file_the_author_published() {
+        let scratch = Scratch::new("mrpack-renamed");
+        let paths = scratch.paths.clone();
+        let mut inst = Instance::new(
+            "Renamed".into(),
+            "1.21.1".into(),
+            Loader::Fabric,
+            "0.16.9".into(),
+        );
+        inst.id = "renamed".into();
+        let mods = paths.game_dir(&inst.id).join("mods");
+        tokio::fs::create_dir_all(&mods).await.unwrap();
+
+        // The upstream name carries a `+`, as a real Fabric build's does, so
+        // this also pins that the name is still encoded once it comes from the
+        // record rather than from the folder.
+        let published = "lithium-fabric-0.14.3+mc1.21.1.jar";
+        for (on_disk, upstream) in [
+            ("01-load-me-first.jar", Some(published)),
+            ("nobody-wrote-it-down.jar", None),
+        ] {
+            tokio::fs::write(mods.join(on_disk), format!("the bytes of {on_disk}"))
+                .await
+                .unwrap();
+            inst.content.push(ContentRecord {
+                file_name: on_disk.into(),
+                kind: ContentKind::Mod,
+                provider: "modrinth".into(),
+                project_id: "gvQqBUqZ".into(),
+                version_id: "ZSNsJrPI".into(),
+                name: "Lithium".into(),
+                version_number: "0.14.3".into(),
+                slug: Some("lithium".into()),
+                icon_url: None,
+                dependency: false,
+                origin: Default::default(),
+                requires: None,
+                side: None,
+                chosen_side: None,
+                keep_on_server: false,
+                server_off: false,
+                ignore_game_version: false,
+                provider_file_name: upstream.map(str::to_string),
+            });
+        }
+
+        let dest = paths.root.join("renamed.mrpack");
+        export_mrpack(
+            // Nobody is asked, which is what a server's export does and the
+            // only way the constructed address is reached at all.
+            Ask::Nobody,
+            &paths,
+            &inst,
+            dest.clone(),
+            &Selection::default(),
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+
+        let index: MrIndex =
+            serde_json::from_slice(&read_entry(&dest, "modrinth.index.json")).unwrap();
+        let address = |path: &str| {
+            index
+                .files
+                .iter()
+                .find(|f| f.path == path)
+                .unwrap_or_else(|| panic!("{path} is not indexed: {:#?}", index.files))
+                .downloads
+                .first()
+                .unwrap_or_else(|| panic!("{path} names no address"))
+                .clone()
+        };
+        assert_eq!(
+            address("mods/01-load-me-first.jar"),
+            "https://cdn.modrinth.com/data/gvQqBUqZ/versions/ZSNsJrPI/\
+             lithium-fabric-0.14.3%2Bmc1.21.1.jar",
+            "the address was built from the name on the sharer's disk, which \
+             Modrinth has never heard of"
+        );
+        assert_eq!(
+            address("mods/nobody-wrote-it-down.jar"),
+            "https://cdn.modrinth.com/data/gvQqBUqZ/versions/ZSNsJrPI/\
+             nobody-wrote-it-down.jar",
+            "a record that says nothing about the published name still has to \
+             fall back to the one on disk"
+        );
+        // And the pack carries neither as bytes, which is what makes the
+        // address the only copy the recipient can get.
+        let zip = zip::ZipArchive::new(std::fs::File::open(&dest).unwrap()).unwrap();
+        assert!(
+            !zip.file_names().any(|n| n.starts_with("overrides/mods/")),
+            "a mod travelled as bytes, which would make a dead address harmless"
+        );
     }
 
     // -----------------------------------------------------------------------

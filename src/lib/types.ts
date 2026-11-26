@@ -267,6 +267,13 @@ export interface ContentRecord {
   iconUrl?: string | null;
   dependency: boolean;
   requires?: string[] | null;
+  /**
+   * What the platform calls this file, when that is not what it is called on
+   * disk — a jar added by hand keeps whatever the copy was called. Absent for
+   * a file Geode installed itself, which lands under the platform's own name,
+   * and for every record written before this was kept.
+   */
+  providerFileName?: string | null;
 }
 
 export interface ServerSettings {
