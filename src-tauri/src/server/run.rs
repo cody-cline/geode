@@ -665,6 +665,35 @@ pub fn build_args(server: &Server, agent: Option<&str>) -> Vec<String> {
     args
 }
 
+/// The server a start will actually launch, held to this host's heap ceiling,
+/// and the ceiling it was lowered to if it was.
+///
+/// A **copy**, and that is the point of the function existing. The ceiling is
+/// a fact about the machine rather than about the server, so a server moved
+/// back to a roomier host has to still ask for what its owner configured. The
+/// clamp used to be applied to the record in place, and the save that records
+/// `last_started` at the end of a successful start writes the whole struct —
+/// so the host's ceiling went to disk as the server's own setting. It then
+/// ratcheted: every start on a constrained host lowered the stored figure
+/// again, nothing ever raised it, and the admin was told once and never
+/// again, because the next start was no longer a clamp.
+///
+/// The arithmetic is not the interesting part; which struct gets written is.
+/// That is what [`a_ceiling_lowers_the_start_and_leaves_the_record_alone`]
+/// pins, because it is testable without a jar — unlike the rule read off
+/// disk after a start, which needs a real JVM and lives in
+/// `tests/live_server_lifecycle.rs`.
+fn under_the_ceiling(server: &Server, ceiling: Option<u32>) -> (Server, Option<u32>) {
+    let mut launching = server.clone();
+    match ceiling {
+        Some(ceiling) if server.settings.memory_mb > ceiling => {
+            launching.settings.memory_mb = ceiling;
+            (launching, Some(ceiling))
+        }
+        _ => (launching, None),
+    }
+}
+
 /// A server that started, and the mods moved out of its Mods first.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -900,18 +929,21 @@ async fn start_again(
     // Lowered for this start only, and never saved: the ceiling is a fact
     // about the machine, so a server moved back to a roomier one should still
     // ask for what its owner configured.
-    if let Some(ceiling) = heap_ceiling_mb {
-        if server.settings.memory_mb > ceiling {
-            super::schedule::announce(
-                sink,
-                id,
-                format!(
-                    "Starting with {ceiling} MB rather than {} MB: this host allows no more",
-                    server.settings.memory_mb
-                ),
-            );
-            server.settings.memory_mb = ceiling;
-        }
+    //
+    // Applied to a copy, and that is the whole of it — see
+    // [`under_the_ceiling`]. Lowering `server` in place used to put the host's
+    // ceiling into the server's own record, because the save at the end of
+    // this function writes the whole struct in order to record `last_started`.
+    let (launching, lowered) = under_the_ceiling(&server, heap_ceiling_mb);
+    if let Some(ceiling) = lowered {
+        super::schedule::announce(
+            sink,
+            id,
+            format!(
+                "Starting with {ceiling} MB rather than {} MB: this host allows no more",
+                server.settings.memory_mb
+            ),
+        );
     }
 
     let progress = Progress::new(sink.clone(), format!("server:{id}"));
@@ -935,7 +967,7 @@ async fn start_again(
         sink,
         paths,
         http,
-        &server,
+        &launching,
         java,
         registry,
         heap_ceiling_mb,
@@ -1736,6 +1768,16 @@ mod tests {
     /// offline: the heap is decided before any Java is looked for, and
     /// the start then refuses at the missing jar without a process ever
     /// existing. What is asserted is what it did on the way there.
+    ///
+    /// So the number this returns as `on_disk` is the record **as created**,
+    /// and not evidence that a start leaves it alone: the start fails before
+    /// the save that records `last_started`, so on this path nothing is ever
+    /// written. The clamp really was reaching disk — measured in a container,
+    /// in a server's own `server.json` — while the assertion below read 16384
+    /// and passed every time. What holds that rule now is
+    /// [`a_ceiling_lowers_the_start_and_leaves_the_record_alone`], which tests
+    /// the decision rather than a path that cannot save, and
+    /// `tests/live_server_lifecycle.rs` for the real thing.
     async fn heap_announcements(asked_mb: u32, ceiling: Option<u32>) -> (Vec<String>, u32) {
         let scratch = crate::paths::Scratch::new("run-heap");
         let mut server = super::super::create(
@@ -1810,6 +1852,53 @@ mod tests {
         // And the app's case, which passes no ceiling at all.
         let (said, _) = heap_announcements(16384, None).await;
         assert!(!said.iter().any(|line| line.contains("rather than")), "{said:?}");
+    }
+
+    /// The rule the comment above [`under_the_ceiling`] states, tested where it
+    /// can actually fail: the record the caller holds — and therefore the one
+    /// a successful start writes to disk — keeps the owner's figure, while the
+    /// copy that is launched carries the host's.
+    ///
+    /// The clamp was applied to the record in place, so the save that records
+    /// `last_started` carried the ceiling to disk, and a server moved to a
+    /// roomier host then asked for the smaller heap for ever. Every offline
+    /// test of it passed throughout, because a start with no jar fails before
+    /// that save. This one needs no start at all.
+    #[tokio::test]
+    async fn a_ceiling_lowers_the_start_and_leaves_the_record_alone() {
+        let scratch = crate::paths::Scratch::new("run-ceiling");
+        let mut server = super::super::create(
+            &scratch.paths,
+            "Survival".into(),
+            ServerKind::Paper,
+            "1.21.1".into(),
+        )
+        .await
+        .unwrap();
+        server.settings.memory_mb = 16384;
+
+        let (launching, lowered) = under_the_ceiling(&server, Some(8192));
+        assert_eq!(lowered, Some(8192), "it should report what it lowered to");
+        assert_eq!(
+            launching.settings.memory_mb, 8192,
+            "the JVM should be started under the host's ceiling"
+        );
+        assert_eq!(
+            server.settings.memory_mb, 16384,
+            "the record that gets saved was lowered, which is how the host's \
+             ceiling used to end up in the server's own settings"
+        );
+        // And `build_args` reads the copy, so the flags really follow it.
+        assert!(build_args(&launching, None).contains(&"-Xmx8192M".to_string()));
+        assert!(build_args(&server, None).contains(&"-Xmx16384M".to_string()));
+
+        // Under the ceiling, and with no ceiling at all, nothing moves.
+        let (same, lowered) = under_the_ceiling(&server, Some(32768));
+        assert_eq!(lowered, None);
+        assert_eq!(same.settings.memory_mb, 16384);
+        let (same, lowered) = under_the_ceiling(&server, None);
+        assert_eq!(lowered, None);
+        assert_eq!(same.settings.memory_mb, 16384);
     }
 
     // -----------------------------------------------------------------
