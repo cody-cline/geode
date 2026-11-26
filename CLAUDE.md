@@ -147,7 +147,7 @@ real zip), `header_wire_format.rs` (one that proves a bcrypt CurseForge key
 reaches the socket unmangled) and `curseforge_fingerprints.rs` (24 that pin
 what a fingerprint lookup puts on the wire). All three serve themselves from a
 `TcpListener` on localhost or a scratch directory; none reaches a real API. The
-fourteen `live_*` files hold 93 tests, every one `#[ignore]`d because they hit
+fourteen `live_*` files hold 95 tests, every one `#[ignore]`d because they hit
 real upstream APIs or stand a real server up, and they exist because the parts
 most likely to break are the ones nobody here controls.
 
