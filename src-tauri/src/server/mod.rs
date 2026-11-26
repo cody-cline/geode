@@ -776,12 +776,13 @@ pub async fn create(
 /// that is present and not shared — visible, and fixable by hand. Both halves
 /// live here so no caller can reach the second without the first.
 pub async fn delete(paths: &Paths, id: &str) -> Result<()> {
+    // The id, never the path it makes, and before the share is cleared so an
+    // id that escapes costs nothing at all. `Path::starts_with` resolves no
+    // `..`, so the guard that used to be here let `servers/..` through to
+    // `remove_dir_all`, which the operating system reads as the whole of
+    // `GEODE_HOME`. See [`crate::instance::one_name`].
+    crate::instance::one_name(id)?;
     let dir = paths.server(id);
-    // Guard against a malformed id deleting something outside the tree. Before
-    // the share is cleared, so an id that escapes costs nothing at all.
-    if !dir.starts_with(paths.servers()) || dir == paths.servers() {
-        return Err(Error::msg("refusing to delete an unexpected path"));
-    }
     share::clear(paths, id).await?;
     tokio::fs::remove_dir_all(&dir).await.map_err(|e| {
         // A folder that would not go is not a folder that was never there, and

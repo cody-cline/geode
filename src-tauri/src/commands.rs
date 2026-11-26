@@ -6970,6 +6970,14 @@ mod tests {
     /// The guard on where a delete may reach runs before any of it happens, so
     /// an id that points outside the servers tree costs nothing — not even the
     /// two files clearing the share would remove by name.
+    ///
+    /// `..` is in here because the guard this replaced let it through. It was
+    /// `!dir.starts_with(paths.servers()) || dir == paths.servers()`, and
+    /// `Path::starts_with` is a component-prefix test that resolves nothing:
+    /// `servers/..` starts with `servers` and is not equal to it, so the
+    /// delete went ahead and `remove_dir_all` was handed a path the operating
+    /// system reads as `GEODE_HOME` — every server, every instance with its
+    /// worlds, and `accounts.json` with its tokens.
     #[tokio::test]
     async fn a_delete_pointed_outside_the_tree_touches_nothing() {
         let admin = Scratch::new("cmd-delete-escape");
@@ -6979,15 +6987,31 @@ mod tests {
         tokio::fs::create_dir_all(&elsewhere).await.unwrap();
         let share = elsewhere.join("share.json");
         tokio::fs::write(&share, b"somebody else's").await.unwrap();
+        let accounts = paths.accounts_file();
+        tokio::fs::write(&accounts, b"tokens").await.unwrap();
+        tokio::fs::create_dir_all(paths.servers()).await.unwrap();
 
-        // Absolute, so `servers/<id>` is just `<id>` — the shape `Path::join`
-        // lets through.
-        let outside = elsewhere.to_string_lossy().to_string();
-        let refused = crate::server::delete(paths, &outside)
-            .await
-            .expect_err("a delete outside the servers tree");
-        assert!(refused.to_string().contains("unexpected path"), "{refused}");
-        assert!(share.exists(), "the guard ran after something was removed");
+        for outside in [
+            // Absolute, so `servers/<id>` is just `<id>` — the shape
+            // `Path::join` lets through.
+            elsewhere.to_string_lossy().to_string(),
+            // And the shapes the operating system resolves above the tree.
+            "..".to_string(),
+            "../elsewhere".to_string(),
+            "../../../../tmp".to_string(),
+            "a/../..".to_string(),
+        ] {
+            let refused = crate::server::delete(paths, &outside)
+                .await
+                .expect_err("a delete outside the servers tree");
+            assert!(
+                refused.to_string().contains("not a name Geode can keep files under"),
+                "{outside}: {refused}"
+            );
+            assert!(share.exists(), "the guard ran after something was removed");
+            assert!(accounts.exists(), "{outside} took the whole of GEODE_HOME");
+            assert!(paths.servers().exists(), "{outside} took servers/ with it");
+        }
     }
 
     /// The webview is never the parser: a link goes through the same strict

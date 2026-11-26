@@ -328,6 +328,36 @@ impl Instance {
     }
 }
 
+/// An id, checked to be a single safe directory name.
+///
+/// Every id Geode keeps files under is made by [`slugify`] — an instance's, a
+/// server's, a plan's — and so is one safe name by construction. What arrives
+/// from somewhere else is not: a webview sends the id of the thing to delete,
+/// a host's listing sends the id of a server to bring here, and a bundle
+/// arrives under the name a stranger asked for. An id holding `..` resolves
+/// out of `GEODE_HOME` the moment it is joined onto a directory and handed to
+/// `remove_dir_all` or a write.
+///
+/// Checked on the id rather than on the path it makes, because a path is the
+/// wrong thing to ask: `Path::starts_with` is a lexical component-prefix test
+/// and resolves no `..`, so `instances/..` passes a guard that compares it
+/// against `instances` and names `GEODE_HOME` on the disk.
+///
+/// The same rule, in the same two parts, that [`crate::logs::resolve`],
+/// [`crate::server::backup`]'s `resolve`, `instance::content`'s `resolve_in`
+/// and [`crate::paths`]'s `version_name` hold for the other names that come
+/// from outside. It belongs on the `Paths` accessors — where no caller can
+/// forget it — and sits here until they take it.
+pub fn one_name(id: &str) -> Result<()> {
+    let p = std::path::Path::new(id);
+    if !crate::paths::is_safe_relative(p) || p.components().count() != 1 {
+        return Err(Error::msg(format!(
+            "'{id}' is not a name Geode can keep files under"
+        )));
+    }
+    Ok(())
+}
+
 /// Directory-safe id derived from the display name. Instances keep their id for
 /// life even if renamed, so this only has to be unique at creation.
 pub fn slugify(name: &str) -> String {
@@ -422,11 +452,12 @@ pub async fn create(
 }
 
 pub async fn delete(paths: &Paths, id: &str) -> Result<()> {
+    // The id, never the path it makes: `Path::starts_with` resolves no `..`,
+    // so the guard that used to be here let `instances/..` through to
+    // `remove_dir_all`, which the operating system reads as `GEODE_HOME`. See
+    // [`one_name`].
+    one_name(id)?;
     let dir = paths.instance(id);
-    // Guard against a malformed id deleting something outside the tree.
-    if !dir.starts_with(paths.instances()) || dir == paths.instances() {
-        return Err(Error::msg("refusing to delete an unexpected path"));
-    }
     tokio::fs::remove_dir_all(&dir)
         .await
         .map_err(|_| Error::NoSuchInstance(id.to_string()))?;
@@ -523,6 +554,45 @@ mod tests {
     #[test]
     fn slugify_collapses_runs() {
         assert_eq!(slugify("a///b"), "a-b");
+    }
+
+    /// The id the webview sends is what a delete is held to, because the path
+    /// it makes cannot be: the guard this replaced compared
+    /// `paths.instance(id)` against `paths.instances()` with
+    /// `Path::starts_with`, which is a component-prefix test that resolves no
+    /// `..`. So `instances/..` started with `instances`, was not equal to it,
+    /// and `remove_dir_all` was handed a path the operating system reads as
+    /// `GEODE_HOME` — every instance and its worlds, every server, and
+    /// `accounts.json` with the tokens in it.
+    #[tokio::test]
+    async fn a_delete_cannot_be_pointed_outside_the_instances_tree() {
+        let scratch = Scratch::new("delete-escape");
+        let paths = scratch.paths.clone();
+        create(&paths, "Survival".into(), "1.21.1".into(), Loader::Fabric, "0.16.9".into())
+            .await
+            .unwrap();
+        tokio::fs::write(paths.accounts_file(), b"tokens").await.unwrap();
+
+        for id in [
+            "..",
+            "../instances",
+            "survival/../..",
+            "../../../../../../tmp",
+            &paths.root.to_string_lossy(),
+        ] {
+            let refused = delete(&paths, id).await.expect_err("an id outside the tree");
+            assert!(
+                refused.to_string().contains("not a name Geode can keep files under"),
+                "{id}: {refused}"
+            );
+        }
+
+        assert!(paths.accounts_file().exists(), "GEODE_HOME was emptied");
+        assert!(paths.instance("survival").exists(), "the instances went with it");
+        // And a real id still deletes the one instance it names.
+        delete(&paths, "survival").await.unwrap();
+        assert!(!paths.instance("survival").exists());
+        assert!(paths.accounts_file().exists());
     }
 
     /// Duplicating a joined instance makes a copy that is not itself a join.

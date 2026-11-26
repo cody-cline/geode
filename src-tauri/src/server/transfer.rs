@@ -134,6 +134,32 @@ const CARRIED: &[&str] = &["server.json", "run", "media", "backups"];
 /// each one, and why a `share.json` is not among them.
 const MOVED: &[&str] = &["share.stopped.json", "share.link.json", "published"];
 
+/// What a bundle carries that is a secret, and so arrives owner-only.
+///
+/// The password that decides who may download this server's pack. `share.rs`
+/// writes it 0600 and tests that it did; a transfer that landed it at the
+/// default 0644 would undo that for every moved server, and nothing would
+/// prompt the admin to replace a password they never knew was readable.
+const PRIVATE: &[&str] = &["share.stopped.json"];
+
+/// The most a bundle's list of files may be, read into memory whole.
+///
+/// It is one small object per file — a path, a length and a digest, about 130
+/// bytes — so this is half a million files, and a well-explored modded world
+/// with its mods, configs and logs is some tens of thousands. Generous on
+/// purpose: what this has to be is small beside the memory of the machine,
+/// not tight against any real server, and the parsed list costs a few times
+/// the text besides. Refused rather than truncated, because a list cut in half
+/// would fail `verify` with a sentence about a file that never arrived, which
+/// is a lie about what went wrong.
+const MAX_MANIFEST_BYTES: u64 = 64 * 1024 * 1024;
+
+/// The most a long file name may be, read into memory whole.
+///
+/// Four times the longest path Linux or Windows will accept, so no name a real
+/// server can hold comes near it.
+const MAX_NAME_BYTES: u64 = 16 * 1024;
+
 /// What a transfer does to the server it came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -629,6 +655,7 @@ impl Drop for Arriving {
 pub async fn receive<S, E>(
     paths: &Paths,
     id: &str,
+    mode: Mode,
     stream: S,
     declared: u64,
     progress: &Progress,
@@ -637,17 +664,21 @@ where
     S: Stream<Item = std::result::Result<Bytes, E>> + Send + Unpin,
     E: std::fmt::Display,
 {
+    // An id off a network path, or out of a webview. The host's routes do
+    // re-parse one (`daemon::api::server_id`) and the app's pull route did
+    // not, so it is checked here, at the callee no caller can get past.
+    //
+    // The id, never the path it makes. The guard that used to be here held
+    // both joined paths against `transfers/` and `servers/` with
+    // `Path::starts_with`, which resolves no `..` — and because those two are
+    // each one name under the root, an id that climbs out of them lands both
+    // in the *same* directory. So the clash check below saw nothing in the
+    // way, every file was unpacked outside `GEODE_HOME`, and for an id ending
+    // in `/..` the staging directory the failure arm then cleared away was a
+    // real local server. See [`crate::instance::one_name`].
+    crate::instance::one_name(id)?;
     let staging = paths.transfer(id);
     let destination = paths.server(id);
-    // An id off a network path, or out of a webview. Both are re-parsed before
-    // they reach here; this is what makes that not matter.
-    if !staging.starts_with(paths.transfers())
-        || staging == paths.transfers()
-        || !destination.starts_with(paths.servers())
-        || destination == paths.servers()
-    {
-        return Err(Error::msg("that is not a server name"));
-    }
     if tokio::fs::metadata(&destination).await.is_ok() {
         return Err(clash(id));
     }
@@ -668,7 +699,7 @@ where
     let _ = tokio::fs::remove_dir_all(&staging).await;
     tokio::fs::create_dir_all(&staging).await?;
 
-    match land(paths, id, &staging, stream, declared, progress).await {
+    match land(paths, id, mode, &staging, stream, declared, progress).await {
         Ok(arrived) => Ok(arrived),
         Err(e) => {
             let _ = tokio::fs::remove_dir_all(&staging).await;
@@ -727,6 +758,7 @@ fn too_large() -> Error {
 async fn land<S, E>(
     paths: &Paths,
     id: &str,
+    mode: Mode,
     staging: &Path,
     mut stream: S,
     declared: u64,
@@ -738,7 +770,7 @@ where
 {
     let (tx, rx) = mpsc::channel::<Bytes>(4);
     let dest = staging.to_path_buf();
-    let unpacking = tokio::task::spawn_blocking(move || unpack(Incoming::new(rx), &dest));
+    let unpacking = tokio::task::spawn_blocking(move || unpack(Incoming::new(rx), mode, &dest));
 
     progress.stage("Receiving the server", declared).await;
     let fed = async {
@@ -809,10 +841,39 @@ where
     // goes back from it is what authorises deleting the other copy — so the
     // name has to survive a power cut as much as the bytes under it do.
     let servers = paths.servers();
-    tokio::task::spawn_blocking(move || sync_dir(&servers))
-        .await
-        .map_err(|e| Error::msg(format!("saving the arrived server failed: {e}")))??;
+    let synced = match tokio::task::spawn_blocking(move || sync_dir(&servers)).await {
+        Ok(synced) => synced,
+        Err(e) => Err(Error::msg(format!("saving the arrived server failed: {e}"))),
+    };
+    if let Err(e) = synced {
+        // Every other failure in here leaves the destination absent rather
+        // than plausible, and this is the only one that happens after the
+        // server is in place — so it is the only one with anything to put
+        // back. Left where it was it would be a server this function said had
+        // not arrived: not deleted by the mover, not proved durable either,
+        // and in the way of the next attempt.
+        return Err(put_back(&paths.server(id), staging, &e));
+    }
     Ok(arrived)
+}
+
+/// Undo the promoting rename, so a failure after it leaves nothing behind.
+///
+/// Back into the staging directory rather than deleted outright, because
+/// [`receive`] clears that directory on its way out of every failure and a
+/// second `remove_dir_all` of a whole server is a second chance to remove the
+/// wrong one. If even the rename back will not go, the server is on the disk
+/// and under the name a later transfer wants: nothing else will mention it
+/// again, so this says it and says what to do about it.
+fn put_back(destination: &Path, staging: &Path, e: &Error) -> Error {
+    match std::fs::rename(destination, staging) {
+        Ok(()) => Error::msg(format!("{e}, so nothing was kept")),
+        Err(undo) => Error::msg(format!(
+            "Delete '{}' before transferring this server again. It arrived whole and then \
+             {e} ({undo}), so Geode can neither finish it nor clear it away.",
+            destination.display()
+        )),
+    }
 }
 
 /// Everything that landed, by the name it landed under.
@@ -840,14 +901,77 @@ struct Landed {
 /// cache. A host that answers 201 and then loses power must still have the
 /// world when it comes back. `server::write_atomic` pays the same price for a
 /// far smaller stake.
-fn unpack<R: Read>(input: R, dest: &Path) -> Result<Landed> {
+///
+/// # What a single entry may cost in memory
+///
+/// Everything a bundle carries is streamed to the disk, with two exceptions
+/// that are read into memory whole: the list of files, and the name of a file
+/// whose path does not fit in a `tar` header. Both are bounded here, because
+/// nothing else bounds them — `tar` reads an entry up to the length the
+/// *sender's* header declares, so an entry claiming 60 GiB is 60 GiB of
+/// `String`. The feeder's only brake is [`MAX_BUNDLE_BYTES`], the whole 64 GiB
+/// budget, which the host would be killed long before reaching: in the
+/// container that is an OOM kill of the whole process namespace, and every
+/// server running there dies mid-save, which is the exact damage
+/// `daemon::shutdown` exists to avoid.
+///
+/// The names are the reason this walks the archive *raw*. `tar` reads a GNU
+/// long-name entry inside its own iterator, before this function is handed a
+/// path to check, so the only way to bound that read is to be the one doing
+/// it. Raw iteration also means the entry types `write_bundle` never emits —
+/// a long *link*, a PAX extension header, a sparse header, a symlink — arrive
+/// here as themselves and are refused without being read at all.
+fn unpack<R: Read>(input: R, mode: Mode, dest: &Path) -> Result<Landed> {
     let mut archive = tar::Archive::new(input);
     let mut landed = Landed::default();
+    // The name of the entry after this one, when it was too long for a
+    // header. `write_bundle` emits one for any path over 100 bytes, which a
+    // modded server's `config/` reaches easily, so this is an ordinary part of
+    // a bundle and not a hostile shape.
+    let mut long_name: Option<PathBuf> = None;
 
-    for entry in archive.entries().map_err(cut_short)? {
+    for entry in archive.entries().map_err(cut_short)?.raw(true) {
         let mut entry = entry.map_err(cut_short)?;
-        let path = entry.path().map_err(cut_short)?.to_path_buf();
-        let name = path.to_string_lossy().replace('\\', "/");
+        let kind = entry.header().entry_type();
+        let declared = entry.header().size().map_err(cut_short)?;
+
+        if kind.is_gnu_longname() {
+            if long_name.is_some() {
+                return Err(Error::msg(
+                    "this transfer gives one of its files two names, so it was not kept",
+                ));
+            }
+            if declared > MAX_NAME_BYTES {
+                return Err(Error::msg(format!(
+                    "this transfer holds a file name of {declared} bytes, which is longer than \
+                     any path can be, so it was not kept"
+                )));
+            }
+            let mut bytes = Vec::new();
+            entry
+                .by_ref()
+                .take(declared)
+                .read_to_end(&mut bytes)
+                .map_err(cut_short)?;
+            // `tar` writes a long name NUL-terminated.
+            while bytes.last() == Some(&0) {
+                bytes.pop();
+            }
+            // Every name in a bundle is text: `walk` refuses to send one that
+            // is not. Refused rather than lossily converted, so what is
+            // checked below is the name that will be written.
+            let text = String::from_utf8(bytes).map_err(|_| {
+                Error::msg("this transfer holds a file whose name is not text, so it was not kept")
+            })?;
+            long_name = Some(PathBuf::from(text));
+            continue;
+        }
+
+        let path = match long_name.take() {
+            Some(long) => long,
+            None => entry.path().map_err(cut_short)?.to_path_buf(),
+        };
+        let name = manifest_name(&path);
 
         if landed.manifest.is_some() {
             return Err(Error::msg(format!(
@@ -856,8 +980,18 @@ fn unpack<R: Read>(input: R, dest: &Path) -> Result<Landed> {
             )));
         }
         if name == MANIFEST_NAME {
+            if declared > MAX_MANIFEST_BYTES {
+                return Err(Error::msg(format!(
+                    "this transfer's list of files is {declared} bytes, which is more than a \
+                     list of files can be, so it was not kept"
+                )));
+            }
             let mut text = String::new();
-            entry.read_to_string(&mut text).map_err(cut_short)?;
+            entry
+                .by_ref()
+                .take(declared)
+                .read_to_string(&mut text)
+                .map_err(cut_short)?;
             landed.manifest =
                 Some(serde_json::from_str(&text).map_err(|e| Error::json(MANIFEST_NAME, e))?);
             continue;
@@ -865,13 +999,12 @@ fn unpack<R: Read>(input: R, dest: &Path) -> Result<Landed> {
 
         // This is an archive Geode did not create — it arrived from another
         // machine — so the same rule applies as to any other.
-        if !crate::paths::is_safe_relative(&path) || !carried(&path) {
+        if !crate::paths::is_safe_relative(&path) || !carried(mode, &path) {
             return Err(Error::msg(format!(
                 "this transfer holds '{name}', which is not part of a server, so it was not kept"
             )));
         }
         let target = dest.join(&path);
-        let kind = entry.header().entry_type();
         if kind.is_dir() {
             std::fs::create_dir_all(&target).ctx(format!("making {name}"))?;
             landed.dirs.insert(target);
@@ -887,7 +1020,8 @@ fn unpack<R: Read>(input: R, dest: &Path) -> Result<Landed> {
             landed.dirs.insert(parent.to_path_buf());
         }
 
-        let mut file = std::fs::File::create(&target).ctx(format!("writing {name}"))?;
+        let mut file = create(&target, PRIVATE.contains(&name.as_str()))
+            .ctx(format!("writing {name}"))?;
         let mut hasher = Sha256::new();
         let mut buf = vec![0u8; 64 * 1024];
         let mut size = 0u64;
@@ -937,16 +1071,82 @@ fn sync_dir(_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Whether a path in an arriving bundle is part of a server at all.
+/// Whether a path in an arriving bundle is part of a server at all, and part
+/// of *this* transfer.
 ///
 /// The top of it only. What is below is the server's own business — a mod
 /// writes whatever it likes into `config/` — and [`crate::paths::is_safe_relative`]
 /// is what keeps all of it inside the folder being built.
-fn carried(path: &Path) -> bool {
+///
+/// The mode is here because "a copy arrives with no sharing at all" is a rule
+/// about what this side accepts, not about what the other side chose to send.
+/// Without it a bundle declared a copy could still carry `share.stopped.json`
+/// — a password the sender knows — and the server would arrive here holding
+/// it, ready to be shared under it.
+fn carried(mode: Mode, path: &Path) -> bool {
+    let allowed = |top: &str| match mode {
+        Mode::Copy => CARRIED.contains(&top),
+        Mode::Move => CARRIED.contains(&top) || MOVED.contains(&top),
+    };
     path.components()
         .next()
         .and_then(|c| c.as_os_str().to_str())
-        .is_some_and(|top| CARRIED.contains(&top) || MOVED.contains(&top))
+        .is_some_and(allowed)
+}
+
+/// The name a manifest uses for a path: its components, joined with `/`.
+///
+/// `tar` carries `/` and [`tar::Entry::path`] parses it into this platform's
+/// own separator, so on Windows the path is `run\world\level.dat` where the
+/// manifest says `run/world/level.dat`. Joined by component rather than by
+/// replacing every `\` in the whole string, because on Unix a backslash is an
+/// ordinary character in a name: an entry called `run/world\level.dat` is one
+/// file named `world\level.dat` inside `run/`, and the replace keyed it as
+/// `run/world/level.dat` — the name the manifest vouches for, and a different
+/// file. Both halves of [`verify`]'s both-ways check then passed for a server
+/// whose world is not there, and a move took that as leave to delete the only
+/// copy that had it.
+fn manifest_name(path: &Path) -> String {
+    path.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Create a file in the staging directory, owner-only where what it holds is
+/// a secret.
+///
+/// The mode is asked for as the file is created rather than set afterwards,
+/// for the reason `auth::store::winacl` gives: access is decided when a handle
+/// is opened, so a file that exists for even a moment at 0644 can be opened by
+/// whoever that admits, and the handle they took goes on working.
+#[cfg(unix)]
+fn create(path: &Path, private: bool) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(if private { 0o600 } else { 0o644 })
+        .open(path)
+}
+
+/// Windows has no mode, and `winacl` asks for the access list the one way that
+/// applies it as the file comes into being. `create_new` refuses a file that is
+/// already there, which here means a bundle carrying two entries of the same
+/// secret name — not something any bundle Geode writes can hold.
+///
+/// `winacl` exists on Windows alone, so a third platform that is neither it
+/// nor Unix does not compile this. That is the right failure: there would be
+/// nothing to ask for the protection with, and writing the password without it
+/// is what this function is here to stop.
+#[cfg(not(unix))]
+fn create(path: &Path, private: bool) -> std::io::Result<std::fs::File> {
+    if private {
+        crate::auth::store::winacl::create_new(path)
+    } else {
+        std::fs::File::create(path)
+    }
 }
 
 /// Hold what arrived against what the sender said it was sending.
@@ -1101,7 +1301,121 @@ mod tests {
     }
 
     async fn received(paths: &Paths, id: &str, bytes: Vec<u8>) -> Result<Arrived> {
-        receive(paths, id, as_stream(bytes), 0, &Progress::silent("t")).await
+        received_as(paths, id, Mode::Move, bytes).await
+    }
+
+    /// As a host or an app receives one, with the mode the person asked for.
+    ///
+    /// `Mode::Move` is the default above because it is the shape that accepts
+    /// more: a test about anything else should not have to think about which
+    /// files are allowed, and the one that is about exactly that passes its
+    /// own mode.
+    async fn received_as(paths: &Paths, id: &str, mode: Mode, bytes: Vec<u8>) -> Result<Arrived> {
+        receive(paths, id, mode, as_stream(bytes), 0, &Progress::silent("t")).await
+    }
+
+    /// An entry under a name of the test's choosing, header written by hand.
+    ///
+    /// `tar` refuses to *write* some of the names below — anything holding
+    /// `..` — and a bundle arriving off another machine was not necessarily
+    /// written by `tar`. What is being proved by these is this module's own
+    /// reading, not that crate's writing.
+    fn append_named(out: &mut tar::Builder<Vec<u8>>, kind: u8, name: &str, body: &[u8]) {
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::new(kind));
+        header.set_mode(0o644);
+        header.set_mtime(0);
+        header.set_size(body.len() as u64);
+        let bytes = name.as_bytes();
+        header.as_gnu_mut().unwrap().name[..bytes.len()].copy_from_slice(bytes);
+        header.set_cksum();
+        out.append(&header, body).unwrap();
+    }
+
+    /// A bundle made by hand: each file under the name it travels as, and the
+    /// manifest vouching for it under a name of its own. The two are the same
+    /// in every bundle Geode writes, and a receiver that takes them for the
+    /// same thing when they are not is the point of one of the tests below.
+    fn handmade(id: &str, files: &[(&str, &str, Vec<u8>)]) -> Vec<u8> {
+        let mut out = tar::Builder::new(Vec::new());
+        let mut listed = Vec::new();
+        for (travels_as, listed_as, body) in files {
+            append_named(&mut out, b'0', travels_as, body);
+            listed.push(Entry {
+                path: listed_as.to_string(),
+                size: body.len() as u64,
+                sha256: hex::encode(Sha256::digest(body)),
+            });
+        }
+        let manifest = serde_json::to_vec(&Manifest {
+            version: FORMAT,
+            id: id.to_string(),
+            files: listed,
+        })
+        .unwrap();
+        append_named(&mut out, b'0', MANIFEST_NAME, &manifest);
+        out.into_inner().unwrap()
+    }
+
+    /// A `server.json` for `id`, as every bundle has to carry one.
+    fn a_record(id: &str) -> Vec<u8> {
+        let mut server = Server::new(format!("Server {id}"), ServerKind::Paper, "1.21.1".into());
+        server.id = id.to_string();
+        serde_json::to_vec(&server).unwrap()
+    }
+
+    /// The id a bundle arrives under is joined onto two directories, and it
+    /// comes off a host's listing or out of a webview.
+    ///
+    /// The guard this replaced compared the joined paths against
+    /// `paths.transfers()` and `paths.servers()` with `Path::starts_with`,
+    /// which resolves no `..`. Because `transfers/` and `servers/` are each
+    /// one name under the root, both joins resolve to the *same* directory for
+    /// an id that climbs out of them — so the clash check saw nothing in the
+    /// way and the whole bundle landed outside `GEODE_HOME`. The shape ending
+    /// in `/..` is worse: the second clash check then fails, and the error arm
+    /// `remove_dir_all`s the staging directory, which by then resolves to a
+    /// real local server.
+    #[tokio::test]
+    async fn an_arriving_id_that_is_not_one_name_reaches_no_path() {
+        let here = Scratch::new("transfer-id-from");
+        let there = Scratch::new("transfer-id-to");
+        a_server(&here.paths, "survival").await;
+        a_server(&there.paths, "survival").await;
+        tokio::fs::write(there.paths.accounts_file(), b"tokens").await.unwrap();
+        let bundle = joined(&bundled(&here.paths, "survival", Mode::Copy).await);
+
+        for id in [
+            "..",
+            "../x",
+            // Lands on the local server, then has it deleted on the way out.
+            "../servers/survival/x/..",
+            "a/b",
+            "",
+        ] {
+            let refused = received(&there.paths, id, bundle.clone())
+                .await
+                .expect_err("an id that is not one name");
+            assert!(
+                refused.to_string().contains("not a name Geode can keep files under"),
+                "{id}: {refused}"
+            );
+        }
+
+        assert!(
+            there.paths.server_run("survival").join("world/level.dat").exists(),
+            "an arriving transfer deleted a server that was already here"
+        );
+        assert!(there.paths.accounts_file().exists(), "GEODE_HOME was written through");
+        assert!(!there.paths.root.join("x").exists(), "the bundle landed outside the tree");
+
+        // And an ordinary id gets past this check to the ones that follow it:
+        // this bundle was made for 'survival', so what refuses it is the
+        // manifest disagreeing and not the shape of the name.
+        let refused = received(&there.paths, "creative", bundle)
+            .await
+            .expect_err("a bundle made for another server");
+        assert!(refused.to_string().contains("holds the server 'survival'"), "{refused}");
     }
 
     /// `src/lib/types.ts` spells these two words by hand, and a command whose
@@ -1211,6 +1525,189 @@ mod tests {
             .await
             .expect_err("a folder that holds itself");
         assert!(refused.to_string().contains("without end"), "{refused}");
+    }
+
+    /// A header saying how long an entry is, then spaces for ever.
+    ///
+    /// `tar` bounds a read by the length the *sender's* header declares and by
+    /// nothing else, so an entry claiming 60 GiB is 60 GiB of `String` — and
+    /// in the container, an OOM kill of every server running beside it. This
+    /// stands in for that sender, with a ceiling of its own so a receiver that
+    /// does *not* refuse fails the test rather than filling this machine.
+    struct Endless {
+        header: Vec<u8>,
+        at: usize,
+        fed: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    /// Past this, the reader gives up rather than growing anybody's buffer.
+    /// Above [`MAX_NAME_BYTES`], below [`MAX_MANIFEST_BYTES`], and nothing on
+    /// either side of a refusal that works should come near it.
+    const FEEDER_CEILING: u64 = 8 * 1024 * 1024;
+
+    impl Endless {
+        fn declaring(kind: u8, name: &str, size: u64) -> Self {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::new(kind));
+            header.set_mode(0o644);
+            header.set_mtime(0);
+            header.set_size(size);
+            let bytes = name.as_bytes();
+            header.as_gnu_mut().unwrap().name[..bytes.len()].copy_from_slice(bytes);
+            header.set_cksum();
+            Self {
+                header: header.as_bytes().to_vec(),
+                at: 0,
+                fed: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            }
+        }
+    }
+
+    impl Read for Endless {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.fed.load(Ordering::Relaxed) > FEEDER_CEILING {
+                return Err(std::io::Error::other(
+                    "the sender was asked for more than a bundle's bookkeeping can be",
+                ));
+            }
+            let read = if self.at < self.header.len() {
+                let take = (self.header.len() - self.at).min(buf.len());
+                buf[..take].copy_from_slice(&self.header[self.at..self.at + take]);
+                self.at += take;
+                take
+            } else {
+                let take = buf.len().min(64 * 1024);
+                buf[..take].fill(b' ');
+                take
+            };
+            self.fed.fetch_add(read as u64, Ordering::Relaxed);
+            Ok(read)
+        }
+    }
+
+    /// The two things a bundle is read into memory whole — its list of files,
+    /// and a name too long for a header — are refused on what the sender
+    /// *declared*, before a byte of either is read.
+    ///
+    /// Everything else a bundle holds is streamed to the disk and bounded by
+    /// [`MAX_BUNDLE_BYTES`] as it lands. These two were bounded by nothing:
+    /// `read_to_string` on the list grew until the feeder stopped, and `tar`
+    /// reads a long name, a long *link* and a PAX extension header inside its
+    /// own iterator — before this module is handed a path to check at all,
+    /// which is why the walk is raw now. In the container that allocation is
+    /// an OOM kill of the whole process namespace: every server running there
+    /// dies mid-save, which is the damage `daemon::shutdown` exists to avoid,
+    /// and `restart: unless-stopped` then brings the host back to it.
+    #[test]
+    fn an_entry_a_bundle_holds_in_memory_is_refused_on_what_it_claims() {
+        let there = Scratch::new("transfer-entry-ceiling");
+        let dest = there.paths.transfer("survival");
+        std::fs::create_dir_all(&dest).unwrap();
+
+        for (kind, name, size, say) in [
+            (
+                b'0',
+                MANIFEST_NAME,
+                MAX_MANIFEST_BYTES + 1,
+                "more than a list of files can be",
+            ),
+            (
+                b'L',
+                "././@LongLink",
+                MAX_NAME_BYTES + 1,
+                "longer than any path can be",
+            ),
+            // Neither of these is anything `write_bundle` emits, and both are
+            // read by `tar` itself when it is not walking raw. Named as part
+            // of a server on purpose: under the names real ones carry
+            // (`././@LongLink`, `PaxHeaders/...`) they are refused one check
+            // earlier, as not part of a server, and what is being pinned here
+            // is that the *type* is refused however it is named.
+            (b'K', "run/longlink", u64::from(u32::MAX), "not a file or a folder"),
+            (b'x', "run/pax", u64::from(u32::MAX), "not a file or a folder"),
+        ] {
+            let feeder = Endless::declaring(kind, name, size);
+            let fed = feeder.fed.clone();
+            let Err(refused) = unpack(feeder, Mode::Move, &dest) else {
+                panic!("{name} ({kind}) claimed the moon and was unpacked");
+            };
+            assert!(refused.to_string().contains(say), "{name} ({kind}): {refused}");
+            assert!(
+                fed.load(Ordering::Relaxed) < 4096,
+                "{name} ({kind}) was read before it was refused: {} bytes",
+                fed.load(Ordering::Relaxed)
+            );
+        }
+    }
+
+    /// A path longer than a `tar` header holds, which `write_bundle` emits as
+    /// a GNU long-name entry — so these are an ordinary part of a bundle and
+    /// not a hostile shape. A modded server's `config/` reaches 100 bytes
+    /// easily, and refusing them outright to bound the read above would have
+    /// stopped those servers transferring at all.
+    #[tokio::test]
+    async fn a_path_too_long_for_a_header_still_travels() {
+        let here = Scratch::new("transfer-longname-from");
+        let there = Scratch::new("transfer-longname-to");
+        a_server(&here.paths, "survival").await;
+
+        let deep = here
+            .paths
+            .server_run("survival")
+            .join("config/some-rather-wordy-mod-id/defaults/structures/overworld")
+            .join("a-generated-file-with-a-long-name-of-its-own.json");
+        assert!(
+            deep.strip_prefix(here.paths.server("survival")).unwrap().as_os_str().len() > 100,
+            "this test is only about a name a header cannot hold"
+        );
+        tokio::fs::create_dir_all(deep.parent().unwrap()).await.unwrap();
+        tokio::fs::write(&deep, b"{}").await.unwrap();
+
+        let bundle = joined(&bundled(&here.paths, "survival", Mode::Copy).await);
+        received(&there.paths, "survival", bundle).await.unwrap();
+
+        let landed = there
+            .paths
+            .server("survival")
+            .join(deep.strip_prefix(here.paths.server("survival")).unwrap());
+        assert_eq!(
+            tokio::fs::read(&landed).await.unwrap(),
+            b"{}",
+            "a file whose path is too long for a header did not arrive where it says"
+        );
+    }
+
+    /// What a file is keyed under has to be the file that was written.
+    ///
+    /// A backslash is a separator on Windows and an ordinary character in a
+    /// name on Unix, so the name was normalised by replacing every `\` in it
+    /// — and `run/world\level.dat` is then keyed as `run/world/level.dat`,
+    /// which is a different file and the one the manifest vouches for. Both
+    /// halves of `verify`'s both-ways check passed, and the server landed with
+    /// its world replaced by one oddly named file. For a move, that was the
+    /// authority for deleting the only copy that had the world.
+    #[tokio::test]
+    async fn a_file_is_vouched_for_under_the_name_it_was_written_as() {
+        let there = Scratch::new("transfer-backslash");
+        tokio::fs::create_dir_all(there.paths.servers()).await.unwrap();
+
+        let bundle = handmade(
+            "survival",
+            &[
+                ("server.json", "server.json", a_record("survival")),
+                // One file called `world\level.dat`, vouched for as the world.
+                ("run/world\\level.dat", "run/world/level.dat", b"a world".to_vec()),
+            ],
+        );
+
+        let refused = received(&there.paths, "survival", bundle)
+            .await
+            .expect_err("the file the manifest names is not the file that arrived");
+        assert!(
+            refused.to_string().contains("run/world/level.dat"),
+            "it should name the file nothing vouched for: {refused}"
+        );
+        assert!(!there.paths.server("survival").exists(), "a world short of a world");
     }
 
     /// Two transfers of one server at once, which is an Escape key and a
@@ -1363,6 +1860,17 @@ mod tests {
             promoted.contains("sync_dir"),
             "the rename that makes the arrived server exist is not itself made durable"
         );
+        // And that sync is the one failure with a server already in place, so
+        // its failure arm is the one that has to put it back. Pinned here
+        // rather than exercised, for the same reason as the sync itself: an
+        // `fsync` that refuses is not something a test can ask for.
+        // `a_failure_after_the_promoting_rename_puts_the_server_back` proves
+        // what `put_back` does; this is what proves it is wired to this.
+        assert!(
+            promoted.contains("put_back"),
+            "a transfer that cannot make the arrived name durable now leaves the server in \
+             place and says it did not arrive"
+        );
     }
 
     /// A host restarted mid-upload drops the request where it stands, and the
@@ -1408,7 +1916,7 @@ mod tests {
             .code;
 
         let bundle = joined(&bundled(&here.paths, "survival", Mode::Copy).await);
-        received(&copy.paths, "survival", bundle).await.unwrap();
+        received_as(&copy.paths, "survival", Mode::Copy, bundle).await.unwrap();
         assert!(
             crate::server::share::load(&copy.paths, "survival").await.unwrap().is_none(),
             "a copy must arrive with no password at all — two machines serving one pack \
@@ -1416,7 +1924,25 @@ mod tests {
         );
 
         let bundle = joined(&bundled(&here.paths, "survival", Mode::Move).await);
-        received(&moved.paths, "survival", bundle).await.unwrap();
+        // What a copy may hold is this side's rule, not the sender's good
+        // manners: the same bundle, received as a copy, is refused rather than
+        // landing a server holding a password whoever sent it knows.
+        let sent_more = Scratch::new("transfer-share-copy-sent-more");
+        let refused = received_as(&sent_more.paths, "survival", Mode::Copy, bundle.clone())
+            .await
+            .expect_err("a copy that was sent the sharing anyway");
+        assert!(
+            refused.to_string().contains("share.stopped.json")
+                && refused.to_string().contains("not part of a server"),
+            "{refused}"
+        );
+        assert!(!sent_more.paths.server("survival").exists());
+        assert!(
+            crate::server::share::load(&sent_more.paths, "survival").await.unwrap().is_none(),
+            "a password the sender chose is sitting on this machine"
+        );
+
+        received_as(&moved.paths, "survival", Mode::Move, bundle).await.unwrap();
         let share = crate::server::share::load(&moved.paths, "survival")
             .await
             .unwrap()
@@ -1432,6 +1958,74 @@ mod tests {
             Some("box.example:25566"),
             "the address the links were built from travels, so the Share tab can say it has moved on"
         );
+    }
+
+    /// The password a move carries arrives readable by nobody else.
+    ///
+    /// `share::save` writes it 0600 and `share.rs` tests that it did, because
+    /// at 0644 any other account on the machine can read the password that
+    /// decides who may download this server's pack — and then fetch it from
+    /// anywhere, as a player, until the admin replaces a password they never
+    /// knew was readable. A transfer writing it with a plain `File::create`
+    /// undid that for every moved server.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_moved_servers_password_arrives_readable_by_nobody_else() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let here = Scratch::new("transfer-private-from");
+        let there = Scratch::new("transfer-private-to");
+        a_server(&here.paths, "survival").await;
+        crate::server::share::start(&here.paths, "survival").await.unwrap();
+        // Without this the umask is doing the job the code under test does,
+        // and a pass would mean nothing. See `paths`' own note on it.
+        crate::paths::insist_others_could_read_a_plain_file(&there.paths.root);
+
+        let bundle = joined(&bundled(&here.paths, "survival", Mode::Move).await);
+        received(&there.paths, "survival", bundle).await.unwrap();
+
+        let stopped = crate::server::share::stopped_path(&there.paths, "survival");
+        let mode = std::fs::metadata(&stopped).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the arrived password is {mode:o}");
+        // And an ordinary file is left as ordinary.
+        let world = there.paths.server_run("survival").join("world/level.dat");
+        let mode = std::fs::metadata(&world).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "a world file came out {mode:o}");
+    }
+
+    /// The rename that puts an arrived server in place is the last thing to
+    /// happen, and making its *name* durable comes after it — so that one
+    /// failure, alone among all of them, has a server already sitting in
+    /// `servers/`. Left there it would be a server this transfer said had not
+    /// arrived: the mover does not delete its copy, nothing here reports it,
+    /// and the next attempt is refused by the clash check it causes.
+    #[test]
+    fn a_failure_after_the_promoting_rename_puts_the_server_back() {
+        let there = Scratch::new("transfer-putback");
+        let staging = there.paths.transfer("survival");
+        let destination = there.paths.server("survival");
+        // Where `land` leaves things: `transfers/` is there and the staging
+        // directory inside it has just been renamed into `servers/`.
+        std::fs::create_dir_all(there.paths.transfers()).unwrap();
+        std::fs::create_dir_all(destination.join("run/world")).unwrap();
+        std::fs::write(destination.join("run/world/level.dat"), b"a world").unwrap();
+
+        let said = put_back(&destination, &staging, &Error::msg("the disk said no"));
+
+        assert!(!destination.exists(), "the destination is left plausible");
+        assert_eq!(
+            std::fs::read(staging.join("run/world/level.dat")).unwrap(),
+            b"a world",
+            "it goes back where `receive` clears it from, not deleted from under it"
+        );
+        assert!(said.to_string().contains("the disk said no"), "{said}");
+        assert!(said.to_string().contains("nothing was kept"), "{said}");
+
+        // And when even that will not go, it says which folder is in the way.
+        std::fs::create_dir_all(destination.join("run")).unwrap();
+        let said = put_back(&destination, &staging, &Error::msg("the disk said no"));
+        assert!(said.to_string().contains("Delete"), "{said}");
+        assert!(said.to_string().contains("survival"), "{said}");
     }
 
     #[tokio::test]
@@ -1625,6 +2219,7 @@ mod tests {
         let refused = receive(
             &there.paths,
             "survival",
+            Mode::Copy,
             as_stream(Vec::new()),
             MAX_BUNDLE_BYTES + 1,
             &Progress::silent("t"),

@@ -257,23 +257,48 @@ struct Listed {
 }
 
 /// Every server on a host.
+///
+/// Each id is held to the shape a server id has, because this list is where
+/// the ids a host supplies enter the app: a row the person picks hands its id
+/// to [`pull`] and on to `transfer::receive`, which joins it onto `transfers/`
+/// and `servers/`. The row shows the *name*, so nothing about an ordinary
+/// looking one says what the id behind it is. Refused for the whole listing
+/// rather than dropped from it: a host answering with something that cannot be
+/// a server id is a host this copy of Geode cannot act on, and a row quietly
+/// missing from the picker would be a server the admin could not reach and
+/// could not be told why.
 pub async fn servers(host: &Host) -> Result<Vec<RemoteServer>> {
     let listed: Vec<Listed> = asked(host, client().get(route(host, "")))
         .await?
         .json()
         .await
         .map_err(|e| Error::msg(format!("{} did not answer with a list of servers: {e}", host.name)))?;
-    Ok(listed
+    rows(&host.name, listed)
+}
+
+/// The rows the picker shows, with every id held to the shape an id has.
+///
+/// Apart from the request so the check can be tested without one.
+fn rows(host: &str, listed: Vec<Listed>) -> Result<Vec<RemoteServer>> {
+    listed
         .into_iter()
-        .map(|server| RemoteServer {
-            id: server.id,
-            name: server.name,
-            kind_name: server.kind.display_name().to_string(),
-            mc_version: server.mc_version,
-            running: server.running,
-            installed: server.installed,
+        .map(|server| {
+            if crate::daemon::api::server_id(&server.id).is_none() {
+                return Err(Error::msg(format!(
+                    "{host} listed a server called '{}' under a name Geode cannot use ('{}')",
+                    server.name, server.id
+                )));
+            }
+            Ok(RemoteServer {
+                id: server.id,
+                name: server.name,
+                kind_name: server.kind.display_name().to_string(),
+                mc_version: server.mc_version,
+                running: server.running,
+                installed: server.installed,
+            })
         })
-        .collect())
+        .collect()
 }
 
 /// How big bringing one of a host's servers here would be.
@@ -328,7 +353,11 @@ pub async fn push(
         })
     };
     let sent = client()
-        .post(route(host, &format!("{id}/transfer")))
+        // The mode is in the query for the host's sake, not for the route's: a
+        // bundle says nothing about which it is, and the receiving side has to
+        // know to hold a copy to "no sharing at all" rather than take the
+        // sender's word for it. See `transfer::carried`.
+        .post(route(host, &format!("{id}/transfer{}", query(mode))))
         .header(reqwest::header::AUTHORIZATION, format!("Bearer {}", host.token))
         .header(reqwest::header::CONTENT_TYPE, "application/x-tar")
         .header(transfer::DECLARED_BYTES, measured.bytes.to_string())
@@ -374,7 +403,7 @@ pub async fn pull(
         .unwrap_or(0);
 
     let body = answer.bytes_stream();
-    transfer::receive(paths, id, Box::pin(body), declared, progress).await
+    transfer::receive(paths, id, mode, Box::pin(body), declared, progress).await
 }
 
 /// Delete a server on a host — the second half of a move, sent only once what
@@ -476,6 +505,49 @@ mod tests {
             "box.example:9090?token=hunter2",
         ] {
             assert!(base(refused).is_err(), "{refused:?} should not be accepted");
+        }
+    }
+
+    /// A host's listing is where the ids a *stranger* chooses enter the app.
+    ///
+    /// The row shows the name, never the id, so an ordinary looking server is
+    /// enough to get an id of any shape in front of the person who picks it —
+    /// and picking it hands that id to `transfer::receive`, which joins it
+    /// onto `transfers/` and `servers/`. Checked here as well as there,
+    /// because a name Geode cannot use should never have been offered.
+    #[test]
+    fn a_hosts_listing_cannot_name_a_server_geode_could_not_keep() {
+        let listed = |id: &str| Listed {
+            id: id.to_string(),
+            name: "Survival".into(),
+            kind: crate::server::ServerKind::Paper,
+            mc_version: "1.21.1".into(),
+            running: false,
+            installed: true,
+        };
+
+        let ok = rows("Cupboard", vec![listed("survival"), listed("sky-block-2")]).unwrap();
+        assert_eq!(ok.len(), 2);
+        assert_eq!(ok[0].id, "survival");
+
+        for id in [
+            "..",
+            "../../x",
+            "../servers/survival/x/..",
+            "/etc/cron.d/evil",
+            "survival/../../config",
+            "",
+        ] {
+            let refused = rows("Cupboard", vec![listed("survival"), listed(id)])
+                .expect_err("a host naming something that cannot be a server id");
+            assert!(
+                refused.to_string().contains("Geode cannot use"),
+                "{id}: {refused}"
+            );
+            // And it says which host and which server, since the name is all
+            // the person has seen of it.
+            assert!(refused.to_string().contains("Cupboard"), "{refused}");
+            assert!(refused.to_string().contains("Survival"), "{refused}");
         }
     }
 

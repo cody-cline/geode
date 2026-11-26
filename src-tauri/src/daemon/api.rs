@@ -73,17 +73,24 @@
 //! world — so what bounds them is stated rather than inherited:
 //!
 //! * **One at a time.** A staging directory is the largest thing the holder of
-//!   this token can make the host allocate, and [`Host::transfers`] is one
-//!   permit. A second upload is refused outright rather than queued, so the
-//!   ceiling below is the whole of what an upload can cost.
+//!   this token can make the host take on *disk*, and [`Host::transfers`] is
+//!   one permit. A second upload is refused outright rather than queued, so
+//!   the ceiling below is the whole of what an upload can cost.
 //! * **A ceiling, counted as it lands.**
 //!   [`transfer::MAX_BUNDLE_BYTES`](crate::server::transfer::MAX_BUNDLE_BYTES),
 //!   checked against the bytes actually written and not against what the
 //!   sender said. [`transfer::DECLARED_BYTES`](crate::server::transfer::DECLARED_BYTES)
 //!   is the sender saying so up front, which only buys a refusal in one round
 //!   trip instead of after 64 GiB.
-//! * **Nothing in memory.** The body is streamed to disk as it arrives and the
-//!   archive is built as it is sent; neither side ever holds more than a chunk.
+//! * **Almost nothing in memory.** The body is streamed to disk as it arrives
+//!   and the archive is built as it is sent, so neither side holds more than a
+//!   chunk of the server itself. Two things in a bundle are read whole — its
+//!   list of files, and a path too long for a `tar` header — and each has a
+//!   ceiling of its own in [`crate::server::transfer`]'s `unpack`, because
+//!   `tar` would otherwise read an entry up to whatever length the *sender's*
+//!   header declared. This bullet used to say "nothing", and an entry claiming
+//!   60 GiB was 60 GiB of `String` — an OOM kill of this whole process
+//!   namespace, which takes every server running beside it down mid-save.
 //! * **Nowhere a half server can be mistaken for one.** It assembles in
 //!   `transfers/<id>/`, and anything that goes wrong removes it. The list route
 //!   reads `servers/` from disk every time, so a server that arrives needs no
@@ -251,7 +258,7 @@ pub async fn respond(host: &Arc<Host>, mut request: Request<Incoming>) -> Respon
     // server is far past [`MAX_BODY`] and is written to disk as it arrives
     // rather than collected. Its own ceilings are in the module header.
     if method == Method::POST && matches!(segments.as_slice(), ["v1", "servers", _, "transfer"]) {
-        return arriving(host, id, request).await;
+        return arriving(host, id, mode(moving), request).await;
     }
 
     // Read once, under one ceiling, rather than per route — a route that
@@ -346,7 +353,12 @@ fn authorised(host: &Host, request: &Request<Incoming>) -> bool {
 /// path off the network. So an id from a request is re-parsed here against
 /// what `instance::slugify` can produce, which contains no `.` and no
 /// separator and therefore cannot name anything outside one server's folder.
-fn server_id(raw: &str) -> Option<String> {
+///
+/// Also the rule [`crate::remote::servers`] holds a *host's* listing to, which
+/// is the same question asked in the other direction: an id a host names is an
+/// id this machine will join onto `transfers/` and `servers/` if somebody
+/// picks that row. One definition, so the two cannot drift.
+pub(crate) fn server_id(raw: &str) -> Option<String> {
     if raw.is_empty()
         || raw.len() > MAX_ID
         || !raw
@@ -656,6 +668,18 @@ async fn write_properties(host: &Arc<Host>, id: &str, body: &Bytes) -> Response<
         Ok(changes) => changes,
         Err(why) => return message(StatusCode::BAD_REQUEST, &why),
     };
+    // The server is looked up first, as `tasks` and `content` do, because
+    // `properties::write` makes the folder it writes into. For an id that
+    // names no server that left `servers/<id>/run/server.properties` behind —
+    // a folder with no `server.json`, so the list route passes over it and
+    // nothing in the app or on the host will ever mention it again, while the
+    // name is taken for good: `transfer::receive` refuses an id whose folder
+    // is there, and a create of a server by that name is given the next free
+    // one instead. So a server that was moved away and is being moved back
+    // cannot come back under its own name.
+    if let Err(e) = server::load(&host.state.paths, id).await {
+        return refused(e);
+    }
     answer(server::properties::write(&host.state.paths, id, &changes).await)
 }
 
@@ -832,7 +856,19 @@ async fn leaving(host: &Arc<Host>, id: &str, mode: Mode) -> Response<Body> {
 /// The ceilings are the module header's. The id is the one in the path, which
 /// has already been re-parsed, and what arrives must agree with it:
 /// [`transfer::receive`] refuses a bundle made for another server.
-async fn arriving(host: &Arc<Host>, id: String, request: Request<Incoming>) -> Response<Body> {
+///
+/// The mode is the uploader's `?mode=move`, and it decides one thing on this
+/// side: whether the server's sharing may travel with it. A sender that does
+/// not say is taken to be copying, which is the shape that carries less, and a
+/// bundle that then holds the sharing anyway is refused rather than unpacked —
+/// so a Geode old enough to send a move without saying so cannot move a server
+/// here, and is told why by the sentence naming the file it sent.
+async fn arriving(
+    host: &Arc<Host>,
+    id: String,
+    mode: Mode,
+    request: Request<Incoming>,
+) -> Response<Body> {
     // One at a time, so the ceiling on one transfer is the ceiling on all of
     // them. Refused rather than queued: a client waiting behind a 10 GB upload
     // for an hour is a client that has timed out anyway, and holding the
@@ -864,7 +900,7 @@ async fn arriving(host: &Arc<Host>, id: String, request: Request<Incoming>) -> R
 
     let progress = Progress::new(host.sink.clone(), format!("server-transfer:{id}"));
     let body = request.into_body().into_data_stream();
-    match transfer::receive(&host.state.paths, &id, body, declared, &progress).await {
+    match transfer::receive(&host.state.paths, &id, mode, body, declared, &progress).await {
         Ok(arrived) => {
             progress.finish().await;
             json(StatusCode::CREATED, &arrived)
@@ -1522,6 +1558,40 @@ mod tests {
             .await
             .unwrap();
         assert!(on_disk.iter().any(|p| p.key == "max-players" && p.value == "12"));
+
+        listening.stop().await;
+    }
+
+    /// A `PUT` of properties for an id that names no server writes nothing.
+    ///
+    /// `properties::write` makes the folder it writes into, so this route left
+    /// `servers/<id>/run/server.properties` behind for any id at all: a folder
+    /// with no `server.json`, which the list route passes over and nothing
+    /// here ever mentions again, while the name is taken for good — a transfer
+    /// of a server by that name is refused by the clash it causes, and a
+    /// create is given the next free name instead. One `PUT` with a typo in
+    /// the id was enough to stop that server ever being moved back here.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn writing_properties_for_a_server_that_is_not_here_reserves_no_name() {
+        let scratch = Scratch::new("daemon-props-ghost");
+        let listening = started(host(&scratch)).await;
+
+        let answer = signed(
+            listening.local_addr,
+            "PUT",
+            "/v1/servers/survival/properties",
+            Some(r#"[{"key":"motd","value":"Geode host"}]"#),
+        );
+        assert!(answer.starts_with("HTTP/1.1 400 "), "{answer}");
+        assert!(
+            body_of(&answer).contains("was not found"),
+            "it should say the server is not here: {}",
+            body_of(&answer)
+        );
+        assert!(
+            !scratch.paths.server("survival").exists(),
+            "a write for a server that is not here took its name"
+        );
 
         listening.stop().await;
     }

@@ -91,6 +91,12 @@ impl Plan {
     }
 
     pub async fn save(&self, paths: &Paths) -> Result<()> {
+        // The whole plan comes from the webview, its id included, and
+        // `paths.plan` joins that id straight onto `plans/` — so an id holding
+        // `..` writes a file outside `GEODE_HOME` as the user. [`delete`]
+        // below has refused exactly that from the start; the write side did
+        // not. See [`crate::instance::one_name`].
+        crate::instance::one_name(&self.id)?;
         let dir = paths.plans();
         tokio::fs::create_dir_all(&dir).await?;
         tokio::fs::write(paths.plan(&self.id), serde_json::to_vec_pretty(self)?).await?;
@@ -221,5 +227,40 @@ mod tests {
             plan_mod("Modrinth", "AAA").key(),
             plan_mod("modrinth", "AAA").key()
         );
+    }
+
+    /// A whole plan arrives from the webview, its id included, and
+    /// `paths.plan` joins that id straight onto `plans/`. [`delete`] has
+    /// refused an id that reaches outside from the start; the write beside it
+    /// did not, so one holding `..` wrote a file wherever it named — as the
+    /// user, over whatever was there.
+    #[tokio::test]
+    async fn a_plan_cannot_be_saved_outside_the_plans_directory() {
+        let scratch = crate::paths::Scratch::new("plan-escape");
+        let paths = scratch.paths.clone();
+        tokio::fs::create_dir_all(paths.plans()).await.unwrap();
+        let elsewhere = paths.root.join("config");
+        tokio::fs::write(&elsewhere.with_extension("json"), b"the real config")
+            .await
+            .unwrap();
+
+        for id in ["../config", "..", "a/b", &paths.root.join("config").to_string_lossy()] {
+            let mut plan = Plan::new("Escaped".into());
+            plan.id = id.to_string();
+            let refused = save(&paths, plan).await.expect_err("an id outside plans/");
+            assert!(
+                refused.to_string().contains("not a name Geode can keep files under"),
+                "{id}: {refused}"
+            );
+        }
+
+        assert_eq!(
+            tokio::fs::read(elsewhere.with_extension("json")).await.unwrap(),
+            b"the real config",
+            "a plan was written over something outside plans/"
+        );
+        // And an ordinary plan still saves, under `plans/<id>.json`.
+        let kept = save(&paths, Plan::new("My Pack".into())).await.unwrap();
+        assert!(paths.plan(&kept.id).exists());
     }
 }
