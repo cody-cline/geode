@@ -6,6 +6,7 @@ import {
   ArrowUpCircle,
   FilePlus2,
   Link2,
+  ListChecks,
   Loader2,
   Package,
   Power,
@@ -17,12 +18,14 @@ import {
   TriangleAlert,
 } from "lucide-react";
 
+import Modal from "../../components/Modal";
 import Tooltip from "../../components/Tooltip";
 import { api, errorMessage } from "../../lib/api";
 import { fileSize, providerLabel, shownName, titleIsFileName } from "../../lib/format";
 import { rovingKey } from "../../lib/rovingFocus";
 import { actionHint } from "../../lib/shortcuts";
 import { useActionShortcut } from "../../lib/useActionShortcut";
+import { useRowSelection } from "../../lib/useRowSelection";
 import { useStore } from "../../lib/store";
 import type {
   ContentItem,
@@ -155,6 +158,35 @@ export default function ServerContentTab({
   const [addingCardboard, setAddingCardboard] = useState(false);
   // The row the keyboard was last on, which is the row that answers Tab.
   const [keyed, setKeyed] = useState<string | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [askingDelete, setAskingDelete] = useState(false);
+
+  const shown = useMemo(() => {
+    if (!items) return null;
+    const q = filter.trim().toLowerCase();
+    return q
+      ? items.filter(
+          (i) =>
+            i.name.toLowerCase().includes(q) ||
+            i.fileName.toLowerCase().includes(q),
+        )
+      : items;
+  }, [items, filter]);
+
+  // Which rows the next press acts on, out of the same hook the instance's
+  // pane uses — the third thing these two share, after the stylesheet and the
+  // list keyboard below. An admin with forty plugins was making forty round
+  // trips because this lived in that file and nowhere else.
+  const {
+    selected,
+    picked,
+    pickedShown,
+    pick,
+    selectAll,
+    clear,
+    followRenames,
+    forget,
+  } = useRowSelection(items, shown);
 
   const load = useCallback(async () => {
     try {
@@ -189,20 +221,13 @@ export default function ServerContentTab({
   useEffect(() => {
     setItems(null);
     setFailed(null);
+    // A selection is of files in one folder, so changing folders drops it
+    // rather than carrying names that are not in the list any more. Starting
+    // the server moves client mods out of Mods, which is the same thing
+    // happening to the list under a selection, so that drops it too.
+    clear();
     void load();
-  }, [load, server.running]);
-
-  const shown = useMemo(() => {
-    if (!items) return null;
-    const q = filter.trim().toLowerCase();
-    return q
-      ? items.filter(
-          (i) =>
-            i.name.toLowerCase().includes(q) ||
-            i.fileName.toLowerCase().includes(q),
-        )
-      : items;
-  }, [items, filter]);
+  }, [load, server.running, clear]);
 
   /**
    * The same key into the Filter box as the instance tab's, bound here for the
@@ -226,6 +251,16 @@ export default function ServerContentTab({
     box.select();
   });
 
+  // Not prevented: Escape has no default of its own here, and anything else
+  // listening for it should still get it. There is no drawer over this
+  // toolbar to hold the press back for, the way the instance's pane has — the
+  // one mode on top of this screen is the delete dialog, and `Modal` claims
+  // back as an overlay, which `useActionShortcut` already stands aside for.
+  useActionShortcut("clearSelection", clear);
+
+  const offCount = picked.filter((i) => !i.enabled).length;
+  const onCount = picked.filter((i) => i.enabled).length;
+
   // The same project can sit in Mods and in Client mods, and each row is
   // offered only its own folder's update.
   const updateFor = (item: ContentItem) =>
@@ -238,15 +273,88 @@ export default function ServerContentTab({
 
   async function toggle(item: ContentItem) {
     try {
-      await api.setServerContentEnabled(
+      const renamed = await api.setServerContentEnabled(
         server.id,
         folder,
         item.fileName,
         !item.enabled,
       );
+      followRenames(new Map([[item.fileName, renamed]]));
       await load();
     } catch (e) {
       reportError("Could not toggle that file", e);
+    }
+  }
+
+  /**
+   * Turn every selected file on, or every one off.
+   *
+   * A loop over the same command a row presses, not a new one: each rename is
+   * independent of the others and the list is reread once at the end rather
+   * than after every one. Files already the way they are being asked to be are
+   * left out, so "Disable" on a mixed selection is not a round trip per row
+   * that changes nothing.
+   */
+  async function setPickedEnabled(enable: boolean) {
+    const targets = picked.filter((i) => i.enabled !== enable);
+    if (targets.length === 0) return;
+    setBulkBusy(true);
+    const moves = new Map<string, string>();
+    try {
+      for (const item of targets) {
+        moves.set(
+          item.fileName,
+          await api.setServerContentEnabled(
+            server.id,
+            folder,
+            item.fileName,
+            enable,
+          ),
+        );
+      }
+    } catch (e) {
+      // Whatever landed before the failure has landed, so this says how far it
+      // got instead of implying none of it happened.
+      reportError(
+        moves.size > 0
+          ? `${enable ? "Enabled" : "Disabled"} ${moves.size} of ${targets.length} files, then stopped`
+          : `Nothing was ${enable ? "enabled" : "disabled"}`,
+        e,
+      );
+    } finally {
+      followRenames(moves);
+      setBulkBusy(false);
+      await load();
+    }
+  }
+
+  /**
+   * Delete every selected file.
+   *
+   * No exemption to count around, unlike the instance's pane: nothing in a
+   * server's own folders belongs to anybody else, so the row's own Delete is
+   * offered on every row here and a bulk delete can take all of them.
+   */
+  async function deletePicked() {
+    setBulkBusy(true);
+    const gone: string[] = [];
+    try {
+      for (const item of picked) {
+        await api.removeServerContent(server.id, folder, item.fileName);
+        gone.push(item.fileName);
+      }
+    } catch (e) {
+      reportError(
+        gone.length > 0
+          ? `Deleted ${gone.length} of ${picked.length} files, then stopped`
+          : "Nothing was deleted",
+        e,
+      );
+    } finally {
+      forget(gone);
+      setAskingDelete(false);
+      setBulkBusy(false);
+      await Promise.all([load(), refreshServers()]);
     }
   }
 
@@ -538,6 +646,21 @@ export default function ServerContentTab({
                 only place it can be come across at all. */}
             <kbd className={styles.searchKey}>{actionHint("focusFilter")}</kbd>
           </div>
+          {/* Taking every row at once, in the open rather than behind the
+              disclosure the instance's toolbar puts it behind. That toolbar
+              was rebuilt around one primary action and has a drawer for its
+              occasional acts; this one is still the plain row of buttons it
+              always was — see `.searchGrow` in the shared stylesheet, which
+              says the same thing about the filter box. A button here is the
+              register this toolbar already speaks in.
+              Only with more than one row to take, since on one row it is the
+              checkbox beside it with extra steps. */}
+          {shown && shown.length > 1 && (
+            <button className="btn" onClick={selectAll}>
+              <ListChecks size={14} />
+              Select all {shown.length}
+            </button>
+          )}
           <button className="btn" onClick={addFiles}>
             <FilePlus2 size={14} />
             Add file
@@ -667,6 +790,67 @@ export default function ServerContentTab({
         </div>
       )}
 
+      {/* Only while something is selected, and every press on it names what it
+          will do to how many — a bar that says "Disable" over a selection you
+          have scrolled away from is a bar that acts on rows you are not
+          looking at. The instance's pane's bar, with the one count it carries
+          for the server's own mods left out: see `deletePicked` above. */}
+      {picked.length > 0 && (
+        <div className={styles.selectBar}>
+          <div className={styles.selectText}>
+            {bulkBusy && <Loader2 size={13} className="spin" />}
+            <span className={styles.selectCount}>{picked.length} selected</span>
+            {/* Why "Enable 1" sits beside "Disable 5" under a count of six:
+                the two presses act on the part of the selection that is not
+                already the way it is being asked to be. Said only when the
+                selection is mixed, because that is the only time the numbers
+                differ from the count and need accounting for. */}
+            {onCount > 0 && offCount > 0 && (
+              <span className={styles.selectNote}>
+                {onCount} on, {offCount} off
+              </span>
+            )}
+            {/* A selection outlives the filter that made it, so the count says
+                so rather than letting a press act on rows nobody can see. */}
+            {picked.length > pickedShown && (
+              <span className={styles.selectNote}>
+                {picked.length - pickedShown} not shown by this filter
+              </span>
+            )}
+          </div>
+          <button className="btn btn-sm btn-ghost" onClick={clear}>
+            Clear
+            <kbd className={styles.selectKey}>
+              {actionHint("clearSelection")}
+            </kbd>
+          </button>
+          <button
+            className="btn btn-sm"
+            onClick={() => void setPickedEnabled(true)}
+            disabled={bulkBusy || offCount === 0}
+          >
+            Enable {offCount}
+          </button>
+          <button
+            className="btn btn-sm"
+            onClick={() => void setPickedEnabled(false)}
+            disabled={bulkBusy || onCount === 0}
+          >
+            Disable {onCount}
+          </button>
+          {/* Set apart from the two presses that can be taken back, and it
+              asks before it does anything. */}
+          <button
+            className={clsx("btn btn-sm btn-danger", styles.selectDelete)}
+            onClick={() => setAskingDelete(true)}
+            disabled={bulkBusy}
+          >
+            <Trash2 size={13} />
+            Delete {picked.length}
+          </button>
+        </div>
+      )}
+
       {/* The one panel the folders swap, named by whichever of them is showing.
           Focusable because it is the thing the strip switches and it scrolls:
           while it is loading or empty there is nothing inside it to focus, so
@@ -733,16 +917,22 @@ export default function ServerContentTab({
           </div>
         ) : (
           /* The instance list's grid, said the same way and for the same
-             reasons — see the comment on that one. The two differences are
-             both about selection: this pane has none, so the grid is not
-             multi-selectable, its rows claim no `aria-selected`, and `rowKeys`
-             is handed nothing to do on Space. A key that does nothing is
-             better left unclaimed than bound to nothing. */
+             reasons — see the comment on that one, which argues the whole
+             shape: the row is the tab stop, Up and Down move between rows,
+             Left and Right along one, and Space takes a row into the
+             selection. This pane now selects too, so there is nothing left to
+             say differently here. */
           <div
             className={styles.rows}
             role="grid"
             aria-labelledby={`server-content-tab-${folderStop}`}
-            onKeyDown={(e) => rowKeys(e)}
+            aria-multiselectable="true"
+            onKeyDown={(e) =>
+              rowKeys(e, (file, extend) => {
+                const row = shown.find((i) => i.fileName === file);
+                if (row) pick(row, extend);
+              })
+            }
             onFocus={(e) => {
               const row = (e.target as HTMLElement).closest<HTMLElement>("[data-row]");
               if (row?.dataset.row) setKeyed(row.dataset.row);
@@ -757,21 +947,38 @@ export default function ServerContentTab({
             // Blank unless the admin answered: the control offers their own
             // answer, not a reading of whatever the jar happens to say.
             const chosen = item.sided?.saidBy === "admin" ? item.sided.side : "";
+            const isPicked = selected.has(item.fileName);
             return (
               <div
                 key={item.fileName}
-                className={styles.row}
+                className={clsx(styles.row, isPicked && styles.rowPicked)}
                 role="row"
+                aria-selected={isPicked}
                 data-row={item.fileName}
                 tabIndex={item.fileName === rowStop ? 0 : -1}
               >
-                {/* No checkbox at the head of a row here. On the instance's
-                    list that column is the selection, which this pane does not
-                    have, and the two panes are one screen — a box in the same
-                    place meaning "loaded" on one and "picked" on the other is
-                    worse than no box. So whether this server loads the file is
-                    a button among the row's other buttons, where every other
-                    verb in the row already is. */}
+                {/* Selecting, and the only checkbox on the row — the same
+                    column, in the same place, meaning the same thing as on the
+                    instance's list. The two panes are one screen, so a box in
+                    the leading column meaning "picked" on one and nothing at
+                    all on the other was the thing to avoid; whether this
+                    server loads the file stays a button among the row's other
+                    buttons, where every other verb in the row already is. */}
+                <label className={styles.selectCell} role="gridcell">
+                  <input
+                    type="checkbox"
+                    checked={isPicked}
+                    // Shift off the event the browser raised, so the gesture
+                    // is the same from the pointer and from Space.
+                    onChange={(e) => {
+                      const raised = e.nativeEvent;
+                      pick(item, raised instanceof MouseEvent && raised.shiftKey);
+                    }}
+                    aria-label={`Select ${item.name}`}
+                    tabIndex={-1}
+                  />
+                </label>
+
                 <div className={styles.itemIcon} role="gridcell">
                   {item.iconUrl ? (
                     <img src={item.iconUrl} alt="" loading="lazy" />
@@ -985,6 +1192,48 @@ export default function ServerContentTab({
           </div>
         )}
       </div>
+
+      {/* A row's own Delete asks nothing — one press, one file, the name right
+          under the cursor. A press that takes a dozen at once is not that, so
+          this names every one of them: a count is what was clicked, the names
+          are what is about to go, and a selection made three filters ago is
+          the easy way to delete a plugin you had forgotten was in it. */}
+      {askingDelete && (
+        <Modal
+          title={`Delete ${picked.length} file${picked.length === 1 ? "" : "s"}?`}
+          subtitle={`Removed from this server's ${noun}. It cannot be undone.`}
+          onClose={() => setAskingDelete(false)}
+          width={480}
+          footer={
+            <>
+              <button className="btn" onClick={() => setAskingDelete(false)}>
+                Cancel
+              </button>
+              <button
+                className="btn btn-danger"
+                onClick={() => void deletePicked()}
+                disabled={bulkBusy}
+              >
+                {bulkBusy && <Loader2 size={14} className="spin" />}
+                Delete permanently
+              </button>
+            </>
+          }
+        >
+          <ul className={styles.confirmList}>
+            {picked.map((item) => (
+              <li key={item.fileName}>
+                <span className={styles.confirmName}>{item.name}</span>
+                {!titleIsFileName(item.fileName, item.name) && (
+                  <span className={styles.fileName}>
+                    {shownName(item.fileName)}
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </Modal>
+      )}
     </div>
   );
 }

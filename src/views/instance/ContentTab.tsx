@@ -28,6 +28,7 @@ import { fileSize, providerLabel, shownName, titleIsFileName } from "../../lib/f
 import { rovingKey } from "../../lib/rovingFocus";
 import { actionHint } from "../../lib/shortcuts";
 import { useActionShortcut } from "../../lib/useActionShortcut";
+import { useRowSelection } from "../../lib/useRowSelection";
 import { useStore } from "../../lib/store";
 import type { ContentItem, ContentKind, Instance, UpdateCandidate } from "../../lib/types";
 
@@ -41,25 +42,6 @@ const KINDS: { id: ContentKind; label: string; extensions: string[] }[] = [
 ];
 
 const KIND_IDS = KINDS.map((k) => k.id);
-
-/**
- * A selection, with every file that has just been renamed following its row.
- *
- * Turning a file on or off *is* a rename on disk — `foo.jar` becomes
- * `foo.jar.disabled` — and a selection is keyed by the file name because that
- * is the only thing unique to a row. Without this, disabling twelve mods would
- * empty the selection the moment it worked, and the obvious next press would
- * have nothing left to act on.
- */
-function followRenames(selected: Set<string>, moves: Map<string, string>) {
-  const next = new Set(selected);
-  for (const [from, to] of moves) {
-    if (!next.has(from)) continue;
-    next.delete(from);
-    next.add(to);
-  }
-  return next;
-}
 
 /** A row of the list, carrying the file name that identifies it. */
 const ROW = "[data-row]";
@@ -105,9 +87,10 @@ const IN_ROW = '[tabindex="-1"]:not(:disabled)';
  * not press it, and this is two nested axes rather than one. The same
  * distinction `ShareMenu` makes about its own arrows.
  *
- * `select` is optional because the two panes differ in exactly one way: the
- * instance's list can be selected from, the server's cannot, and a key that
- * does nothing is better left unclaimed than bound to nothing.
+ * `select` is optional because the card grids on the two front doors walk by
+ * these same keys and have nothing to take a card into — see `cardKeys`, which
+ * spends the key on opening the card instead. A key that does nothing is
+ * better left unclaimed than bound to nothing. Both Content tabs pass it.
  */
 export function rowKeys(
   e: KeyboardEvent<HTMLElement>,
@@ -350,10 +333,6 @@ export default function ContentTab({
   const [updating, setUpdating] = useState<string | null>(null);
   const [linking, setLinking] = useState(false);
 
-  // The rows a press is about to act on, by file name, and the row a plain
-  // click last landed on so Shift can measure a span from it.
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [anchor, setAnchor] = useState<string | null>(null);
   // The row the keyboard was last on, which is the row that answers Tab.
   const [keyed, setKeyed] = useState<string | null>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
@@ -370,6 +349,32 @@ export default function ContentTab({
   // something else on this screen and the drawer has first call on it.
   const [moreOpen, setMoreOpen] = useState(false);
   const filterBox = useRef<HTMLInputElement>(null);
+
+  const shown = useMemo(() => {
+    if (!items) return null;
+    const q = filter.trim().toLowerCase();
+    return q
+      ? items.filter(
+          (i) =>
+            i.name.toLowerCase().includes(q) ||
+            i.fileName.toLowerCase().includes(q),
+        )
+      : items;
+  }, [items, filter]);
+
+  // Which rows the next press acts on, and the gestures that say so. Shared
+  // with the server's Content tab rather than written out on each, the way
+  // `rowKeys` above and this file's stylesheet already are.
+  const {
+    selected,
+    picked,
+    pickedShown,
+    pick,
+    selectAll,
+    clear,
+    followRenames,
+    forget,
+  } = useRowSelection(items, shown);
 
   const load = useCallback(async () => {
     try {
@@ -388,73 +393,16 @@ export default function ContentTab({
     setItems(null);
     // A selection is of files in one folder, so changing folders drops it
     // rather than carrying names that are not in the list any more.
-    setSelected(new Set());
-    setAnchor(null);
+    clear();
     void load();
-  }, [load]);
+  }, [load, clear]);
 
-  const shown = useMemo(() => {
-    if (!items) return null;
-    const q = filter.trim().toLowerCase();
-    return q
-      ? items.filter(
-          (i) =>
-            i.name.toLowerCase().includes(q) ||
-            i.fileName.toLowerCase().includes(q),
-        )
-      : items;
-  }, [items, filter]);
-
-  // Everything about the selection is read back off `items`, so a name left in
-  // it by a file that has since gone counts for nothing anywhere on screen.
-  const picked = useMemo(
-    () => items?.filter((i) => selected.has(i.fileName)) ?? [],
-    [items, selected],
-  );
-  const pickedShown = useMemo(
-    () => shown?.filter((i) => selected.has(i.fileName)).length ?? 0,
-    [shown, selected],
-  );
   // The server's own mods are not the player's to delete — the row's own
   // button is disabled for them and Rust refuses it as well — so a bulk delete
   // counts what it can really take.
   const deletable = picked.filter((i) => i.origin !== "server");
   const offCount = picked.filter((i) => !i.enabled).length;
   const onCount = picked.filter((i) => i.enabled).length;
-
-  /**
-   * Take a row into the selection, or out of it.
-   *
-   * Shift adds the span between the row a plain click last landed on and this
-   * one, rather than replacing what is selected: the gesture reads as "and
-   * these too". The span is measured over what is *shown*, so it runs along
-   * the rows in front of you and never through the ones the filter is hiding.
-   */
-  function pick(item: ContentItem, extend: boolean) {
-    const rows = shown ?? [];
-    setSelected((prev) => {
-      const next = new Set(prev);
-      const from = rows.findIndex((r) => r.fileName === anchor);
-      const to = rows.findIndex((r) => r.fileName === item.fileName);
-      if (extend && from >= 0 && to >= 0) {
-        for (const row of rows.slice(Math.min(from, to), Math.max(from, to) + 1)) {
-          next.add(row.fileName);
-        }
-        return next;
-      }
-      if (next.has(item.fileName)) next.delete(item.fileName);
-      else next.add(item.fileName);
-      return next;
-    });
-    // The anchor stays where a plain click put it, so a second Shift-click
-    // adjusts the same span instead of walking away from it.
-    if (!extend) setAnchor(item.fileName);
-  }
-
-  function clearSelection() {
-    setSelected(new Set());
-    setAnchor(null);
-  }
 
   /**
    * The Content tab's own keys, bound while the tab is on screen rather than
@@ -486,8 +434,7 @@ export default function ContentTab({
   // underneath.
   useActionShortcut("clearSelection", () => {
     if (moreOpen) return;
-    setSelected((prev) => (prev.size === 0 ? prev : new Set<string>()));
-    setAnchor(null);
+    clear();
   });
 
   // The folder as well as the project: the check spans every folder while this
@@ -509,9 +456,7 @@ export default function ContentTab({
         item.fileName,
         !item.enabled,
       );
-      setSelected((prev) =>
-        followRenames(prev, new Map([[item.fileName, renamed]])),
-      );
+      followRenames(new Map([[item.fileName, renamed]]));
       // And the tab stop follows the rename too. Turning a file off renames it
       // on disk, so the row it was on is replaced by one with a different key:
       // without this, disabling the fifth mod puts the list's one tab stop
@@ -563,7 +508,7 @@ export default function ContentTab({
         e,
       );
     } finally {
-      setSelected((prev) => followRenames(prev, moves));
+      followRenames(moves);
       setBulkBusy(false);
       await load();
     }
@@ -587,11 +532,7 @@ export default function ContentTab({
         e,
       );
     } finally {
-      setSelected((prev) => {
-        const next = new Set(prev);
-        for (const file of gone) next.delete(file);
-        return next;
-      });
+      forget(gone);
       setAskingDelete(false);
       setBulkBusy(false);
       await Promise.all([load(), refreshInstances()]);
@@ -846,8 +787,7 @@ export default function ContentTab({
                       label: "Select all",
                       note: `${shown.length}`,
                       icon: <ListChecks size={14} />,
-                      onSelect: () =>
-                        setSelected(new Set(shown.map((i) => i.fileName))),
+                      onSelect: selectAll,
                     },
                   ]
                 : []),
@@ -936,7 +876,7 @@ export default function ContentTab({
               </span>
             )}
           </div>
-          <button className="btn btn-sm btn-ghost" onClick={clearSelection}>
+          <button className="btn btn-sm btn-ghost" onClick={clear}>
             Clear
             <kbd className={styles.selectKey}>
               {actionHint("clearSelection")}

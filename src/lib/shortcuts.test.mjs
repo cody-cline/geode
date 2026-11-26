@@ -84,7 +84,14 @@ const PRINTED_IN = {
     "../views/server/ContentTab.tsx",
     "../views/server/Properties.tsx",
   ],
-  clearSelection: ["../views/instance/ContentTab.tsx"],
+  // Both Content tabs now, since the selection they clear is one hook they
+  // share. Listed rather than left at the instance tab alone because this map
+  // is what makes a hint load-bearing: a screen missing from here can lose its
+  // hint and nothing notices, which is the whole failure this test exists for.
+  clearSelection: [
+    "../views/instance/ContentTab.tsx",
+    "../views/server/ContentTab.tsx",
+  ],
   // Three, and all three have to print it. An action can belong to more than
   // one screen — "new" means something on each of these and nothing anywhere
   // else — and the screen that binds it without printing it is the one where
