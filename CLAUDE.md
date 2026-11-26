@@ -131,9 +131,22 @@ real zip), `header_wire_format.rs` (one that proves a bcrypt CurseForge key
 reaches the socket unmangled) and `curseforge_fingerprints.rs` (24 that pin
 what a fingerprint lookup puts on the wire). All three serve themselves from a
 `TcpListener` on localhost or a scratch directory; none reaches a real API. The
-nine `live_*` files hold 49 tests, every one `#[ignore]`d because they hit real
-upstream APIs, and they exist because the parts most likely to break are the
-ones nobody here controls:
+fourteen `live_*` files hold 93 tests, every one `#[ignore]`d because they hit
+real upstream APIs or stand a real server up, and they exist because the parts
+most likely to break are the ones nobody here controls.
+
+Four of them are newer than the rest and cover what no offline test can reach,
+so they are the ones to run before trusting a change to any of it:
+`live_server_lifecycle.rs` drives a real Paper server — the console, the
+Brigadier probe, the player files, backups, scheduled tasks — and holds the
+backup-and-reinstall round trip that the thinning rule below depends on;
+`live_share_join.rs` is the player's side against a real host, including a
+second real identity for the wrong-certificate case; `live_pack_sync.rs` walks
+an admin's changes through to a player's update with real Modrinth mods; and
+`live_pack_hostile.rs` builds packs meant to hurt the recipient. Several tests
+in the last two are named `..._today`, which is deliberate: they pin what
+happens now rather than claiming it is right, so hardening one of those
+behaviours changes a test that already records what it saw.
 
 ```bash
 cargo test --test live_metadata -- --ignored --nocapture
