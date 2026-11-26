@@ -451,13 +451,30 @@ anywhere, it is stale.
 
 ## Platform reality
 
-Linux is the only platform Geode has ever been run on. The macOS and Windows
-code paths compile and the whole check suite passes on both — it first did on
-30 October, nine days after CI was added — but nobody has launched the app on
-either one, and that is the claim to make rather than implying otherwise:
-tests passing is not somebody having used it. `main.rs` works around
-WebKitGTK's DMABUF renderer aborting on NVIDIA under Wayland by setting
-`WEBKIT_DISABLE_DMABUF_RENDERER=1` for itself.
+Linux is where Geode is developed and the only platform it has been used on at
+any length. **Windows has now been run once.** On 26 November 2026 the `nsis`
+installer was run by hand on one laptop, an instance was created, and Minecraft
+launched and played: Geode fetched its own Temurin 25 JRE, 466 MB of assets and
+88 MB of libraries in under twenty seconds, the game window came up on an AMD
+GPU, and the instance log held no WARN or ERROR. The installer wrote
+`Software\Classes\geode`, an Apps & Features entry and both shortcuts, and
+`%APPDATA%\geode` held the instance afterwards.
+
+That is one launch, on one machine, by one person, and it is the whole of what
+anybody has done on Windows — keep saying so. macOS has still never been run at
+all. Both code paths compile and the whole check suite passes on all three — it
+first did on 30 October, nine days after CI was added — but a suite passing is
+not somebody having used it, and that is the claim to make rather than implying
+otherwise. `main.rs` works around WebKitGTK's DMABUF renderer aborting on
+NVIDIA under Wayland by setting `WEBKIT_DISABLE_DMABUF_RENDERER=1` for itself.
+
+One trap that first Windows run exposed, worth knowing before anybody repeats
+it: a Claude Code session running inside the Claude desktop app on Windows has
+its `AppData` and `HKCU` writes redirected into Claude's own MSIX package
+sandbox, even though the shell reports no package identity. An install started
+from such a shell never reaches the real profile, and every path, registry and
+ACL reading taken from it describes the sandbox. The installer has to be run
+from Explorer to be tested at all.
 
 All three are now **built** by `.github/workflows/build.yml`, and that is a
 different claim. A release is asked for, never triggered: pushing a tag builds
@@ -466,10 +483,11 @@ universal macOS dmg — come from a `workflow_dispatch` run with `release` ticke
 and the version typed into `tag`, which is also what makes the git tag. Every
 push and pull request runs the whole check suite on all three runners. A green
 Windows job means the code compiled, the offline tests passed and an installer
-came out; it does not mean anyone has launched Geode on Windows, clicked a
-`geode://` link there, or seen the `Info.plist` the macOS bundler wrote.
-Keep the two apart in anything you write — "built by CI" is not "tested on
-Windows". What each platform does and does not prove, and which secrets
+came out; it does not mean the installer was run or the app used. The one
+Windows install and launch there has been happened by hand, off a downloaded
+release asset, and nothing in CI does it. Nobody has seen the `Info.plist` the
+macOS bundler wrote. Keep the two apart in anything you write — "built by CI"
+is not "tested on Windows", and one launch is not a platform. What each platform does and does not prove, and which secrets
 signing needs, is [docs/releasing.md](docs/releasing.md).
 
 Each platform claims `geode://` from a different thing. Linux claims it twice —
