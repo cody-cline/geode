@@ -27,27 +27,41 @@ pub fn sink(app: AppHandle) -> EventSink {
 
 #[cfg(test)]
 mod tests {
-    /// The app's identifier is its identity on disk, not a URL, and it does
-    /// not follow a GitHub rename.
+    /// The app's identifier is the installed app's identity, not a URL, and
+    /// moving it is a decision rather than a rename.
     ///
-    /// It keys the single-instance lock, the `geode://` scheme registration,
-    /// and the data directory on all three platforms. Changing it does not
-    /// migrate anything: every existing install becomes a different
-    /// application that cannot see its own instances, servers or accounts,
-    /// and the old ones are left behind with nothing pointing at them. The
-    /// owner's GitHub account was renamed from `littlesquirt1` to
-    /// `cody-cline` and every URL moved with it; this deliberately did not,
-    /// and this test is here so the next person to grep for the old name does
-    /// not finish the job.
+    /// It keys the single-instance lock on all three platforms, the webview's
+    /// profile directory, the description Windows stores for the `geode://`
+    /// registration, the NSIS manufacturer key that remembers where the last
+    /// install went, and on macOS the `CFBundleIdentifier` — which is the
+    /// LaunchServices identity carrying `CFBundleURLTypes`, and what signing
+    /// and notarization are keyed to. Its second segment is also the publisher:
+    /// `bundle.publisher` is unset, so tauri takes `cody-cline` from here for
+    /// the Win32 `CompanyName` on both exes, the Apps & Features publisher and
+    /// the `.deb` maintainer.
+    ///
+    /// What it does *not* key is Geode's own data. `paths.rs` roots instances,
+    /// servers and `accounts.json` at `GEODE_HOME`, else `dirs::data_dir()`
+    /// joined with a literal `geode`, and nothing in this crate reads the
+    /// identifier or a Tauri app-directory helper — which is the whole reason
+    /// this was cheap to move when the owner's GitHub account was renamed from
+    /// `littlesquirt1` to `cody-cline`. The other half of why it was cheap is
+    /// timing: it moved while the only install in existence was the owner's
+    /// own. After a release the same move costs every install an abandoned
+    /// webview profile, a forgotten install directory, and a fresh macOS app
+    /// identity that re-registers the `geode://` handler as a different
+    /// application. So this test is not here to forbid the next move, only to
+    /// make it a decision and not a grep.
     #[test]
-    fn the_app_identifier_does_not_follow_a_rename() {
+    fn the_app_identifier_moves_only_on_purpose() {
         let config: serde_json::Value =
             serde_json::from_str(include_str!("../tauri.conf.json"))
                 .expect("tauri.conf.json is not valid JSON");
         assert_eq!(
-            config["identifier"], "dev.littlesquirt1.geode",
-            "the identifier is the installed app's identity: changing it \
-             orphans every existing data directory"
+            config["identifier"], "dev.cody-cline.geode",
+            "the identifier is the installed app's identity: moving it \
+             abandons each existing install's webview profile and, on macOS, \
+             its registered app identity"
         );
     }
 
