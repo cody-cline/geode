@@ -37,7 +37,9 @@ Everything above compiles the desktop app, so Linux runs one step more:
 cargo clippy --all-targets --no-default-features -- -D warnings
 ```
 
-That is the only thing here that compiles `geoded` and `src/daemon/` — the
+That is the only thing a push compiles `geoded` and `src/daemon/` with — the
+`host` job below builds them too, but only when a release is asked for, which
+is far too late to hear about it. The
 desktop build is handed several Cargo features for free by Tauri, so a
 dependency the host needs spelled out can go missing while every step above
 stays green. Linux alone, because a missing Cargo feature is not a platform
@@ -70,6 +72,43 @@ architecture because a player should not have to know which kind of Mac they
 have. It costs a second compile of every crate; macOS runner minutes are
 billed at ten times the rate, so one universal job costs roughly what two
 single-arch jobs would.
+
+That universal target is also what broke the first release. `tauri build
+--target universal-apple-darwin` lipos the *app's* binary into
+`target/universal-apple-darwin/release/` and stops there, but the bundler then
+copies every binary the crate declares out of that same directory — and the
+crate declares two. The macOS leg died on `Failed to copy binary from
+…/universal-apple-darwin/release/geoded` while Windows and Linux bundled
+fine, because on those two `cargo build --bins` puts `geoded` beside the app
+by itself and nothing has to be arranged. The Tauri CLI skips a `[[bin]]`
+whose `required-features` are missing from the build command, so gating
+`geoded` behind a feature would be the tidy fix — and it is not available,
+because `container/Dockerfile` builds it with `--no-default-features --bin
+geoded`, which enables no feature at all. So the macOS leg makes the file
+itself, with a `lipo` step before the bundler runs, and
+`daemon::tests::the_macos_release_builds_the_universal_host_the_bundler_copies`
+is what keeps it making it. A consequence worth knowing: all three installers
+therefore carry a copy of `geoded` inside them. Nobody is meant to run that
+copy — see `host` below.
+
+**`host`** — the same release dispatch, after `bundle`, on the same three
+runners. `geoded` runs Minecraft servers with no desktop app anywhere near
+them, and whoever hosts one should not have to install a launcher to get it,
+so it is attached to the draft release as three plain binaries:
+
+| Runner | Out |
+|---|---|
+| `ubuntu-22.04` | `geoded-<tag>-linux-x86_64` |
+| `windows-2022` | `geoded-<tag>-windows-x86_64.exe` |
+| `macos-15` | `geoded-<tag>-macos-universal`, arm64 and x86_64 in one file |
+
+All three are built `--no-default-features`, which is the same build the
+container image makes: no Tauri, no wry, no webview, and so nothing to install
+on the machine that runs it. It is also why this job needs no apt packages on
+Linux where the bundle needs seven. It runs after `bundle` because the draft
+release has to exist before anything can be attached to it and `tauri-action`
+is what creates it — so a bundle leg failing takes its platform's host binary
+with it.
 
 The release is a draft on purpose. Somebody signs off before three bundles,
 two of which nobody has launched, go out under a version number.

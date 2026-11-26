@@ -131,9 +131,10 @@ jobs:
       # And the other build. Everything above compiles the desktop app, which
       # gets several Cargo features for free from Tauri — so a dependency the
       # host needs spelled out can go missing and every step above still pass.
-      # `toml`'s `serde` and `std` did exactly that. This is the only thing
-      # here that compiles `geoded`, `src/daemon/` and the container image's
-      # half of the crate at all.
+      # `toml`'s `serde` and `std` did exactly that. This is the only thing a
+      # push compiles `geoded`, `src/daemon/` and the container image's half
+      # of the crate with at all — the `host` job below builds them too, and
+      # only when a release is asked for, which is far too late to hear it.
       #
       # Linux only, because a missing Cargo feature is not a platform
       # difference and the host is a Linux container; the three-platform
@@ -311,6 +312,39 @@ jobs:
             echo "No notarisation credentials; the dmg will be signed but not notarised."
           fi
 
+      # `tauri build --target universal-apple-darwin` lipos the *app's* binary
+      # into `target/universal-apple-darwin/release/` and stops there. The
+      # bundler then copies every binary the crate declares out of that same
+      # directory, and `geoded` is one of them: the Tauri CLI only skips a
+      # `[[bin]]` whose `required-features` are missing from the build
+      # command, and this one has none to skip on. Gating it behind a feature
+      # would be the tidy fix and is not available — `container/Dockerfile`
+      # builds it with `--no-default-features --bin geoded`, which enables no
+      # feature at all, so a gate there would stop the image producing a host
+      # binary. So the first release died here, copying a file nothing had
+      # made: "Failed to copy binary from …/universal-apple-darwin/release/geoded".
+      #
+      # Made by hand because cargo never writes that directory — it is the
+      # CLI's own lipo output. Which is also why the other two platforms have
+      # never needed this: there `cargo build --bins` puts `geoded` beside the
+      # app in `target/release/` by itself.
+      #
+      # Built headless, so the copy that ends up inside `Geode.app` is the
+      # real host rather than one linked against a webview it will never open.
+      # It is not the binary anyone downloads — that is the `host` job below.
+      - name: Build the universal host binary the macOS bundler copies
+        if: runner.os == 'macOS'
+        shell: bash
+        working-directory: src-tauri
+        run: |
+          for triple in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --locked --no-default-features --bin geoded --target "$triple"
+          done
+          mkdir -p target/universal-apple-darwin/release
+          lipo -create -output target/universal-apple-darwin/release/geoded \
+            target/aarch64-apple-darwin/release/geoded \
+            target/x86_64-apple-darwin/release/geoded
+
       - name: Build the installers and attach them to a draft release
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
@@ -348,3 +382,95 @@ jobs:
           # the deb and rpm.
           uploadUpdaterJson: true
           args: ${{ matrix.args }}
+
+  # The headless host, on its own, for all three platforms. `geoded` runs
+  # Minecraft servers with no desktop app anywhere near them, and whoever
+  # hosts one should not have to install a launcher to get it — so it ships as
+  # three plain binaries rather than as a file buried inside an installer.
+  # Other people will host on platforms nobody here uses, which is the whole
+  # reason this is built for three of them and not just the one it is
+  # developed on.
+  #
+  # `--no-default-features` is the point, not an optimisation, and it is the
+  # same build `container/Dockerfile` makes: no Tauri, no wry, no webview, and
+  # so nothing to install on the machine that runs it. It is also why this job
+  # needs no apt packages where the desktop bundle needs seven. `--locked`
+  # because what ships is built from the committed lockfile, exactly as the
+  # image is.
+  #
+  # After `bundle` because the draft release has to exist before anything can
+  # be attached to it, and `tauri-action` is what creates it. A bundle leg
+  # failing therefore takes its platform's host binary down with it; the macOS
+  # leg of the first release was exactly that, and the lipo step above is what
+  # stops it recurring.
+  host:
+    name: host (${{ matrix.name }})
+    needs: bundle
+    if: ${{ inputs.release }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      # To attach the binary to the draft release.
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-22.04
+            suffix: linux-x86_64
+          - name: windows
+            os: windows-2022
+            suffix: windows-x86_64
+            exe: .exe
+          # One binary for both kinds of Mac, the same choice the dmg makes.
+          - name: macos
+            os: macos-15
+            suffix: macos-universal
+            rust_targets: aarch64-apple-darwin x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the Rust toolchain
+        shell: bash
+        run: |
+          rustup update --no-self-update stable
+          rustup default stable
+
+      - name: Add the Rust targets this binary is built for
+        if: matrix.rust_targets != ''
+        shell: bash
+        run: rustup target add ${{ matrix.rust_targets }}
+
+      # Named for the platform and the version, because all three land in the
+      # same download folder and a file called `geoded` says nothing about
+      # which machine it runs on.
+      - name: Build the headless host
+        shell: bash
+        working-directory: src-tauri
+        env:
+          TAG: ${{ inputs.tag }}
+          SUFFIX: ${{ matrix.suffix }}
+          EXE: ${{ matrix.exe }}
+        run: |
+          asset="geoded-$TAG-$SUFFIX$EXE"
+          if [ "$RUNNER_OS" = macOS ]; then
+            for triple in aarch64-apple-darwin x86_64-apple-darwin; do
+              cargo build --release --locked --no-default-features --bin geoded --target "$triple"
+            done
+            lipo -create -output "$asset" \
+              target/aarch64-apple-darwin/release/geoded \
+              target/x86_64-apple-darwin/release/geoded
+          else
+            cargo build --release --locked --no-default-features --bin geoded
+            cp "target/release/geoded$EXE" "$asset"
+          fi
+          echo "GEODED_ASSET=$asset" >> "$GITHUB_ENV"
+
+      - name: Attach it to the draft release
+        shell: bash
+        working-directory: src-tauri
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: gh release upload "$TAG" "$GEODED_ASSET" --clobber

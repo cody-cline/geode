@@ -310,21 +310,69 @@ mod tests {
     #[test]
     fn ci_compiles_the_headless_build_and_not_only_the_app() {
         let workflow = include_str!("../../../.github/workflows/build.yml");
-        // The checks, not the release bundles: a bundle is a desktop app by
-        // definition, so a `--no-default-features` down there would prove
-        // nothing about a push.
-        let checks = workflow.split("\n  bundle:").next().unwrap_or(workflow);
+
+        // The `check` job alone, not the release jobs below it: a bundle is a
+        // desktop app by definition and `host` builds the headless binary it
+        // ships, so a `--no-default-features` in either would satisfy this
+        // while a push compiled nothing of `daemon/` at all. A job's own key
+        // sits at two spaces and nothing inside a job does, so the next one
+        // of those ends the job.
+        let starts_a_job = |line: &str| {
+            line.starts_with("  ") && !line.starts_with("   ") && !line.starts_with("  #")
+        };
+        let checks = workflow
+            .lines()
+            .skip_while(|line| *line != "  check:")
+            .skip(1)
+            .take_while(|line| !starts_a_job(line));
 
         // A step that runs it, not a comment that mentions it — including the
         // comment beside the step itself, which explains why it is there.
         assert!(
-            checks.lines().any(|line| {
+            checks.into_iter().any(|line| {
                 line.contains("run:")
                     && line.contains("cargo")
                     && line.contains("--no-default-features")
             }),
             "no step in build.yml's check job compiles the headless build, so \
              nothing in CI builds `geoded` or `daemon/` at all"
+        );
+    }
+
+    /// The universal macOS bundle asks for a binary nothing builds.
+    ///
+    /// `tauri build --target universal-apple-darwin` lipos the *app's* binary
+    /// into `target/universal-apple-darwin/release/` and stops there, but the
+    /// bundler then copies every binary the crate declares out of that same
+    /// directory — `geoded` included, because the Tauri CLI only skips a
+    /// `[[bin]]` whose `required-features` are missing from the build command
+    /// and this one has none to skip on. So the first release bundled on
+    /// Windows and Linux and died on macOS: "Failed to copy binary from
+    /// …/universal-apple-darwin/release/geoded".
+    ///
+    /// Gating `geoded` behind a feature is the fix Cargo offers and is not
+    /// available: `container/Dockerfile` builds it with
+    /// `--no-default-features --bin geoded`, which enables no feature at all,
+    /// so a gate would stop the image producing a host binary. The release
+    /// job makes the file instead, and this is what keeps it making it — the
+    /// one thing standing between a macOS release and the error above.
+    #[test]
+    fn the_macos_release_builds_the_universal_host_the_bundler_copies() {
+        let workflow = include_str!("../../../.github/workflows/build.yml");
+
+        let made = workflow
+            .find("target/universal-apple-darwin/release/geoded")
+            .expect(
+                "nothing in build.yml puts a universal `geoded` in the macOS out \
+                 directory, so the bundler will fail copying one nothing made",
+            );
+        let bundled = workflow
+            .find("tauri-apps/tauri-action")
+            .expect("build.yml no longer runs tauri-action; this test is checking the wrong thing");
+        assert!(
+            made < bundled,
+            "the universal `geoded` is made after `tauri build` has already \
+             bundled, which is too late for it to be copied into the app"
         );
     }
 
