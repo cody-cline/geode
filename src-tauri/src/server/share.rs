@@ -286,6 +286,13 @@ async fn read(file: &std::path::Path) -> Result<Option<ServerShare>> {
 /// Write atomically: to a temporary file in the same directory, then rename.
 /// A shared share goes to `share.json`, a stopped one to `share.stopped.json`.
 ///
+/// Written owner-only, like `accounts.json` and `hosts.json`: the first field
+/// in here is the password that decides who may download this server's pack,
+/// and the stopped file holds the same one so sharing again brings it back.
+/// `save_link_address` beside it is an ordinary write — the address Geode
+/// hands out in links is the one thing in all of this that is meant to be
+/// public.
+///
 /// The server's folder is not created. Sharing a server that is not there, or
 /// one deleted a moment ago, would leave a password with nothing behind it.
 pub async fn save(paths: &Paths, id: &str, share: &ServerShare) -> Result<()> {
@@ -297,7 +304,7 @@ pub async fn save(paths: &Paths, id: &str, share: &ServerShare) -> Result<()> {
     } else {
         stopped_path(paths, id)
     };
-    super::write_atomic(&file, &serde_json::to_vec_pretty(share)?).await
+    super::write_atomic_private(&file, &serde_json::to_vec_pretty(share)?).await
 }
 
 /// Share a server: again with the password it has, or with a new one the first
@@ -644,6 +651,40 @@ mod tests {
         assert!(again.shared);
         assert_eq!(load(&paths, "survival").await.unwrap(), Some(again));
         assert_eq!(listed(&list(&paths).await.unwrap()), vec!["survival"]);
+    }
+
+    /// Whichever file the password is in, only this account may read it.
+    ///
+    /// A share password is all it takes to download a server's pack —
+    /// `share::host` finds the server by code alone — so another account on
+    /// this machine reading it gains that pack from anywhere, as a player,
+    /// including whatever the admin chose to send out of `config/`. The
+    /// sharing private key next to it has been owner-only from the start; this
+    /// is the other half of the same thing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn only_this_account_can_read_a_servers_password() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = scratch("share-mode");
+        let paths = scratch.paths.clone();
+        let dir = paths.server("survival");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mode_of = |file: &str| {
+            std::fs::metadata(dir.join(file))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+
+        start(&paths, "survival").await.unwrap();
+        assert_eq!(mode_of("share.json"), 0o600);
+        // And the stopped file, which holds the same password so that sharing
+        // again brings it back.
+        stop(&paths, "survival").await.unwrap();
+        assert_eq!(mode_of("share.stopped.json"), 0o600);
     }
 
     /// A Geode from before passwords were kept reads `share.json` and nothing

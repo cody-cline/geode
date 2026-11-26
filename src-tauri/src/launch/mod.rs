@@ -309,6 +309,11 @@ fn game_command(
         // started from.
         .envs(&overrides.env)
         .current_dir(&plan.game_dir);
+    // Last, so it also covers an instance's own env map naming one of them:
+    // the game runs the player's mods, and Geode's own variables — a host's
+    // token, the CurseForge key a developer exported to run the live tests —
+    // are nothing a mod needs and everything it would like.
+    crate::childenv::keep_geodes_own_out(&mut command);
     command
 }
 
@@ -377,7 +382,12 @@ async fn run_hook(command: &str, game_dir: &Path) -> Result<()> {
         ("sh", "-c")
     };
 
-    let status = tokio::process::Command::new(program)
+    let mut command = tokio::process::Command::new(program);
+    // A hook is a shell, which is the easiest place in Geode to read a
+    // variable out of — and the same variables are no part of what a hook is
+    // for. See [`crate::childenv`].
+    crate::childenv::keep_geodes_own_out(&mut command);
+    let status = command
         .arg(first_arg)
         .arg(trimmed)
         .current_dir(game_dir)
@@ -578,13 +588,48 @@ mod tests {
             Some(std::ffi::OsStr::new("video=verbose"))
         );
         // Added, not replacing: nothing here clears the inherited environment,
-        // because the game still needs HOME, PATH and DISPLAY.
-        assert!(
-            !std.get_envs().any(|(_, v)| v.is_none()),
-            "something was removed from the environment rather than added to it"
+        // because the game still needs HOME, PATH and DISPLAY. The only
+        // removals are Geode's own variables, which the test below is about.
+        let mut removed: Vec<_> = std
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+        removed.sort();
+        let mut geodes_own = crate::childenv::GEODES_OWN.to_vec();
+        geodes_own.sort_unstable();
+        assert_eq!(
+            removed,
+            geodes_own,
+            "the game's environment lost something other than Geode's own"
         );
 
         assert_eq!(std.get_current_dir(), Some(std::path::Path::new("/games/survival")));
+    }
+
+    /// The game runs the player's mods, so Geode's own variables are taken off
+    /// it — including when the instance's own env map is the thing asking for
+    /// one, which is why the strip goes last.
+    #[test]
+    fn the_game_is_not_handed_geodes_own_environment() {
+        let plan = LaunchPlan {
+            java: PathBuf::from("/jvm/bin/java"),
+            args: Vec::new(),
+            game_dir: PathBuf::from("/games/survival"),
+        };
+        let mut overrides = crate::instance::InstanceOverrides::default();
+        overrides
+            .env
+            .insert("GEODE_TOKEN".into(), "a-real-looking-token".into());
+
+        let command = game_command(&plan, &overrides);
+        assert!(
+            command
+                .as_std()
+                .get_envs()
+                .any(|(k, v)| k == std::ffi::OsStr::new("GEODE_TOKEN") && v.is_none()),
+            "an instance asked for a host's token and got it"
+        );
     }
 
     /// With no wrapper the JVM is the program, exactly as before.

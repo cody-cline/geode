@@ -588,8 +588,33 @@ impl Server {
 /// the disk before the rename, so a crash leaves the old file rather than an
 /// empty new one.
 pub(crate) async fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    replace(path, bytes, None).await
+}
+
+/// [`write_atomic`], for a file whose contents are a secret.
+///
+/// A rename hands the target whatever mode the temp file was created with, and
+/// a default create is 0666 & ~umask — 0644 on an ordinary Linux desktop, for
+/// the life of the file rather than for a moment. `share.json` holds the
+/// password that decides who may download a server's pack, so at 0644 any
+/// other account on the machine could read it and then fetch that pack from
+/// anywhere, as a player, until the admin replaces the password — which
+/// nothing would prompt them to do. So the mode is asked for as the file is
+/// created, the way `share::identity` does for the sharing key beside it.
+pub(crate) async fn write_atomic_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    replace(path, bytes, Some(0o600)).await
+}
+
+/// What both of those do: a temporary file beside the target, created with
+/// `mode` where one is asked for, then a rename over it.
+async fn replace(path: &std::path::Path, bytes: &[u8], mode: Option<u32>) -> Result<()> {
     use std::sync::atomic::{AtomicU64, Ordering};
     use tokio::io::AsyncWriteExt;
+
+    // Windows has no mode to ask for: a file under %APPDATA% inherits an ACL
+    // that is the owning user's already.
+    #[cfg(not(unix))]
+    let _ = mode;
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -606,7 +631,13 @@ pub(crate) async fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result
     ));
 
     let written = async {
-        let mut file = tokio::fs::File::create(&tmp).await?;
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        if let Some(mode) = mode {
+            options.mode(mode);
+        }
+        let mut file = options.open(&tmp).await?;
         file.write_all(bytes).await?;
         file.flush().await?;
         file.sync_all().await?;

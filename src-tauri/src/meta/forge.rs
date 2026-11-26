@@ -451,7 +451,12 @@ async fn run_processor(
         .map(|a| expand_arg(a, tokens, paths))
         .collect();
 
-    let output = tokio::process::Command::new(java_exe)
+    let mut command = tokio::process::Command::new(java_exe);
+    // A Forge processor is a jar from Forge's own manifest, run here on this
+    // machine, so it is given no more of Geode's environment than a server is.
+    // See [`crate::childenv`].
+    crate::childenv::keep_geodes_own_out(&mut command);
+    let output = command
         .arg("-cp")
         .arg(cp.join(sep))
         .arg(&main_class)

@@ -20,11 +20,41 @@ trap 'rm -rf "$work"' EXIT
 # needs, and the oldest of those are still Java 8.
 target=8
 
-asm_version=$(curl -fsSL https://repo1.maven.org/maven2/org/ow2/asm/asm/maven-metadata.xml \
-  | grep -oE '<release>[^<]+' | head -1 | cut -d'>' -f2)
+# ASM is pinned and checked rather than taken on trust. These bytes become
+# most of the class files in a jar that is committed, carried inside the
+# binary, and then handed to every server start as `-javaagent:` — the
+# earliest code in that JVM, on its system class path for the life of the
+# process — and nobody re-reads a committed jar. Asking the repository which
+# version is current and then asking the same repository for that version is
+# one host trusted twice, with TLS the only thing in between, and left no
+# record anywhere of which ASM a given jar holds.
+#
+# agent/asm.lock is "<version> <sha256>" and is committed beside the jar. A
+# first build with no lock records what it was served and says so; every build
+# after it refuses anything that is not those bytes.
+lock="$here/asm.lock"
+if [ -f "$lock" ]; then
+  read -r asm_version asm_sha256 < "$lock"
+else
+  asm_version=$(curl -fsSL https://repo1.maven.org/maven2/org/ow2/asm/asm/maven-metadata.xml \
+    | grep -oE '<release>[^<]+' | head -1 | cut -d'>' -f2)
+  asm_sha256=
+fi
 echo "asm $asm_version"
 curl -fsSL -o "$work/asm.jar" \
   "https://repo1.maven.org/maven2/org/ow2/asm/asm/$asm_version/asm-$asm_version.jar"
+
+got=$(sha256sum "$work/asm.jar" | cut -d' ' -f1)
+if [ -n "$asm_sha256" ]; then
+  if [ "$got" != "$asm_sha256" ]; then
+    echo "asm-$asm_version.jar is not the jar agent/asm.lock names, so nothing was built." >&2
+    echo "Expected $asm_sha256, was served $got." >&2
+    exit 1
+  fi
+else
+  printf '%s %s\n' "$asm_version" "$got" > "$lock"
+  echo "recorded asm $asm_version in agent/asm.lock — commit it with the jar"
+fi
 
 # The hook ships as its own jar nested inside the agent, because it is the only
 # class that goes on the bootstrap class loader. See Probe.java for why.

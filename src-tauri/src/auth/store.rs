@@ -206,8 +206,31 @@ impl AccountsFile {
 }
 
 /// Write a file only the owning user can read.
+///
+/// The mode is asked for as the file is created, never widened first and
+/// narrowed after — which is what a plain write does, and what left a refresh
+/// token and every host's token sitting at 0644 for the two awaits it took a
+/// chmod to land. The path is fixed and the folders above it are traversable,
+/// so that window needs no guessing to hit: one watch on the directory and
+/// whatever is watching reads the whole file. `share::identity::write_new`
+/// says the same thing about the sharing key, one module over.
+///
+/// The chmod stays as well, because creating with a mode does nothing for a
+/// file that is already there: a `config.json` or an `accounts.json` written
+/// by a Geode older than this is repaired by the next save.
 pub(crate) async fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
-    tokio::fs::write(path, bytes).await?;
+    use tokio::io::AsyncWriteExt;
+
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+
+    let mut file = options.open(path).await?;
+    file.write_all(bytes).await?;
+    file.flush().await?;
+    drop(file);
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -659,6 +682,61 @@ mod tests {
         // And an install with no accounts has nobody to offer.
         AccountsFile::default().save(&scratch.paths).await.unwrap();
         assert_eq!(offline_offer(&scratch.paths, None).await.unwrap(), None);
+    }
+
+    /// A credential file must never exist at a mode somebody else can read —
+    /// not at rest, and not for the moment between its bytes landing and a
+    /// chmod.
+    ///
+    /// `accounts.json` holds a Microsoft refresh token and `hosts.json` holds
+    /// a host's management token, the path to both is fixed, and every
+    /// directory above them is traversable, so "briefly" is long enough for
+    /// anything watching that folder: the window is two awaits wide, not one
+    /// instruction. Watched here by a thread doing nothing but stat the file,
+    /// over enough fresh creations that missing the window every time is not
+    /// how this passes. `share::identity` says the same thing about the
+    /// sharing key, and asserts it the same way.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_credential_file_is_never_readable_by_anyone_else() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let scratch = crate::paths::Scratch::new("accounts-mode");
+        tokio::fs::create_dir_all(&scratch.paths.root).await.unwrap();
+
+        for attempt in 0..24 {
+            let path = scratch.paths.root.join(format!("accounts-{attempt}.json"));
+            let watching = path.clone();
+            let done = Arc::new(AtomicBool::new(false));
+            let stop = done.clone();
+            let watcher = std::thread::spawn(move || {
+                let mut seen = Vec::new();
+                while !stop.load(Ordering::Relaxed) {
+                    if let Ok(meta) = std::fs::metadata(&watching) {
+                        let mode = meta.permissions().mode() & 0o777;
+                        if !seen.contains(&mode) {
+                            seen.push(mode);
+                        }
+                    }
+                }
+                seen
+            });
+
+            write_private(&path, br#"{"msa_refresh_token":"a-real-looking-token"}"#)
+                .await
+                .unwrap();
+            done.store(true, Ordering::Relaxed);
+
+            for mode in watcher.join().unwrap() {
+                assert_eq!(
+                    mode & 0o077,
+                    0,
+                    "the file existed at {mode:o}, which the rest of the machine can read"
+                );
+            }
+        }
     }
 
     #[test]

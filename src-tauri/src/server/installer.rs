@@ -79,6 +79,10 @@ pub async fn run_tool(
     progress.stage(stage, 0).await;
 
     let mut command = tokio::process::Command::new(java);
+    // An installer is a jar somebody else wrote, downloaded a moment ago, and
+    // it has no business reading Geode's own variables. See
+    // [`crate::childenv`].
+    crate::childenv::keep_geodes_own_out(&mut command);
     // Left to itself the JVM sizes the heap from the machine's memory, which is
     // how BuildTools ends up refusing to start on a small one.
     if let Some(mb) = heap_mb {
@@ -215,7 +219,11 @@ pub async fn preflight_buildtools(paths: &Paths, workspace: &Path) -> Result<()>
 /// Whether a command can be run at all and exits cleanly.
 #[cfg(unix)]
 async fn runs(program: &str, args: &[&str]) -> bool {
-    tokio::process::Command::new(program)
+    let mut command = tokio::process::Command::new(program);
+    // Nothing is asked of this shell but whether it starts, so it is started
+    // on the same terms as everything else here. See [`crate::childenv`].
+    crate::childenv::keep_geodes_own_out(&mut command);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

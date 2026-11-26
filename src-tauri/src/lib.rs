@@ -8,6 +8,7 @@
 //! webview toolchain anywhere near it.
 
 pub mod auth;
+pub mod childenv;
 #[cfg(feature = "desktop")]
 pub mod commands;
 pub mod config;

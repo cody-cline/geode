@@ -232,6 +232,33 @@ mod tests {
         );
     }
 
+    /// Most of the committed jar is ASM, and ASM is downloaded by
+    /// `agent/build.sh`. Nothing in a `cargo test` can say which ASM is in the
+    /// bytes above, but it can say that the script which put them there pinned
+    /// a version and checked a digest rather than trusting whichever release
+    /// the repository happened to name that afternoon — one response choosing
+    /// the version and the next supplying the bytes is one host trusted twice,
+    /// and these bytes go into every server's JVM as the earliest code in it.
+    /// A rule nothing enforces is a rule a tired afternoon skips.
+    #[test]
+    fn the_agents_asm_is_pinned_and_checked_against_a_digest() {
+        let script = include_str!("../../../agent/build.sh");
+        for needed in ["asm.lock", "sha256sum"] {
+            assert!(
+                script.contains(needed),
+                "agent/build.sh no longer mentions {needed}, so the ASM in the committed jar \
+                 is whatever answered"
+            );
+        }
+        // The version has to come off the lock file, not off the metadata the
+        // same server serves — otherwise the digest is checked against a
+        // version the server chose.
+        assert!(
+            script.contains("read -r asm_version asm_sha256"),
+            "agent/build.sh does not take its ASM version from agent/asm.lock"
+        );
+    }
+
     /// The one failure the agent cannot defend against, so this side must.
     ///
     /// A jar the JVM cannot open is fatal during VM initialisation — the server

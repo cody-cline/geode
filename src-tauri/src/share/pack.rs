@@ -2207,7 +2207,14 @@ async fn resolve_references(
             missing.push(format!("{} (not a safe path, so it was not fetched)", note.path));
             continue;
         }
-        let Some(kind) = kind_for(rel) else {
+        // One content folder and one file name, which is the only shape any
+        // export writes and the same two components `content_file` requires
+        // of a path a pack carries as bytes. `kind_for` reads the last folder
+        // alone, so `config/mods/x.jar` would resolve as a mod, be fetched
+        // into a folder no loader reads, and have a record written for it —
+        // keyed by kind and file name, with no path in it — that replaced the
+        // player's own record for their own `mods/x.jar`.
+        let Some(kind) = kind_for(rel).filter(|_| rel.components().count() == 2) else {
             missing.push(format!("{} (unrecognised folder)", note.path));
             continue;
         };
@@ -2554,7 +2561,15 @@ async fn server_mods<'a>(
                 if !entry.file_type().is_ok_and(|t| t.is_file()) {
                     continue;
                 }
-                let name = entry.file_name().to_string_lossy().to_string();
+                // Named as it is on disk or not at all. A name that is not
+                // text cannot be a zip entry, so the writer — which matches
+                // the real bytes of this entry against the paths it is given
+                // — would never carry it; counting it would promise a player
+                // a mod no pack can hold, and the revision would leave it out
+                // too, since the mangled path is a path no file is at.
+                let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                    continue;
+                };
                 if is_content_file(&name, kind) {
                     // Only a regular file gets this far, so reading what it
                     // declares follows no link.
@@ -3288,8 +3303,18 @@ async fn server_revision(
         // Only a path whose files actually travel. A behaviour chosen for a
         // folder this pack does not send changes nothing for anybody, and a
         // revision that moved for it would send every player a pack over a
-        // choice none of them can see.
+        // choice none of them can see. Which is reachable without any file
+        // moving: the config folder has to be on for `client-files/` to
+        // travel at all, so an admin sending nothing but `options.txt` has it
+        // on with every `config/` row unpicked, and the folder's own radio is
+        // still in front of them.
         for named in &settings.paths {
+            let travels = sent
+                .iter()
+                .any(|row| row.sent && super::manifest::covers(Path::new(&named.path), &row.rel));
+            if !travels {
+                continue;
+            }
             lines.push(format!(
                 "settings {} {} {}",
                 named.path,
@@ -10377,6 +10402,252 @@ mod tests {
         assert!(
             preview(&referencing).await.unwrap().needs_curseforge_key,
             "a note naming a CurseForge file needs the recipient's key"
+        );
+    }
+
+    /// A behaviour chosen for a folder whose files this pack does not send
+    /// reaches nobody, so it must not move the revision: every joined player
+    /// would fetch the whole pack again, and re-import it, over a choice none
+    /// of them can see. The two loops under this one in `server_revision`
+    /// filter on exactly that — an override whose path is not kept in sync, a
+    /// settings file that is not sent — and this is the one that was left
+    /// unguarded.
+    ///
+    /// Reachable without touching a file by hand, and in either order. The
+    /// only way `client-files/` travels at all is with the config folder
+    /// turned on, so an admin who wants to share nothing but `options.txt`
+    /// turns it on and then unticks every `config/` row. The folder's radio
+    /// stays on screen — it is offered off `include_config` alone — and
+    /// clicking it is a real change to `share.json` that reaches no file any
+    /// player holds. Narrowing the picks afterwards reaches the same state:
+    /// picking replaces the list and never prunes a behaviour chosen earlier.
+    ///
+    /// The control at the end is half the point: once a `config/` file is
+    /// picked again the folder's behaviour does describe a file players
+    /// receive, and then the revision has to move — or the admin's choice is
+    /// one nobody is ever sent.
+    #[tokio::test]
+    async fn a_behaviour_chosen_for_a_folder_the_pack_does_not_send_moves_no_revision() {
+        let (scratch, server) = small_server(
+            "folder-policy",
+            &[
+                ("mods/a.jar", b"a".to_vec()),
+                ("config/sodium.properties", b"renderDistance=8\n".to_vec()),
+                ("client-files/options.txt", b"version:3955\nfov:70.0\n".to_vec()),
+            ],
+            true,
+        )
+        .await;
+        let paths = scratch.paths.clone();
+
+        // Config on, and only the client file picked: no file under `config/`
+        // is on its way, so there is nothing the folder's behaviour could
+        // describe.
+        pick(
+            &paths,
+            &server.id,
+            &[("client-files/options.txt", Policy::ShipOnce)],
+        )
+        .await;
+        let narrowed = revision_of(&paths, &server).await;
+        let dest = pack_now(&paths, &server, "folder-policy-picked").await;
+        assert_eq!(settings_in(&dest), vec!["options.txt"], "{:?}", entries(&dest));
+
+        // Away from the behaviour in force and then back to it. Both are real
+        // changes to the share file — `Settings::choose` writes nothing for a
+        // behaviour already in force, so neither of these is a no-op — and
+        // neither reaches a file any player holds.
+        for policy in [Policy::Merge, Policy::Enforce] {
+            choose_config(&paths, &server.id, policy).await;
+            assert_eq!(
+                revision_of(&paths, &server).await,
+                narrowed,
+                "{policy:?} chosen for a folder the pack sends no file out of"
+            );
+            assert_eq!(
+                settings_in(&pack_now(&paths, &server, "folder-policy-again").await),
+                vec!["options.txt"],
+                "and the pack still carries the one file it carried"
+            );
+        }
+
+        // The control: pick a `config/` file as well, and the folder now
+        // covers something players receive, so changing its behaviour must
+        // move the revision.
+        pick(
+            &paths,
+            &server.id,
+            &[
+                ("client-files/options.txt", Policy::ShipOnce),
+                ("config/sodium.properties", Policy::Enforce),
+            ],
+        )
+        .await;
+        let sending = revision_of(&paths, &server).await;
+        assert_ne!(sending, narrowed, "a config file started travelling");
+        choose_config(&paths, &server.id, Policy::Merge).await;
+        let merging = revision_of(&paths, &server).await;
+        assert_ne!(
+            merging, sending,
+            "a behaviour chosen for a folder the pack does send reaches every player's copy"
+        );
+
+        // And again between two behaviours that leave the rest of the
+        // description alone, because the step above does not on its own prove
+        // the settings line is what moved. Enforce is the one behaviour whose
+        // `config-file` line carries a hash; away from it that line becomes
+        // `sent`, so the revision would have moved for the folder's choice
+        // even if the choice were never written down. Merge to ship-once is
+        // `sent` either side, the client file's own choice is its own, and
+        // nothing is pushed, so the folder's line is the only thing left that
+        // can move this — and it has to.
+        choose_config(&paths, &server.id, Policy::ShipOnce).await;
+        assert_ne!(
+            revision_of(&paths, &server).await,
+            merging,
+            "the folder's behaviour is the only thing that changed, so it is what has to move it"
+        );
+    }
+
+    /// A jar whose name is not text is in `mods/` as surely as its neighbour,
+    /// and the count a joining player is shown promised it: the walk names
+    /// every entry with `to_string_lossy`, so the mangled name went into
+    /// `carried` and was counted. Nothing else could follow it. The writer
+    /// matches the real bytes of a directory entry against the paths it was
+    /// given and never finds the mangled one, so the zip cannot carry it; the
+    /// revision joins the mangled path onto the run directory, finds no file
+    /// there and leaves it out, so even once the admin renames the jar the
+    /// revision moves for the rename and never for the mod having been absent
+    /// all along. The preview said two mods, one arrived, and nothing
+    /// anywhere said which.
+    ///
+    /// Counted in nothing that does not send it is the rule, and it is the
+    /// same rule `the_preview_counts_the_mods_the_pack_actually_carries`
+    /// holds: the count, the revision and the zip are one answer about this
+    /// server, so a name this build cannot put in a zip entry belongs to none
+    /// of them.
+    ///
+    /// Not macOS, for the reason
+    /// `a_non_utf8_path_is_reported_rather_than_mangled` gives: APFS and HFS+
+    /// refuse the name outright, so there is nothing there for the behaviour
+    /// to be about.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[tokio::test]
+    async fn a_jar_whose_name_is_not_text_is_counted_in_nothing_that_sends_it() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let (scratch, server) =
+            small_server("badname", &[("mods/fine.jar", b"fine".to_vec())], false).await;
+        let paths = scratch.paths.clone();
+        let name = std::ffi::OsStr::from_bytes(b"sodium\xff.jar");
+        tokio::fs::write(
+            paths.server_run(&server.id).join("mods").join(name),
+            b"not really a jar",
+        )
+        .await
+        .unwrap();
+
+        let info = server_pack_info(&paths, &server).await.unwrap();
+        let dest = pack_now(&paths, &server, "badname").await;
+        assert_eq!(info.mods, mods_in(&dest), "{:?}", entries(&dest));
+        assert_eq!(info.mods, 1, "{:?}", entries(&dest));
+        assert!(
+            entries(&dest).iter().all(|n| !n.contains('\u{fffd}')),
+            "a mangled name went into the pack: {:?}",
+            entries(&dest)
+        );
+        // And its neighbour still travels, so this is not a description of a
+        // pack that gave up.
+        assert!(
+            entries(&dest).contains(&"overrides/mods/fine.jar".to_string()),
+            "{:?}",
+            entries(&dest)
+        );
+    }
+
+    /// A reference's path is one content folder and one file name — the same
+    /// two components `content_file` requires of every path a pack carries as
+    /// bytes, and the only shape any export writes. `kind_for` reads the last
+    /// folder alone, so `config/mods/victim.jar` resolved as a mod: it would
+    /// have been fetched into a folder no loader reads, and the record built
+    /// for it — keyed by kind and file name, with no path in it anywhere —
+    /// would have replaced the player's own record for their own
+    /// `mods/victim.jar`, leaving their jar on disk reporting a project
+    /// somebody else chose, offering them that project's files as its
+    /// updates, and answering the server's own forbid list as it.
+    ///
+    /// Refused where `../../` is refused, before any provider is asked, and
+    /// said rather than skipped for the same reason: an empty list has to mean
+    /// everything the pack named arrived.
+    ///
+    /// What is checked here is the refusal and where it happens, not the
+    /// eviction: with no key nothing is fetched and no record is written, so a
+    /// player's record survives this pack today whatever the path says, and an
+    /// assertion about it would pass for the wrong reason. The eviction is why
+    /// the refusal has to come before the provider — the message is what pins
+    /// that.
+    #[tokio::test]
+    async fn a_reference_nested_below_a_content_folder_is_refused() {
+        let (scratch, inst) = fixture("nested", &[("mods", "victim.jar")]).await;
+        let paths = scratch.paths.clone();
+        let dest = paths.root.join("nested.geodepack");
+        export(
+            Ask::Nobody,
+            &paths,
+            &inst,
+            dest.clone(),
+            &Selection::default(),
+            &Progress::silent("t"),
+        )
+        .await
+        .unwrap();
+        rewrite_pack(
+            &dest,
+            |m| {
+                for path in ["config/mods/victim.jar", "mods/ordinary.jar"] {
+                    m.files.push(FileNote {
+                        path: path.into(),
+                        side: None,
+                        source: Some(SourceRef {
+                            provider: "curseforge".into(),
+                            project_id: "1".into(),
+                            version_id: "2".into(),
+                        }),
+                        disabled: false,
+                    })
+                }
+            },
+            &[],
+        );
+
+        let mut arrived = fresh("nested-arrived");
+        let missing = import_offline(&paths, &mut arrived, &dest).await.unwrap();
+        let said = |path: &str| {
+            missing
+                .iter()
+                .find(|m| m.starts_with(path))
+                .unwrap_or_else(|| panic!("nothing said about {path}: {missing:?}"))
+                .clone()
+        };
+
+        let nested = said("config/mods/victim.jar");
+        assert!(nested.contains("unrecognised folder"), "{nested}");
+        // Refused as a path, so no provider was asked and no key was wanted:
+        // the depth is not something a recipient's own credentials could make
+        // right.
+        assert!(
+            !nested.contains("CurseForge"),
+            "the path was refused before anything was asked about it: {nested}"
+        );
+        // The control, and the reason this is a depth rule rather than a
+        // narrower folder list: the shape every export actually writes — one
+        // content folder, one file name — still gets as far as wanting the
+        // recipient's key. A refusal that swallowed this one would refuse
+        // every reference any pack carries.
+        let ordinary = said("mods/ordinary.jar");
+        assert!(
+            ordinary.contains("CurseForge") && !ordinary.contains("unrecognised folder"),
+            "{ordinary}"
         );
     }
 }

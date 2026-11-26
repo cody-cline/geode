@@ -219,10 +219,15 @@ impl Config {
         }
     }
 
+    /// Written owner-only, like `accounts.json` beside it. Nothing in Geode
+    /// can save a CurseForge key today — the box to paste one into was taken
+    /// out on purpose — but `curseforge_api_key` and `client_id` are still
+    /// fields in this file, and a config that can hold a credential is not one
+    /// to leave at 0644 waiting for the day one arrives.
     pub async fn save(&self, paths: &Paths) -> Result<()> {
         tokio::fs::create_dir_all(&paths.root).await?;
-        tokio::fs::write(paths.config_file(), serde_json::to_vec_pretty(self)?).await?;
-        Ok(())
+        crate::auth::store::write_private(&paths.config_file(), &serde_json::to_vec_pretty(self)?)
+            .await
     }
 
     /// The Azure application id to actually sign in with: whatever the user
@@ -465,6 +470,24 @@ mod tests {
             config.effective_client_id().as_deref(),
             Some("typed-into-settings")
         );
+    }
+
+    /// `config.json` has fields for a CurseForge key and an application id, so
+    /// it is written on the same terms as the accounts beside it rather than
+    /// on the terms of a file holding only a theme.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_config_is_readable_only_by_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = crate::paths::Scratch::new("config-mode");
+        Config::default().save(&scratch.paths).await.unwrap();
+
+        let mode = std::fs::metadata(scratch.paths.config_file())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     /// A field cleared to spaces is a field with nothing in it, not an id

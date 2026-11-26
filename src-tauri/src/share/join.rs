@@ -30,6 +30,22 @@ pub(super) const MAX_PACK_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// not get to make a player's Geode hold gigabytes to find out it is junk.
 const MAX_REPLY_BYTES: usize = 64 * 1024;
 
+/// The most of its own words a server gets to put on a player's screen.
+///
+/// Its refusals and the strings in its pack description are the server's text,
+/// shown in Geode's own dialog, and a desktop app has no address bar to say
+/// otherwise — so they are held to what copy on a screen can be, the way
+/// `auth::describe_oauth_error` holds Microsoft's. The reply is bounded at
+/// [`MAX_REPLY_BYTES`], which stops a server exhausting memory and nothing
+/// else.
+const MAX_SAID: usize = 300;
+
+/// A pack's name as shown, and the length of the ids beside it: the Minecraft
+/// version, the loader, its version, the server software. Generous for a real
+/// name, far short of a paragraph.
+const MAX_NAME: usize = 120;
+const MAX_ID: usize = 40;
+
 /// The whole of a preview's request. Describing a pack builds nothing, so a
 /// server that takes longer than this to say what it shares has stopped, and
 /// the player is still looking at the dialog waiting to hear.
@@ -249,6 +265,31 @@ fn setup(mc_version: &str, loader: &str, loader_version: &str) -> String {
     }
 }
 
+/// Whether there is a machine at the other end of this link at all, asked
+/// before anything is connected to.
+///
+/// `0.0.0.0`, `::`, a multicast group and `255.255.255.255` all parse, and
+/// none of them names a server a player could join — each one would send every
+/// player to their own computer, or to nothing. So a link carrying one was
+/// built rather than copied, and the only thing asking it achieves is making
+/// Geode open a socket somewhere whoever wrote the link chose. A join link
+/// opens the dialog and the dialog looks the server up on sight, so this is
+/// the last point where that can be said. `game_address` turns the same
+/// addresses away, for the same reason and in the same words.
+///
+/// Loopback and the private ranges are deliberately *not* screened here. A
+/// server shared to friends on the same LAN is the ordinary case — which is
+/// why `check_public_address` allows a private address too — and the hosts
+/// these tests and the live ones talk to answer on 127.0.0.1.
+fn joinable(link: &Link) -> Result<()> {
+    match link.address.unreachable_ip() {
+        Some(ip) => Err(Error::msg(format!(
+            "{ip} is not an address a server can be joined at — ask for the link again"
+        ))),
+        None => Ok(()),
+    }
+}
+
 /// How a link says its server should be trusted.
 fn trust_for(link: &Link) -> Trust {
     match (&link.address, link.pin) {
@@ -264,6 +305,7 @@ fn trust_for(link: &Link) -> Trust {
 /// written into the returned link — so the download that follows is pinned to
 /// the same machine that answered now, not to whoever answers next.
 pub async fn preview(mut link: Link) -> Result<JoinPreview> {
+    joinable(&link)?;
     let trust = trust_for(&link);
     let client = TrustedClient::new(trust)?;
     // Nothing cancels a preview; its deadline is what ends one.
@@ -277,8 +319,9 @@ pub async fn preview(mut link: Link) -> Result<JoinPreview> {
         &uncancelled,
     )
     .await?;
-    let info: PackInfo = serde_json::from_slice(&read_reply(response, &uncancelled).await?)
+    let mut info: PackInfo = serde_json::from_slice(&read_reply(response, &uncancelled).await?)
         .map_err(|_| Error::msg("the server's answer was not a Geode pack description"))?;
+    shortened(&mut info);
 
     let verified = match trust {
         Trust::Pinned(_) => Verified::Pinned,
@@ -306,6 +349,7 @@ pub async fn preview(mut link: Link) -> Result<JoinPreview> {
 /// has filled one in, and a link that still lacks it has skipped the step that
 /// decides who to trust.
 pub async fn download(link: &Link, dest: &Path, progress: &Progress) -> Result<()> {
+    joinable(link)?;
     if matches!(link.address, Address::Direct { .. }) && link.pin.is_none() {
         return Err(Error::msg(
             "this server has not been verified yet — open its link again to see what it shares",
@@ -379,21 +423,70 @@ async fn request(
             "something answered at that address, but it is not a Geode server sharing a pack",
         )),
         status => {
-            // A Geode server explains itself in `{"error": "…"}`; say that.
-            // Anything else it sent, however much, is only a reason to fall
-            // back on the status.
-            let said = match read_reply(response, progress).await {
+            let body = match read_reply(response, progress).await {
                 Err(Error::Cancelled) => return Err(Error::Cancelled),
-                body => body
-                    .ok()
-                    .and_then(|body| serde_json::from_slice::<serde_json::Value>(&body).ok())
-                    .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string)),
+                // Anything it sent that cannot be read is only a reason to
+                // fall back on the status.
+                body => body.unwrap_or_default(),
             };
-            Err(Error::msg(said.unwrap_or_else(|| {
-                format!("the server refused the request ({status})")
-            })))
+            Err(refusal(status, &body))
         }
     }
+}
+
+/// What a player is told when a server answers with a status rather than a
+/// pack.
+///
+/// A Geode server explains itself in `{"error": "…"}`, and that explanation is
+/// worth passing on — attributed, and only as much of it as a line of copy,
+/// because whoever is at that address wrote it. The address came out of a
+/// link, the fingerprint in the link is their own certificate, and nothing
+/// bounds what they put in this field inside the 64 KiB [`read_reply`] allows:
+/// nine kilobytes of "your Microsoft session has expired, sign in again at …"
+/// used to arrive in the join dialog as Geode's own sentence, in an app with
+/// no address bar to disagree with it. `auth::describe_oauth_error` holds
+/// Microsoft's own field to the same first line and 300 characters, and says
+/// why in the same words.
+fn refusal(status: reqwest::StatusCode, body: &[u8]) -> Error {
+    let said = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+        .as_deref()
+        .and_then(one_line_of);
+    match said {
+        Some(said) => Error::msg(format!("the server said: {said}")),
+        None => Error::msg(format!("the server refused the request ({status})")),
+    }
+}
+
+/// What a server said, as a line of copy: its first line, trimmed, and no more
+/// of it than a sentence. `None` for a field with nothing in it, which is a
+/// server saying nothing rather than a server saying "".
+fn one_line_of(said: &str) -> Option<String> {
+    let line: String = said.lines().next()?.trim().chars().take(MAX_SAID).collect();
+    (!line.is_empty()).then_some(line)
+}
+
+/// Hold the server's own strings to what the dialog can show, for the same
+/// reason [`one_line_of`] holds its refusals: every one of these is text the
+/// server chose, the player reads them while deciding whether to trust it, and
+/// the name goes on to be the instance's own.
+///
+/// The versions and the loader are compared against the pack that arrives
+/// ([`check_matches`]), so shortening one could only turn a match into a
+/// mismatch — and no real Minecraft version or loader is anywhere near this
+/// long.
+fn shortened(info: &mut PackInfo) {
+    let cut = |s: &mut String, limit: usize| {
+        if s.chars().count() > limit {
+            *s = s.chars().take(limit).collect();
+        }
+    };
+    cut(&mut info.name, MAX_NAME);
+    cut(&mut info.mc_version, MAX_ID);
+    cut(&mut info.loader, MAX_ID);
+    cut(&mut info.loader_version, MAX_ID);
+    cut(&mut info.server_kind, MAX_ID);
 }
 
 /// A reply that has to be held whole to be read, collected as it arrives and
@@ -1090,6 +1183,81 @@ mod tests {
                 "certificateChanged": true,
             })
         );
+    }
+
+    /// A link that opened Geode is looked up the moment the dialog mounts, so
+    /// an address that names no machine has to be turned away before a socket
+    /// is opened rather than reported as a server that did not answer.
+    #[tokio::test]
+    async fn a_link_to_nowhere_is_refused_before_anything_is_connected_to() {
+        let code = Code::generate();
+        for nowhere in ["0.0.0.0", "::", "255.255.255.255", "224.0.0.1"] {
+            let link = direct(nowhere, 25590, &code, Some(Pin([1; 32])));
+            let err = promptly(nowhere, preview(link)).await.unwrap_err();
+            assert!(
+                err.to_string().contains("is not an address a server can be joined at"),
+                "{nowhere} was asked anyway: {err}"
+            );
+        }
+    }
+
+    /// A server's refusal is the server's, said as such and said short.
+    ///
+    /// The field is passed on because a Geode server uses it to explain
+    /// itself, but whoever is at that address wrote it, and the join dialog is
+    /// the one place in Geode where a stranger's prose and Geode's own sit in
+    /// the same panel. Nine kilobytes of "sign in again at …" arrived there as
+    /// Geode's own sentence, with no address bar anywhere to contradict it.
+    #[tokio::test]
+    async fn a_servers_own_refusal_is_attributed_and_held_to_a_line() {
+        let phish = format!(
+            "Your Microsoft session has expired. Sign in again at https://geode-login.invalid \
+             to keep your worlds.\n{}",
+            "PADDING ".repeat(1200)
+        );
+        let body = serde_json::to_vec(&serde_json::json!({ "error": phish })).unwrap();
+        assert!(body.len() > 9000, "the payload must be worth bounding");
+
+        let link = answering(whole("403 Forbidden", "", &body)).await;
+        let said = promptly("a hostile refusal", preview(link))
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            said.starts_with("the server said: "),
+            "the server's words must not be Geode's: {said}"
+        );
+        assert!(
+            said.chars().count() <= "the server said: ".len() + MAX_SAID,
+            "{} characters of somebody else's prose reached the dialog",
+            said.chars().count()
+        );
+        assert!(
+            !said.contains("PADDING"),
+            "only the first line of it is copy: {said}"
+        );
+        assert!(
+            said.contains("Microsoft session has expired"),
+            "a Geode server's own explanation still has to arrive: {said}"
+        );
+    }
+
+    /// And the same rule on the way a server succeeds: every string in a pack
+    /// description is text it chose, read by a player deciding whether to
+    /// trust it, and the name becomes the instance's own.
+    #[tokio::test]
+    async fn a_servers_pack_description_is_held_to_what_the_dialog_can_show() {
+        let mut info = described("1.21.1", Loader::Fabric, "0.16.9");
+        info.name = "A".repeat(4000);
+        info.server_kind = "B".repeat(4000);
+        let body = serde_json::to_vec(&info).unwrap();
+
+        let link = answering(whole("200 OK", "", &body)).await;
+        let found = promptly("a long-winded pack", preview(link)).await.unwrap();
+
+        assert_eq!(found.info.name.chars().count(), MAX_NAME);
+        assert_eq!(found.info.server_kind.chars().count(), MAX_ID);
     }
 
     /// A gzip bomb: well inside the limit on the wire, megabytes once

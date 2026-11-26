@@ -1033,7 +1033,15 @@ async fn spawn(
         ));
     }
 
-    let mut child = tokio::process::Command::new(&java)
+    let mut command = tokio::process::Command::new(&java);
+    // Everything in this JVM is somebody else's: the server software, the
+    // admin's mods and plugins, whatever a plugin loads. A host tells `geoded`
+    // its token through the environment, and a child inherits that block
+    // whole, so without this `System.getenv("GEODE_TOKEN")` inside a mod is
+    // the host's only credential — every server on the machine, including the
+    // transfer that copies one off it and then deletes the source.
+    crate::childenv::keep_geodes_own_out(&mut command);
+    let mut child = command
         .args(build_args(server, agent.as_deref()))
         .current_dir(&run)
         .stdout(Stdio::piped())

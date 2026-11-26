@@ -32,8 +32,15 @@
 //! A link is hostile until [`Opened::parse`] accepts it: any web page can
 //! navigate to `geode://`, and any local process can start Geode with an
 //! argument or call the running copy. Only the normalised form ever reaches
-//! the webview, and nothing here acts on it — the window shows the player what
-//! the pack is and waits for them to say yes.
+//! the webview, and nothing here acts on it.
+//!
+//! What the window then does is worth stating exactly, because "waits for them
+//! to say yes" has been read as more than it says. A join link is looked up as
+//! the dialog opens — one read of the address the link named, so the player
+//! has something to decide about — and nothing is downloaded, written or
+//! imported until they press the button. [`crate::share::join`] is where that
+//! read is held to an address a server could actually be at, since a link that
+//! names nowhere is a link nobody shared.
 
 use std::sync::Mutex;
 
