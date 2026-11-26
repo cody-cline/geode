@@ -490,6 +490,19 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600);
     }
 
+    /// The same claim on Windows, where it is an access list rather than a
+    /// mode.
+    ///
+    /// **This has never executed.** Nobody has run `cargo test` on Windows.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn the_config_carries_an_owner_only_access_list() {
+        let scratch = crate::paths::Scratch::new("config-acl");
+        Config::default().save(&scratch.paths).await.unwrap();
+
+        crate::auth::store::winacl::assert_owner_only(&scratch.paths.config_file());
+    }
+
     /// A field cleared to spaces is a field with nothing in it, not an id
     /// that happens to be blank — otherwise clearing the box would turn
     /// sign-in off in a build that can sign in perfectly well.

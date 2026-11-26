@@ -304,7 +304,23 @@ pub async fn save(paths: &Paths, id: &str, share: &ServerShare) -> Result<()> {
     } else {
         stopped_path(paths, id)
     };
-    super::write_atomic_private(&file, &serde_json::to_vec_pretty(share)?).await
+    super::write_atomic_private(&file, &serde_json::to_vec_pretty(share)?).await?;
+
+    // Windows has no mode, so the owner-only part of that write is asked for
+    // here instead — and this is the one place in Geode where it is asked for
+    // *after* the bytes rather than as they are written. The atomic write is a
+    // temporary file renamed over this one, a rename hands the target whatever
+    // access list the temporary file had, and that file is created by
+    // `server::write_atomic_private` rather than here. So the password exists
+    // under whatever the server's folder grants for the moment between the
+    // rename and this call. Closing that means creating the temporary file
+    // through `winacl`, in `server/mod.rs`.
+    //
+    // A later rename keeps what this sets: `start` and `stop` only move the
+    // file between `share.json` and `share.stopped.json`.
+    #[cfg(windows)]
+    crate::auth::store::winacl::protect(&file).await?;
+    Ok(())
 }
 
 /// Share a server: again with the password it has, or with a new one the first
@@ -685,6 +701,26 @@ mod tests {
         // again brings it back.
         stop(&paths, "survival").await.unwrap();
         assert_eq!(mode_of("share.stopped.json"), 0o600);
+    }
+
+    /// The same on Windows, including the part a mode gets for free: the
+    /// rename in `stop` has to carry the access list over, or the password is
+    /// protected while shared and open while it is not.
+    ///
+    /// **This has never executed.** Nobody has run `cargo test` on Windows.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn only_this_account_can_read_a_servers_password_on_windows() {
+        let scratch = scratch("share-acl");
+        let paths = scratch.paths.clone();
+        let dir = paths.server("survival");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        start(&paths, "survival").await.unwrap();
+        crate::auth::store::winacl::assert_owner_only(&dir.join("share.json"));
+
+        stop(&paths, "survival").await.unwrap();
+        crate::auth::store::winacl::assert_owner_only(&dir.join("share.stopped.json"));
     }
 
     /// A Geode from before passwords were kept reads `share.json` and nothing

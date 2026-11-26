@@ -394,8 +394,11 @@ tools/                  geode-probe.jar, and a portable git for BuildTools
 ```
 
 `hosts.json` holds the `geoded` hosts this copy can reach and the token for
-each, written owner-only like `accounts.json`; `remote.rs` is the only thing
-that reads it, and no token ever crosses the IPC boundary.
+each, written owner-only like `accounts.json` — 0600 on Unix, which a test
+watches for; on Windows an access list naming this account, Local System and
+Administrators with inheritance off, which compiles and has never run
+(`auth/store/winacl.rs`); `remote.rs` is the only thing that reads it, and no
+token ever crosses the IPC boundary.
 `transfers/<id>/` is deliberately *not* under `servers/`: `server::list` reads
 every directory there, so a half-arrived server in it would show in the app as
 a real one the moment its `server.json` landed. A folder in `transfers/` is a

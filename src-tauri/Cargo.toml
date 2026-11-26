@@ -144,6 +144,22 @@ getrandom = "0.3.4"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# What `0o600` is on Windows: the DACL `auth/store/winacl.rs` puts on
+# `accounts.json`, `hosts.json`, `config.json`, a server's share password and
+# the sharing key, because Windows has no mode to ask for. Already in the
+# Windows dependency graph at this version — tokio, socket2 and dirs-sys all
+# build it — so this asks for features on a crate that was being compiled
+# anyway rather than adding one. Behind `cfg(windows)` so neither the Linux app
+# nor the headless `geoded` sees it at all.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 # A fake UPnP gateway, so port mapping is tested without touching a real router.
 mock-igd = "0.3"

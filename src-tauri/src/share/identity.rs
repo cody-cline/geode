@@ -52,7 +52,9 @@ impl Identity {
     /// Read the identity from disk, creating and saving one the first time.
     ///
     /// Files: `share/identity.crt` (DER) and `share/identity.key` (DER,
-    /// PKCS#8, mode 0600 on Unix). A key file that exists but will not parse
+    /// PKCS#8, readable only by this account — mode 0600 on Unix, and on
+    /// Windows the access list [`crate::auth::store::winacl`] asks for, which
+    /// has never run). A key file that exists but will not parse
     /// is an error, never silently replaced — replacing it would break every
     /// link out there without saying why.
     pub async fn load_or_create(paths: &Paths) -> Result<Self> {
@@ -145,14 +147,27 @@ fn create(dir: &Path, cert_path: &Path, key_path: &Path) -> Result<Identity> {
 /// Synced before returning because a link can be handed out the moment this
 /// succeeds, and a crash that left an empty key behind would be refused on
 /// every launch after it.
+///
+/// Windows has no mode, so `mode` is read there as the intent it carries: a
+/// file nobody else may read — the key, not the certificate — is created
+/// through [`crate::auth::store::winacl`], which asks for its access list as
+/// the file comes into being for exactly the reason above. That path has
+/// never run; the module says so.
 fn write_new(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, mode);
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     let _ = mode;
 
+    #[cfg(windows)]
+    let mut file = if mode & 0o077 == 0 {
+        crate::auth::store::winacl::create_new(path)?
+    } else {
+        options.open(path)?
+    };
+    #[cfg(not(windows))]
     let mut file = options.open(path)?;
     file.write_all(bytes)
         .and_then(|()| file.sync_all())
@@ -271,6 +286,20 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    /// The same for Windows, where the key's access list is asked for as the
+    /// file is created. The certificate beside it is deliberately not checked:
+    /// every link handed out names it, and it is meant to be public.
+    ///
+    /// **This has never executed.** Nobody has run `cargo test` on Windows.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn the_key_carries_an_owner_only_access_list() {
+        let temp = Scratch::new("identity-acl");
+        Identity::load_or_create(&temp.paths).await.unwrap();
+
+        crate::auth::store::winacl::assert_owner_only(&temp.paths.share_dir().join(KEY_FILE));
     }
 
     /// The first share on a machine can ask for the identity from two places

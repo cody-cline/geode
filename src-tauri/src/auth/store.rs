@@ -12,6 +12,13 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::paths::Paths;
 
+/// How [`write_private`] asks for the same thing on Windows, where there is no
+/// mode. Lives under this file because `write_private` is what every
+/// credential file in Geode goes through; `config.rs`, `remote.rs`,
+/// `share::identity` and `server::share` all reach it from here.
+#[cfg(windows)]
+pub(crate) mod winacl;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AccountKind {
@@ -207,7 +214,7 @@ impl AccountsFile {
 
 /// Write a file only the owning user can read.
 ///
-/// The mode is asked for as the file is created, never widened first and
+/// The protection is asked for as the file is created, never widened first and
 /// narrowed after — which is what a plain write does, and what left a refresh
 /// token and every host's token sitting at 0644 for the two awaits it took a
 /// chmod to land. The path is fixed and the folders above it are traversable,
@@ -218,6 +225,14 @@ impl AccountsFile {
 /// The chmod stays as well, because creating with a mode does nothing for a
 /// file that is already there: a `config.json` or an `accounts.json` written
 /// by a Geode older than this is repaired by the next save.
+///
+/// Two platforms, two mechanisms, and the second one has never run. On Unix
+/// that is the mode above. On Windows there is no mode, so [`winacl`] asks
+/// instead for an access list naming this account, Local System and the
+/// Administrators group, with inheritance off — created with the file where
+/// there is no file yet, and replaced before these bytes land where there is.
+/// That code compiles and is written to the API's contract; nobody has watched
+/// it work. The module says so at more length.
 pub(crate) async fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     use tokio::io::AsyncWriteExt;
 
@@ -225,6 +240,12 @@ pub(crate) async fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
     options.mode(0o600);
+
+    // Before the open, not after it: a list set afterwards is the window the
+    // mode above exists to avoid, and a handle opened inside that window
+    // outlives the repair on Windows, where access is decided at open time.
+    #[cfg(windows)]
+    winacl::ensure(path).await?;
 
     let mut file = options.open(path).await?;
     file.write_all(bytes).await?;
@@ -737,6 +758,35 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The same claim on Windows, which has no mode to watch: the file is
+    /// readable by this account, Local System and the Administrators group,
+    /// and inherits nothing from the folder it sits in.
+    ///
+    /// Asserted at rest rather than watched, because there is no cheap thing
+    /// to poll — `winacl` asks for the access list as the file is created and
+    /// replaces it before the bytes of an existing one, so the window the Unix
+    /// test above hunts for has nowhere to open. Both halves of that are
+    /// covered here: the second write is the repair path.
+    ///
+    /// **This has never executed.** Nobody has run `cargo test` on Windows.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_credential_file_carries_an_owner_only_access_list() {
+        let scratch = crate::paths::Scratch::new("accounts-acl");
+        tokio::fs::create_dir_all(&scratch.paths.root).await.unwrap();
+        let path = scratch.paths.accounts_file();
+
+        write_private(&path, br#"{"msa_refresh_token":"a-real-looking-token"}"#)
+            .await
+            .unwrap();
+        winacl::assert_owner_only(&path);
+
+        write_private(&path, br#"{"msa_refresh_token":"a-renewed-one"}"#)
+            .await
+            .unwrap();
+        winacl::assert_owner_only(&path);
     }
 
     #[test]

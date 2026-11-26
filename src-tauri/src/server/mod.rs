@@ -611,8 +611,22 @@ async fn replace(path: &std::path::Path, bytes: &[u8], mode: Option<u32>) -> Res
     use std::sync::atomic::{AtomicU64, Ordering};
     use tokio::io::AsyncWriteExt;
 
-    // Windows has no mode to ask for: a file under %APPDATA% inherits an ACL
-    // that is the owning user's already.
+    // Windows has no mode to ask for, and what replaces one does not happen
+    // here. A rename hands the target whatever the *temporary* file carried,
+    // so the caller that wants an access list has to set it afterwards —
+    // `server/share.rs` does, and says in its own comment that this leaves the
+    // password under the folder's own grant for the moment in between. The
+    // better fix is to create this temporary file through
+    // `auth::store::winacl` so the list arrives with the bytes; it is not done
+    // here because nothing has ever run that code on Windows and a wrong
+    // descriptor at this seam would lock Geode out of its own files.
+    //
+    // What this comment used to say — that a file under %APPDATA% inherits an
+    // ACL that is the owning user's already — was an unsupported guarantee.
+    // Measured on a real install, such a file does come out readable only by
+    // the user, SYSTEM and Administrators, but by that machine's policy
+    // rather than by anything Geode asked for: the folders of twenty
+    // unrelated applications in the same %APPDATA% carry the identical list.
     #[cfg(not(unix))]
     let _ = mode;
 
