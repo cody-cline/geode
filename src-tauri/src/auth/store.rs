@@ -717,6 +717,12 @@ mod tests {
     /// over enough fresh creations that missing the window every time is not
     /// how this passes. `share::identity` says the same thing about the
     /// sharing key, and asserts it the same way.
+    ///
+    /// What a mode-less create would give is the umask's business, so that is
+    /// measured first — see
+    /// [`crate::paths::insist_others_could_read_a_plain_file`]. Without it this
+    /// passes on a machine at `umask 077` with the `mode(0o600)` and the chmod
+    /// both taken out, since every create there is already owner-only.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_credential_file_is_never_readable_by_anyone_else() {
@@ -726,6 +732,7 @@ mod tests {
 
         let scratch = crate::paths::Scratch::new("accounts-mode");
         tokio::fs::create_dir_all(&scratch.paths.root).await.unwrap();
+        crate::paths::insist_others_could_read_a_plain_file(&scratch.paths.root);
 
         for attempt in 0..24 {
             let path = scratch.paths.root.join(format!("accounts-{attempt}.json"));

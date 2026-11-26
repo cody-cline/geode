@@ -677,6 +677,13 @@ mod tests {
     /// including whatever the admin chose to send out of `config/`. The
     /// sharing private key next to it has been owner-only from the start; this
     /// is the other half of the same thing.
+    ///
+    /// The mode a rename hands the target is the temporary file's, and without
+    /// one asked for that is the umask's, so this measures what the umask here
+    /// would have given — see
+    /// [`crate::paths::insist_others_could_read_a_plain_file`]. At `umask 077`
+    /// it would pass with `write_atomic_private` swapped back for
+    /// `write_atomic`.
     #[cfg(unix)]
     #[tokio::test]
     async fn only_this_account_can_read_a_servers_password() {
@@ -686,6 +693,7 @@ mod tests {
         let paths = scratch.paths.clone();
         let dir = paths.server("survival");
         std::fs::create_dir_all(&dir).unwrap();
+        crate::paths::insist_others_could_read_a_plain_file(&dir);
 
         let mode_of = |file: &str| {
             std::fs::metadata(dir.join(file))

@@ -58,6 +58,21 @@
 //! rather than being skipped: a sequence that silently lost a mod would assert
 //! nothing.
 //!
+//! **Two tests pin a hole rather than a guard**, and carry `…_today` for it
+//! the way `live_pack_hostile.rs`'s do:
+//! [`a_preview_that_promised_no_config_still_installs_the_admins_config_today`]
+//! and [`a_recorded_jars_bytes_can_be_swapped_under_the_revision_today`]. Each
+//! says in its own documentation what the assertion should become when the
+//! hole is closed. A test asserting the behaviour somebody wants would fail on
+//! every run until that day, which is a broken suite rather than a finding;
+//! one asserting what the code does now fails the day it changes, which is the
+//! notice that is actually wanted — so a failure there is a result to read
+//! rather than a regression to fix. The other five tests here pin rules, and
+//! nothing but the suffix tells the two kinds apart:
+//! [`a_renamed_and_relinked_jar_ships_the_published_name`] was a record of
+//! this kind until the gap it recorded was closed, and that had to be
+//! reconstructed from its prose afterwards.
+//!
 //! What a green run does **not** prove:
 //!
 //! - **Anybody's screen.** This calls what the commands call, in the order
@@ -1715,10 +1730,15 @@ async fn a_folder_behaviour_moves_the_revision_only_when_its_files_travel() {
 /// the real `check_matches`, the real manifest read, the real
 /// `check_server_downloads`, the real `pack::import` — installs the admin's
 /// config without a word. If a later change makes the gate see config, this
-/// fails and should be rewritten rather than deleted.
+/// fails and should be rewritten rather than deleted: what it should become is
+/// that the import is refused and the player is sent back to a description
+/// that names the config coming.
+///
+/// `…_today` for that reason, as in `live_pack_hostile.rs`: this records what
+/// happens now rather than claiming it is right.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "binds a port and speaks real TLS"]
-async fn a_preview_that_promised_no_config_still_installs_the_admins_config() {
+async fn a_preview_that_promised_no_config_still_installs_the_admins_config_today() {
     let scratch = Scratch::new("consent");
     let paths = &scratch.paths;
     paths.ensure_all().await.unwrap();
@@ -1904,9 +1924,17 @@ fn jar_of_length(declaration: &[u8], target: u64) -> Vec<u8> {
 /// one leaves exactly this state. The same-length part is what this test
 /// arranges by hand; a rebuild that happened to differ in length would move the
 /// revision and push the same broken pack to everybody instead.
+///
+/// `…_today` for what that makes it, as in `live_pack_hostile.rs`: a record of
+/// what happens now rather than a rule. Whichever end closes the hole — an
+/// export that notices its own record has gone stale, or a revision that
+/// hashes a recorded jar — this fails, at the revision or at the import, and
+/// what it should become is the pair that change makes true: the revision
+/// moves, and the player who joins afterwards gets a pack whose index vouches
+/// for the bytes its addresses really serve.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "binds a port, speaks real TLS, and downloads a real mod from Modrinth"]
-async fn a_recorded_jars_bytes_can_be_swapped_under_the_revision() {
+async fn a_recorded_jars_bytes_can_be_swapped_under_the_revision_today() {
     let scratch = Scratch::new("swapped");
     let paths = &scratch.paths;
     paths.ensure_all().await.unwrap();

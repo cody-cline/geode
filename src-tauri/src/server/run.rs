@@ -679,10 +679,13 @@ pub fn build_args(server: &Server, agent: Option<&str>) -> Vec<String> {
 /// again, because the next start was no longer a clamp.
 ///
 /// The arithmetic is not the interesting part; which struct gets written is.
-/// That is what [`a_ceiling_lowers_the_start_and_leaves_the_record_alone`]
-/// pins, because it is testable without a jar — unlike the rule read off
-/// disk after a start, which needs a real JVM and lives in
-/// `tests/live_server_lifecycle.rs`.
+/// [`a_ceiling_lowers_the_copy_the_jvm_is_started_from`] pins the arithmetic,
+/// and that is all it can pin: taking `server` by an immutable borrow is what
+/// keeps the caller's record out of this, and the compiler is what enforces
+/// that rather than any test. The rule itself — the owner's figure still in
+/// `server.json` after a start that saved — needs a real JVM, and lives in
+/// `tests/live_server_lifecycle.rs`, in
+/// `a_hosts_ceiling_is_not_saved_as_the_servers_own_setting`.
 fn under_the_ceiling(server: &Server, ceiling: Option<u32>) -> (Server, Option<u32>) {
     let mut launching = server.clone();
     match ceiling {
@@ -1767,18 +1770,27 @@ mod tests {
     /// [`start`] against a server with no software, which is how this is
     /// offline: the heap is decided before any Java is looked for, and
     /// the start then refuses at the missing jar without a process ever
-    /// existing. What is asserted is what it did on the way there.
+    /// existing. What is asserted is what it said on the way there, and
+    /// nothing else.
     ///
-    /// So the number this returns as `on_disk` is the record **as created**,
-    /// and not evidence that a start leaves it alone: the start fails before
-    /// the save that records `last_started`, so on this path nothing is ever
-    /// written. The clamp really was reaching disk — measured in a container,
-    /// in a server's own `server.json` — while the assertion below read 16384
-    /// and passed every time. What holds that rule now is
-    /// [`a_ceiling_lowers_the_start_and_leaves_the_record_alone`], which tests
-    /// the decision rather than a path that cannot save, and
-    /// `tests/live_server_lifecycle.rs` for the real thing.
-    async fn heap_announcements(asked_mb: u32, ceiling: Option<u32>) -> (Vec<String>, u32) {
+    /// It used to hand back the server's `memory_mb` as read off disk, and
+    /// both callers asserted it. That proved nothing on this path: the start
+    /// fails before the save that records `last_started`, so nothing is ever
+    /// written here, and the figure read back was the one the test had just
+    /// created. The clamp really was reaching disk — measured in a container,
+    /// in a server's own `server.json` — while an assertion whose failure
+    /// message read "the server's own setting was overwritten" passed every
+    /// time. It is gone rather than annotated: a path that cannot save should
+    /// not hand back a number to assert on, because the next person greps for
+    /// that message and finds a green test standing in for a rule it never
+    /// checked.
+    ///
+    /// Where the rule lives now: the arithmetic in
+    /// [`a_ceiling_lowers_the_copy_the_jvm_is_started_from`], and the figure on
+    /// disk after a start that actually succeeded in
+    /// `tests/live_server_lifecycle.rs`, in
+    /// `a_hosts_ceiling_is_not_saved_as_the_servers_own_setting`.
+    async fn heap_announcements(asked_mb: u32, ceiling: Option<u32>) -> Vec<String> {
         let scratch = crate::paths::Scratch::new("run-heap");
         let mut server = super::super::create(
             &scratch.paths,
@@ -1804,7 +1816,7 @@ mod tests {
         .await;
         assert!(refused.is_err(), "a server with no jar must not start");
 
-        let said = recorder
+        recorder
             .events()
             .into_iter()
             .filter_map(|(_, payload)| {
@@ -1813,13 +1825,7 @@ mod tests {
                     .and_then(|l| l.as_str())
                     .map(str::to_string)
             })
-            .collect();
-        let on_disk = super::super::load(&scratch.paths, &server.id)
-            .await
-            .unwrap()
-            .settings
-            .memory_mb;
-        (said, on_disk)
+            .collect()
     }
 
     /// A modpack configured for 16 GB on somebody's desktop must not take down
@@ -1827,45 +1833,50 @@ mod tests {
     /// memory than it asked for is a server nobody can explain the lag of.
     #[tokio::test]
     async fn a_hosts_heap_ceiling_lowers_what_a_server_asks_for_and_says_so() {
-        let (said, on_disk) = heap_announcements(16384, Some(8192)).await;
+        let said = heap_announcements(16384, Some(8192)).await;
         assert!(
             said.iter()
                 .any(|line| line.contains("8192 MB rather than 16384 MB")),
             "it should say what it did and why: {said:?}"
         );
-        // The ceiling is the machine's, not the server's: moved to a roomier
-        // host, this server should still ask for what its owner configured.
-        assert_eq!(on_disk, 16384, "the server's own setting was overwritten");
     }
 
     /// And a server content with less than the ceiling is left alone — no
     /// console line, because nothing happened to it.
     #[tokio::test]
     async fn a_server_asking_for_less_than_the_ceiling_is_not_touched() {
-        let (said, on_disk) = heap_announcements(2048, Some(8192)).await;
+        let said = heap_announcements(2048, Some(8192)).await;
         assert!(
             !said.iter().any(|line| line.contains("rather than")),
             "nothing was lowered, so nothing should be announced: {said:?}"
         );
-        assert_eq!(on_disk, 2048);
 
         // And the app's case, which passes no ceiling at all.
-        let (said, _) = heap_announcements(16384, None).await;
+        let said = heap_announcements(16384, None).await;
         assert!(!said.iter().any(|line| line.contains("rather than")), "{said:?}");
     }
 
-    /// The rule the comment above [`under_the_ceiling`] states, tested where it
-    /// can actually fail: the record the caller holds — and therefore the one
-    /// a successful start writes to disk — keeps the owner's figure, while the
-    /// copy that is launched carries the host's.
+    /// The clamp itself: what [`under_the_ceiling`] returns, what it reports
+    /// having lowered to, and that [`build_args`] reads the copy — so the
+    /// flags the JVM is handed really follow it.
     ///
-    /// The clamp was applied to the record in place, so the save that records
-    /// `last_started` carried the ceiling to disk, and a server moved to a
-    /// roomier host then asked for the smaller heap for ever. Every offline
-    /// test of it passed throughout, because a start with no jar fails before
-    /// that save. This one needs no start at all.
+    /// Not the rule in the comment above that function, and it is worth
+    /// saying why this looks as though it is. It used to assert
+    /// `server.settings.memory_mb` after the call, under a name claiming the
+    /// record was left alone. The parameter is an immutable borrow, so that
+    /// assertion was enforced by the borrow checker and not by the function
+    /// body: no change to `under_the_ceiling` could have made it fail, and
+    /// "verifying" it meant changing the signature to `&mut Server` first,
+    /// which verifies that a different function is different.
+    ///
+    /// What actually broke was which struct [`start`] saved. The owner's
+    /// figure in `server.json` after a start that reached its save is in
+    /// `tests/live_server_lifecycle.rs`, in
+    /// `a_hosts_ceiling_is_not_saved_as_the_servers_own_setting` — it needs a
+    /// real jar and a real JVM, because a start with neither fails before the
+    /// save and leaves nothing to read.
     #[tokio::test]
-    async fn a_ceiling_lowers_the_start_and_leaves_the_record_alone() {
+    async fn a_ceiling_lowers_the_copy_the_jvm_is_started_from() {
         let scratch = crate::paths::Scratch::new("run-ceiling");
         let mut server = super::super::create(
             &scratch.paths,
@@ -1883,14 +1894,8 @@ mod tests {
             launching.settings.memory_mb, 8192,
             "the JVM should be started under the host's ceiling"
         );
-        assert_eq!(
-            server.settings.memory_mb, 16384,
-            "the record that gets saved was lowered, which is how the host's \
-             ceiling used to end up in the server's own settings"
-        );
         // And `build_args` reads the copy, so the flags really follow it.
         assert!(build_args(&launching, None).contains(&"-Xmx8192M".to_string()));
-        assert!(build_args(&server, None).contains(&"-Xmx16384M".to_string()));
 
         // Under the ceiling, and with no ceiling at all, nothing moves.
         let (same, lowered) = under_the_ceiling(&server, Some(32768));

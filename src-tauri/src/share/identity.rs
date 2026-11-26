@@ -273,12 +273,18 @@ mod tests {
         }
     }
 
+    /// What a `create_new` with no mode of its own would have given is the
+    /// umask's, so that is measured first — see
+    /// [`crate::paths::insist_others_could_read_a_plain_file`]. Without it this
+    /// passes on a machine at `umask 077` with the `mode` dropped from
+    /// [`write_new`], since every create there is already owner-only.
     #[cfg(unix)]
     #[tokio::test]
     async fn the_key_is_readable_only_by_its_owner() {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = Scratch::new("identity-mode");
+        crate::paths::insist_others_could_read_a_plain_file(&temp.paths.share_dir());
         Identity::load_or_create(&temp.paths).await.unwrap();
 
         let mode = std::fs::metadata(temp.paths.share_dir().join(KEY_FILE))

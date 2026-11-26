@@ -296,6 +296,12 @@ impl Live {
 
     /// Start the server and wait until it says it has finished starting.
     async fn start(&self) {
+        self.start_under(None).await
+    }
+
+    /// [`Live::start`] with a host's heap ceiling — the argument the app always
+    /// passes as `None` and `geoded` fills in from `GEODE_MAX_HEAP_MB`.
+    async fn start_under(&self, ceiling: Option<u32>) {
         assert!(
             !self.registry.is_running(ID),
             "the server was already running"
@@ -308,7 +314,7 @@ impl Live {
             &self.http,
             &self.registry,
             ID,
-            None,
+            ceiling,
         )
         .await
         .unwrap_or_else(|e| panic!("start: {e}"));
@@ -1314,20 +1320,25 @@ async fn a_backup_is_the_servers_own_data_and_nothing_beside_it() {
     .await
     .expect("published copy");
 
-    // Two, so the second has a first to sweep up if it could.
-    //
-    // A second apart, and not for tidiness: `backup::new_name` is
-    // `%Y-%m-%dT%H-%M-%S`, so two backups taken inside one second are handed
-    // the same name and the second `File::create` truncates the first — which
-    // this test found by taking them back to back. Waiting out the second is
-    // how this test gets two *files* to reason about; the collision itself is
-    // `backup.rs`'s to fix and wants a test of its own.
+    // Two, so the second has a first to sweep up if it could — and back to
+    // back, which is the shape that found the collision this test used to
+    // step around. `backup::new_name` was `%Y-%m-%dT%H-%M-%S`, so two backups
+    // taken inside one second were handed one name and the second
+    // `File::create` truncated the first; this test waited the second out to
+    // get two files to reason about. That is fixed: the name carries
+    // milliseconds and `backup::claim` takes it with `create_new`, so
+    // whichever backup loses a name is handed the next one rather than an
+    // archive to write over. So the wait is gone, and two backups in one
+    // second is the case worth arranging rather than the one to avoid.
+    // `backup.rs`'s `two_backups_in_the_same_moment_cannot_take_each_others_name`
+    // pins the same claim offline, at a rate no pair of real backups can
+    // reach.
     let first = live.backup().await;
-    tokio::time::sleep(Duration::from_millis(1100)).await;
     let second = live.backup().await;
     assert_ne!(
         first.name, second.name,
-        "a second apart and still the same name"
+        "two backups in the same second were handed one name, and the second \
+         archive is written over the first"
     );
     assert!(
         live.backup_path(&first.name).is_file(),
@@ -1852,4 +1863,112 @@ async fn server_properties_and_the_eula_survive_the_real_files() {
         "a clean shutdown overwrote an edit made while the server ran"
     );
     println!("== the edit made while it ran survived its shutdown");
+}
+
+// ---------------------------------------------------------------------------
+// the heap a host allows
+// ---------------------------------------------------------------------------
+
+/// A host's heap ceiling lowers the JVM this start puts up, and does not
+/// become the server's own setting.
+///
+/// The second half can only be asserted here. `geoded` passes
+/// `GEODE_MAX_HEAP_MB` into every `run::start`; the clamp used to be applied to
+/// the record in place, and the save at the end of a successful start writes
+/// the whole struct in order to record `last_started` — so the host's ceiling
+/// went to disk in place of the figure the owner had asked for, every start on
+/// a constrained host lowered it again, nothing ever raised it, and a server
+/// moved back to a roomier host went on asking for the smaller heap. It was
+/// measured in a container, which is what this test replaces. `run.rs`'s own
+/// tests cannot reach it: a start with no jar fails before that save, so
+/// nothing is written and the figure they read back is the one they created a
+/// moment earlier.
+///
+/// Guards two lines of `run::start_again`. The `&launching` handed to `spawn`
+/// is where the `-Xmx` below comes from — change it back to `&server` and the
+/// JVM ignores the ceiling altogether. The absence of any
+/// `server.settings.memory_mb = ceiling` before the save is where the figure
+/// on disk comes from — put one back and that is the original defect exactly.
+///
+/// `last_started` is asserted beside the heap, and not for its own sake: it is
+/// the proof that this start reached its save at all. Without it, a start that
+/// stopped earlier would leave the owner's figure on disk because this test
+/// wrote it there, which is how the offline version of this claim passed for
+/// as long as it did.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "installs and runs a real Minecraft server"]
+async fn a_hosts_ceiling_is_not_saved_as_the_servers_own_setting() {
+    let live = live().await;
+
+    // The ceiling is the heap the whole suite runs this server at, so the JVM
+    // below is one this machine is known to be able to start. The owner's
+    // figure is twice that and is never meant to be launched with.
+    let mut server = live.server().await;
+    let ceiling = server.settings.memory_mb;
+    let owner = ceiling * 2;
+    server.settings.memory_mb = owner;
+    server.last_started = None;
+    server
+        .save(&live.paths)
+        .await
+        .expect("save the owner's figure");
+
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a clock after 1970")
+        .as_secs() as i64;
+    live.start_under(Some(ceiling)).await;
+
+    // Said in the console, because a server quietly given less memory than it
+    // asked for is a server nobody can explain the lag of.
+    assert!(
+        live.log.has(&format!("{ceiling} MB rather than {owner} MB")),
+        "the console never said the heap had been lowered:\n{}",
+        live.log.tail(30)
+    );
+
+    // What the JVM was really started with, read off the process rather than
+    // off anything Geode said about it. `/proc` is the whole of why this is a
+    // Linux-only assertion, which this file is anyway.
+    let pid = guard(&live.pid).expect("a started server has a pid");
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline"))
+        .unwrap_or_else(|e| panic!("/proc/{pid}/cmdline: {e} — this assertion needs Linux"));
+    let argv: Vec<String> = raw
+        .split(|byte| *byte == 0)
+        .filter(|arg| !arg.is_empty())
+        .map(|arg| String::from_utf8_lossy(arg).into_owned())
+        .collect();
+    println!("== {}", argv.join(" "));
+    // One assertion rather than two: `build_args` pushes exactly one `-Xmx`,
+    // so "the ceiling's is there" and "the owner's is not" are the same claim,
+    // and the second would only ever fail where the first already had.
+    assert!(
+        argv.iter().any(|arg| arg == &format!("-Xmx{ceiling}M")),
+        "the JVM was not started under the host's ceiling: {argv:?}"
+    );
+
+    // And the record that start wrote. The ceiling is a fact about the
+    // machine, so what is on disk has to be the owner's figure.
+    let saved = live.server().await;
+    assert!(
+        saved.last_started.unwrap_or(0) >= before,
+        "this start never reached its save, so the figure below is only the one \
+         this test wrote: last_started is {:?}",
+        saved.last_started
+    );
+    assert_eq!(
+        saved.settings.memory_mb, owner,
+        "the host's ceiling was written into the server's own settings"
+    );
+    println!("== started under {ceiling} MB with {owner} MB still on disk");
+
+    live.stop().await;
+
+    // Again after the stop, which is the other moment anything writes
+    // `server.json` on this path.
+    assert_eq!(
+        live.server().await.settings.memory_mb,
+        owner,
+        "the host's ceiling reached the record as the server shut down"
+    );
 }

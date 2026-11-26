@@ -989,15 +989,16 @@ async fn a_copied_certificate_without_its_key_is_refused_on_the_players_own_path
     names_the_address(&err.to_string(), &address).unwrap_or_else(|why| panic!("{why}"));
 }
 
-/// Six machines that are not the host, and the client stops at every one of
+/// Seven machines that are not the host, and the client stops at every one of
 /// them.
 ///
 /// The cases that answer at all serve the admin's own certificate, so the pin
 /// matches and the only thing left to refuse them is what they say. Each is a
 /// real shape: a port nothing holds, a port something holds and never speaks
 /// on, a web server where the pack port should be, the admin's machine with
-/// something else listening on the port, a reply that is not HTTP, and a
-/// perfectly good HTTP reply that is not a pack description.
+/// something else listening on the port, a reply that is not HTTP, a perfectly
+/// good HTTP reply that is not a pack description, and the right machine
+/// taking the request and then building a pack for ever.
 ///
 /// Guards the status table in `join::request`, where a 404 is told apart from
 /// a refused password and from a Geode that explained itself; the parse of the
@@ -1388,7 +1389,9 @@ async fn a_cancelled_join_leaves_nothing_behind_and_asking_again_works() {
 /// what arrives is some interleaving of the two builds. Comparing each
 /// carried file against the admin's own copy of it is what catches that — two
 /// downloads that merely returned `Ok` would not, and neither would comparing
-/// the two packs only to each other.
+/// the two packs only to each other. The names the host builds under are
+/// watched as well, which is the same defect from the admin's side: they exist
+/// only while the builds do, so they are collected as the downloads run.
 ///
 /// Note what is **not** asserted: that the two packs are the same bytes. They
 /// are not, reliably. `modrinth.index.json` carries its `dependencies` as a
@@ -1419,6 +1422,28 @@ async fn two_players_download_at_once_and_both_get_a_whole_pack() {
     let link = link_to("127.0.0.1", host.local_addr.port(), &code, pin);
 
     let players = [("first", &first_home), ("second", &second_home)];
+
+    // Every name the host built a pack under, collected while it was building
+    // them. `host::pack` removes each file with the response it belongs to, so
+    // once both downloads are done there is nothing left to count — and the
+    // names are the only place its per-request naming shows from outside the
+    // process.
+    let built: Arc<std::sync::Mutex<BTreeSet<String>>> = Arc::new(Default::default());
+    let watching = tokio::spawn({
+        let (seen, dir) = (built.clone(), outgoing(admin));
+        async move {
+            loop {
+                if let Ok(entries) = std::fs::read_dir(&dir) {
+                    let mut seen = seen.lock().unwrap_or_else(|p| p.into_inner());
+                    for entry in entries.flatten() {
+                        seen.insert(entry.file_name().to_string_lossy().into_owned());
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+    });
+
     let began = Instant::now();
     let fetching: Vec<_> = players
         .iter()
@@ -1457,6 +1482,7 @@ async fn two_players_download_at_once_and_both_get_a_whole_pack() {
         windows.push((who, asked, done));
         landed.push((who, dest));
     }
+    watching.abort();
 
     // Both requests were open at the same time, which is the whole premise:
     // one host, two players, two packs being built. Two tasks spawned is not
@@ -1546,13 +1572,30 @@ async fn two_players_download_at_once_and_both_get_a_whole_pack() {
 
     // And neither pack is still on the admin's disk.
     outgoing_empties(admin, patience()).await;
-    // Two files, not one: the only thing the host's naming promises from
-    // outside the process.
+
+    // Two names on the admin's disk while that was happening, not one.
+    // `host::pack` names each built pack after the request it is for —
+    // `{server id}-{uuid}.geodepack` — and these are the names it really used.
+    //
+    // What used to be here instead compared the two players' *destination*
+    // paths and asserted the set held two. Those are paths this test builds
+    // itself, from two scratch homes and two filenames, so it held two however
+    // the host behaved: no change to `host::pack` could have failed it, while
+    // its message claimed something about the host's naming it never touched.
+    let built = built.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    println!("built      {built:?}");
     assert_eq!(
-        BTreeSet::from([first, second]).len(),
+        built.len(),
         2,
-        "the two players downloaded to one path"
+        "the host built both packs under one name, which is two responses \
+         streaming one file: {built:?}"
     );
+    for name in &built {
+        assert!(
+            name.starts_with("survival-") && name.ends_with(".geodepack"),
+            "{name} is not named after the request it was built for"
+        );
+    }
 
     host.stop().await;
 }

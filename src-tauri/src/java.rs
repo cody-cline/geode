@@ -223,6 +223,36 @@ struct AdoptiumPackage {
     size: Option<u64>,
 }
 
+/// The SHA-256 Adoptium published for a download, or the refusal to install a
+/// runtime there is no way to check.
+///
+/// A missing checksum refuses rather than falling back to the size check. What
+/// this guards against is a tampered answer from Adoptium — a proxy, a CDN, a
+/// CA — and that same answer can leave the `checksum` field out as easily as
+/// it can swap the bytes, so a fallback would hand the whole check back to
+/// whoever wanted it gone. An empty string counts as absent: it is a hash that
+/// can never match, and "expected ''" is not something to show anybody. The
+/// value itself is passed on exactly as it arrived, because that is what
+/// `Download::sha256` compares against.
+///
+/// A function of its own so that [`tests::a_download_with_no_checksum_is_refused`]
+/// can reach the refusal at all: [`provision_image`] only gets this far by
+/// asking the real api.adoptium.net, whose address is a hardcoded `format!`,
+/// and an offline test has nowhere to point a stub.
+fn published_checksum(package: &AdoptiumPackage, major: u32) -> Result<String> {
+    package
+        .checksum
+        .clone()
+        .filter(|c| !c.trim().is_empty())
+        .ok_or_else(|| {
+            Error::msg(format!(
+                "Pick a Java {major} already on this machine under Settings → Java & Memory, or \
+                 try again later. Adoptium published no checksum for its Java {major} download, \
+                 and Geode will not install a runtime it cannot check against one."
+            ))
+        })
+}
+
 fn adoptium_os() -> &'static str {
     if cfg!(target_os = "windows") {
         "windows"
@@ -284,28 +314,10 @@ pub async fn provision_image(
     })?;
 
     // Read before anything is removed or downloaded: a refusal must not first
-    // delete an install that was working.
-    //
-    // A missing checksum refuses rather than falling back to the size check.
-    // What this guards against is a tampered answer from Adoptium — a proxy, a
-    // CDN, a CA — and that same answer can leave the `checksum` field out as
-    // easily as it can swap the bytes, so a fallback would hand the whole check
-    // back to whoever wanted it gone. An empty string counts as absent: it is a
-    // hash that can never match, and "expected ''" is not something to show
-    // anybody.
-    let Some(checksum) = asset
-        .binary
-        .package
-        .checksum
-        .clone()
-        .filter(|c| !c.trim().is_empty())
-    else {
-        return Err(Error::msg(format!(
-            "Pick a Java {major} already on this machine under Settings → Java & Memory, or try \
-             again later. Adoptium published no checksum for its Java {major} download, and Geode \
-             will not install a runtime it cannot check against one."
-        )));
-    };
+    // delete an install that was working. Why it is a refusal rather than a
+    // fallback is at [`published_checksum`], and the ordering is pinned by
+    // [`tests::the_checksum_is_read_before_the_destination_is_cleared`].
+    let checksum = published_checksum(&asset.binary.package, major)?;
 
     // A JDK is kept apart from the JRE of the same version: they are different
     // downloads, and letting one overwrite the other would mean whichever was
@@ -693,6 +705,86 @@ mod tests {
 
         let java = dest.join("jdk/bin/java");
         assert_eq!(mode_of(&java), 0o755, "the setuid bit survived extraction");
+    }
+
+    /// A JSON package, the shape Adoptium's answer carries one in.
+    fn package(json: &str) -> AdoptiumPackage {
+        serde_json::from_str(json).unwrap_or_else(|e| panic!("{json}: {e}"))
+    }
+
+    const LINK: &str = r#""link": "https://example.invalid/OpenJDK21.tar.gz", "size": 1234"#;
+
+    /// A download Adoptium published no checksum for is refused, and not
+    /// quietly downgraded to the size check — which was the whole point of
+    /// reading the field, and had nothing exercising it.
+    ///
+    /// Four shapes of absent, because this is deserialised from somebody
+    /// else's JSON and all four really describe the same answer: the field
+    /// gone, `null`, empty, and whitespace. A fallback would make a tampered
+    /// answer able to turn the check off by dropping a key, which is cheaper
+    /// than swapping the bytes.
+    #[test]
+    fn a_download_with_no_checksum_is_refused() {
+        for json in [
+            format!("{{{LINK}}}"),
+            format!(r#"{{{LINK}, "checksum": null}}"#),
+            format!(r#"{{{LINK}, "checksum": ""}}"#),
+            format!(r#"{{{LINK}, "checksum": " \t "}}"#),
+        ] {
+            let refused = published_checksum(&package(&json), 21)
+                .expect_err(&format!("a runtime nothing can check was accepted: {json}"));
+            let said = refused.to_string();
+            assert!(
+                said.contains("published no checksum"),
+                "the refusal should say what is missing: {said}"
+            );
+            // And it is not a dead end: a Java already on the machine can be
+            // pointed at, which is the only thing a person can do about this.
+            assert!(
+                said.contains("Settings → Java & Memory"),
+                "the refusal should say what to do instead: {said}"
+            );
+        }
+
+        // And a published one is handed on exactly as it arrived, because
+        // `Download::sha256` compares against it byte for byte.
+        let real = "a07e4e2f43d9e2b1f4d5c6b7a8998a0b1c2d3e4f50617283940a5b6c7d8e9f01";
+        assert_eq!(
+            published_checksum(&package(&format!(r#"{{{LINK}, "checksum": "{real}"}}"#)), 21)
+                .expect("a published checksum is what this is for"),
+            real
+        );
+    }
+
+    /// The ordering the comment at that refusal's call site claims: it is read
+    /// before the destination is cleared, so a Java that cannot be checked
+    /// never first deletes the install that was working.
+    ///
+    /// Read off this file's own text, which is a strange test and the only one
+    /// available. Reaching that refusal inside [`provision_image`] means the
+    /// real api.adoptium.net has already answered, its address is a hardcoded
+    /// `format!`, and nothing offline can hand it an answer with the field left
+    /// out. The cheaper test is the vacuous one: `provision_image` called with
+    /// no network fails at `get_json`, before both the refusal and the
+    /// `remove_dir_all`, so a file left in the destination survives whichever
+    /// order those two are in and proves neither.
+    #[test]
+    fn the_checksum_is_read_before_the_destination_is_cleared() {
+        let body = include_str!("java.rs")
+            .split_once("pub async fn provision_image(")
+            .expect("provision_image is in this file")
+            .1;
+        let read = body
+            .find("published_checksum(")
+            .expect("the checksum is read in provision_image");
+        let cleared = body
+            .find("remove_dir_all(&dest_dir)")
+            .expect("the destination is cleared in provision_image");
+        assert!(
+            read < cleared,
+            "the destination is cleared before the checksum is read, so a \
+             refusal now deletes a working install on its way out"
+        );
     }
 
     #[test]

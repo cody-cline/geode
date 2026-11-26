@@ -475,12 +475,18 @@ mod tests {
     /// `config.json` has fields for a CurseForge key and an application id, so
     /// it is written on the same terms as the accounts beside it rather than
     /// on the terms of a file holding only a theme.
+    ///
+    /// The mode this would otherwise come out at is the umask's, so that is
+    /// measured first — see
+    /// [`crate::paths::insist_others_could_read_a_plain_file`], without which
+    /// this passes on a machine at `umask 077` whatever `save` does.
     #[cfg(unix)]
     #[tokio::test]
     async fn the_config_is_readable_only_by_its_owner() {
         use std::os::unix::fs::PermissionsExt;
 
         let scratch = crate::paths::Scratch::new("config-mode");
+        crate::paths::insist_others_could_read_a_plain_file(&scratch.paths.root);
         Config::default().save(&scratch.paths).await.unwrap();
 
         let mode = std::fs::metadata(scratch.paths.config_file())
