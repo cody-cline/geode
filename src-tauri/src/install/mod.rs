@@ -53,7 +53,7 @@ pub async fn install_version(
 
     // The client jar is both a launch input and a processor input for
     // Forge/NeoForge, so it has to land before the loader install runs.
-    let client_jar = paths.version_jar(mc_version);
+    let client_jar = paths.version_jar(mc_version)?;
     if let Some(art) = vanilla.downloads.get("client") {
         progress.stage("Downloading Minecraft", 1).await;
         crate::net::fetch_one(
@@ -107,9 +107,9 @@ pub async fn install_version(
     };
 
     // Cache the merged manifest so a relaunch skips all the meta round-trips.
-    tokio::fs::create_dir_all(paths.version_dir(&version_id)).await?;
+    tokio::fs::create_dir_all(paths.version_dir(&version_id)?).await?;
     tokio::fs::write(
-        paths.version_json(&version_id),
+        paths.version_json(&version_id)?,
         serde_json::to_vec_pretty(&version)?,
     )
     .await?;
@@ -154,7 +154,7 @@ async fn alias_client_jar(
         return Ok(shared.to_path_buf());
     }
 
-    let alias = paths.version_jar(version_id);
+    let alias = paths.version_jar(version_id)?;
     if let Ok(existing) = tokio::fs::metadata(&alias).await {
         // Re-link if the shared jar was replaced (a corrupt download redownloaded).
         let source_len = tokio::fs::metadata(shared)
@@ -281,7 +281,7 @@ async fn extract_natives(
     features: &HashMap<String, bool>,
     progress: &Progress,
 ) -> Result<PathBuf> {
-    let dir = paths.natives(&version.id);
+    let dir = paths.natives(&version.id)?;
     tokio::fs::create_dir_all(&dir).await?;
 
     let mut jobs: Vec<(PathBuf, Vec<String>)> = Vec::new();
@@ -316,6 +316,14 @@ async fn extract_natives(
     Ok(dir)
 }
 
+/// The most one native payload inside a library jar may inflate to.
+///
+/// These are `.so`/`.dll`/`.dylib` files, and the largest real one in a
+/// Minecraft classpath is around a megabyte — LWJGL's are hundreds of
+/// kilobytes each. 16 MB is a long way past any of them and still a bound,
+/// which `read_to_end` on its own was not.
+const MAX_NATIVE_BYTES: u64 = 16 * 1024 * 1024;
+
 fn extract_native_jar(jar: &Path, dest: &Path, exclude: &[String]) -> Result<()> {
     if !jar.exists() {
         return Ok(());
@@ -348,7 +356,21 @@ fn extract_native_jar(jar: &Path, dest: &Path, exclude: &[String]) -> Result<()>
         };
         let out_path = dest.join(filename);
         let mut buf = Vec::new();
-        entry.read_to_end(&mut buf)?;
+        // Counted on the bytes as they inflate, not on the size the entry's
+        // header declares, which a crafted jar can understate. Mojang's own
+        // libraries arrive sha1-pinned and are not the worry; a loader
+        // manifest's are listed as a coordinate and a maven base with no
+        // digest at all (`library_download`), so what lands in `libraries/`
+        // for one of those is whatever that host served.
+        (&mut entry).take(MAX_NATIVE_BYTES + 1).read_to_end(&mut buf)?;
+        if buf.len() as u64 > MAX_NATIVE_BYTES {
+            return Err(Error::msg(format!(
+                "'{name}' in {} unpacks to more than {} MB, which is more than any native \
+                 library is",
+                jar.display(),
+                MAX_NATIVE_BYTES / (1024 * 1024)
+            )));
+        }
         std::fs::write(&out_path, buf)?;
 
         #[cfg(unix)]
@@ -526,4 +548,65 @@ pub fn classpath(
     // The client jar goes last so loader-patched classes shadow vanilla ones.
     out.push(client_jar.to_path_buf());
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::paths::Scratch;
+
+    /// A native payload is read against a ceiling, not into whatever the jar
+    /// asks for.
+    ///
+    /// Mojang's own libraries arrive sha1-pinned, so they are not the worry.
+    /// A loader manifest lists its libraries as a coordinate plus a maven base
+    /// with no digest at all ([`library_download`]), so what lands in the
+    /// shared `libraries/` tree for one of those is whatever that host served
+    /// — and `read_to_end` then allocated however much it inflated to.
+    ///
+    /// The honest payload beside it is the other half: a ceiling that refused
+    /// a real native would break every launch.
+    #[test]
+    fn a_native_payload_larger_than_any_real_one_is_refused() {
+        use std::io::Write;
+
+        let scratch = Scratch::new("natives");
+        std::fs::create_dir_all(&scratch.paths.root).unwrap();
+        let jar = scratch.paths.root.join("lwjgl-natives-linux.jar");
+        {
+            let file = std::fs::File::create(&jar).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            zip.start_file("libhonest.so", options).unwrap();
+            zip.write_all(b"ELF, more or less").unwrap();
+            zip.start_file("libbomb.so", options).unwrap();
+            zip.write_all(&vec![0u8; MAX_NATIVE_BYTES as usize + 1]).unwrap();
+            zip.finish().unwrap();
+        }
+        let on_disk = std::fs::metadata(&jar).unwrap().len();
+        assert!(
+            on_disk < MAX_NATIVE_BYTES / 100,
+            "the control is wrong: the jar is {on_disk} bytes, so a check on the file's \
+             own size would have caught this and it proves nothing about inflation"
+        );
+
+        let dest = scratch.paths.natives("1.21.1").expect("a real version id");
+        std::fs::create_dir_all(&dest).unwrap();
+        let err = extract_native_jar(&jar, &dest, &[])
+            .expect_err("a native larger than any real one is refused");
+        assert!(
+            err.to_string().contains("more than any native library is"),
+            "refused for some other reason: {err}"
+        );
+        assert!(
+            !dest.join("libbomb.so").exists(),
+            "the oversized payload was written anyway"
+        );
+        // The honest entry before it still landed, and is intact.
+        assert_eq!(
+            std::fs::read(dest.join("libhonest.so")).unwrap(),
+            b"ELF, more or less"
+        );
+    }
 }

@@ -1991,6 +1991,198 @@ async fn an_entry_named_like_a_folder_the_instance_has_fails_the_whole_import() 
     );
 }
 
+/// A pack's own index names the directory the launcher writes into, and it
+/// cannot name a path.
+///
+/// The one place in the import chain where a pack's free-form JSON becomes a
+/// *filesystem* name rather than a file inside the instance.
+/// `modrinth.index.json`'s `dependencies` map is strings its author chose;
+/// `loader_from_dependencies` reads `minecraft` out of it; nothing between
+/// there and the instance on disk looks at the value, which the two assertions
+/// before the launch record rather than claim is right. At launch
+/// `meta::version_id` interpolates it — for vanilla, *is* it — and
+/// `paths.version_dir`, `.version_json` and `.version_jar` join it, then
+/// `install::install_version` `create_dir_all`s the first, writes the merged
+/// manifest to the second and hard-links the vanilla client jar to the third.
+///
+/// Two accidental gates stood in front of this and neither was a validation.
+/// For a loader the profile fetch happens first with the string
+/// percent-encoded into a meta URL, so upstream 404s before the write — a
+/// stranger's server deciding whether this one is safe. For vanilla the gate
+/// was Mojang's manifest listing the id, which was consulted *below* a cache
+/// read that returned early on any file at that path which parsed. That is
+/// why the archive here names no loader: vanilla is the arm with the real
+/// gate, and this test is pointed at it.
+///
+/// So the manifest cache is planted listing the hostile id, which is the only
+/// way to reach the path check and not merely the lookup. It is a contrived
+/// manifest on purpose: the claim is that `paths` refuses the name even when
+/// everything above it has said yes, because the accessor is the thing a new
+/// caller cannot forget.
+///
+/// Aimed *inside the scratch home* and outside `versions/`, for the reason
+/// [`nothing_a_pack_names_lands_outside_the_instance`] gives: somewhere this
+/// process can really write, so a missing guard leaves something behind. The
+/// test writes both destinations itself first and removes them again, so a run
+/// where the escape was impossible rather than refused fails at that control
+/// instead of passing silently.
+///
+/// Not covered by the offline suite as a chain.
+/// `a_version_id_that_is_not_one_name_reaches_no_path` (src-tauri/src/paths.rs)
+/// holds the four accessors and
+/// `an_id_the_manifest_does_not_list_is_refused_even_with_a_file_in_the_cache`
+/// (src-tauri/src/meta/mod.rs) holds the lookup's order. Neither runs a pack.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "binds a loopback port and writes a scratch GEODE_HOME"]
+async fn a_pack_whose_dependencies_name_a_path_cannot_reach_one() {
+    /// Out of `versions/` and into the scratch home beside it.
+    const ESCAPED: &str = "../escaped-version";
+
+    let scratch = Scratch::new("version-escape");
+    let paths = &scratch.paths;
+    paths.ensure_all().await.unwrap();
+
+    let archive = paths.root.join("escape.mrpack");
+    write_archive(
+        &archive,
+        &[Entry::at(
+            "modrinth.index.json",
+            serde_json::to_vec(&serde_json::json!({
+                "formatVersion": 1,
+                "game": "minecraft",
+                "versionId": "1.0.0",
+                "name": "Hostile",
+                "files": [],
+                // No loader key, so this is a vanilla instance and the
+                // version id *is* this string.
+                "dependencies": { "minecraft": ESCAPED },
+            }))
+            .unwrap(),
+        )],
+    );
+
+    // What the import side does with it today: nothing. Recorded rather than
+    // asserted to be right — a refusal here would be a better message, and
+    // would also be a second place to forget.
+    let preview = instance::modpack::preview(archive.clone())
+        .await
+        .expect("the pack previews");
+    assert_eq!(
+        preview.mc_version, ESCAPED,
+        "the preview has started validating its Minecraft version — if it refuses the \
+         pack outright, this test needs rewriting around the refusal"
+    );
+    assert_eq!(preview.loader, Loader::Vanilla);
+
+    let inst = instance::create(
+        paths,
+        "Escape".into(),
+        preview.mc_version,
+        preview.loader,
+        preview.loader_version,
+    )
+    .await
+    .expect("the instance is created");
+    assert_eq!(inst.mc_version, ESCAPED, "the instance stored it as given");
+
+    // A version JSON for the hostile id, so that nothing *past* the path
+    // check could be what refuses.
+    let host = serving(vec![(
+        "/escaped.json",
+        200,
+        serde_json::to_vec(&serde_json::json!({
+            "id": ESCAPED,
+            "type": "release",
+            "mainClass": "net.minecraft.client.main.Main",
+            "libraries": [],
+        }))
+        .unwrap(),
+    )])
+    .await;
+
+    // Mojang's manifest, planted where `ManifestCache` falls back to it when
+    // the real one cannot be reached — which, through `only_loopback`, it
+    // cannot. Listing the hostile id is what carries the launch past the
+    // lookup and all the way to the path.
+    std::fs::write(
+        paths.cache().join("version_manifest_v2.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "latest": { "release": ESCAPED, "snapshot": ESCAPED },
+            "versions": [{
+                "id": ESCAPED,
+                "type": "release",
+                "url": host.url("/escaped.json"),
+                "time": "2026-01-01T00:00:00+00:00",
+                "releaseTime": "2026-01-01T00:00:00+00:00",
+            }],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    // The control, before the launch: both destinations really are writable
+    // from here, so "nothing was created" means refused and not impossible.
+    let landing = paths.root.join("escaped-version");
+    let beside = paths.root.join("escaped-version.json");
+    std::fs::create_dir_all(&landing).unwrap();
+    std::fs::write(&beside, b"a probe").unwrap();
+    assert!(
+        landing.is_dir() && beside.exists(),
+        "the control failed: this process cannot write where the escape aims, so the \
+         assertions below would hold with every guard removed"
+    );
+    std::fs::remove_dir_all(&landing).unwrap();
+    std::fs::remove_file(&beside).unwrap();
+
+    // Matched rather than `expect_err`: `Installed` is not `Debug`, and it
+    // holds resolved launch inputs rather than anything a test would print.
+    let refusal = match geode_lib::install::install_version(
+        &only_loopback(),
+        paths,
+        &geode_lib::meta::ManifestCache::new(),
+        &inst.mc_version,
+        inst.loader,
+        &inst.loader_version,
+        None,
+        &Progress::silent("hostile-version"),
+    )
+    .await
+    {
+        Ok(installed) => panic!(
+            "a version id that is a path was installed, under {}",
+            installed.version_id
+        ),
+        Err(e) => e,
+    };
+
+    let said = refusal.to_string();
+    println!("the whole message a person sees: {said}");
+    // That it is *this* refusal. Without this the test would pass on the
+    // network failure every other part of a launch would hit here.
+    assert!(
+        said.contains("is not a version name"),
+        "the launch was refused for some other reason: {said}"
+    );
+
+    assert!(
+        !landing.exists(),
+        "the launch created a directory outside versions/: {}",
+        landing.display()
+    );
+    assert!(
+        !beside.exists(),
+        "the launch wrote a file outside versions/: {}",
+        beside.display()
+    );
+    // The guard fires before anything is fetched, so the one listener here was
+    // never asked — the same proof shape as the index-entry test above.
+    assert!(
+        host.asked_for().is_empty(),
+        "the version metadata was fetched before the name was checked: {:?}",
+        host.asked_for()
+    );
+}
+
 // ---------------------------------------------------------------- not covered
 //
 // Shapes the brief asked for that are already pinned offline, named here so

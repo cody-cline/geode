@@ -305,7 +305,13 @@ fn unpack_installer(
         if entry.is_dir() {
             continue;
         }
-        let name = entry.name().to_string();
+        // Separators normalised before any name is matched or joined, the way
+        // `worlds::extract` does it. An installer jar written with backslashes
+        // names `maven\net\...` in one `Normal` component on Linux: the
+        // `maven/` prefix never matches, so the embedded library tree is
+        // silently not unpacked and the loader install fails later with a
+        // missing jar instead of here with a reason.
+        let name = entry.name().replace('\\', "/");
 
         match name.as_str() {
             "install_profile.json" => {
@@ -600,6 +606,72 @@ mod tests {
         assert_eq!(
             expand_arg("[net.minecraft:client:1.20.1:slim]", &tokens, &paths),
             expected.to_string_lossy()
+        );
+    }
+
+    /// An installer jar whose entries were written with backslashes is still
+    /// unpacked, and an entry that climbs out is still refused.
+    ///
+    /// Not a security hole — a quiet loss, the same one `extract_trees` had.
+    /// On Linux `maven\net\x\x.jar` is a single `Normal` component: the
+    /// `maven/` prefix never matched, so the embedded library tree — which
+    /// holds the loader's own universal jar, published nowhere else — was
+    /// silently not written, and the install failed later with a missing jar
+    /// instead of here with a reason.
+    ///
+    /// The climbing entry is the other half: normalising turns a name the
+    /// component check could not see into one it can, so the check has to stay
+    /// *after* it.
+    #[test]
+    fn an_installer_entry_named_with_backslashes_is_still_unpacked() {
+        use std::io::Write;
+
+        let scratch = crate::paths::Scratch::new("forge-backslash");
+        std::fs::create_dir_all(&scratch.paths.root).unwrap();
+        let installer = scratch.paths.root.join("forge-installer.jar");
+        {
+            let file = std::fs::File::create(&installer).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            for (name, body) in [
+                ("install_profile.json", "{}"),
+                ("version.json", "{}"),
+                // The shape an archiver on Windows writes.
+                ("maven\\net\\minecraftforge\\forge\\1.20.1-47.2.0\\forge.jar", "UNIVERSAL"),
+                ("data\\client.lzma", "PATCH"),
+                ("maven/..\\../climbed.jar", "CLIMBED"),
+            ] {
+                zip.start_file(name, options).unwrap();
+                zip.write_all(body.as_bytes()).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+
+        let libraries = scratch.paths.libraries();
+        let work = scratch.paths.cache().join("forge-work").join("47.2.0");
+        let unpacked = unpack_installer(&installer, &libraries, &work)
+            .expect("an installer written with backslashes unpacks");
+
+        assert_eq!(
+            std::fs::read(
+                libraries
+                    .join("net/minecraftforge/forge/1.20.1-47.2.0/forge.jar")
+            )
+            .unwrap(),
+            b"UNIVERSAL",
+            "the embedded maven tree was silently not written"
+        );
+        let patch = unpacked
+            .extracted
+            .get("/data/client.lzma")
+            .expect("the data payload is referenced under the name the profile uses");
+        assert_eq!(std::fs::read(patch).unwrap(), b"PATCH");
+
+        assert!(
+            !libraries.join("../climbed.jar").exists()
+                && !scratch.paths.root.join("climbed.jar").exists(),
+            "normalising a name let it climb out of libraries/"
         );
     }
 }

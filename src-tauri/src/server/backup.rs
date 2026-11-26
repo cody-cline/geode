@@ -359,6 +359,27 @@ pub async fn prune(paths: &Paths, id: &str, keep: usize) -> Result<usize> {
     Ok(count)
 }
 
+/// How many bytes a backup may unpack to, all together.
+///
+/// Mostly a backup is one Geode wrote, and then the bound is bookkeeping — but
+/// not always: a backup can have arrived inside a transfer bundle from another
+/// machine ([`crate::server::transfer`]), so the zip is somebody else's file
+/// and `std::io::copy` with no ceiling is a stranger choosing how much of this
+/// disk to use.
+///
+/// A ratio rather than a flat limit, for the reason `worlds::unpack_budget`
+/// gives: what a backup holds is the world and the plugin data, there is no
+/// honest absolute size for those, and a limit low enough to stop a bomb would
+/// refuse a real server's. A region file is already-compressed chunk data, so
+/// a real backup deflates a few times over; a zip of zeros deflates about a
+/// thousand. The floor is so a small server's backup is not refused for being
+/// small.
+fn unpack_budget(archive_bytes: u64) -> u64 {
+    const RATIO: u64 = 64;
+    const FLOOR: u64 = 16 * 1024 * 1024;
+    archive_bytes.saturating_mul(RATIO).max(FLOOR)
+}
+
 /// Unpack a backup over the run directory.
 ///
 /// Files the backup does not contain are left alone rather than the directory
@@ -373,7 +394,12 @@ pub async fn restore(paths: &Paths, id: &str, name: &str) -> Result<()> {
     tokio::fs::create_dir_all(&run).await?;
 
     tokio::task::spawn_blocking(move || -> Result<()> {
+        use std::io::Read;
+
         let file = std::fs::File::open(&archive)?;
+        let archive_bytes = file.metadata()?.len();
+        let budget = unpack_budget(archive_bytes);
+        let mut unpacked: u64 = 0;
         let mut zip = zip::ZipArchive::new(file)?;
         for i in 0..zip.len() {
             let mut entry = zip.by_index(i)?;
@@ -392,7 +418,19 @@ pub async fn restore(paths: &Paths, id: &str, name: &str) -> Result<()> {
                 std::fs::create_dir_all(parent)?;
             }
             let mut out = std::fs::File::create(&dest)?;
-            std::io::copy(&mut entry, &mut out)?;
+            // Counted on the bytes as they inflate. The entry's header states
+            // a size too, and a crafted zip can understate it.
+            let left = budget - unpacked;
+            let copied = std::io::copy(&mut (&mut entry).take(left + 1), &mut out)?;
+            if copied > left {
+                return Err(Error::msg(format!(
+                    "that backup unpacks to more than {} MB from a {} MB file, which no real \
+                     server's does — it was stopped before it could fill the disk",
+                    budget / (1024 * 1024),
+                    archive_bytes.div_ceil(1024 * 1024)
+                )));
+            }
+            unpacked += copied;
         }
         Ok(())
     })
@@ -687,6 +725,51 @@ mod tests {
         // found anywhere.
         assert!(!out("plugins/.paper-remapped-notes.txt"));
         assert!(!out("world/plugins/.paper-remapped/a1b2.jar"));
+    }
+
+    /// A restore is held to what the archive unpacks to, measured against its
+    /// own size.
+    ///
+    /// Mostly these are archives Geode wrote and this is bookkeeping, but not
+    /// always: a backup can arrive inside a transfer bundle from another
+    /// machine, and `std::io::copy` with no ceiling let whoever built it choose
+    /// how much of this disk to use. A ratio rather than a flat limit, because
+    /// what a backup holds is a world and there is no honest absolute size for
+    /// one — see [`unpack_budget`].
+    #[tokio::test]
+    async fn restoring_a_backup_that_unpacks_past_its_budget_is_stopped() {
+        use std::io::Write;
+
+        let scratch = crate::paths::Scratch::new("backup-bomb");
+        let paths = scratch.paths.clone();
+        let backups = paths.server_backups("survival");
+        tokio::fs::create_dir_all(&backups).await.unwrap();
+
+        let archive = backups.join("2026-01-01T00-00-00.zip");
+        {
+            let file = std::fs::File::create(&archive).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            zip.start_file("world/region/r.0.0.mca", options).unwrap();
+            // Over the floor, which is what a near-empty archive is held to.
+            zip.write_all(&vec![0u8; unpack_budget(0) as usize + 1]).unwrap();
+            zip.finish().unwrap();
+        }
+        let on_disk = tokio::fs::metadata(&archive).await.unwrap().len();
+        assert!(
+            on_disk * 64 < unpack_budget(0),
+            "the control is wrong: the archive is {on_disk} bytes, so the ratio alone \
+             would have allowed what it unpacks to"
+        );
+
+        let err = restore(&paths, "survival", "2026-01-01T00-00-00.zip")
+            .await
+            .expect_err("a backup that unpacks past its budget is refused");
+        assert!(
+            err.to_string().contains("it could fill the disk"),
+            "refused for some other reason: {err}"
+        );
     }
 
     /// Everything inside a backup, by entry name.

@@ -324,12 +324,29 @@ struct Level {
     version: Option<String>,
 }
 
+/// The most a `level.dat` may inflate to.
+///
+/// A real one is kilobytes: it is the handful of keys the game needs to open
+/// the world, and the biggest thing in it is the datapack and dimension lists.
+/// A megabyte is already a hundred times any world here, and the ceiling earns
+/// its place twice over because this file does not arrive once — a crafted
+/// world zip plants one, and [`read_world`] decompresses it again on every
+/// Worlds listing, so an unbounded read here is a cost the screen pays
+/// forever rather than at import.
+///
+/// Nothing is truncated: a `level.dat` cut off part way is NBT that does not
+/// parse, and "that is not a level.dat" said straight is the better answer.
+const MAX_LEVEL_DAT: u64 = 1024 * 1024;
+
 /// Decompress `level.dat`.
 ///
 /// It is gzip — `1f 8b` — which is the opposite answer from `servers.dat`
 /// beside it, checked on this machine against all ten real worlds here and
 /// recorded in [`super::multiplayer`]'s header for the same reason. Guessing
 /// either way round loses the file.
+///
+/// Counted on the bytes as they inflate, not on gzip's own declared size,
+/// which a crafted file can understate.
 fn gunzip(bytes: &[u8]) -> Result<Vec<u8>> {
     use std::io::Read;
 
@@ -341,8 +358,18 @@ fn gunzip(bytes: &[u8]) -> Result<Vec<u8>> {
     }
     let mut out = Vec::new();
     flate2::read::GzDecoder::new(bytes)
+        .take(MAX_LEVEL_DAT + 1)
         .read_to_end(&mut out)
         .map_err(|e| nbt::unreadable(SUBJECT, &format!("it is not readable gzip ({e})")))?;
+    if out.len() as u64 > MAX_LEVEL_DAT {
+        return Err(nbt::unreadable(
+            SUBJECT,
+            &format!(
+                "it unpacks to more than {} MB, and a level.dat is kilobytes",
+                MAX_LEVEL_DAT / (1024 * 1024)
+            ),
+        ));
+    }
     Ok(out)
 }
 
@@ -855,7 +882,8 @@ pub async fn restore(
     let into = world.clone();
     tokio::task::spawn_blocking(move || -> Result<()> {
         let file = std::fs::File::open(&archive)?;
-        extract(zip::ZipArchive::new(file)?, &into, "")
+        let archive_bytes = file.metadata()?.len();
+        extract(zip::ZipArchive::new(file)?, &into, "", archive_bytes)
     })
     .await
     .map_err(|e| Error::msg(format!("restoring this world panicked: {e}")))?
@@ -929,11 +957,12 @@ pub async fn import(
     let into = to.clone();
     let landed = tokio::task::spawn_blocking(move || -> Result<()> {
         let file = std::fs::File::open(&archive)?;
+        let archive_bytes = file.metadata()?.len();
         let mut zip = zip::ZipArchive::new(file)
             .map_err(|_| Error::msg("that file is not a zip Geode can open"))?;
         let prefix = world_root(&mut zip)?;
         std::fs::create_dir_all(&into)?;
-        extract(zip, &into, &prefix)
+        extract(zip, &into, &prefix, archive_bytes)
     })
     .await
     .map_err(|e| Error::msg(format!("importing this world panicked: {e}")))?;
@@ -983,17 +1012,47 @@ fn world_root(zip: &mut zip::ZipArchive<std::fs::File>) -> Result<String> {
     })
 }
 
+/// How many bytes a world archive may unpack to, all together.
+///
+/// A world has no honest *absolute* ceiling, which is the whole reason this is
+/// a ratio. There is no upstream to re-fetch a region file from — the rule at
+/// the top of this module — so a world really does run to tens of gigabytes,
+/// and a flat limit low enough to stop a bomb would refuse somebody's actual
+/// world, which is worse than no limit at all. Measured against the archive's
+/// own size instead, the same shape `modpack::overrides_budget` uses, and the
+/// one thing a bomb cannot satisfy: a region file is already-compressed chunk
+/// data padded out to whole sectors, so a real world zip deflates a few times
+/// over, while a zip built out of zeros deflates about a thousand.
+///
+/// The floor is so a small world is not refused for being small — a freshly
+/// generated one is a couple of megabytes zipped, and the ratio alone would
+/// hold a near-empty one to almost nothing.
+fn unpack_budget(archive_bytes: u64) -> u64 {
+    const RATIO: u64 = 64;
+    const FLOOR: u64 = 16 * 1024 * 1024;
+    archive_bytes.saturating_mul(RATIO).max(FLOOR)
+}
+
 /// Unpack `zip` into `into`, dropping `prefix` from each entry's path.
 ///
 /// Every entry is checked before it is joined, and one that would land outside
 /// `into` fails the whole call. Separators are normalised first: an archive
 /// built on Windows names its entries with backslashes, and a path left
 /// unnormalised would sail past a component check that never saw a separator.
+///
+/// `archive_bytes` is the file's own size, which is what [`unpack_budget`]
+/// measures against — an import is somebody else's zip, and a world's own
+/// files give no absolute size to hold it to.
 fn extract(
     mut zip: zip::ZipArchive<std::fs::File>,
     into: &Path,
     prefix: &str,
+    archive_bytes: u64,
 ) -> Result<()> {
+    use std::io::Read;
+
+    let budget = unpack_budget(archive_bytes);
+    let mut unpacked: u64 = 0;
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i)?;
         let name = entry.name().replace('\\', "/");
@@ -1019,7 +1078,19 @@ fn extract(
             std::fs::create_dir_all(parent)?;
         }
         let mut out = std::fs::File::create(&dest)?;
-        std::io::copy(&mut entry, &mut out)?;
+        // Counted on the bytes as they inflate. The entry's header states a
+        // size too, and a crafted zip can understate it.
+        let left = budget - unpacked;
+        let copied = std::io::copy(&mut (&mut entry).take(left + 1), &mut out)?;
+        if copied > left {
+            return Err(Error::msg(format!(
+                "that archive unpacks to more than {} MB from a {} MB file, which no real world \
+                 does — it was stopped before it could fill the disk",
+                budget / (1024 * 1024),
+                archive_bytes.div_ceil(1024 * 1024)
+            )));
+        }
+        unpacked += copied;
     }
     Ok(())
 }
@@ -1711,6 +1782,118 @@ mod tests {
             );
             tokio::fs::remove_file(&archive).await.unwrap();
         }
+    }
+
+    /// A `level.dat` is refused on what it inflates to, not on what it weighs.
+    ///
+    /// The file arrives inside a world zip somebody else built, and `gunzip`
+    /// read it with `read_to_end` — so a kilobyte on disk asked for as much
+    /// memory as its author chose. Worse than once: `read_world` decompresses
+    /// it again on every Worlds listing, so the cost was the screen's forever
+    /// rather than the import's.
+    ///
+    /// Reported as the world's `trouble` rather than failing the listing, which
+    /// is what this module already does with a `level.dat` it cannot read.
+    #[tokio::test]
+    async fn a_level_dat_that_inflates_past_its_ceiling_is_reported_rather_than_read() {
+        use std::io::Write;
+
+        let scratch = Scratch::new("worlds-levelbomb");
+        let paths = scratch.paths.clone();
+        let dir = paths.instance_saves("survival").join("Bomb");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        gz.write_all(&vec![0u8; (MAX_LEVEL_DAT as usize) + 1]).unwrap();
+        let bomb = gz.finish().unwrap();
+        // The control: a size check on the file as it sits would never fire,
+        // so a pass here is about the inflated bytes and nothing else.
+        assert!(
+            (bomb.len() as u64) < MAX_LEVEL_DAT / 100,
+            "the control is wrong: the bomb is {} bytes on disk",
+            bomb.len()
+        );
+        tokio::fs::write(dir.join(LEVEL_DAT), &bomb).await.unwrap();
+
+        let listed = list(&paths, "survival").await.unwrap();
+        assert_eq!(listed.len(), 1);
+        let trouble = listed[0].trouble.as_deref().unwrap_or("");
+        assert!(
+            trouble.contains("unpacks to more than"),
+            "the bomb was decompressed whole: {trouble:?}"
+        );
+
+        // And a real `level.dat` beside it still reads.
+        let honest = paths.instance_saves("survival").join("Home");
+        tokio::fs::create_dir_all(&honest).await.unwrap();
+        tokio::fs::write(honest.join(LEVEL_DAT), level_dat("Home", 7, &moddish_keys()))
+            .await
+            .unwrap();
+        let listed = list(&paths, "survival").await.unwrap();
+        let home = listed.iter().find(|w| w.folder == "Home").expect("Home is listed");
+        assert_eq!(home.name, "Home");
+        assert_eq!(home.trouble, None);
+    }
+
+    /// A world zip is held to what it unpacks to, measured against its own
+    /// size — so a crafted one cannot fill the disk, and a real world of any
+    /// size is still imported.
+    ///
+    /// `std::io::copy` with no ceiling was the whole of the old check: a
+    /// megabyte of zeros deflates about a thousand to one, and a world has no
+    /// honest absolute size to be held to instead. [`unpack_budget`]'s ratio
+    /// is what a bomb cannot satisfy and a world can.
+    #[tokio::test]
+    async fn a_world_zip_that_unpacks_past_its_budget_is_stopped() {
+        let scratch = Scratch::new("worlds-bomb");
+        let paths = scratch.paths.clone();
+        tokio::fs::create_dir_all(&paths.root).await.unwrap();
+
+        // Over the floor, which is what a near-empty archive is held to.
+        let zeros = vec![0u8; unpack_budget(0) as usize + 1];
+        let archive = paths.root.join("Bomb.zip");
+        zip_up(
+            &archive,
+            &[
+                ("level.dat", &level_dat("Bomb", 1, &[])),
+                ("region/r.0.0.mca", &zeros),
+            ],
+        );
+        let on_disk = tokio::fs::metadata(&archive).await.unwrap().len();
+        assert!(
+            on_disk * 64 < unpack_budget(0),
+            "the control is wrong: the archive is {on_disk} bytes, so the ratio alone \
+             would have allowed what it unpacks to and the floor is what fired"
+        );
+
+        let err = import(&paths, &stopped(), "survival", &archive, &quiet())
+            .await
+            .expect_err("a world that unpacks past its budget is refused");
+        assert!(
+            err.to_string().contains("it could fill the disk"),
+            "refused for some other reason: {err}"
+        );
+        assert!(
+            tokio::fs::metadata(paths.instance_saves("survival").join("Bomb"))
+                .await
+                .is_err(),
+            "a half-unpacked world was left behind"
+        );
+    }
+
+    /// The budget is a ratio against the archive, with a floor — not a flat
+    /// ceiling, because a real world has no honest one.
+    #[test]
+    fn the_unpack_budget_follows_the_archive_and_never_caps_a_real_world() {
+        // Small archives get the floor rather than almost nothing.
+        assert_eq!(unpack_budget(0), 16 * 1024 * 1024);
+        assert_eq!(unpack_budget(1024), 16 * 1024 * 1024);
+        // A large one gets room measured against itself: a 20 GB world zip is
+        // allowed to be a 20 GB world, which any flat ceiling would refuse.
+        let twenty_gb = 20 * 1024 * 1024 * 1024u64;
+        assert!(unpack_budget(twenty_gb) > twenty_gb);
+        // And nothing overflows at the top end.
+        assert_eq!(unpack_budget(u64::MAX), u64::MAX);
     }
 
     /// A world folder name arriving over IPC cannot escape `saves/` either.

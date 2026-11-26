@@ -1403,7 +1403,15 @@ async fn extract_trees(
                 if entry.is_dir() {
                     continue;
                 }
-                let name = entry.name().to_string();
+                // Separators normalised before the name is matched or joined,
+                // the way `worlds::extract` does it. An archiver on Windows
+                // writes its entries with backslashes, and on Linux
+                // `overrides\config\foo.toml` is one `Normal` component: it
+                // sails past the component check below, and lands as a single
+                // file with that literal name — which is to say a pack built
+                // that way had its overrides silently dropped or flattened
+                // rather than installed.
+                let name = entry.name().replace('\\', "/");
                 let Some((rel, under)) = trees.iter().find_map(|(prefix, under)| {
                     if prefix.is_empty() {
                         Some((name.as_str(), under))
@@ -3590,6 +3598,84 @@ mod tests {
         let game = paths.game_dir(&inst.id);
         assert!(!game.join("config/ok.toml").exists(), "what came before the bomb stayed");
         assert!(!game.join("mods/filler.jar").exists(), "the half-written file was left behind");
+    }
+
+    /// A pack whose entries were written with backslashes installs its
+    /// overrides, and an entry that climbs out is still refused.
+    ///
+    /// Not a security hole — a quiet loss. On Linux `overrides\config\x.toml`
+    /// is one `Normal` component: the `overrides/` prefix never matched, so
+    /// the whole tree was skipped without a word, and `overrides/config\x.toml`
+    /// matched and then landed as a single file with a backslash in its name.
+    /// Either way the pack imported "successfully" and the player's config was
+    /// not there. `worlds::extract` has normalised separators all along; these
+    /// two did not.
+    ///
+    /// The climbing entry is the other half: normalising turns a name the
+    /// component check could not see into one it can, so the check has to stay
+    /// *after* it. Written with a backslash in the middle rather than at the
+    /// front, which is the one shape that reaches `is_safe_relative` at all.
+    #[tokio::test]
+    async fn an_override_named_with_backslashes_still_lands_where_it_belongs() {
+        use zip::CompressionMethod::Deflated;
+        let scratch = scratch_dir("backslash");
+        let dir = scratch.paths.root.clone();
+        let archive = dir.join("windows.mrpack");
+        write_zip(
+            &archive,
+            &[
+                ("modrinth.index.json", INDEX.as_bytes(), Deflated),
+                // The whole path backslashed, which is what an archiver on
+                // Windows writes.
+                ("overrides\\config\\windows.toml", b"windows = true\n", Deflated),
+                // And the mixed shape, which is what a hand-built one writes.
+                ("overrides/config\\mixed.toml", b"mixed = true\n", Deflated),
+                ("overrides/..\\../climbed.toml", b"climbed = true\n", Deflated),
+            ],
+        );
+
+        let (paths, mut inst) = unpacking(&dir);
+        import_into(
+            &reqwest::Client::new(),
+            &paths,
+            &mut inst,
+            &archive,
+            None,
+            &Progress::silent("t"),
+        )
+        .await
+        .expect("a pack written with backslashes imports");
+
+        let game = paths.game_dir(&inst.id);
+        assert_eq!(
+            std::fs::read(game.join("config/windows.toml")).unwrap(),
+            b"windows = true\n",
+            "a fully backslashed override was dropped"
+        );
+        assert_eq!(
+            std::fs::read(game.join("config/mixed.toml")).unwrap(),
+            b"mixed = true\n",
+            "a half-backslashed override was dropped"
+        );
+
+        // Nothing landed under a name holding a separator, at any depth.
+        let mut stack = vec![game.clone()];
+        while let Some(at) = stack.pop() {
+            for entry in std::fs::read_dir(&at).unwrap().flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                assert!(
+                    !name.contains('\\'),
+                    "'{name}' landed as one file name with a separator in it"
+                );
+                if entry.file_type().unwrap().is_dir() {
+                    stack.push(entry.path());
+                }
+            }
+        }
+        assert!(
+            !game.join("../climbed.toml").exists() && !dir.join("climbed.toml").exists(),
+            "normalising a name let it climb out"
+        );
     }
 
     /// The other half of that clean-up: an update extracts over a game

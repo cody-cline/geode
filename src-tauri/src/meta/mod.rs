@@ -138,21 +138,27 @@ pub async fn vanilla_version_json(
     manifest: &piston::VersionManifest,
     mc_version: &str,
 ) -> Result<piston::VersionJson> {
-    let cached = paths.version_json(mc_version);
-    if let Ok(bytes) = tokio::fs::read(&cached).await {
-        if let Ok(v) = serde_json::from_slice::<piston::VersionJson>(&bytes) {
-            return Ok(v);
-        }
-    }
-
+    // Mojang's manifest decides which ids exist, and it decides that *above*
+    // the cache rather than below it. Read the other way round, any file on
+    // disk that happens to parse as a version JSON answered for an id Mojang
+    // never listed, and the only thing standing between a pack-supplied
+    // `mc_version` and a path was `paths`' own check — which is a check, not
+    // the only one this should have.
     let entry = manifest
         .versions
         .iter()
         .find(|v| v.id == mc_version)
         .ok_or_else(|| Error::msg(format!("unknown Minecraft version '{mc_version}'")))?;
 
+    let cached = paths.version_json(mc_version)?;
+    if let Ok(bytes) = tokio::fs::read(&cached).await {
+        if let Ok(v) = serde_json::from_slice::<piston::VersionJson>(&bytes) {
+            return Ok(v);
+        }
+    }
+
     let json: piston::VersionJson = get_json(client, &entry.url).await?;
-    tokio::fs::create_dir_all(paths.version_dir(mc_version)).await?;
+    tokio::fs::create_dir_all(paths.version_dir(mc_version)?).await?;
     tokio::fs::write(&cached, serde_json::to_vec_pretty(&json)?).await?;
     Ok(json)
 }
@@ -178,4 +184,87 @@ pub async fn loader_versions(
         Loader::NeoForge => forge::versions(client, forge::Flavor::NeoForge, mc_version).await?,
         Loader::Forge => forge::versions(client, forge::Flavor::Forge, mc_version).await?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::paths::Scratch;
+
+    fn manifest_listing(ids: &[&str]) -> piston::VersionManifest {
+        piston::VersionManifest {
+            latest: piston::LatestVersions {
+                release: ids.first().unwrap_or(&"").to_string(),
+                snapshot: ids.first().unwrap_or(&"").to_string(),
+            },
+            versions: ids
+                .iter()
+                .map(|id| piston::ManifestVersion {
+                    id: (*id).to_string(),
+                    kind: "release".into(),
+                    // Nothing here is fetched: every assertion below is about
+                    // what happens before a request would be made. A URL that
+                    // could not be reached anyway says so.
+                    url: "http://127.0.0.1:9/never-fetched.json".into(),
+                    time: "2026-01-01T00:00:00+00:00".into(),
+                    release_time: "2026-01-01T00:00:00+00:00".into(),
+                    sha1: String::new(),
+                })
+                .collect(),
+        }
+    }
+
+    /// The cache never answers for an id Mojang does not list.
+    ///
+    /// `mc_version` arrives from a modpack's `dependencies` map, and for a
+    /// vanilla instance it *is* the name of the directory under `versions/`
+    /// and the file inside it. The manifest lookup is the thing that says an
+    /// id is real; below the cache read it was skipped entirely whenever a
+    /// file at that path already parsed, so a file planted once answered for
+    /// every launch afterwards. Moved above, the lookup refuses first and the
+    /// cache is only consulted for an id Mojang published.
+    #[tokio::test]
+    async fn an_id_the_manifest_does_not_list_is_refused_even_with_a_file_in_the_cache() {
+        let scratch = Scratch::new("meta-unlisted");
+        let paths = &scratch.paths;
+        let planted = paths.version_json("1.21.1").expect("a real id resolves");
+        tokio::fs::create_dir_all(planted.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &planted,
+            serde_json::to_vec(&piston::VersionJson {
+                id: "1.21.1".into(),
+                main_class: "net.minecraft.client.main.Main".into(),
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        // A control: the same cache does answer once the manifest lists it.
+        let listed = vanilla_version_json(
+            &reqwest::Client::new(),
+            paths,
+            &manifest_listing(&["1.21.1"]),
+            "1.21.1",
+        )
+        .await
+        .expect("a listed id reads its cached file");
+        assert_eq!(listed.main_class, "net.minecraft.client.main.Main");
+
+        let refusal = vanilla_version_json(
+            &reqwest::Client::new(),
+            paths,
+            &manifest_listing(&["1.21.4"]),
+            "1.21.1",
+        )
+        .await
+        .expect_err("an unlisted id is refused however the cache reads");
+        assert!(
+            refusal.to_string().contains("unknown Minecraft version"),
+            "the cache answered for an id the manifest does not list: {refusal}"
+        );
+    }
 }

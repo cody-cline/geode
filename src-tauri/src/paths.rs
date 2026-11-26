@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use crate::error::{Error, Result};
+
 /// On-disk layout for everything Geode owns.
 ///
 /// Libraries, assets and Java runtimes are shared across every instance —
@@ -168,17 +170,19 @@ impl Paths {
         self.root.join("versions")
     }
     /// Cached merged version manifest for a resolved (mc + loader) combo.
-    pub fn version_dir(&self, id: &str) -> PathBuf {
-        self.versions().join(id)
+    ///
+    /// Refuses an id that is not one safe component — see [`version_name`].
+    pub fn version_dir(&self, id: &str) -> Result<PathBuf> {
+        Ok(self.versions().join(version_name(id)?))
     }
-    pub fn version_json(&self, id: &str) -> PathBuf {
-        self.version_dir(id).join(format!("{id}.json"))
+    pub fn version_json(&self, id: &str) -> Result<PathBuf> {
+        Ok(self.version_dir(id)?.join(format!("{id}.json")))
     }
-    pub fn version_jar(&self, id: &str) -> PathBuf {
-        self.version_dir(id).join(format!("{id}.jar"))
+    pub fn version_jar(&self, id: &str) -> Result<PathBuf> {
+        Ok(self.version_dir(id)?.join(format!("{id}.jar")))
     }
-    pub fn natives(&self, id: &str) -> PathBuf {
-        self.root.join("natives").join(id)
+    pub fn natives(&self, id: &str) -> Result<PathBuf> {
+        Ok(self.root.join("natives").join(version_name(id)?))
     }
     pub fn java(&self) -> PathBuf {
         self.root.join("java")
@@ -251,8 +255,48 @@ pub fn maven_relative_path(coord: &str) -> PathBuf {
     p
 }
 
+/// A version id, checked to be a single safe directory name.
+///
+/// Every id under `versions/` and `natives/` can have come from a pack built
+/// by a stranger: an `.mrpack`'s `dependencies` map and a CurseForge
+/// `manifest.json`'s `minecraft` block are free-form JSON strings, they become
+/// an instance's `mc_version` and `loader_version` on import, and
+/// [`crate::meta::version_id`] interpolates them straight into the directory
+/// name that the accessors above then join. A value holding `..` walked the
+/// `create_dir_all`, the manifest write and the client-jar link out of
+/// `GEODE_HOME` as the user.
+///
+/// The check is on the accessors rather than at one caller because the
+/// accessor is the thing a new caller cannot forget — the same reason
+/// [`crate::server::backup`]'s `resolve`, [`crate::logs::resolve`] and
+/// `instance::content`'s `resolve_in` hold this rule for the other names that
+/// arrive from outside: safe, and exactly one component.
+fn version_name(id: &str) -> Result<&Path> {
+    let p = Path::new(id);
+    if !is_safe_relative(p) || p.components().count() != 1 {
+        return Err(Error::msg(format!(
+            "'{id}' is not a version name Geode can keep files under"
+        )));
+    }
+    Ok(p)
+}
+
 /// Reject path components that would escape the destination directory.
 /// Used when extracting archives we did not create (mrpacks, natives, JREs).
+///
+/// It promises one thing: that joining `p` onto a directory lands inside that
+/// directory. It does not promise the result is a *usable* path, and two cases
+/// are worth knowing because they look like holes and are not:
+///
+/// * An empty name has no components, so this is `true` for `""`. Joined, it
+///   names the destination directory itself, and the create then fails with
+///   the operating system's "Is a directory". Callers that need a name rather
+///   than a path — [`version_name`] above, and the `components().count() != 1`
+///   checks beside the other external names — reject it; an extractor walking
+///   a tree does not need to, because there is nothing to write.
+/// * A NUL in a name is not checked here. It cannot bypass anything:
+///   `File::create` refuses an interior NUL outright and creates nothing, so
+///   the entry fails rather than landing anywhere unexpected.
 pub fn is_safe_relative(p: &Path) -> bool {
     use std::path::Component;
     !p.components().any(|c| {
@@ -295,6 +339,48 @@ impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.paths.root);
     }
+}
+
+/// Insist that a file created here with no mode of its own comes out readable
+/// by other accounts, and say so rather than passing when it does not.
+///
+/// Four tests — `config`'s `the_config_is_readable_only_by_its_owner`,
+/// `auth::store`'s `a_credential_file_is_never_readable_by_anyone_else`,
+/// `server::share`'s `only_this_account_can_read_a_servers_password` and
+/// `share::identity`'s `the_key_is_readable_only_by_its_owner` — can only
+/// detect their regression because the default for `O_CREAT` is
+/// `0o666 & ~umask`, which is `0o644` on an ordinary desktop and on the CI
+/// runners. Under `umask 077` it is already `0o600`, so every one of them
+/// passes with the thing it is testing taken out. That is a property of the
+/// machine rather than of the test, so each one measures it first: a suite
+/// that cannot see the regression should say so, not report a pass.
+///
+/// Measured rather than read off `umask(2)`, which has no reader — asking for
+/// the value means setting it, and setting process-wide state while the other
+/// tests run on sibling threads is not something to do for a measurement. A
+/// default ACL on the directory would show up here too, and in the same way it
+/// shows up for the file under test.
+#[cfg(all(test, unix))]
+pub fn insist_others_could_read_a_plain_file(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::create_dir_all(dir).expect("a directory to measure in");
+    let probe = dir.join(format!("umask-probe-{}", uuid::Uuid::new_v4()));
+    std::fs::write(&probe, b"probe").expect("a file to measure");
+    let mode = std::fs::metadata(&probe)
+        .expect("the probe's mode")
+        .permissions()
+        .mode()
+        & 0o777;
+    let _ = std::fs::remove_file(&probe);
+
+    assert!(
+        mode & 0o077 != 0,
+        "this test cannot detect the regression on this machine: a file created \
+         with no mode of its own already comes out {mode:o}, so the umask is \
+         doing the job the code under test is supposed to do. Run the suite \
+         under `umask 022`, which is what CI does."
+    );
 }
 
 #[cfg(test)]
@@ -340,5 +426,72 @@ mod tests {
         assert!(!is_safe_relative(Path::new("../evil")));
         assert!(!is_safe_relative(Path::new("/etc/passwd")));
         assert!(is_safe_relative(Path::new("mods/cool.jar")));
+    }
+
+    /// A version id comes from a pack a stranger built, so the four accessors
+    /// that turn one into a path refuse anything but a single safe name.
+    ///
+    /// `meta::version_id` interpolates a pack's `dependencies` values into the
+    /// directory name — `fabric-loader-{loader_version}-{mc_version}`, or the
+    /// Minecraft version alone for vanilla — and these four are then joined,
+    /// `create_dir_all`ed, written to and hard-linked into. Checked on each
+    /// accessor rather than on one caller, so every one of them is asserted
+    /// here: a guard added to three of the four is the one a new caller walks
+    /// through.
+    #[test]
+    fn a_version_id_that_is_not_one_name_reaches_no_path() {
+        let paths = Paths {
+            root: PathBuf::from("/home/somebody/.local/share/geode"),
+        };
+        for id in [
+            "../escaped",
+            "..",
+            "a/b",
+            "/etc/cron.d/evil",
+            "fabric-loader-0.16.9-../../../escaped",
+            "",
+        ] {
+            assert!(
+                paths.version_dir(id).is_err(),
+                "version_dir accepted {id:?}"
+            );
+            assert!(
+                paths.version_json(id).is_err(),
+                "version_json accepted {id:?}"
+            );
+            assert!(
+                paths.version_jar(id).is_err(),
+                "version_jar accepted {id:?}"
+            );
+            assert!(paths.natives(id).is_err(), "natives accepted {id:?}");
+        }
+
+        // And the real ids every loader produces still resolve, under
+        // `versions/<id>/` and `natives/<id>` exactly as before.
+        for id in [
+            "1.21.4",
+            "fabric-loader-0.16.9-1.21.1",
+            "quilt-loader-0.27.0-1.21.1",
+            "neoforge-21.1.248",
+            "1.20.1-forge-47.2.0",
+            "3D Shareware v1.34",
+        ] {
+            assert_eq!(
+                paths.version_dir(id).expect("a real version id resolves"),
+                paths.versions().join(id)
+            );
+            assert_eq!(
+                paths.version_json(id).expect("a real version id resolves"),
+                paths.versions().join(id).join(format!("{id}.json"))
+            );
+            assert_eq!(
+                paths.version_jar(id).expect("a real version id resolves"),
+                paths.versions().join(id).join(format!("{id}.jar"))
+            );
+            assert_eq!(
+                paths.natives(id).expect("a real version id resolves"),
+                paths.root.join("natives").join(id)
+            );
+        }
     }
 }

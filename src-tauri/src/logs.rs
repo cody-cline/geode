@@ -22,6 +22,23 @@ use crate::error::{Error, Result};
 /// crash is.
 const MAX_TEXT: usize = 2 * 1024 * 1024;
 
+/// The most a rotated log may inflate to before it is refused instead.
+///
+/// `MAX_TEXT` above is a *view*, applied after the whole file is already in
+/// memory, so on its own it bounds nothing: a `.log.gz` is the one file in
+/// `logs/` written by somebody else's server software, gzip turns a run of
+/// spaces into a thousandth of its size, and a one-megabyte archive asking for
+/// a gigabyte of memory is a thing the app would simply do.
+///
+/// Counted on the bytes as they inflate rather than on the size gzip's own
+/// trailer states, which a crafted file can understate.
+///
+/// Refused rather than truncated, because this view keeps the *end* and
+/// `take` keeps the beginning — cutting here would throw away the crash and
+/// show the boot. 128 MB is far past any real day of log: a busy modded server
+/// writing a hundred bytes a line would need over a million lines to reach it.
+const MAX_GZIP: u64 = 128 * 1024 * 1024;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogFile {
@@ -108,17 +125,29 @@ pub async fn list(dir: &Path) -> Result<Vec<LogFile>> {
 
 /// Read one log back as text, decompressing it if it has been rotated.
 pub async fn read(dir: &Path, name: &str) -> Result<String> {
+    read_within(dir, name, MAX_GZIP).await
+}
+
+/// [`read`] with the inflation ceiling a test can reach.
+async fn read_within(dir: &Path, name: &str, ceiling: u64) -> Result<String> {
     let path = resolve(dir, name)?;
     let bytes = tokio::fs::read(&path)
         .await
         .map_err(|_| Error::msg(format!("no log called {name}")))?;
 
     let gzipped = name.ends_with(".gz");
+    let named = name.to_string();
     let text = tokio::task::spawn_blocking(move || -> Result<String> {
         let raw = if gzipped {
-            let mut decoder = flate2::read::GzDecoder::new(&bytes[..]);
+            let decoder = flate2::read::GzDecoder::new(&bytes[..]);
             let mut out = Vec::new();
-            decoder.read_to_end(&mut out)?;
+            decoder.take(ceiling + 1).read_to_end(&mut out)?;
+            if out.len() as u64 > ceiling {
+                return Err(Error::msg(format!(
+                    "{named} unpacks to more than {} MB, which is more log than Geode will open",
+                    ceiling / (1024 * 1024)
+                )));
+            }
             out
         } else {
             bytes
@@ -217,6 +246,58 @@ mod tests {
     fn keeping_none_deletes_every_archive() {
         let all = archives(&[("a.log.gz", 1), ("b.log.gz", 2)]);
         assert_eq!(to_prune(&all, 0).len(), 2);
+    }
+
+    /// A rotated log is refused on what it inflates to, not on what it weighs.
+    ///
+    /// The file is somebody else's server software's, `MAX_TEXT` is applied
+    /// only after the whole thing is already in memory, and gzip will turn a
+    /// gigabyte of spaces into a megabyte — so without this the view's own
+    /// ceiling bounded nothing and a small file could ask for all the memory
+    /// there is. Run at a small ceiling through `read_within` rather than
+    /// building a real 128 MB bomb, which is `MAX_GZIP`'s only difference.
+    #[tokio::test]
+    async fn a_rotated_log_that_inflates_past_its_ceiling_is_refused() {
+        use std::io::Write;
+
+        let scratch = crate::paths::Scratch::new("log-bomb");
+        let dir = scratch.paths.logs();
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let write_gz = |name: &str, plain: &[u8]| {
+            let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+            gz.write_all(plain).unwrap();
+            std::fs::write(dir.join(name), gz.finish().unwrap()).unwrap();
+        };
+
+        // A run of spaces, which deflates to almost nothing: the archive on
+        // disk is tiny and what it unpacks to is not.
+        let plain = b" ".repeat(64 * 1024);
+        write_gz("2026-09-12-1.log.gz", &plain);
+        write_gz("2026-09-11-1.log.gz", b"the whole of a short log\n");
+
+        let on_disk = std::fs::metadata(dir.join("2026-09-12-1.log.gz"))
+            .unwrap()
+            .len();
+        assert!(
+            on_disk < 8 * 1024,
+            "the control is wrong: the archive is {on_disk} bytes, so a size check would \
+             have caught it and this proves nothing about inflation"
+        );
+
+        let refusal = read_within(&dir, "2026-09-12-1.log.gz", 16 * 1024)
+            .await
+            .expect_err("a log that inflates past the ceiling is refused");
+        assert!(
+            refusal.to_string().contains("more log than Geode will open"),
+            "refused for some other reason: {refusal}"
+        );
+
+        // And a log under the ceiling still reads, whole.
+        let short = read_within(&dir, "2026-09-11-1.log.gz", 16 * 1024)
+            .await
+            .expect("a log inside the ceiling reads");
+        assert_eq!(short, "the whole of a short log\n");
     }
 
     #[test]
