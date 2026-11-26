@@ -95,8 +95,48 @@ pub struct BackupInfo {
 
 /// Timestamped so the name sorts chronologically and survives any filesystem —
 /// colons are fine on Linux and forbidden on Windows.
+///
+/// Milliseconds, and not for precision. At one-second resolution two backups
+/// taken in the same second were handed the same name, and [`create`] opened
+/// it with `File::create`, which truncates — so the second quietly took the
+/// first's place and reported a new backup. Two clicks of Backup did it, and
+/// so did a scheduled backup landing in the same second as a manual one.
+/// Milliseconds make that rare; [`claim`] makes what is left of it safe
+/// rather than silent.
 fn new_name() -> String {
-    format!("{}.zip", chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S"))
+    format!("{}.zip", chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S-%3f"))
+}
+
+/// Take a name nothing holds yet, and the open file to write the archive into.
+///
+/// `create_new` is the whole point: it is the only way to learn that a name
+/// was taken that has no window between the looking and the writing. Whoever
+/// wins the name gets the file; whoever loses tries the next millisecond.
+///
+/// One note for anyone reading [`to_prune`] next: a sub-second name sorts
+/// *before* a bare-second one from that same second, because `-` precedes
+/// `.`. That can only matter across the one second in which this format
+/// changed, and the cost there is prune order rather than a lost archive.
+fn claim(dir: &Path) -> Result<(String, PathBuf, std::fs::File)> {
+    for _ in 0..100 {
+        let name = new_name();
+        let dest = dir.join(&name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&dest)
+        {
+            Ok(file) => return Ok((name, dest, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Err(Error::msg(
+        "Try this backup again in a moment. Every name for the last tenth of a \
+         second is already taken, which means something is taking backups in a loop.",
+    ))
 }
 
 /// Reject anything that is not a plain backup file name.
@@ -208,13 +248,14 @@ pub async fn create(
 
     let dir = paths.server_backups(id);
     tokio::fs::create_dir_all(&dir).await?;
-    let name = new_name();
-    let dest = dir.join(&name);
+    // Claimed before any of the work, so a second backup racing this one is
+    // given its own name instead of writing over this archive — see [`claim`].
+    let (name, dest, file) = tokio::task::spawn_blocking(move || claim(&dir))
+        .await
+        .map_err(|e| Error::msg(format!("claiming a name for the backup panicked: {e}")))??;
 
     progress.stage("Backing up", 1).await;
-    let dest_for_write = dest.clone();
     tokio::task::spawn_blocking(move || -> Result<()> {
-        let file = std::fs::File::create(&dest_for_write)?;
         let mut zip = zip::ZipWriter::new(file);
         let options: zip::write::FileOptions<'_, ()> =
             zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
@@ -664,7 +705,50 @@ mod tests {
         // Nothing a filesystem objects to, on any platform.
         assert!(!name.contains(':'));
         assert!(!name.contains('/'));
-        assert_eq!(name.len(), "2026-09-12T04-15-00.zip".len());
+        assert_eq!(name.len(), "2026-09-12T04-15-00-000.zip".len());
+        // Fixed width, so sorting the names is still sorting by age — which is
+        // the whole of how `to_prune` decides what to throw away.
+        assert_eq!(new_name().len(), name.len());
+    }
+
+    /// Two backups a moment apart must be two backups.
+    ///
+    /// At one-second resolution they were given one name and `File::create`
+    /// truncated, so the second overwrote the first and returned a
+    /// `BackupInfo` as though a new archive existed. A live run of two
+    /// back-to-back backups is what caught it.
+    ///
+    /// Claiming the file rather than checking for it first is the part worth
+    /// pinning: the names here are generated as fast as the machine can, which
+    /// is the only way to actually land two in one millisecond, and whichever
+    /// loses has to be handed a different name rather than the same one.
+    #[test]
+    fn two_backups_in_the_same_moment_cannot_take_each_others_name() {
+        let scratch = crate::paths::Scratch::new("backup-claim");
+        let dir = scratch.paths.server_backups("survival");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut seen = std::collections::BTreeSet::new();
+        let mut handed_out = Vec::new();
+        for _ in 0..24 {
+            let (name, dest, file) = claim(&dir).expect("a name was available");
+            drop(file);
+            assert!(
+                seen.insert(name.clone()),
+                "{name} was handed out twice, so one archive would overwrite the other"
+            );
+            assert!(dest.exists(), "the claim should have created {name}");
+            handed_out.push(name);
+        }
+
+        // Kept in the order they were taken, then sorted: the two have to
+        // agree, or `to_prune` would throw away the wrong archive.
+        let mut sorted = handed_out.clone();
+        sorted.sort();
+        assert_eq!(
+            handed_out, sorted,
+            "names handed out in time order must also sort in that order"
+        );
     }
 
     #[test]
