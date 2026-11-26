@@ -29,31 +29,44 @@ target=8
 # one host trusted twice, with TLS the only thing in between, and left no
 # record anywhere of which ASM a given jar holds.
 #
-# agent/asm.lock is "<version> <sha256>" and is committed beside the jar. A
-# first build with no lock records what it was served and says so; every build
-# after it refuses anything that is not those bytes.
+# agent/asm.lock is "<version> <sha256>" and is committed beside the jar. There
+# is no branch for a build without one: this script wrote its own lock for a
+# while from whatever it was served, and since the lock was never committed
+# every run took that branch, so the pin was written down and never once in
+# force. A missing lock is refused now instead.
+#
+# To move to another ASM, write the version and digest in by hand from what
+# Maven Central publishes beside the jar —
+# .../org/ow2/asm/asm/<version>/asm-<version>.jar.sha256 — and rebuild. That
+# way the version is chosen here and only the bytes are asked for, rather than
+# asking one host which version is current and then asking the same host for
+# it.
 lock="$here/asm.lock"
-if [ -f "$lock" ]; then
-  read -r asm_version asm_sha256 < "$lock"
-else
-  asm_version=$(curl -fsSL https://repo1.maven.org/maven2/org/ow2/asm/asm/maven-metadata.xml \
-    | grep -oE '<release>[^<]+' | head -1 | cut -d'>' -f2)
-  asm_sha256=
+if [ ! -f "$lock" ]; then
+  echo "agent/asm.lock is missing, so nothing was built: it is the record of which" >&2
+  echo "ASM goes into every server's JVM, and this script will not choose one." >&2
+  echo "Write '<version> <sha256>' into it, taking the digest from" >&2
+  echo "https://repo1.maven.org/maven2/org/ow2/asm/asm/<version>/asm-<version>.jar.sha256" >&2
+  exit 1
+fi
+asm_version=
+asm_sha256=
+read -r asm_version asm_sha256 < "$lock" || true
+# Checked because the lock is hand-written: a half-filled one must not read as
+# a build with no digest to meet.
+if [ -z "$asm_version" ] || [ -z "$asm_sha256" ]; then
+  echo "agent/asm.lock is not '<version> <sha256>', so nothing was built." >&2
+  exit 1
 fi
 echo "asm $asm_version"
 curl -fsSL -o "$work/asm.jar" \
   "https://repo1.maven.org/maven2/org/ow2/asm/asm/$asm_version/asm-$asm_version.jar"
 
 got=$(sha256sum "$work/asm.jar" | cut -d' ' -f1)
-if [ -n "$asm_sha256" ]; then
-  if [ "$got" != "$asm_sha256" ]; then
-    echo "asm-$asm_version.jar is not the jar agent/asm.lock names, so nothing was built." >&2
-    echo "Expected $asm_sha256, was served $got." >&2
-    exit 1
-  fi
-else
-  printf '%s %s\n' "$asm_version" "$got" > "$lock"
-  echo "recorded asm $asm_version in agent/asm.lock — commit it with the jar"
+if [ "$got" != "$asm_sha256" ]; then
+  echo "asm-$asm_version.jar is not the jar agent/asm.lock names, so nothing was built." >&2
+  echo "Expected $asm_sha256, was served $got." >&2
+  exit 1
 fi
 
 # The hook ships as its own jar nested inside the agent, because it is the only

@@ -1188,15 +1188,27 @@ mod tests {
     /// A link that opened Geode is looked up the moment the dialog mounts, so
     /// an address that names no machine has to be turned away before a socket
     /// is opened rather than reported as a server that did not answer.
+    ///
+    /// Both shapes a link's address comes in. The `https://` ones went through
+    /// for a while, because [`Address::unreachable_ip`] read the `Direct` arm
+    /// alone — and a URL is the easier one to write by hand.
     #[tokio::test]
     async fn a_link_to_nowhere_is_refused_before_anything_is_connected_to() {
         let code = Code::generate();
-        for nowhere in ["0.0.0.0", "::", "255.255.255.255", "224.0.0.1"] {
-            let link = direct(nowhere, 25590, &code, Some(Pin([1; 32])));
-            let err = promptly(nowhere, preview(link)).await.unwrap_err();
+        let nowhere = ["0.0.0.0", "::", "255.255.255.255", "224.0.0.1"]
+            .map(|host| direct(host, 25590, &code, Some(Pin([1; 32]))))
+            .into_iter()
+            .chain(["https://0.0.0.0", "https://[::]", "https://224.0.0.1"].map(|url| Link {
+                address: Address::Https { url: url.into() },
+                code: code.clone(),
+                pin: None,
+            }));
+        for link in nowhere {
+            let shown = link.address.display();
+            let err = promptly(&shown, preview(link)).await.unwrap_err();
             assert!(
                 err.to_string().contains("is not an address a server can be joined at"),
-                "{nowhere} was asked anyway: {err}"
+                "{shown} was asked anyway: {err}"
             );
         }
     }

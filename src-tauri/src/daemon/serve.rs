@@ -192,7 +192,9 @@ fn bind(addr: SocketAddr) -> std::io::Result<std::net::TcpListener> {
 pub(super) mod tests {
     //! Against a listener on a port the OS chose, spoken to over a real
     //! socket, with its data in a scratch directory. Nothing here reaches the
-    //! network or starts a Minecraft server.
+    //! network or starts a Minecraft server: every listener is on loopback,
+    //! bar the one `#[ignore]`d test that exists to measure a wildcard bind
+    //! and says so.
 
     use std::io::{Read, Write};
     use std::net::{Ipv4Addr, Ipv6Addr, TcpStream};
@@ -279,13 +281,31 @@ pub(super) mod tests {
     /// It did refuse them on Windows, where `IPV6_V6ONLY` is on unless
     /// cleared: `[::1]:25570` answered while `127.0.0.1:25570` and the LAN
     /// address were both refused on the same machine. This is that
-    /// measurement, and it is why the whole check suite running on three
-    /// runners matters — it fails on the Windows one without
-    /// [`bind`]'s `set_only_v6(false)`, and passes here either way, because
-    /// Linux leaves the flag off to begin with. Which is exactly how this
-    /// shipped. `daemon::tests::both_listeners_clear_the_windows_ipv6_only_flag`
-    /// is the half a run on this machine can still refuse.
+    /// measurement — it fails without [`bind`]'s `set_only_v6(false)` there,
+    /// and passes either way on Linux, which leaves the flag off to begin
+    /// with. Which is exactly how this shipped.
+    ///
+    /// **`#[ignore]`d, and the only test in this module that is.** The flag is
+    /// observable on a wildcard bind and nowhere else — a loopback listener
+    /// has no second family to refuse — so measuring it means opening a port
+    /// on every interface of whatever machine runs the suite, answering
+    /// `/health` to anyone on the LAN who finds it first, and raising the
+    /// firewall prompt on Windows. That is not something a `cargo test --lib`
+    /// should do on somebody's laptop, and the module above says nothing here
+    /// reaches the network. Run it on purpose:
+    ///
+    /// ```text
+    /// cargo test --lib an_ipv6_listener -- --ignored --nocapture
+    /// ```
+    ///
+    /// What that costs is real and worth naming: this was the one thing in the
+    /// suite that *measured* the flag on the Windows runner, and no CI job
+    /// runs it now. `daemon::tests::both_listeners_clear_the_windows_ipv6_only_flag`
+    /// keeps the call in both listeners, which is a check on the source and
+    /// not on a socket. So if the flag is ever touched again, this is the test
+    /// to run by hand on Windows before believing it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "binds the IPv6 wildcard, so it opens a port on every interface"]
     async fn an_ipv6_listener_answers_an_ipv4_client_too() {
         let scratch = Scratch::new("daemon-dual");
         let listening = Listener::start(

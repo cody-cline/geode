@@ -118,8 +118,21 @@ atomically. See `opens_as_archive` in `src-tauri/src/server/probe.rs`.
 Writes `src-tauri/resources/geode-probe.jar`, which is committed — Geode is a
 Rust and TypeScript project, and a JDK in the release pipeline for 500 lines of
 Java is a poor trade. Re-run it when anything here changes and commit the jar
-alongside. Needs a JDK, `curl` and `python3`; ASM is fetched from Maven Central
-at the version its metadata currently calls the release.
+alongside. Needs a JDK, `curl` and `python3`.
+
+**`agent/asm.lock` is committed too, and it is the third file in that set.**
+Most of the jar is ASM, fetched from Maven Central, and the lock is
+`<version> <sha256>` — the record of which ASM is inside the committed bytes,
+and the digest the build refuses to go on without. There is no branch for a
+build with no lock: the script wrote its own for a while, from whichever
+release the repository's metadata happened to name that afternoon, which is
+one host asked which version to use and then asked for the bytes of its own
+answer. To move to another ASM, write the version and digest in by hand from
+what Maven Central publishes beside the jar —
+`.../org/ow2/asm/asm/<version>/asm-<version>.jar.sha256` — and rebuild, so the
+lock, the jar and the version are one commit.
+`server::probe::tests::the_agents_asm_is_pinned_and_checked_against_a_digest`
+reads the lock, so a `cargo test` fails if it goes missing.
 
 ## Verified against
 

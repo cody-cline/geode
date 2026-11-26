@@ -79,10 +79,6 @@ pub async fn run_tool(
     progress.stage(stage, 0).await;
 
     let mut command = tokio::process::Command::new(java);
-    // An installer is a jar somebody else wrote, downloaded a moment ago, and
-    // it has no business reading Geode's own variables. See
-    // [`crate::childenv`].
-    crate::childenv::keep_geodes_own_out(&mut command);
     // Left to itself the JVM sizes the heap from the machine's memory, which is
     // how BuildTools ends up refusing to start on a small one.
     if let Some(mb) = heap_mb {
@@ -102,6 +98,11 @@ pub async fn run_tool(
         .map_err(|e| Error::msg(format!("could not build a PATH for the tool: {e}")))?;
         command.env("PATH", combined);
     }
+    // Last, so it also covers anything set above naming one of them: an
+    // installer is a jar somebody else wrote, downloaded a moment ago, and a
+    // command keeps the last word said about each name. See
+    // [`crate::childenv`].
+    crate::childenv::keep_geodes_own_out(&mut command);
     let mut child = command
         .arg("-jar")
         .arg(&tool)

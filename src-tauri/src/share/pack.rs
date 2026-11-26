@@ -2208,6 +2208,10 @@ async fn resolve_references(
             missing.push(format!("{} (not a safe path, so it was not fetched)", note.path));
             continue;
         }
+        let Some(kind) = kind_for(rel) else {
+            missing.push(format!("{} (unrecognised folder)", note.path));
+            continue;
+        };
         // One content folder and one file name, which is the only shape any
         // export writes and the same two components `content_file` requires
         // of a path a pack carries as bytes. `kind_for` reads the last folder
@@ -2215,10 +2219,15 @@ async fn resolve_references(
         // into a folder no loader reads, and have a record written for it —
         // keyed by kind and file name, with no path in it — that replaced the
         // player's own record for their own `mods/x.jar`.
-        let Some(kind) = kind_for(rel).filter(|_| rel.components().count() == 2) else {
-            missing.push(format!("{} (unrecognised folder)", note.path));
+        //
+        // Said separately from the arm above, because for this path the folder
+        // *is* one Geode knows: the depth is the whole of what is wrong with
+        // it, and a refusal naming the folder as unrecognised sends whoever
+        // reads it looking for a spelling mistake.
+        if rel.components().count() != 2 {
+            missing.push(format!("{} (nested below a content folder, so it was not fetched)", note.path));
             continue;
-        };
+        }
 
         // Only CurseForge is ever written as a reference today — Modrinth goes
         // in the index, and nothing else is installed by id.
@@ -10634,7 +10643,12 @@ mod tests {
         };
 
         let nested = said("config/mods/victim.jar");
-        assert!(nested.contains("unrecognised folder"), "{nested}");
+        // The nesting, and not the folder: `mods` is a folder Geode knows, so
+        // a refusal calling it unrecognised states something that is not true
+        // and sends the reader hunting for a spelling mistake. It did say
+        // exactly that, because this fell into the arm next to it.
+        assert!(nested.contains("nested below a content folder"), "{nested}");
+        assert!(!nested.contains("unrecognised folder"), "{nested}");
         // Refused as a path, so no provider was asked and no key was wanted:
         // the depth is not something a recipient's own credentials could make
         // right.
@@ -10649,7 +10663,9 @@ mod tests {
         // every reference any pack carries.
         let ordinary = said("mods/ordinary.jar");
         assert!(
-            ordinary.contains("CurseForge") && !ordinary.contains("unrecognised folder"),
+            ordinary.contains("CurseForge")
+                && !ordinary.contains("unrecognised folder")
+                && !ordinary.contains("nested below"),
             "{ordinary}"
         );
     }

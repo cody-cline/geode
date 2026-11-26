@@ -152,13 +152,40 @@ impl Address {
     /// Unspecified (`0.0.0.0`, `::`), multicast, and the IPv4 broadcast
     /// address all parse perfectly well and name no machine a player could
     /// reach — each one would send every player to their own computer, or to
-    /// nothing. A host *name* is not judged here: where it points is the
-    /// DNS's business and may be right tomorrow.
+    /// nothing.
+    ///
+    /// Both shapes are judged. An `https://` URL carries a literal as readily
+    /// as a `host:port` does, and `https://0.0.0.0` reaches exactly as far as
+    /// `0.0.0.0` — but this read the [`Address::Direct`] arm alone to begin
+    /// with and answered `None` for everything else. So `share::join::joinable`
+    /// let such a link through, and `check_public_address` let an admin save
+    /// one; `game_address` was unaffected only because it turns every URL away
+    /// before it asks. Small, because none of this is a boundary against
+    /// anybody else's network: loopback and the private ranges are allowed
+    /// through on purpose, since a server shared to friends on one LAN is the
+    /// ordinary case. What it is, in every caller, is the check that says a
+    /// link or a setting was built rather than copied — and two shapes
+    /// answering differently is the sort of thing nobody thinks to ask about.
+    ///
+    /// A host *name* is not judged here, in either shape: where it points is
+    /// the DNS's business and may be right tomorrow. Worth stating outright,
+    /// because `10f4f17`'s commit message claimed a `geode://` link "naming a
+    /// host **that does not resolve** is refused before anything is connected
+    /// to". Nothing here resolves anything, and nothing should — what is
+    /// refused is a literal that names no reachable machine. Pushed history
+    /// stays as it is, so this is where the correction lives.
     pub fn unreachable_ip(&self) -> Option<std::net::IpAddr> {
-        let Address::Direct { host, .. } = self else {
-            return None;
+        let ip = match self {
+            Address::Direct { host, .. } => host.parse::<std::net::IpAddr>().ok()?,
+            // Read off the parsed URL rather than the text: the host may be
+            // bracketed, and `url` has already settled which part of this is
+            // the host, at parse time, by the same rules.
+            Address::Https { url } => match url::Url::parse(url).ok()?.host()? {
+                url::Host::Ipv4(v4) => std::net::IpAddr::V4(v4),
+                url::Host::Ipv6(v6) => std::net::IpAddr::V6(v6),
+                url::Host::Domain(_) => return None,
+            },
         };
-        let ip = host.parse::<std::net::IpAddr>().ok()?;
         let unusable = ip.is_unspecified()
             || ip.is_multicast()
             || matches!(ip, std::net::IpAddr::V4(v4) if v4.is_broadcast());
@@ -1127,6 +1154,39 @@ mod tests {
         // A loopback address is a real answer for a server on the same
         // machine, so it is not in the refused set.
         assert!(game_address("127.0.0.1").is_ok());
+    }
+
+    /// And the same literals behind `https://`, which is the other shape an
+    /// address comes in.
+    ///
+    /// [`Address::unreachable_ip`] read the `Direct` arm alone at first and
+    /// answered `None` for a URL, so `https://0.0.0.0` was a public address
+    /// an admin could save and a `geode://join` link `joinable` let through.
+    /// `game_address` is not in that list — it turns every URL away before it
+    /// asks — which is why this is tested on the function and not through it.
+    #[test]
+    fn an_https_address_naming_an_unreachable_ip_is_refused_too() {
+        for text in [
+            "https://0.0.0.0",
+            "https://[::]",
+            "https://224.0.0.1",
+            "https://255.255.255.255",
+            "https://0.0.0.0:8443",
+        ] {
+            let parsed = Address::parse(text, 25590).unwrap_or_else(|e| panic!("{text}: {e}"));
+            assert!(
+                parsed.unreachable_ip().is_some(),
+                "{text} passed as a share address"
+            );
+        }
+        // A domain is not judged on where it points in this shape either, and
+        // nor is a literal somebody can really reach.
+        for fine in ["https://pack.example.com", "https://203.0.113.7", "https://127.0.0.1"] {
+            assert!(
+                Address::parse(fine, 25590).unwrap().unreachable_ip().is_none(),
+                "{fine} was refused"
+            );
+        }
     }
 
     /// Minecraft does not speak HTTP, and an https address is the likeliest

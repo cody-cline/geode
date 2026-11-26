@@ -233,29 +233,63 @@ mod tests {
     }
 
     /// Most of the committed jar is ASM, and ASM is downloaded by
-    /// `agent/build.sh`. Nothing in a `cargo test` can say which ASM is in the
-    /// bytes above, but it can say that the script which put them there pinned
-    /// a version and checked a digest rather than trusting whichever release
-    /// the repository happened to name that afternoon — one response choosing
-    /// the version and the next supplying the bytes is one host trusted twice,
-    /// and these bytes go into every server's JVM as the earliest code in it.
+    /// `agent/build.sh`. Nothing in a `cargo test` can hash the ASM inside the
+    /// bytes above, but it can read the record of which one that is — and
+    /// these bytes go into every server's JVM as the earliest code in it, so
+    /// having a record is the point. A version chosen here and only the bytes
+    /// asked for is one host asked for something already named; asking one
+    /// host which release is current and then asking the same host for it is
+    /// one host trusted twice, with TLS the only thing in between.
+    ///
+    /// This read the *script* for the words `asm.lock` and `sha256sum` for as
+    /// long as there was no `agent/asm.lock` at all — so it passed while every
+    /// build took the branch that asked the repository which version to use
+    /// and then wrote the lock from the answer. The pin was written down and
+    /// never once in force, and the check could not tell. It reads the lock
+    /// now: `include_str!` fails the build outright if the file goes away,
+    /// which is the one failure the old shape could not have.
+    ///
     /// A rule nothing enforces is a rule a tired afternoon skips.
     #[test]
     fn the_agents_asm_is_pinned_and_checked_against_a_digest() {
-        let script = include_str!("../../../agent/build.sh");
-        for needed in ["asm.lock", "sha256sum"] {
-            assert!(
-                script.contains(needed),
-                "agent/build.sh no longer mentions {needed}, so the ASM in the committed jar \
-                 is whatever answered"
-            );
-        }
-        // The version has to come off the lock file, not off the metadata the
-        // same server serves — otherwise the digest is checked against a
-        // version the server chose.
+        let lock = include_str!("../../../agent/asm.lock");
+        let line = lock.lines().next().expect("agent/asm.lock is empty");
+        let mut fields = line.split_whitespace();
+        let (Some(version), Some(digest), None) = (fields.next(), fields.next(), fields.next())
+        else {
+            panic!("agent/asm.lock is not one '<version> <sha256>' line: {line:?}");
+        };
+        assert_eq!(
+            digest.len(),
+            64,
+            "agent/asm.lock's second field is not a SHA-256: {digest:?} (asm {version})"
+        );
         assert!(
-            script.contains("read -r asm_version asm_sha256"),
+            digest.bytes().all(|b| b.is_ascii_hexdigit()),
+            "agent/asm.lock's second field is not hex: {digest:?} (asm {version})"
+        );
+
+        // And a lock the script would write rather than obey pins nothing, so
+        // the bootstrap branch must stay gone.
+        let script = include_str!("../../../agent/build.sh");
+        let code = script
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            code.contains("read -r asm_version asm_sha256"),
             "agent/build.sh does not take its ASM version from agent/asm.lock"
+        );
+        assert!(
+            !code.contains("maven-metadata.xml"),
+            "agent/build.sh asks the repository which ASM release is current again, so the \
+             version it checks a digest against is one that host chose"
+        );
+        assert!(
+            !code.contains("> \"$lock\""),
+            "agent/build.sh writes agent/asm.lock again, so a build records whatever it was \
+             served instead of refusing it"
         );
     }
 
